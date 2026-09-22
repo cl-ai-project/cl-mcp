@@ -964,6 +964,48 @@ nothing."
                                  (subseq text (+ at (length from))))))))
         response))))
 
+(defun %response-withholding-the-projected-evidence (real)
+  "Return a wrong BUILD-SPEC-CHECK-RESPONSE, for the negative control: the
+projected record is published without its data, so the evidence reaches a
+reader of the text and not a reader of the payload.
+
+Everything else about the response stays right, including the text -- which is
+written from the record's raw source and so still names the captured value or
+the case nobody reached."
+  (lambda (report)
+    (let ((response (funcall real report)))
+      (loop for result across (gethash "results" response)
+            for core = (gethash "core_result" result)
+            when (hash-table-p core)
+              do (setf (gethash "data" core) nil))
+      response)))
+
+(defun %response-listing-one-gap-fewer (real)
+  "Return a wrong BUILD-SPEC-CHECK-RESPONSE, for the negative control: the
+text's gap line drops its last entry while the payload keeps every one.
+
+A check that searched the text for one gap it expected would pass this: the
+first gap is still there.  Only reading the line as a list sees the one that
+went missing."
+  (let ((prefix "verification gaps: "))
+    (lambda (report)
+      (let* ((response (funcall real report))
+             (content (gethash "content" response)))
+        (when (and (vectorp content) (plusp (length content)))
+          (let* ((part (aref content 0))
+                 (text (gethash "text" part))
+                 (at (search prefix text)))
+            (when at
+              (let* ((end (or (position #\Newline text :start at) (length text)))
+                     (line (subseq text at end))
+                     (comma (position #\, line :from-end t)))
+                (when comma
+                  (setf (gethash "text" part)
+                        (concatenate 'string (subseq text 0 at)
+                                     (subseq line 0 comma)
+                                     (subseq text end))))))))
+        response))))
+
 (defun %declaration-with-required-arguments (real)
   "Return a wrong %DESCRIBE-FUNCTION-SPEC, for the negative control: every
 argument is reported as required, which is what version 1's omitted :KIND is
@@ -1270,6 +1312,16 @@ the argument as it is after the call cannot see."
      (list :function 'build-spec-check-response
            :description "opens every headline with VERIFIED"
            :replacement (%response-with-a-verified-headline real-check-response)
+           :targets (list (list :property response-check))
+           :must-fail (list (list :property response-check)))
+     (list :function 'build-spec-check-response
+           :description "publishes the evidence to the text and not the payload"
+           :replacement (%response-withholding-the-projected-evidence real-check-response)
+           :targets (list (list :property response-check))
+           :must-fail (list (list :property response-check)))
+     (list :function 'build-spec-check-response
+           :description "lists one gap fewer in the text than in the payload"
+           :replacement (%response-listing-one-gap-fewer real-check-response)
            :targets (list (list :property response-check))
            :must-fail (list (list :property response-check)))
      (list :function 'build-spec-check-response

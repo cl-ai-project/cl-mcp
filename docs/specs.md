@@ -1073,8 +1073,8 @@ and a string is a vector, so `vectorp` and `equalp` cannot tell `""` from `[]`.
 | `spec-list-response-says-why-a-kind-has-no-names` | `build-spec-list-response` | all five listing answers under the drawn limit | the answer, the limit |
 | `spec-symbol-response-separates-registration-from-failure` | `build-spec-symbol-response` | all six spec-symbol answers | the answer |
 | `spec-describe-response-carries-the-declaration-it-was-given` | `build-spec-describe-response` | the drawn declaration in all four clause states | the declaration, the clause state, the documentation |
-| `spec-check-response-carries-the-verdict-and-its-reservations` | `build-spec-check-response` | all seventeen spec-check answers | the answer |
-| `spec-check-replay-line-asks-for-the-run-it-reports` | `build-spec-check-response` | all seventeen, through the printed line | the answer |
+| `spec-check-response-carries-the-verdict-and-its-reservations` | `build-spec-check-response` | all sixteen spec-check answers, and the one robustness case beside them | the answer |
+| `spec-check-replay-line-asks-for-the-run-it-reports` | `build-spec-check-response` | all sixteen, through the printed line | the answer |
 
 What they hold to:
 - **A count is a number only where someone looked.** A kind that was not
@@ -1099,12 +1099,17 @@ What they hold to:
 - **A verdict carries what it does not cover.** The three verdicts are three
   words, and the word a reader stops at names the coverage it stands on: a
   declared case nobody reached, a contract that was not run, the properties
-  that were not. A status with no run reports the status and claims no verdict
-  at all. The gaps reach the text as well as the payload. A counterexample
-  that is empty, absent, unavailable or never generated stays four answers; a
-  captured `NIL` is application data where an unavailable capture is not a
-  value. Every seed stays a decimal string, every symbol stays a package and a
-  name, and cl-spec's raw record stays behind the projection.
+  that were not. A verdict is about the results alone — a digest that
+  disagrees with the caller, or a contract nobody ran, leaves it standing and
+  is reported beside it — and a status with no run claims no verdict at all.
+  The gaps reach the text as well as the payload, and the line that lists them
+  lists all of them. A counterexample that is empty, none, unavailable or
+  never generated stays four answers; a captured `NIL` is application data
+  where an unavailable capture is not a value, in the payload as well as in
+  the text. Every seed stays a decimal string where there was one and null
+  where the run never started, every symbol stays a package and a name, and
+  cl-spec's raw record stays behind the projection — behind it, not withheld:
+  what the text says about a capture or a case is in `core_result.data` too.
 - **The replay line asks for the run it reports.** It is read out of the text
   the response produced — by the grammar the line is written in, never by
   evaluating it — and checked as the request it asks for: the first result
@@ -1114,12 +1119,30 @@ What they hold to:
   with no seed prints no line at all, rather than one whose arguments are
   `NIL`.
 
-**Fixed cases, default suite** (`tests/spec-responses-test.lisp`, 24 tests):
-the decoder's own guard, the two Lisp traps, each listing answer, each
-spec-symbol answer, the clause states, the documentation strings, the verdict
-words, the four counterexample answers, a captured `NIL` against an
-unavailable capture, the seed, and the replay line for a property, for a
-contract and for a run with nothing to replay.
+**The scenarios are states the report layer builds.** Each report is written
+in that layer's own vocabulary: the statuses of `+result-statuses+` and
+`+call-statuses+`, the gaps of `+verification-gap-values+` in the order
+`%verification-gaps` appends them, and the counterexample and shrink answers a
+run that reached a verdict gives. A combination it does not build is not a
+positive example of anything, however plausible it reads, so a fixed case
+checks every value a descriptor uses against those documented sets. Two
+consequences are worth naming, because a hand-written report drifts from them
+first: every run carries at least `input-coverage-unmeasured`, and a property
+run carries `rejection-counts-unmeasured` beside it — there is no check with
+no gaps; and `verified` is decided by the results alone.
+
+One case is kept apart, in `+check-robustness-cases+`: a whole-call timeout,
+which `build-spec-check-response` answers and no spec-check call produces
+(`%within-deadline` wraps the other three tools, and `+call-statuses+` does
+not name it). It is checked as robustness, not as a state a run reports.
+
+**Fixed cases, default suite** (`tests/spec-responses-test.lisp`, 25 tests):
+the decoder's own guard, the two Lisp traps, the vocabulary check above, each
+listing answer, each spec-symbol answer, the clause states, the documentation
+strings, the verdict words, the four counterexample answers, a captured `NIL`
+against an unavailable capture in the text *and* in the payload, the seed, and
+the replay line for a property, for a contract and for a run with nothing to
+replay.
 
 **Real cl-spec, opt-in** (`tests/spec-responses-specs-test.lisp`, 2 tests): a
 descriptor cannot say whether the printed line, handed back to the tool it
@@ -1445,7 +1468,7 @@ something failed, `2` the script could not run them.
   does not load, exits `2`. Both suites swap the cl-spec registry, or bind
   one, while they run: use a process of their own, not the MCP worker you
   are working in.
-- `negative-control` swaps in thirty-four wrong implementations, one at a time:
+- `negative-control` swaps in thirty-six wrong implementations, one at a time:
   - an `ensure-trailing-newline` that returns its argument unchanged;
   - one that overwrites its argument with newlines and returns it;
   - a `sanitize-for-json` that returns `""`;
@@ -1526,11 +1549,13 @@ something failed, `2` the script could not run them.
     digest was refused. The digest-source property must fail.
 
   - a `build-spec-list-response` that publishes a count nobody took as 0, and
-    three `build-spec-check-response`s: one that publishes a verified of false
+    five `build-spec-check-response`s: one that publishes a verified of false
     as null (the fault the worker boundary has today, planted at the builder),
     one that opens every headline with VERIFIED while every field beside it
-    stays right, and one that replays a contract as `property=`. The response
-    properties must fail for each.
+    stays right, one that publishes the evidence to the text and not to the
+    payload, one that lists one gap fewer in the text than in the payload, and
+    one that replays a contract as `property=`. The response properties must
+    fail for each.
 
   Each wrong record, verdict, routing and inspection function calls the real
   one and bends one rule of its answer. The verdict properties' own outcome is read from cl-spec's

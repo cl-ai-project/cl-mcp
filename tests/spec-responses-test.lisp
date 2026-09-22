@@ -19,6 +19,10 @@
                 #:build-spec-symbol-response
                 #:build-spec-describe-response
                 #:build-spec-check-response)
+  ;; A bare :import-from declares the dependency without importing a symbol.
+  ;; The documented status and gap sets are internal parameters, named in full
+  ;; where they are read.
+  (:import-from #:cl-mcp/src/spec-adapter-report)
   (:import-from #:cl-mcp/specs/spec-response-fixtures
                 #:response-json
                 #:parse-response
@@ -34,6 +38,8 @@
                 #:line-starting-with
                 #:claims-p
                 #:qualified
+                #:+check-cases+
+                #:+check-robustness-cases+
                 #:list-scenario
                 #:symbol-scenario
                 #:describe-scenario
@@ -300,15 +306,27 @@
 (deftest the-gaps-reach-the-text-as-well-as-the-payload
   (multiple-value-bind (document text) (%check :passed-with-gaps)
     (ok (json-true-p (json-at document "verified")))
-    (ok (equal '("trials-not-exhaustive" "instrumentation-not-used")
-               (coerce (json-at document "verification_gaps") 'list)))
-    (ok (claims-p text "verification gaps:"))
-    (ok (claims-p text "trials-not-exhaustive"))
-    (ok (claims-p text "verified: true"))))
+    (ok (equal '("rejection-counts-unmeasured" "input-coverage-unmeasured")
+               (coerce (json-at document "verification_gaps") 'list))
+        "every run carries these two; there is no check with none")
+    ;; Read as a line, not searched for in the whole text: one gap found
+    ;; somewhere is not every gap listed.
+    (let ((line (line-starting-with text "verification gaps: ")))
+      (ok line)
+      (ok (claims-p line "rejection-counts-unmeasured"))
+      (ok (claims-p line "input-coverage-unmeasured")))
+    (ok (claims-p text "verified: true")))
+  (testing "a gap a result produced is listed before the two standing ones"
+    (multiple-value-bind (document text) (%check :case-never-reached)
+      (ok (equal '("cases-never-called" "rejection-counts-unmeasured"
+                   "input-coverage-unmeasured")
+                 (coerce (json-at document "verification_gaps") 'list)))
+      (ok (claims-p (line-starting-with text "verification gaps: ")
+                    "cases-never-called")))))
 
 (deftest four-answers-about-a-counterexample-stay-four
   (dolist (row '((:empty-counterexample "present" 0)
-                 (:no-counterexample "absent" 0)
+                 (:no-counterexample "none" 0)
                  (:counterexample-not-collected "unavailable" 0)
                  (:generation-failed "not-applicable" 0)
                  (:has-failure "present" 2)))
@@ -320,31 +338,60 @@
           (ok (equal status (json-at result "counterexample_status"))
               (format nil "~(~A~) is ~A" case status))
           (ok (json-array-p (json-at result "counterexample")))
-          (ok (eql count (length (json-at result "counterexample")))))))))
+          (ok (eql count (length (json-at result "counterexample"))))))))
+  (testing "and the one that could not be read says why"
+    (multiple-value-bind (document text) (%check :counterexample-not-collected)
+      (let ((result (aref (json-at document "results") 0)))
+        (ok (stringp (json-at result "counterexample_unavailable_reason"))))
+      (ok (claims-p text "UNAVAILABLE"))
+      (ok (not (claims-p text "none reported"))
+          "which is a different answer from the backend reporting none"))))
 
 (deftest a-captured-nil-is-a-value-and-an-unavailable-capture-is-not
-  (multiple-value-bind (document text) (%check :capture-collected-nil)
-    (declare (ignore document))
-    (ok (claims-p text "captured:"))
-    (ok (claims-p text "BALANCE = NIL"))
-    (ok (not (claims-p text "BALANCE = UNAVAILABLE"))))
-  (multiple-value-bind (document text) (%check :capture-unavailable)
-    (declare (ignore document))
-    (ok (claims-p text "BALANCE = UNAVAILABLE"))
-    (ok (claims-p text "not-restorable"))
-    (ok (not (claims-p text "BALANCE = NIL"))
-        "a value cl-mcp could not read is not a value the run produced")))
+  (testing "in the text, which is written from the record's raw source"
+    (multiple-value-bind (document text) (%check :capture-collected-nil)
+      (declare (ignore document))
+      (ok (claims-p text "captured:"))
+      (ok (claims-p text "BALANCE = NIL"))
+      (ok (not (claims-p text "BALANCE = UNAVAILABLE"))))
+    (multiple-value-bind (document text) (%check :capture-unavailable)
+      (declare (ignore document))
+      (ok (claims-p text "BALANCE = UNAVAILABLE"))
+      (ok (claims-p text "not-restorable"))
+      (ok (not (claims-p text "BALANCE = NIL"))
+          "a value cl-mcp could not read is not a value the run produced")))
+  ;; The text and the payload are written from different halves of the same
+  ;; record, so evidence can reach one and not the other.
+  (testing "and in the payload, which is written from its projection"
+    (multiple-value-bind (document text) (%check :capture-collected-nil)
+      (declare (ignore text))
+      (let* ((result (aref (json-at document "results") 0))
+             (entry (aref (json-at result "core_result" "data" "capture") 0)))
+        (ok (equal "BALANCE" (json-at entry "name")))
+        (ok (equal "collected" (json-at entry "availability")))
+        (ok (equal "NIL" (json-at entry "value" "printed")))))
+    (multiple-value-bind (document text) (%check :capture-unavailable)
+      (declare (ignore text))
+      (let* ((result (aref (json-at document "results") 0))
+             (entry (aref (json-at result "core_result" "data" "capture") 0)))
+        (ok (equal "unavailable" (json-at entry "availability")))
+        (ok (equal "not-restorable" (json-at entry "reason")))
+        (ok (not (nth-value 1 (json-at entry "value")))
+            "and carries no value key to be mistaken for one")))))
 
 (deftest a-digest-that-moved-is-not-a-verdict-about-the-code
   (multiple-value-bind (document text) (%check :digest-moved)
     ;; The documented word, not the keyword: "unfaithful" says what happened
     ;; where "false" would read as a boolean about the run.
     (ok (equal "unfaithful" (json-at document "reproduction_faithful")))
-    (ok (json-false-p (json-at document "verified")))
+    ;; The run holds, and says so.  Whether it reproduced the run the caller
+    ;; named is a different question, answered beside the verdict.
+    (ok (json-true-p (json-at document "verified"))
+        "a digest that disagrees does not falsify anything")
+    (ok (claims-p text "✓ VERIFIED"))
     (ok (claims-p text "did NOT reproduce"))
     (let ((result (aref (json-at document "results") 0)))
-      (ok (equal "passed" (json-at result "status"))
-          "the run itself holds; what it does not do is reproduce the old one")
+      (ok (equal "passed" (json-at result "status")))
       (ok (equal "mismatch" (json-at result "definition_match"))
           "and the comparison is a word of its own, not a boolean"))))
 
@@ -364,7 +411,43 @@
     (let ((result (aref (json-at document "results") 0)))
       (ok (json-object-p (json-at result "core_result")))
       (ok (not (nth-value 1 (json-at result "core_result" "source")))
-          "cl-spec's own record stays behind the projection"))))
+          "cl-spec's own record stays behind the projection")
+      ;; Behind the projection, not withheld: what the text says about the
+      ;; case nobody reached is in the payload as well.
+      (ok (equal '("insufficient")
+                 (coerce (json-at result "core_result" "data" "never_called")
+                         'list))))))
+
+(deftest every-scenario-speaks-the-report-layers-own-vocabulary
+  ;; The descriptors claim to be states the report layer builds.  A value it
+  ;; never emits -- a status of :ABSENT, a gap nobody appends -- would make a
+  ;; scenario a positive example of nothing, and every check over it would
+  ;; hold vacuously.  These are the documented sets, read from production.
+  (let ((statuses cl-mcp/src/spec-adapter-report::+result-statuses+)
+        (calls cl-mcp/src/spec-adapter-report::+call-statuses+)
+        (gaps cl-mcp/src/spec-adapter-report::+verification-gap-values+)
+        (counts (mapcar #'cdr cl-mcp/src/spec-adapter-report::+named-count-statuses+)))
+    (testing "and the robustness case is the one it does not"
+      ;; Stated rather than skipped: BUILD-SPEC-CHECK-RESPONSE answers a
+      ;; whole-call timeout, and no spec-check call produces one, so the
+      ;; documented set does not name it.  If that ever changes, this is
+      ;; where it is noticed.
+      (ok (equal '(:timeout) +check-robustness-cases+))
+      (ok (not (member :timeout calls))))
+    (dolist (case +check-cases+)
+      (let ((report (check-scenario case)))
+        (testing (format nil "~(~A~)" case)
+          (ok (member (getf report :status) calls)
+              (format nil "call status ~S is documented" (getf report :status)))
+          (dolist (gap (getf report :verification-gaps))
+            (ok (or (member gap gaps) (member gap statuses))
+                (format nil "gap ~S is documented" gap)))
+          (dolist (result (getf report :results))
+            (ok (member (getf result :status) statuses)
+                (format nil "result status ~S is documented" (getf result :status))))
+          (dolist (key '(:passed :failed :errored :timed-out :not-run))
+            (ok (or (null (getf report :counts)) (member key counts))
+                (format nil "count field ~S has a status of its own" key))))))))
 
 ;;; ------------------------------------------------------------------------
 ;;; F. The replay line
@@ -377,9 +460,13 @@
       (ok (claims-p line (format nil "property=~A" (qualified :other-property))))
       (ok (claims-p line "seed=11"))
       (ok (claims-p line "profile=normal"))
-      (ok (claims-p line "expect_definition_digest=fnv1a64-v1:00000000000000dd"))
+      ;; The two results carry different digests, so a line that took the
+      ;; failure's name and seed and the other result's digest is visible.
+      (ok (claims-p line "expect_definition_digest=fnv1a64-v1:00000000000000ee"))
+      (ok (not (claims-p line "00000000000000dd"))
+          "not the digest of the run that already holds")
       (ok (not (claims-p line "3963993791726803706"))
-          "not the seed of the run that already holds"))))
+          "nor its seed"))))
 
 (deftest a-contract-is-replayed-by-function-and-a-budget
   (multiple-value-bind (document text) (%check :contract-only)

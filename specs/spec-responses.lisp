@@ -24,7 +24,7 @@
 ;;;; Verified domain: the six listing answers under three limits; the six
 ;;;; spec-symbol answers; five kinds of declaration with four clause states
 ;;;; and four documentation strings (ASCII, Japanese, quotes and a backslash,
-;;;; empty); the seventeen spec-check answers.  Not covered: the tool entry
+;;;; empty); the sixteen spec-check answers.  Not covered: the tool entry
 ;;;; points, the worker's own JSON round trip, JSON-RPC and the transports
 ;;;; (all of them 3E-2), and cl-spec itself.
 
@@ -64,6 +64,7 @@
                 #:+describe-entities+
                 #:+clause-states+
                 #:+check-cases+
+                #:+check-robustness-cases+
                 #:list-scenario
                 #:symbol-scenario
                 #:describe-scenario
@@ -158,6 +159,20 @@ JSON number comes back rounded, and a rounded seed replays a different run."
   (and (stringp value)
        (plusp (length value))
        (every (lambda (character) (find character "0123456789")) value)))
+
+(defun %seed-holds-p (result)
+  "Return true when RESULT's seed is the text a replay needs, or is honestly
+absent.
+
+A run that reached a verdict was started from a seed and carries it as a
+decimal string.  A run that never started -- one the deadline stopped, one
+that signalled before the first trial -- has none, and null is the right
+answer there: a seed invented for it would name a run nobody can reproduce."
+  (let ((seed (json-at result "seed"))
+        (status (json-at result "status")))
+    (if (member status '("passed" "failed" "error") :test #'equal)
+        (%decimal-string-p seed)
+        (or (json-null-p seed) (%decimal-string-p seed)))))
 
 ;;; ------------------------------------------------------------------------
 ;;; B. The text
@@ -376,17 +391,81 @@ never got as far as generating has none to have."
                (ecase (getf facts :counterexample)
                  (:present (and (equal "present" status) (plusp (length value))))
                  (:present-empty (and (equal "present" status) (zerop (length value))))
-                 (:absent (and (equal "absent" status) (zerop (length value))))
+                 ;; The backend reported none, and the argument list was read:
+                 ;; a statement about the run, not about cl-mcp.
+                 (:none (and (equal "none" status) (zerop (length value))))
+                 ;; It could not be read, and the reason says so.
                  (:unavailable (and (equal "unavailable" status)
-                                    (zerop (length value))))
+                                    (zerop (length value))
+                                    (stringp (json-at result
+                                                      "counterexample_unavailable_reason"))))
+                 ;; The run reached no verdict, so there is none to have.
                  (:not-applicable (and (equal "not-applicable" status)
                                        (zerop (length value))))))))))
 
-(defun %gaps-hold-p (facts document)
-  "Return true when the gaps reach both the payload and the text, each once."
-  (let ((gaps (json-at document "verification_gaps")))
+(defun %comma-separated (line prefix)
+  "Return the comma-separated items LINE lists after PREFIX."
+  (when line
+    (let ((rest (subseq line (length prefix)))
+          (items '())
+          (start 0))
+      (loop for comma = (position #\, rest :start start)
+            do (push (string-trim " " (subseq rest start comma)) items)
+               (if comma (setf start (1+ comma)) (return)))
+      (nreverse items))))
+
+(defun %gaps-hold-p (facts document text)
+  "Return true when the gaps reach both the payload and the text, each once.
+
+The text is read at its own line rather than searched whole: a gap named in a
+docstring, a note or a message elsewhere in the response would answer a search
+for it, and a list that dropped one of two gaps would still pass.  The line
+says exactly what it lists."
+  (let ((gaps (json-at document "verification_gaps"))
+        (line (line-starting-with text "verification gaps: ")))
     (and (json-array-p gaps)
-         (equal (getf facts :gaps) (coerce gaps 'list)))))
+         (equal (getf facts :gaps) (coerce gaps 'list))
+         (if (and (getf facts :gaps) (getf facts :gap-line))
+             (equal (getf facts :gaps)
+                    (%comma-separated line "verification gaps: "))
+             ;; One answer prints no such line: the zero-selection one, whose
+             ;; text is a short form of its own.  The descriptor says so, and
+             ;; says what that text carries instead.
+             (null line)))))
+
+(defun %evidence-holds-p (facts document)
+  "Return true when the evidence the text shows reaches the payload as well.
+
+The text is written from the record's raw source and the payload from its
+projection, so a projection that dropped the evidence publishes a finding to a
+reader of the text and withholds it from a reader of the JSON.  Only reading
+both says whether that happened."
+  (let* ((results (json-at document "results"))
+         (result (when (plusp (length results)) (aref results (1- (length results)))))
+         (data (when result (json-at result "core_result" "data")))
+         (capture (getf facts :capture)))
+    (cond
+      (capture
+       (let* ((entries (json-at data "capture"))
+              (entry (when (and (json-array-p entries) (plusp (length entries)))
+                       (aref entries 0))))
+         (and (json-object-p entry)
+              (equal "BALANCE" (json-at entry "name"))
+              (equal (getf capture :availability) (json-at entry "availability"))
+              (if (getf capture :printed)
+                  ;; Collected: the application's own value crossed, printed.
+                  (and (json-object-p (json-at entry "value"))
+                       (equal (getf capture :printed)
+                              (json-at entry "value" "printed")))
+                  ;; Unavailable: a reason, and no value to mistake for one.
+                  (and (not (nth-value 1 (json-at entry "value")))
+                       (equal (getf capture :reason) (json-at entry "reason")))))))
+      ((getf facts :case-never-called)
+       (let ((never (json-at data "never_called")))
+         (and (json-array-p never)
+              (equal (list (getf facts :case-never-called))
+                     (coerce never 'list)))))
+      (t t))))
 
 (defun %check-holds-p (case)
   "Return true when a spec-check answer carries its verdict, its evidence and
@@ -410,13 +489,14 @@ its reservations -- in the payload and in the text alike."
            (%verdict-holds-p (getf facts :verdict) text)
            (%text-holds-p facts text)
            (or status-only
-               (and (%gaps-hold-p facts document)
+               (and (%gaps-hold-p facts document text)
                     (%counterexample-holds-p facts document)
+                    (%evidence-holds-p facts document)
                     ;; Every result keeps its seed as a decimal string, its
                     ;; symbol as package and name, and the raw record cl-spec
                     ;; handed over stays out of the payload.
                     (loop for result across (json-at document "results")
-                          always (and (%decimal-string-p (json-at result "seed"))
+                          always (and (%seed-holds-p result)
                                       (json-object-p (json-at result "property"))
                                       (multiple-value-bind (value present)
                                           (json-at result "core_result" "source")
@@ -574,18 +654,26 @@ it off."
     "A run's answer is its verdict and everything the verdict does not cover.
 The three verdicts are three words, and the word a reader stops at carries the
 coverage it stands on: a case nobody reached, a contract that was not run, the
-properties that were not.  A status with no run reports the status and claims
-no verdict at all.  The gaps reach the text as well as the payload; a
-counterexample that is empty, absent, unavailable or never generated stays
-four answers; a captured NIL is application data and an unavailable capture is
-not a value.  VERIFIED is checked as a word, not as a substring of NOT
-VERIFIED.  Every trial checks the drawn answer and every other one."
+properties that were not.  A verdict is about the results alone, so a digest
+that disagrees with the caller leaves it standing and is reported beside it.
+A status with no run reports the status and claims no verdict at all.  The
+gaps reach the text as well as the payload, and the line that lists them lists
+all of them.  A counterexample that is empty, none, unavailable or never
+generated stays four answers; a captured NIL is application data and an
+unavailable capture is not a value -- in the payload as well as in the text,
+which are written from different halves of the same record.  VERIFIED is
+checked as a word, not as a substring of NOT VERIFIED.  Every trial checks the
+drawn answer and every other one."
     (:about build-spec-check-response)
     (:kind :resolution)
     (:trials (:smoke 5 :normal 25))
     (destructuring-bind (&key case) case
       (and (%check-holds-p case)
-           (every #'%check-holds-p +check-cases+))))
+           (every #'%check-holds-p +check-cases+)
+           ;; Kept apart from the answers above: these are ones the builder
+           ;; handles and no spec-check call produces, so they are evidence
+           ;; about its robustness and not about what a run reports.
+           (every #'%check-holds-p +check-robustness-cases+))))
 
   (defproperty spec-check-replay-line-asks-for-the-run-it-reports
       ((case check-case))
@@ -601,4 +689,5 @@ rather than one whose arguments are NIL."
     (:trials (:smoke 5 :normal 25))
     (destructuring-bind (&key case) case
       (and (%replay-holds-p case)
-           (every #'%replay-holds-p +check-cases+)))))
+           (every #'%replay-holds-p +check-cases+)
+           (every #'%replay-holds-p +check-robustness-cases+)))))

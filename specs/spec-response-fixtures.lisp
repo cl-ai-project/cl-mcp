@@ -63,6 +63,7 @@
            #:draw-symbol-case
            #:draw-describe-case
            #:+check-cases+
+           #:+check-robustness-cases+
            #:check-scenario
            #:draw-check-case))
 
@@ -654,17 +655,28 @@ second line."
 (defparameter +check-cases+
   '(:passed-with-gaps :has-failure :no-properties :no-effective-trials
     :case-never-reached :properties-only :contract-only :generation-failed
-    :timeout :timed-out-result :digest-moved :empty-counterexample
+    :timed-out-result :digest-moved :empty-counterexample
     :no-counterexample
     :counterexample-not-collected :capture-collected-nil :capture-unavailable
     :shrink-limited)
-  "The seventeen spec-check answers these fixtures describe.
+  "The sixteen spec-check answers these fixtures describe.
 
 Each is a state the report layer actually produces, not a combination of keys
 assembled because each key exists somewhere.  Between them they cover the
 three verdicts, a run that selected nothing, a run whose trials never
 happened, evidence that is absent against evidence that could not be read, and
 a digest that disagrees with the caller while the run itself holds.")
+
+(defparameter +check-robustness-cases+
+  '(:timeout)
+  "Answers BUILD-SPEC-CHECK-RESPONSE handles that spec-check does not produce.
+
+A whole-call timeout is one: %WITHIN-DEADLINE wraps spec-list, spec-symbol and
+spec-describe, and SPEC-CHECK-RESPONSE calls CHECK-REPORT without it, so no
+spec-check call carries that status today -- which is why it is not in
++CALL-STATUSES+ either.  The builder is written to answer it anyway, and what
+it answers is checked here, apart from the positive examples so that a
+robustness case cannot be mistaken for a state the report layer builds.")
 
 (defun %value (printed &key (type "integer") (complete t) (omitted 0) object-id)
   "Return one externalized value, as the report layer carries it."
@@ -678,54 +690,140 @@ a digest that disagrees with the caller while the run itself holds.")
         collect (list :variable (symbol-data key) :value (%value text))))
 
 (defun %result (&key (name :property) (kind :property) (status :passed)
-                  (seed "3963993791726803706") (profile :normal)
+                  (seed "3963993791726803706") (seed-p t) (profile :normal)
                   (executed 25) (budget 25) contract counterexample
-                  (counterexample-status :absent) shrunk shrink-status shrink-note
+                  (counterexample-status :none) counterexample-unavailable-reason
+                  shrunk (shrink-status :none) shrink-note
                   (digest "fnv1a64-v1:00000000000000dd") (match :not-checked)
                   core-record message condition)
-  "Return one per-property result, as a check report carries it."
-  (list :property (symbol-data name)
-        :kind kind
-        :status status
-        :seed seed
-        :profile (unless (eq kind :contract) profile)
-        :trials (list :executed executed :budget budget
-                      :budget-source "backend-default")
-        :contract contract
-        :counterexample counterexample
-        :counterexample-status counterexample-status
-        :shrunk-counterexample shrunk
-        :shrink-status shrink-status
-        :shrink-note shrink-note
-        :condition condition
-        :definition-digest digest
-        :definition-digest-complete t
-        :definition-match match
-        :core-record core-record
-        :elapsed 0.02
-        :message message))
+  "Return one per-property result, as a check report carries it.
 
-(defun %case-report (never-called)
-  "Return a core record whose source carries cl-spec's case report.
+The defaults are a passing property run as CHECK-REPORT builds one: a verdict
+was reached, so the counterexample and the shrink search each answer :NONE
+rather than :ABSENT or :UNAVAILABLE, which are the answers for a run that
+reached no verdict at all.  SEED-P false leaves the key out, which is what a
+result that never started carries."
+  (append
+   (list :property (symbol-data name)
+         :kind kind
+         :status status
+         :profile (unless (eq kind :contract) profile))
+   (when seed-p (list :seed seed))
+   (list :trials (list :executed executed :budget budget
+                       :budget-source "backend-default")
+         :contract contract
+         :counterexample counterexample
+         :counterexample-status counterexample-status
+         :counterexample-unavailable-reason counterexample-unavailable-reason
+         :shrunk-counterexample shrunk
+         :shrink-status shrink-status
+         :shrink-note shrink-note
+         :condition condition
+         :definition-digest digest
+         :definition-digest-complete t
+         :definition-match match
+         :core-record core-record
+         :elapsed 0.02
+         :message message)))
 
-The names under :NEVER-CALLED are the declared cases no trial reached, which
-is the gap a bare verdict hides."
+(defun %capture-node (record)
+  "Return one capture RECORD as a projection node.
+
+The nodes are written here rather than taken from the record layer, whose own
+projection is checked in specs/core-records.lisp.  What matters at this layer
+is that the response carries them: a capture that was collected and one that
+could not be read must stay two answers in the JSON, not only in the text."
+  (list :object
+        (if (eq :collected (getf record :availability))
+            (list (cons "name" (list :scalar (getf record :name)))
+                  (cons "availability" (list :scalar "collected"))
+                  (cons "value" (list :value (%value (getf record :printed)
+                                                     :type (getf record :type)))))
+            (list (cons "name" (list :scalar (getf record :name)))
+                  (cons "availability" (list :scalar "unavailable"))
+                  (cons "reason" (list :scalar (getf record :reason)))
+                  (cons "type" (list :scalar (getf record :type)))))))
+
+(defun %capture-record (record)
+  "Return one capture RECORD as cl-spec's raw source carries it."
+  (if (eq :collected (getf record :availability))
+      (list :name (getf record :name)
+            :availability :collected
+            ;; The application's own value, as the code under test produced
+            ;; it.  NIL here is a value, not an absence.
+            :value (getf record :value))
+      (list :name (getf record :name)
+            :availability :unavailable
+            :reason (getf record :reason)
+            :type (getf record :type))))
+
+(defun %capture-evidence (records)
+  "Return the core record of a failure that captured RECORDS.
+
+:SOURCE is what the text is written from and :DATA is what the JSON carries.
+A record with one and not the other publishes the evidence to a reader of the
+text and withholds it from a reader of the payload -- the same finding told to
+one caller and not another."
   (list :availability :available
         :schema-supported t
         :schema-version 1
+        :field-availability (list :capture :available)
         :projection (list :complete t :issues '())
-        :source (list :case-report (list :never-called never-called))))
+        :source (list :failure
+                      (list :state
+                            (list :capture
+                                  (list :values (mapcar #'%capture-record records)))))
+        :data (list :object
+                    (list (cons "capture"
+                                (list :array (mapcar #'%capture-node records)))))))
+
+(defun %case-report (never-called)
+  "Return the core record of a run that declared cases and missed some.
+
+The names under :NEVER-CALLED are the declared cases no trial reached, which
+is the gap a bare verdict hides.  Carried in :SOURCE, which the text is
+written from, and in :DATA, which is what the payload carries: a record with
+one and not the other tells a reader of the text something it withholds from a
+reader of the payload."
+  (list :availability :available
+        :schema-supported t
+        :schema-version 1
+        :field-availability (list :case-report :available)
+        :projection (list :complete t :issues '())
+        :source (list :case-report (list :never-called never-called))
+        :data (list :object
+                    (list (cons "never_called"
+                                (list :array
+                                      (mapcar (lambda (name)
+                                                (list :scalar
+                                                      (string-downcase
+                                                       (princ-to-string name))))
+                                              never-called)))))))
 
 (defun check-scenario (case)
   "Return (values REPORT FACTS) for the spec-check answer CASE.
 
+Each report is a state CHECK-REPORT builds, in its own vocabulary: the
+statuses of +RESULT-STATUSES+ and +CALL-STATUSES+, the gaps of
++VERIFICATION-GAP-VALUES+ in the order %VERIFICATION-GAPS appends them, and
+the counterexample and shrink answers a run that reached a verdict gives.  A
+combination the report layer does not build is not a positive example of
+anything, however plausible it reads.
+
+Two consequences worth naming, because they are where a hand-written report
+tends to drift.  Every run carries at least :INPUT-COVERAGE-UNMEASURED, and a
+property run carries :REJECTION-COUNTS-UNMEASURED beside it -- there is no
+such thing as a check with no gaps.  And :VERIFIED is decided by the results
+alone: a digest that disagrees with the caller, or a contract nobody ran,
+leaves it true and is reported beside it.
+
 FACTS says what the response must carry and what its text must and must not
-claim.  The expectations are written here; nothing recomputes them from the
-report, which is the only way a second copy of the verdict layer stays out of
-the check."
+claim.  It is written here; nothing recomputes it from the report."
   (let* ((property (symbol-data :property))
          (other (symbol-data :other-property))
          (subject (symbol-data :subject))
+         (other-digest "fnv1a64-v1:00000000000000ee")
+         (property-gaps '("rejection-counts-unmeasured" "input-coverage-unmeasured"))
          (selection
            (list :mode "explicit" :kind :property
                  :requested (list :property property)
@@ -734,6 +832,23 @@ the check."
                  :source "explicit property argument"
                  :coverage "Only the property named."
                  :notes '()))
+         (contract-selection
+           (list :mode "function" :kind :contract
+                 :requested (list :function subject)
+                 :selected (list subject)
+                 :count 1
+                 :source "explicit function argument"
+                 :coverage "Only the contract named."
+                 :notes '()
+                 :properties-not-run '()
+                 :properties-not-run-read t))
+         (usable-contract (list :rejection-status :measured
+                                :precondition-p t
+                                :rejected 0
+                                :rejected-measured t
+                                :rejected-readable t
+                                :rejected-usable t
+                                :effective-trials 25))
          (base (list :status :completed
                      :verified t
                      :selection selection
@@ -744,7 +859,8 @@ the check."
                      :profile :normal
                      :timeout-seconds 60
                      :thread-leaked nil
-                     :verification-gaps '()
+                     :verification-gaps '(:rejection-counts-unmeasured
+                                          :input-coverage-unmeasured)
                      :elapsed 0.5
                      :reproduction-faithful :not-checked
                      :environment (environment)))
@@ -752,10 +868,13 @@ the check."
                       :verdict :verified
                       :verified :true
                       :status "completed"
-                      :gaps '()
+                      :gaps property-gaps
+                      ;; Every answer but the zero-selection one prints its
+                      ;; gaps on a line of their own.
+                      :gap-line t
                       :text-must '()
                       :text-must-not '()
-                      :counterexample :absent
+                      :counterexample :none
                       :replay (list :target :property
                                     :name (qualified :property)
                                     :seed "3963993791726803706"
@@ -772,31 +891,26 @@ the check."
            (failed-counts ()
              (list :selected 1 :passed 0 :failed 1 :errored 0
                    :timed-out 0 :not-run 0 :other 0
-                   :by-status '((:failed . 1))))
-           (evidence (values)
-             ;; Where cl-spec's v1 record keeps what a failing trial captured:
-             ;; under the failure's state, not beside it.
-             (list :availability :available
-                   :schema-supported t
-                   :schema-version 1
-                   :projection (list :complete t :issues '())
-                   :source (list :failure
-                                 (list :state
-                                       (list :capture (list :values values)))))))
+                   :by-status '((:failed . 1)))))
       (ecase case
         (:passed-with-gaps
-         ;; Everything selected passed, and the gaps say what that does not
-         ;; cover.  A verdict is not a summary of the gaps: both are reported.
-         (values (report :verification-gaps '(:trials-not-exhaustive
-                                              :instrumentation-not-used))
-                 (expect :gaps '("trials-not-exhaustive" "instrumentation-not-used")
-                         :text-must '("verification gaps:" "trials-not-exhaustive"))))
+         ;; The plain passing run.  It still carries two gaps, because two
+         ;; things are never measured, and a verdict is not a summary of them.
+         (values (report)
+                 (expect :text-must '("verification gaps:"
+                                      "input-coverage-unmeasured"
+                                      "rejection-counts-unmeasured"
+                                      "verified: true"))))
         (:has-failure
          (values (report :verified nil
+                         :selection (append (list :selected (list property other)
+                                                  :count 2)
+                                            selection)
                          :results (list (%result)
                                         (%result :name :other-property
                                                  :status :failed
                                                  :seed "11"
+                                                 :digest other-digest
                                                  :counterexample
                                                  (%counterexample "68" "0")
                                                  :counterexample-status :present))
@@ -807,13 +921,15 @@ the check."
                          :verified :false
                          :counterexample :present
                          :text-must (list "AMOUNT = 68" (qualified :other-property))
-                         ;; The replay line points at the failure, not at the
-                         ;; run that already holds.
+                         ;; The replay line points at the failure, with that
+                         ;; result's own seed and its own digest -- the two
+                         ;; results carry different ones so a line that mixed
+                         ;; them could be seen.
                          :replay (list :target :property
                                        :name (qualified :other-property)
                                        :seed "11"
                                        :profile "normal"
-                                       :digest "fnv1a64-v1:00000000000000dd"))))
+                                       :digest other-digest))))
         (:no-properties
          (values (report :status :no-properties
                          :verified nil
@@ -828,43 +944,43 @@ the check."
                          :counts (list :selected 0 :passed 0 :failed 0 :errored 0
                                        :timed-out 0 :not-run 0 :other 0
                                        :by-status '())
+                         :verification-gaps '(:no-properties-selected
+                                              :rejection-counts-unmeasured
+                                              :input-coverage-unmeasured)
                          :message "No property is registered about this symbol.")
                  (expect :verdict :no-properties
                          :verified :false
                          :status "no-properties"
+                         :gaps (cons "no-properties-selected" property-gaps)
+                         ;; This answer's text is a short form with no gap
+                         ;; line.  What it says instead is that nothing was
+                         ;; selected and that nothing is verified, which is
+                         ;; what the gaps here amount to.
+                         :gap-line nil
                          :text-must (list "Selected 0 properties"
                                           "A contract is registered for this symbol."
                                           "verified: false")
                          :replay nil)))
         (:no-effective-trials
          ;; A contract whose every generated argument was refused: the trials
-         ;; ran, and none of them reached the function.
+         ;; ran, and none of them reached the function.  cl-spec says passed;
+         ;; what it passed is nothing, so the verdict is not verified and the
+         ;; gap names the budget that resolved to no evaluation.
          (values (report :verified nil
-                         :selection (list :kind :contract
-                                          :requested (list :function subject)
-                                          :selected (list subject)
-                                          :mode "function" :count 1
-                                          :source "explicit function argument"
-                                          :coverage "Only the contract named."
-                                          :notes '()
-                                          ;; Read, and empty: this case is
-                                          ;; about trials that reached nothing,
-                                          ;; not about coverage nobody looked
-                                          ;; up.
-                                          :properties-not-run '()
-                                          :properties-not-run-read t)
+                         :selection contract-selection
                          :results (list (%result :name :subject :kind :contract
-                                                 :contract (list :rejection-status :measured
-                                                                 :precondition-p t
-                                                                 :rejected 25
-                                                                 :rejected-measured t
-                                                                 :rejected-readable t
-                                                                 :effective-trials 0)))
-                         :verification-gaps '(:no-effective-trials))
+                                                 :contract
+                                                 (append (list :rejected 25
+                                                               :effective-trials 0)
+                                                         usable-contract)))
+                         :verification-gaps '(:zero-trials :input-coverage-unmeasured))
                  (expect :verdict :not-verified
                          :verified :false
-                         :gaps '("no-effective-trials")
+                         ;; A contract's refusals are counted, so that gap is
+                         ;; not listed for it.
+                         :gaps '("zero-trials" "input-coverage-unmeasured")
                          :effective-trials 0
+                         :text-must '("zero-trials")
                          :replay (list :target :function
                                        :name (qualified :subject)
                                        :trials 25
@@ -874,35 +990,34 @@ the check."
          (values (report :verified nil
                          :results (list (%result :core-record
                                                  (%case-report '(:insufficient))))
-                         :verification-gaps '(:case-never-called))
+                         :verification-gaps (list* :cases-never-called
+                                                   '(:rejection-counts-unmeasured
+                                                     :input-coverage-unmeasured)))
                  (expect :verdict :not-verified
                          :verified :false
-                         :gaps '("case-never-called")
+                         :gaps (cons "cases-never-called" property-gaps)
+                         :case-never-called "insufficient"
                          :text-must '("insufficient" "never reached"))))
         (:properties-only
-         (values (report :verified nil
-                         :selection (append (list :contract-not-run subject) selection)
-                         :verification-gaps '(:contract-not-run))
-                 (expect :verdict :not-verified
-                         :verified :false
-                         :gaps '("contract-not-run")
-                         :text-must (list "properties only" (qualified :subject)))))
+         ;; Everything selected passed, so the run is verified.  What it does
+         ;; not cover is the contract nobody ran, and that is said in the same
+         ;; line as the verdict rather than instead of it.
+         (values (report :selection (append (list :contract-not-run subject) selection)
+                         :verification-gaps (list* :contract-not-run
+                                                   '(:rejection-counts-unmeasured
+                                                     :input-coverage-unmeasured)))
+                 (expect :gaps (cons "contract-not-run" property-gaps)
+                         :text-must (list "properties only" (qualified :subject)
+                                          "verified: true"))))
         (:contract-only
-         (values (report :verified nil
-                         :selection (list :kind :contract
-                                          :requested (list :function subject)
-                                          :selected (list subject)
-                                          :mode "function" :count 1
-                                          :source "explicit function argument"
-                                          :coverage "Only the contract named."
-                                          :notes '()
-                                          :properties-not-run (list property other)
-                                          :properties-not-run-read t)
-                         :results (list (%result :name :subject :kind :contract))
-                         :verification-gaps '(:properties-not-run))
-                 (expect :verdict :not-verified
-                         :verified :false
-                         :gaps '("properties-not-run")
+         (values (report :selection (append (list :properties-not-run
+                                                  (list property other))
+                                            contract-selection)
+                         :results (list (%result :name :subject :kind :contract
+                                                 :contract usable-contract))
+                         :verification-gaps '(:properties-not-run
+                                              :input-coverage-unmeasured))
+                 (expect :gaps '("properties-not-run" "input-coverage-unmeasured")
                          :text-must '("contract only" "2 properties")
                          :replay (list :target :function
                                        :name (qualified :subject)
@@ -911,100 +1026,118 @@ the check."
                                        :digest "fnv1a64-v1:00000000000000dd"))))
         (:generation-failed
          ;; Nothing was falsified, because nothing ran: the generator broke
-         ;; before the first trial.
+         ;; before the first trial.  An error is a verdict about the run, so
+         ;; the call completed; what it did not produce is a counterexample,
+         ;; and the status says so rather than an empty one standing in.
          (values (report :verified nil
-                         :results (list (%result :status :errored
+                         :results (list (%result :status :error
                                                  :executed 0
                                                  :counterexample-status :not-applicable
+                                                 :shrink-status :not-applicable
                                                  :condition (list :type "GENERATOR-ERROR"
-                                                                  :message "no shrinker")
+                                                                  :message "the generator signalled")
                                                  :message "The generator signalled."))
                          :counts (list :selected 1 :passed 0 :failed 0 :errored 1
                                        :timed-out 0 :not-run 0 :other 0
-                                       :by-status '((:errored . 1))))
+                                       :by-status '((:error . 1))))
                  (expect :verdict :not-verified
                          :verified :false
                          :counterexample :not-applicable
-                         :text-must '("errored"))))
+                         :text-must '("error"))))
         (:timeout
          ;; The call itself ran out of time, so there is no run to report on.
-         ;; This answer carries a message and no selection, and the text is
+         ;; This answer carries a message and no selection, and its text is
          ;; the status and that message -- not a verdict about anything.
-         (values (report :status :timeout
-                         :verified nil
-                         :name subject
-                         :results '()
-                         :message "spec-check ran out of time after 60 seconds."
-                         :counts nil
-                         :verification-gaps '())
+         (values (list :status :timeout
+                       :verified nil
+                       :message "reading the registry exceeded its 60 second deadline."
+                       :environment (environment))
                  (expect :verdict :status-only
-                         :headline "TIMEOUT"
                          :verified :false
                          :status "timeout"
                          :gaps '()
-                         :text-must '("ran out of time")
+                         :text-must '("exceeded its 60 second deadline")
                          :replay nil)))
         (:timed-out-result
-         ;; The call finished; one selected property did not.  Here there is a
-         ;; run to report on, and what it leaves behind -- a thread that was
-         ;; still going -- belongs in the text beside the verdict.
-         (values (report :status :completed
+         ;; The call finished; one selected property did not.  A timeout is
+         ;; not a verdict, so the call is incomplete, the result carries no
+         ;; seed to replay from, and the evidence it has none of says
+         ;; "unavailable" rather than "none".
+         (values (report :status :incomplete
                          :verified nil
-                         :results (list (%result :status :timed-out :executed 3))
+                         :results (list (%result :status :timeout
+                                                 :seed-p nil
+                                                 :executed 3
+                                                 :counterexample-status :unavailable
+                                                 :counterexample-unavailable-reason
+                                                 "the run did not reach a verdict within its deadline"
+                                                 :shrink-status :unavailable
+                                                 :message "The deadline passed."))
                          :counts (list :selected 1 :passed 0 :failed 0 :errored 0
                                        :timed-out 1 :not-run 0 :other 0
-                                       :by-status '((:timed-out . 1)))
+                                       :by-status '((:timeout . 1)))
                          :worker-reuse :unknown
                          :worker-reuse-message
                          "The thread was still running when the deadline passed."
                          :thread-leaked t
-                         :verification-gaps '(:timed-out))
+                         :verification-gaps (list* :timeout
+                                                   '(:rejection-counts-unmeasured
+                                                     :input-coverage-unmeasured)))
                  (expect :verdict :not-verified
                          :verified :false
-                         :gaps '("timed-out")
-                         :text-must '("worker_reuse: unknown" "timed-out"
+                         :status "incomplete"
+                         :gaps (cons "timeout" property-gaps)
+                         :counterexample :unavailable
+                         :text-must '("worker_reuse: unknown" "timeout"
                                       "still running")
-                         ;; A timeout is not a counterexample.
-                         :text-must-not '("✗ FAILED"))))
+                         ;; A timeout is not a counterexample, and a result
+                         ;; with no seed has nothing to replay.
+                         :text-must-not '("✗ FAILED")
+                         :replay nil)))
         (:digest-moved
-         ;; The run holds; what it does not do is reproduce the run the caller
-         ;; named.  The two are reported separately.
+         ;; The run holds, and it is reported as holding.  What it does not do
+         ;; is reproduce the run the caller named, and that is a separate
+         ;; sentence beside the verdict -- not a verdict of its own.
          (values (report :reproduction-faithful :false
-                         :verified nil
-                         :results (list (%result :match :false))
-                         :verification-gaps '(:definitions-moved))
-                 (expect :verdict :not-verified
-                         :verified :false
-                         :gaps '("definitions-moved")
-                         :match "false"
-                         :text-must '("did NOT reproduce" "reproduction:"))))
+                         :results (list (%result :match :false)))
+                 (expect :match "mismatch"
+                         :text-must '("did NOT reproduce" "reproduction:"
+                                      "verified: true"))))
         (:empty-counterexample
-         ;; A property of no arguments can fail, and its counterexample is the
-         ;; empty list of bindings -- present, and with nothing in it.
+         ;; A property of no arguments can fail, and its counterexample is
+         ;; present with nothing in it.
          (values (report :verified nil
                          :results (list (%result :status :failed
                                                  :counterexample '()
-                                                 :counterexample-status :present))
+                                                 :counterexample-status :present
+                                                 :shrink-status :present))
                          :counts (failed-counts))
                  (expect :verdict :failed
                          :verified :false
                          :counterexample :present-empty)))
         (:no-counterexample
+         ;; A failure the backend reported no arguments for, on a property
+         ;; whose argument list was read.  "None reported" is what that is.
          (values (report :verified nil
                          :results (list (%result :status :failed
-                                                 :counterexample-status :absent))
+                                                 :counterexample-status :none))
                          :counts (failed-counts))
                  (expect :verdict :failed
                          :verified :false
-                         :counterexample :absent)))
+                         :counterexample :none
+                         :text-must '("none reported by the backend"))))
         (:counterexample-not-collected
          (values (report :verified nil
                          :results (list (%result :status :failed
-                                                 :counterexample-status :unavailable))
+                                                 :counterexample-status :unavailable
+                                                 :counterexample-unavailable-reason
+                                                 "the backend recorded no arguments"
+                                                 :shrink-status :unavailable))
                          :counts (failed-counts))
                  (expect :verdict :failed
                          :verified :false
-                         :counterexample :unavailable)))
+                         :counterexample :unavailable
+                         :text-must '("UNAVAILABLE"))))
         (:capture-collected-nil
          ;; The captured value is NIL, and NIL is a value the code under test
          ;; produced.  Rendered as "unavailable" it would become a fact about
@@ -1013,15 +1146,19 @@ the check."
                          :results (list (%result :status :failed
                                                  :counterexample (%counterexample "3")
                                                  :counterexample-status :present
+                                                 :shrink-status :present
                                                  :core-record
-                                                 (evidence
+                                                 (%capture-evidence
                                                   (list (list :name "BALANCE"
                                                               :availability :collected
-                                                              :value nil)))))
+                                                              :value nil
+                                                              :printed "NIL"
+                                                              :type "null")))))
                          :counts (failed-counts))
                  (expect :verdict :failed
                          :verified :false
                          :counterexample :present
+                         :capture (list :availability "collected" :printed "NIL")
                          :text-must '("captured:" "BALANCE = NIL")
                          :text-must-not '("BALANCE = UNAVAILABLE"))))
         (:capture-unavailable
@@ -1029,34 +1166,56 @@ the check."
                          :results (list (%result :status :failed
                                                  :counterexample (%counterexample "3")
                                                  :counterexample-status :present
+                                                 :shrink-status :present
                                                  :core-record
-                                                 (evidence
+                                                 (%capture-evidence
                                                   (list (list :name "BALANCE"
                                                               :availability :unavailable
-                                                              :reason :not-restorable
+                                                              :reason "not-restorable"
                                                               :type "INTEGER")))))
                          :counts (failed-counts))
                  (expect :verdict :failed
                          :verified :false
                          :counterexample :present
+                         :capture (list :availability "unavailable"
+                                        :reason "not-restorable")
                          :text-must '("BALANCE = UNAVAILABLE" "not-restorable")
                          ;; The value is not there to print, and a line that
                          ;; printed one would be cl-mcp's invention.
                          :text-must-not '("BALANCE = NIL"))))
         (:shrink-limited
-         ;; The finding stands; only the reduction is unfinished.
+         ;; The finding stands; only the reduction is unfinished.  The search
+         ;; came back with nothing smaller, and the record says why -- which
+         ;; is what tells "found nothing" from "never really looked".
          (values (report :verified nil
                          :results (list (%result :status :failed
                                                  :counterexample (%counterexample "68" "0")
                                                  :counterexample-status :present
-                                                 :shrink-status :unavailable
-                                                 :shrink-note "budget-exhausted"))
+                                                 :shrink-status :none
+                                                 :core-record
+                                                 (list :availability :available
+                                                       :schema-supported t
+                                                       :schema-version 1
+                                                       :projection (list :complete t
+                                                                         :issues '())
+                                                       :source
+                                                       (list :shrink-report
+                                                             (list :termination
+                                                                   :budget-exhausted))
+                                                       :data
+                                                       (list :object
+                                                             (list (cons "shrink_termination"
+                                                                         (list :scalar
+                                                                               "budget-exhausted")))))))
                          :counts (failed-counts))
                  (expect :verdict :failed
                          :verified :false
                          :counterexample :present
-                         :text-must '("AMOUNT = 68"))))))))
+                         :text-must '("AMOUNT = 68" "shrinking: budget-exhausted"
+                                      "the shrink budget ran out")
+                         ;; The reduction is unfinished; the finding is not.
+                         :text-must-not '("did not reach a verdict"))))))))
 
 (defun draw-check-case ()
-  "Return a spec-check case: which of the seventeen answers."
+  "Return a spec-check case: which of the sixteen answers."
   (list :case (nth (random (length +check-cases+)) +check-cases+)))
