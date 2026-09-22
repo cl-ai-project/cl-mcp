@@ -43,7 +43,8 @@
                 #:+required-metadata+
                 #:+sentinel-fields+
                 #:with-isolated-object-registry
-                #:decimal-string))
+                #:decimal-string
+                #:json-array-p))
 
 (in-package #:cl-mcp/tests/core-record-specs-test)
 
@@ -142,7 +143,8 @@ parse it back with false, null, [] and a missing key kept apart."
                             :json-booleans-as-symbols t :json-nulls-as-keyword t)))
     (ok (eq 'yason:false (%json-at table "f")) "false")
     (ok (eq :null (%json-at table "n")) "null")
-    (ok (equalp #() (%json-at table "a")) "[]")
+    (let ((empty (%json-at table "a")))
+      (ok (and (json-array-p empty) (zerop (length empty))) "[]"))
     (ok (not (nth-value 1 (%json-at table "missing"))) "missing")))
 
 (deftest the-restated-contract-matches-this-cl-spec
@@ -176,8 +178,9 @@ parse it back with false, null, [] and a missing key kept apart."
                      (format nil "~A: schema supported" label))
                  (ok (eq 'yason:true (%json-at json "projection" "complete"))
                      (format nil "~A: projected whole" label))
-                 (ok (equalp #() (%json-at json "unknown_keys"))
-                     (format nil "~A: no key this adapter does not know" label))
+                 (let ((unknown (%json-at json "unknown_keys")))
+                   (ok (and (json-array-p unknown) (zerop (length unknown)))
+                       (format nil "~A: no key this adapter does not know" label)))
                  (ok (not (nth-value 1 (%json-at json "source")))
                      (format nil "~A: the raw record stays inside the adapter" label))
                  (ok (equal "result" (%json-at json "data" "record_kind"))
@@ -207,11 +210,16 @@ parse it back with false, null, [] and a missing key kept apart."
                      (progn
                        (ok (eq :null (%json-at json "data" "failure"))
                            (format nil "~A: no failure, as null" label))
-                       (ok (equalp #() (%json-at json "data" "counterexample"))
-                           (format nil "~A: no counterexample, as []" label)))
+                       (let ((counterexample (%json-at json "data" "counterexample")))
+                         (ok (and (json-array-p counterexample)
+                                  (zerop (length counterexample)))
+                             (format nil "~A: no counterexample, as the array []" label))))
                      (progn
                        (ok (hash-table-p (%json-at json "data" "failure"))
                            (format nil "~A: the failure is an object" label))
-                       (ok (plusp (length (%json-at json "data" "counterexample")))
-                           (format nil "~A: the counterexample is a non-empty array"
-                                   label)))))))))
+                       (let ((counterexample (%json-at json "data" "counterexample")))
+                         (ok (and (json-array-p counterexample)
+                                  (plusp (length counterexample))
+                                  (every #'hash-table-p counterexample))
+                             (format nil "~A: the counterexample is a non-empty array of objects"
+                                     label))))))))))

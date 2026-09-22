@@ -42,6 +42,10 @@
            #:object-field
            #:node-at
            #:object-keys
+           #:json-array-p
+           #:numbered-items
+           #:numbered-text
+           #:record-capture-value
            #:draw-availability-case
            #:draw-role-case
            #:draw-seed-case
@@ -212,6 +216,13 @@ indices, starting at NODE."
   "Return the JSON keys of the (:OBJECT ...) NODE, in any order."
   (mapcar #'car (second node)))
 
+(defun json-array-p (value)
+  "True when VALUE is what a JSON array decodes to under the tests' decoder
+settings: a vector that is not a string.  EQUALP is no such test --
+\(EQUALP #() \"\") is true -- so a check for [] or a non-empty array asks this
+first and only then looks at the length."
+  (and (vectorp value) (not (stringp value))))
+
 ;;; ------------------------------------------------------------------------
 ;;; A. Availability
 
@@ -285,6 +296,12 @@ as (values RECORD CAPTURE-VALUE)."
               (:present-nil record))
             capture-value)))
 
+(defun record-capture-value (record)
+  "Return the value of the first capture binding of RECORD's failure: the
+record's own object, which an object id for it must name."
+  (getf (first (getf (getf (getf (getf record :failure) :state) :capture) :values))
+        :value))
+
 ;;; ------------------------------------------------------------------------
 ;;; C. Seeds
 
@@ -327,16 +344,31 @@ status, the known field to duplicate, and how many unknown keys to add."
 ;;; E. Cuts
 
 (defun draw-cut-case ()
-  "Return a case for the cut property: the one limit to push, its bound, and a
-filler length for a string.  :LENGTH bounds are at least 32, above the 31 keys
-of a record, and :CHARS bounds at least 30, above every other string in it, so
-only the field the check lengthens can be cut."
-  (let ((kind (%pick '(:length :chars :depth))))
-    (list :kind kind
-          :limit (ecase kind
-                   (:length (+ 32 (random 9)))
-                   (:chars (+ 30 (random 11)))
-                   (:depth (+ 3 (random 5)))))))
+  "Return a case for the cut property: a bound for each of the three limits,
+all of which every trial pushes.  The length bound is at least 32, above the 31
+keys of a record, and the character bound at least 30, above every other string
+in it, so only the field a check lengthens can be cut."
+  (let ((length-limit (+ 32 (random 9)))
+        (chars-limit (+ 30 (random 11)))
+        (depth-limit (+ 3 (random 5))))
+    (list :length-limit length-limit :chars-limit chars-limit :depth-limit depth-limit)))
+
+(defun numbered-items (count)
+  "Return a fresh list of the integers below COUNT: every position holds a
+different item, so which items a cut kept, and in what order, can be seen."
+  (loop for i below count collect i))
+
+(defun numbered-text (count)
+  "Return a fresh string of COUNT characters that never repeats a stretch:
+\"0,1,2,...,10,11,...\" cut to COUNT, so its head and its tail differ."
+  (let ((pieces '())
+        (length 0))
+    (loop for i from 0
+          while (< length count)
+          do (let ((piece (format nil "~D," i)))
+               (push piece pieces)
+               (incf length (length piece))))
+    (subseq (apply #'concatenate 'string (nreverse pieces)) 0 count)))
 
 (defun error-chain-record (deepest)
   "Return a fresh failing record whose failure explanation nests error datums

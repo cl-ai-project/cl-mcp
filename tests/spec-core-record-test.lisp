@@ -8,7 +8,7 @@
 (defpackage #:cl-mcp/tests/spec-core-record-test
   (:use #:cl)
   (:import-from #:rove
-                #:deftest #:testing #:ok)
+                #:deftest #:testing #:ok #:ng)
   (:import-from #:cl-mcp/src/spec-core-record
                 #:safe-json-integer-p
                 #:project-value
@@ -37,6 +37,9 @@
                 #:object-field
                 #:node-at
                 #:object-keys
+                #:json-array-p
+                #:numbered-items
+                #:numbered-text
                 #:error-chain-record
                 #:chain-container-path))
 
@@ -870,9 +873,26 @@ parse the text back so that false, null, [] and a missing key stay apart."
                             :json-booleans-as-symbols t :json-nulls-as-keyword t)))
     (ok (eq 'yason:false (%json-at table "f")) "false is YASON:FALSE")
     (ok (eq :null (%json-at table "n")) "null is :NULL")
-    (ok (equalp #() (%json-at table "a")) "[] is an empty vector")
+    (let ((empty (%json-at table "a")))
+      (ok (and (json-array-p empty) (zerop (length empty))) "[] is an empty array"))
     (ok (eq 'yason:true (%json-at table "t")) "true is YASON:TRUE")
     (ok (not (nth-value 1 (%json-at table "missing"))) "a missing key is not present")))
+
+(deftest a-json-string-is-never-taken-for-an-array
+  ;; EQUALP compares a string and a vector element by element, so an array
+  ;; check built on it would take "" for [] -- and a length check would take
+  ;; any non-empty string for a non-empty array.
+  (ok (equalp #() "") "EQUALP alone cannot tell [] from \"\"")
+  (ng (json-array-p "") "\"\" is not an array")
+  (ng (json-array-p "lost") "a non-empty string is not an array")
+  (ng (json-array-p nil) "null is not an array")
+  (ok (json-array-p (vector)) "[] is an array")
+  (ok (json-array-p (vector (make-hash-table))) "[{}] is an array")
+  (let ((decoded (yason:parse "{\"s\":\"\",\"a\":[]}"
+                              :object-as :hash-table :json-arrays-as-vectors t
+                              :json-booleans-as-symbols t :json-nulls-as-keyword t)))
+    (ng (json-array-p (%json-at decoded "s")) "a decoded \"\" is not an array")
+    (ok (json-array-p (%json-at decoded "a")) "a decoded [] is an array")))
 
 (deftest a-core-record-reaches-json-with-each-role-intact
   (let* ((record (record-without (make-result-record :definition-digest-complete nil)
@@ -881,7 +901,12 @@ parse the text back so that false, null, [] and a missing key stay apart."
     (ok (eq 'yason:false (%json-at json "data" "definition_digest_complete"))
         "a boolean NIL is false")
     (ok (eq :null (%json-at json "data" "failure")) "an absent observation is null")
-    (ok (equalp #() (%json-at json "data" "counterexample")) "an empty collection is []")
+    (let ((counterexample (%json-at json "data" "counterexample")))
+      (ok (and (json-array-p counterexample) (zerop (length counterexample)))
+          "an empty collection is [], an array and not a string"))
+    (let ((unknown (%json-at json "unknown_keys")))
+      (ok (and (json-array-p unknown) (zerop (length unknown)))
+          "unknown_keys is an empty array"))
     (ok (not (nth-value 1 (%json-at json "data" "failure_phase")))
         "a key missing from the record is missing from data")
     (ok (eq :null (%json-at json "data" "shrink_report"))
@@ -994,57 +1019,64 @@ parse the text back so that false, null, [] and a missing key stay apart."
             "an unknown key is not guessed into data")))))
 
 (deftest each-limit-cuts-just-past-it-and-says-so
+  ;; Every item and every character differs from its neighbours, so a cut that
+  ;; kept the wrong part -- the tail, or a reordering -- shows in the content,
+  ;; not only in the counts.
   (flet ((issues (report) (getf (getf report :projection) :issues))
          (complete-p (report) (getf (getf report :projection) :complete))
-         (words (count)
-           (loop for i below count
-                 collect (nth (mod i 3) '(:target-implementation :helper-implementations
-                                          :captured-state)))))
+         (prefix-nodes (count)
+           ;; A small integer projects as itself: (:SCALAR n).
+           (loop for i below count collect (list :scalar i))))
     (testing "length: 39, 40 and 41 items against 40"
       (let ((*projection-max-length* 40))
         (dolist (count '(39 40))
-          (let ((report (%core (make-result-record :digest-exclusions (words count)))))
+          (let ((report (%core (make-result-record :digest-exclusions (numbered-items count)))))
             (ok (and (complete-p report) (null (issues report))
-                     (= count (length (second (object-field (getf report :data)
-                                                            "digest_exclusions")))))
-                (format nil "~D items: all kept, nothing reported" count))))
-        (let* ((report (%core (make-result-record :digest-exclusions (words 41))))
+                     (equal (prefix-nodes count)
+                            (second (object-field (getf report :data) "digest_exclusions"))))
+                (format nil "~D items: all kept, in order, nothing reported" count))))
+        (let* ((report (%core (make-result-record :digest-exclusions (numbered-items 41))))
                (issue (first (issues report))))
           (ok (and (not (complete-p report)) (= 1 (length (issues report)))
                    (equal '("digest_exclusions") (getf issue :path))
                    (eq :length-limit (getf issue :reason))
                    (eql 1 (getf issue :omitted-items)) (getf issue :omitted-items-exact-p))
               "41 items: one exact length cut of 1, reported")
-          (ok (= 40 (length (second (object-field (getf report :data) "digest_exclusions"))))
-              "41 items: the first 40 are kept"))
-        (let ((issue (first (issues (%core (make-result-record
-                                            :digest-exclusions (words 82)))))))
+          (ok (equal (prefix-nodes 40)
+                     (second (object-field (getf report :data) "digest_exclusions")))
+              "41 items: exactly the first 40 are kept, in order"))
+        (let* ((report (%core (make-result-record :digest-exclusions (numbered-items 82))))
+               (issue (first (issues report))))
           (ok (and (not (getf issue :omitted-items-exact-p))
                    (< (getf issue :omitted-items) 42))
-              "82 items: the count of 42 is not claimed, and says it is not exact"))))
+              "82 items: the count of 42 is not claimed, and says it is not exact")
+          (ok (equal (prefix-nodes 40)
+                     (second (object-field (getf report :data) "digest_exclusions")))
+              "82 items: exactly the first 40 are kept, in order"))))
     (testing "chars: 29, 30 and 31 characters against 30"
-      (flet ((report-for (count)
+      (flet ((report-for (text)
                (%core (make-result-record
                        :status :failed
-                       :failure (list :status :failed
-                                      :condition-report (make-string count
-                                                                     :initial-element #\r)))
+                       :failure (list :status :failed :condition-report text))
                       :max-chars 30)))
         (dolist (count '(29 30))
-          (let ((report (report-for count)))
+          (let* ((text (numbered-text count))
+                 (report (report-for text)))
             (ok (and (complete-p report) (null (issues report))
-                     (equal (list :scalar (make-string count :initial-element #\r))
+                     (equal (list :scalar text)
                             (node-at (getf report :data) '("failure" "condition_report"))))
                 (format nil "~D characters: kept whole, nothing reported" count))))
-        (let* ((report (report-for 31))
+        (let* ((text (numbered-text 31))
+               (report (report-for text))
                (issue (first (issues report))))
           (ok (and (not (complete-p report)) (= 1 (length (issues report)))
                    (equal '("failure" "condition_report") (getf issue :path))
                    (eq :char-limit (getf issue :reason))
-                   (eql 1 (getf issue :omitted-items)) (getf issue :omitted-items-exact-p)
-                   (equal (list :scalar (make-string 30 :initial-element #\r))
-                          (node-at (getf report :data) '("failure" "condition_report"))))
-              "31 characters: 30 kept, one exact character cut of 1 reported"))))
+                   (eql 1 (getf issue :omitted-items)) (getf issue :omitted-items-exact-p))
+              "31 characters: one exact character cut of 1, reported")
+          (ok (equal (list :scalar (subseq text 0 30))
+                     (node-at (getf report :data) '("failure" "condition_report")))
+              "31 characters: exactly the first 30 are kept"))))
     (testing "depth: the deepest container at 3, 4 and 5 against 4"
       (let ((*projection-max-depth* 4))
         (let ((report (%core (error-chain-record 3))))

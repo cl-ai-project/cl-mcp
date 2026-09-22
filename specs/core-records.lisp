@@ -41,6 +41,8 @@
                 #:project-core-record
                 #:*projection-max-depth*
                 #:*projection-max-length*)
+  (:import-from #:cl-mcp/src/object-registry
+                #:lookup-object)
   (:import-from #:cl-mcp/specs/core-record-fixtures
                 #:with-isolated-object-registry
                 #:decimal-string
@@ -57,6 +59,9 @@
                 #:draw-cut-case
                 #:draw-validation-case
                 #:role-case-record
+                #:record-capture-value
+                #:numbered-items
+                #:numbered-text
                 #:permute-record
                 #:error-chain-record
                 #:chain-container-path
@@ -185,40 +190,56 @@ JSON []; a key missing from the record is missing from :DATA while a present
 NIL phase is there as null.  A collected capture value is application data --
 an externalized (:VALUE ...) node -- whatever it looks like, even a list shaped
 like cl-spec's own unavailable marker, and the capture record invents no
-:REASON or :TYPE for it."
+:REASON or :TYPE for it.  The value itself survives, not only its tag: its
+printed text is what the standard printer writes for it, and a list carries an
+object id that, in the same registry, names the record's own list, while an
+atom carries none."
     (:about project-core-record project-record)
     (:kind :preservation)
     (:trials (:smoke 5 :normal 25))
     (multiple-value-bind (record capture-value) (role-case-record case)
-      (declare (ignore capture-value))
-      (let* ((data (getf (%core record) :data))
-             (capture (node-at data '("failure" "state" "capture" "values" 0))))
-        (and
-         ;; A boolean.
-         (equal (list :bool (getf case :definition-digest-complete))
-                (object-field data "definition_digest_complete"))
-         ;; An optional object: null when absent, an object when present.
-         (ecase (getf case :shrunk-failure)
-           (:none (equal '(:scalar nil) (object-field data "shrunk_failure")))
-           (:present (eq :object (first (object-field data "shrunk_failure")))))
-         ;; Collections: [] when empty, never null.
-         (eq :array (first (object-field data "counterexample")))
-         (eq (eq :empty (getf case :counterexample))
-             (null (second (object-field data "counterexample"))))
-         (eq :array (first (object-field data "digest_exclusions")))
-         (eq (eq :empty (getf case :digest-exclusions))
-             (null (second (object-field data "digest_exclusions"))))
-         ;; A missing key against a present NIL.
-         (ecase (getf case :failure-phase)
-           (:absent (not (nth-value 1 (object-field data "failure_phase"))))
-           (:present-nil (multiple-value-bind (child present-p)
-                             (object-field data "failure_phase")
-                           (and present-p (equal '(:scalar nil) child)))))
-         ;; A collected capture value is application data.
-         (equal '(:scalar "collected") (object-field capture "availability"))
-         (eq :value (first (object-field capture "value")))
-         (not (nth-value 1 (object-field capture "reason")))
-         (not (nth-value 1 (object-field capture "type")))))))
+      ;; One registry scope for the projection and the lookup below, so an
+      ;; object id can be followed to the object it names.
+      (with-isolated-object-registry
+        (let* ((data (getf (project-core-record record :result-data
+                                                :expected-record-kind :result)
+                           :data))
+               (capture (node-at data '("failure" "state" "capture" "values" 0)))
+               (value (second (object-field capture "value")))
+               (stored (record-capture-value record))
+               (id (getf value :object-id)))
+          (and
+           ;; A boolean.
+           (equal (list :bool (getf case :definition-digest-complete))
+                  (object-field data "definition_digest_complete"))
+           ;; An optional object: null when absent, an object when present.
+           (ecase (getf case :shrunk-failure)
+             (:none (equal '(:scalar nil) (object-field data "shrunk_failure")))
+             (:present (eq :object (first (object-field data "shrunk_failure")))))
+           ;; Collections: [] when empty, never null.
+           (eq :array (first (object-field data "counterexample")))
+           (eq (eq :empty (getf case :counterexample))
+               (null (second (object-field data "counterexample"))))
+           (eq :array (first (object-field data "digest_exclusions")))
+           (eq (eq :empty (getf case :digest-exclusions))
+               (null (second (object-field data "digest_exclusions"))))
+           ;; A missing key against a present NIL.
+           (ecase (getf case :failure-phase)
+             (:absent (not (nth-value 1 (object-field data "failure_phase"))))
+             (:present-nil (multiple-value-bind (child present-p)
+                               (object-field data "failure_phase")
+                             (and present-p (equal '(:scalar nil) child)))))
+           ;; A collected capture value is application data.
+           (equal '(:scalar "collected") (object-field capture "availability"))
+           (eq :value (first (object-field capture "value")))
+           (not (nth-value 1 (object-field capture "reason")))
+           (not (nth-value 1 (object-field capture "type")))
+           ;; And it is the value: the standard printer's text for it, and for
+           ;; a list, an id naming the record's own list.
+           (equal (prin1-to-string capture-value) (getf value :printed))
+           (if (consp stored)
+               (and id (eq stored (lookup-object id)))
+               (null id)))))))
 
   (defproperty core-record-seeds-stay-decimal-text
       ((case seed-case))
@@ -294,97 +315,96 @@ sets; the values keep their own order."
 
   (defproperty core-record-reports-every-cut
       ((case cut-case))
-    "Pushing one limit at a time -- list length, nesting depth or string length
--- a record just under it and at it is projected whole, with no issue and
-PROJECTION.COMPLETE true; just past it, and far past it, the field is cut and
-the report says so: exactly one issue, at that field's path, with the limit's
-reason, and PROJECTION.COMPLETE false.  An omitted count is the true excess
-when it says it is exact, and is less than the true excess when it says it is
-not.  Fields away from the cut stay whole, and no issue is written into
-:DATA.  Every trial checks all four sizes."
+    "Every trial pushes all three limits, one record at a time -- list length,
+string length and nesting depth -- to just under, at, just past and far past
+its bound.  Just under and at it, the record is projected whole: no issue,
+PROJECTION.COMPLETE true, and every item or character kept, in order.  Past
+it, the field is cut and the report says so: exactly one issue, at that
+field's path, with the limit's reason, and PROJECTION.COMPLETE false.  What is
+kept is the head, in order -- compared item by item and character by
+character, and every item and character here differs from its neighbours, so
+keeping the tail or reordering shows -- and a cut container is left as an
+externalized value.  An omitted count is the true excess when it says it is
+exact, and less than it when it says it is not.  Fields away from the cut stay
+whole, and no issue is written into :DATA."
     (:about project-core-record project-record)
     (:kind :boundary)
     (:trials (:smoke 5 :normal 25))
-    (destructuring-bind (&key kind limit) case
+    (destructuring-bind (&key length-limit chars-limit depth-limit) case
       (flet ((issues (report) (getf (getf report :projection) :issues))
              (complete-p (report) (getf (getf report :projection) :complete))
-             (words (count)
-               (loop for i below count
-                     collect (nth (mod i 3) '(:target-implementation
-                                              :helper-implementations :captured-state))))
              (clean-p (report)
                ;; The transport metadata never lands inside the record.
                (not (or (nth-value 1 (object-field (getf report :data) "issues"))
                         (nth-value 1 (object-field (getf report :data) "projection")))))
              (whole-status-p (report)
                (member (object-field (getf report :data) "status")
-                       '((:scalar "passed") (:scalar "failed")) :test #'equal)))
-        (ecase kind
-          (:length
-           (let ((*projection-max-length* limit))
-             (every (lambda (count)
-                      (let* ((report (%core (make-result-record
-                                             :digest-exclusions (words count))))
-                             (kept (second (object-field (getf report :data)
-                                                         "digest_exclusions")))
-                             (issue (first (issues report)))
-                             (excess (- count limit)))
-                        (and (clean-p report) (whole-status-p report)
-                             (if (<= count limit)
-                                 (and (complete-p report) (null (issues report))
-                                      (= count (length kept)))
-                                 (and (not (complete-p report))
-                                      (= 1 (length (issues report)))
-                                      (equal '("digest_exclusions") (getf issue :path))
-                                      (eq :length-limit (getf issue :reason))
-                                      (= limit (length kept))
-                                      (if (getf issue :omitted-items-exact-p)
-                                          (= excess (getf issue :omitted-items))
-                                          (< (getf issue :omitted-items) excess)))))))
-                    (list (1- limit) limit (1+ limit) (+ (* 2 limit) 5)))))
-          (:chars
+                       '((:scalar "passed") (:scalar "failed")) :test #'equal))
+             (prefix-nodes (count)
+               ;; A small integer projects as itself: (:SCALAR n).
+               (loop for i below count collect (list :scalar i))))
+        (and
+         ;; Length: a list of distinct integers.
+         (let ((*projection-max-length* length-limit))
            (every (lambda (count)
-                    (let* ((text (make-string count :initial-element #\r))
-                           (report (%core (make-result-record
-                                           :status :failed
-                                           :failure (list :status :failed
-                                                          :condition-report text))
-                                          :max-chars limit))
-                           (node (node-at (getf report :data)
-                                          '("failure" "condition_report")))
-                           (issue (first (issues report))))
+                    (let* ((report (%core (make-result-record
+                                           :digest-exclusions (numbered-items count))))
+                           (kept (second (object-field (getf report :data)
+                                                       "digest_exclusions")))
+                           (issue (first (issues report)))
+                           (excess (- count length-limit)))
                       (and (clean-p report) (whole-status-p report)
-                           (if (<= count limit)
-                               (and (complete-p report) (null (issues report))
-                                    (equal (list :scalar text) node))
+                           (equal (prefix-nodes (min count length-limit)) kept)
+                           (if (<= count length-limit)
+                               (and (complete-p report) (null (issues report)))
                                (and (not (complete-p report))
                                     (= 1 (length (issues report)))
-                                    (equal '("failure" "condition_report")
-                                           (getf issue :path))
-                                    (eq :char-limit (getf issue :reason))
-                                    (getf issue :omitted-items-exact-p)
-                                    (= (- count limit) (getf issue :omitted-items))
-                                    (equal (list :scalar (subseq text 0 limit)) node))))))
-                  (list (1- limit) limit (1+ limit) (* 3 limit))))
-          (:depth
-           (let ((*projection-max-depth* limit))
-             (every (lambda (deepest)
-                      (let* ((report (%core (error-chain-record deepest)))
-                             (issue (first (issues report)))
-                             (cut-path (chain-container-path limit)))
-                        (and (clean-p report) (whole-status-p report)
-                             (if (< deepest limit)
-                                 (and (complete-p report) (null (issues report))
-                                      (nth-value 1 (node-at (getf report :data)
-                                                            (chain-container-path
-                                                             deepest))))
-                                 (and (not (complete-p report))
-                                      (= 1 (length (issues report)))
-                                      (eq :depth-limit (getf issue :reason))
-                                      (equal cut-path (getf issue :path))
-                                      (eq :value (first (node-at (getf report :data)
-                                                                 cut-path))))))))
-                    (list (1- limit) limit (1+ limit) (+ limit 3)))))))))
+                                    (equal '("digest_exclusions") (getf issue :path))
+                                    (eq :length-limit (getf issue :reason))
+                                    (if (getf issue :omitted-items-exact-p)
+                                        (= excess (getf issue :omitted-items))
+                                        (< (getf issue :omitted-items) excess)))))))
+                  (list (1- length-limit) length-limit (1+ length-limit)
+                        (+ (* 2 length-limit) 5))))
+         ;; Characters: a string that never repeats a stretch.
+         (every (lambda (count)
+                  (let* ((text (numbered-text count))
+                         (report (%core (make-result-record
+                                         :status :failed
+                                         :failure (list :status :failed
+                                                        :condition-report text))
+                                        :max-chars chars-limit))
+                         (node (node-at (getf report :data) '("failure" "condition_report")))
+                         (issue (first (issues report))))
+                    (and (clean-p report) (whole-status-p report)
+                         (equal (list :scalar (subseq text 0 (min count chars-limit))) node)
+                         (if (<= count chars-limit)
+                             (and (complete-p report) (null (issues report)))
+                             (and (not (complete-p report))
+                                  (= 1 (length (issues report)))
+                                  (equal '("failure" "condition_report") (getf issue :path))
+                                  (eq :char-limit (getf issue :reason))
+                                  (getf issue :omitted-items-exact-p)
+                                  (= (- count chars-limit) (getf issue :omitted-items)))))))
+                (list (1- chars-limit) chars-limit (1+ chars-limit) (* 3 chars-limit)))
+         ;; Depth: a chain of error datums.
+         (let ((*projection-max-depth* depth-limit))
+           (every (lambda (deepest)
+                    (let* ((report (%core (error-chain-record deepest)))
+                           (issue (first (issues report)))
+                           (cut-path (chain-container-path depth-limit)))
+                      (and (clean-p report) (whole-status-p report)
+                           (if (< deepest depth-limit)
+                               (and (complete-p report) (null (issues report))
+                                    (nth-value 1 (node-at (getf report :data)
+                                                          (chain-container-path deepest))))
+                               (and (not (complete-p report))
+                                    (= 1 (length (issues report)))
+                                    (eq :depth-limit (getf issue :reason))
+                                    (equal cut-path (getf issue :path))
+                                    (eq :value (first (node-at (getf report :data)
+                                                               cut-path))))))))
+                  (list (1- depth-limit) depth-limit (1+ depth-limit) (+ depth-limit 3))))))))
 
   (defproperty core-record-validation-separates-ok-unsupported-malformed
       ((case validation-case))
