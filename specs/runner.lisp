@@ -60,9 +60,14 @@
                 #:%verification-gaps
                 #:%select-properties
                 #:%trials-budget
-                #:%definition-match)
+                #:%definition-match
+                #:list-report
+                #:%describe-function-spec)
   (:import-from #:cl-mcp/src/tools/spec-entry
                 #:parse-seed-string)
+  (:import-from #:cl-mcp/src/spec-adapter-core
+                #:api-fn
+                #:definition-digest)
   (:import-from #:cl-mcp/specs
                 #:register-specifications
                 #:contract-names
@@ -867,6 +872,65 @@ goes to REAL."
           :true
           answer))))
 
+(defun %listing-counting-what-it-did-not-look-at (real)
+  "Return a wrong LIST-REPORT, for the negative control: every count that is
+absent -- because the kind was not asked for, or cannot be listed -- is
+reported as 0, which says the registry holds none of them."
+  (lambda (api api-status &rest arguments)
+    (let ((report (copy-list (apply real api api-status arguments))))
+      (when (getf report :counts)
+        (setf (getf report :counts)
+              (loop for (key value) on (getf report :counts) by #'cddr
+                    append (list key (or value 0)))))
+      report)))
+
+(defun %declaration-with-required-arguments (real)
+  "Return a wrong %DESCRIBE-FUNCTION-SPEC, for the negative control: every
+argument is reported as required, which is what version 1's omitted :KIND is
+normalized to -- and what an :OPTIONAL or :KEY argument is not."
+  (lambda (api name registry max-chars)
+    (let ((description (copy-list (funcall real api name registry max-chars))))
+      (when (getf description :arguments)
+        (setf (getf description :arguments)
+              (loop for argument in (getf description :arguments)
+                    collect (let ((copy (copy-list argument)))
+                              (setf (getf copy :kind) :required)
+                              copy))))
+      description)))
+
+(defun %declaration-claiming-whole-clauses (real)
+  "Return a wrong %DESCRIBE-FUNCTION-SPEC, for the negative control: a
+precondition that was cut is reported complete, so a reader takes the part it
+can see for the whole condition."
+  (lambda (api name registry max-chars)
+    (let ((description (copy-list (funcall real api name registry max-chars))))
+      (when (getf description :preconditions)
+        (setf (getf description :preconditions-complete) t))
+      description)))
+
+(defun %digest-falling-back-from-a-refused-record (real)
+  "Return a wrong DEFINITION-DIGEST, for the negative control: a record whose
+own digest cannot be used -- incomplete, missing, or of a version this cl-mcp
+does not know -- is digested from the readers instead, by handing REAL the
+same record with its versioned metadata stripped off.  That reports a
+definition as unchanged on the strength of a record that was refused."
+  (lambda (api name registry &rest arguments)
+    (multiple-value-bind (digest complete) (apply real api name registry arguments)
+      (if digest
+          (values digest complete)
+          (let* ((key (getf arguments :data-key :property-data))
+                 (data (ignore-errors (funcall (api-fn api key) name :registry registry)))
+                 (stripped (loop for (indicator value) on data by #'cddr
+                                 unless (member indicator
+                                                '(:schema-version :record-kind :entity-kind
+                                                  :definition-digest
+                                                  :definition-digest-complete
+                                                  :definition-digest-covers :capabilities))
+                                   append (list indicator value))))
+            (if stripped
+                (funcall real api name registry :property stripped :data-key key)
+                (values nil nil)))))))
+
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
@@ -903,6 +967,12 @@ the argument as it is after the call cannot see."
         (budget (%bundle-name :property "CHECK-ROUTING-BUDGET-COMES-FROM-ITS-STATED-SOURCE"))
         (seed-text (%bundle-name :property "CHECK-ROUTING-SEED-TEXT-KEEPS-EVERY-DIGIT"))
         (digest (%bundle-name :property "CHECK-ROUTING-DIGEST-COMPARISON-HAS-FOUR-ANSWERS"))
+        (listing (%bundle-name :property
+                               "SPEC-INSPECTION-LISTING-SEPARATES-CAPABILITY-FROM-COUNT"))
+        (declaration (%bundle-name :property
+                                   "SPEC-INSPECTION-CONTRACT-DECLARATION-SURVIVES-DESCRIBE"))
+        (digest-source (%bundle-name :property
+                                     "SPEC-INSPECTION-DIGEST-COMES-FROM-THE-RECORD-OR-THE-READERS"))
         ;; Taken before any swap, so a wrong implementation can defer to it.
         (real-read (fdefinition 'allowed-read-path))
         (real-write (fdefinition 'ensure-write-path))
@@ -916,7 +986,10 @@ the argument as it is after the call cannot see."
         (real-selection (fdefinition '%select-properties))
         (real-budget (fdefinition '%trials-budget))
         (real-seed (fdefinition 'parse-seed-string))
-        (real-match (fdefinition '%definition-match)))
+        (real-match (fdefinition '%definition-match))
+        (real-listing (fdefinition 'list-report))
+        (real-declaration (fdefinition '%describe-function-spec))
+        (real-digest (fdefinition 'definition-digest)))
     (list
      (list :function newline
            :description "returns its argument, never adding a newline"
@@ -1068,7 +1141,29 @@ the argument as it is after the call cannot see."
            :description "counts an incomplete digest equal to the expected one as a match"
            :replacement (%incomplete-digest-matching real-match)
            :targets (list (list :property digest))
-           :must-fail (list (list :property digest))))))
+           :must-fail (list (list :property digest)))
+     ;; Inspection.  Each fault is a false negative or a false completeness:
+     ;; something unread reported as something known.
+     (list :function 'list-report
+           :description "reports a count it never looked for as zero"
+           :replacement (%listing-counting-what-it-did-not-look-at real-listing)
+           :targets (list (list :property listing))
+           :must-fail (list (list :property listing)))
+     (list :function '%describe-function-spec
+           :description "reports every contract argument as required"
+           :replacement (%declaration-with-required-arguments real-declaration)
+           :targets (list (list :property declaration))
+           :must-fail (list (list :property declaration)))
+     (list :function '%describe-function-spec
+           :description "reports a precondition that was cut as complete"
+           :replacement (%declaration-claiming-whole-clauses real-declaration)
+           :targets (list (list :property declaration))
+           :must-fail (list (list :property declaration)))
+     (list :function 'definition-digest
+           :description "digests from the readers when the record's own digest was refused"
+           :replacement (%digest-falling-back-from-a-refused-record real-digest)
+           :targets (list (list :property digest-source))
+           :must-fail (list (list :property digest-source))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put
