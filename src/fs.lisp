@@ -402,7 +402,12 @@ read-modify-write, as FS-WRITE-FILE does."
                                 :element-type 'character)
              (write-string content out)
              (finish-output out))
-           (rename-file tmp pn)
+           ;; RENAME-FILE merges the new name with TMP, so a PN without a
+           ;; type would take TMP's "tmp" and the write would land beside the
+           ;; file as NAME.tmp.  :UNSPECIFIC is not merged over.
+           (rename-file tmp (if (pathname-type pn)
+                                pn
+                                (make-pathname :type :unspecific :defaults pn)))
            t)
       ;; Clean up this call's temp file on failure
       (when (probe-file tmp)

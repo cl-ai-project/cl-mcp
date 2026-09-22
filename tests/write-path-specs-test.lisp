@@ -318,6 +318,19 @@ dleaf -> nothing.txt, doleaf -> ../outside/nothing.txt."
                          :changed `(("project/src/a.txt" :file ,(octets *write-contents*))))
         "only the file's bytes change, and no temporary file is left")))
 
+(deftest writer-replaces-an-existing-type-less-file-in-place
+  ;; RENAME-FILE merged the temporary file's type "tmp" into a target without
+  ;; one: the write reported success, left the file as it was, and put the new
+  ;; bytes in NAME.tmp beside it.
+  (with-tree (fixture :places (list (place :project '() "Makefile")
+                                    (place :project '() ".hidden")
+                                    (place :project '("sub") "LICENSE")))
+    (dolist (relative '("Makefile" ".hidden" "sub/LICENSE"))
+      (ok (wrote-exactly-p (write-to fixture relative)
+                           :changed `((,(concatenate 'string "project/" relative) :file
+                                       ,(octets *write-contents*))))
+          relative))))
+
 (deftest writer-follows-links-and-aliases-that-stay-inside
   (with-table-tree (fixture)
     (ok (wrote-exactly-p (write-to fixture "link-a/n1/new.txt")
