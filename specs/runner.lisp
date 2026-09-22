@@ -46,6 +46,10 @@
                 #:write-path-refused
                 #:canonical-path
                 #:path-inside-p)
+  (:import-from #:cl-mcp/src/spec-core-record
+                #:field-availability
+                #:project-record
+                #:project-core-record)
   (:import-from #:cl-mcp/specs
                 #:register-specifications
                 #:contract-names
@@ -682,6 +686,45 @@ comparison of spellings that include a doubled separator can tell."
                          :defaults result)
           result))))
 
+(defun %availability-reading-nil-as-absent (real)
+  "Return a wrong FIELD-AVAILABILITY, for the negative control: a key present
+with NIL reads as :ABSENT, as GETF would answer; anything else goes to REAL."
+  (lambda (record key)
+    (if (null (getf record key))
+        :absent
+        (funcall real record key))))
+
+(defun %project-record-with-numeric-seeds (real)
+  "Return a wrong PROJECT-RECORD, for the negative control: REAL's projection,
+with a top-level seed turned back into a JSON number."
+  (lambda (value descriptor &rest options)
+    (multiple-value-bind (node issues unknown) (apply real value descriptor options)
+      (values (if (and (consp node) (eq :object (first node)))
+                  (list :object
+                        (loop for (key . child) in (second node)
+                              collect (if (and (equal "seed" key)
+                                               (stringp (second child)))
+                                          (cons key (list :scalar
+                                                          (parse-integer (second child))))
+                                          (cons key child))))
+                  node)
+              issues
+              unknown))))
+
+(defun %core-record-claiming-completeness (real)
+  "Return a wrong PROJECT-CORE-RECORD, for the negative control: REAL's report,
+with PROJECTION.COMPLETE true even when its issues say something was cut."
+  (lambda (record shape-name &rest options)
+    (multiple-value-bind (report status reason) (apply real record shape-name options)
+      (values (and report
+                   (let ((copy (copy-list report)))
+                     (setf (getf copy :projection)
+                           (list :complete t
+                                 :issues (getf (getf report :projection) :issues)))
+                     copy))
+              status
+              reason))))
+
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
@@ -703,9 +746,16 @@ the argument as it is after the call cannot see."
         (link-writes (%bundle-name :property "WRITE-FOLLOWS-EXISTING-LINKS"))
         (writes (%bundle-name :property "WRITER-CHANGES-ONLY-THE-EXPECTED-ENTRIES"))
         (spellings (%bundle-name :property "WRITE-PRESERVES-SAFE-SPELLINGS"))
+        (availability (%bundle-name :property
+                                    "CORE-RECORD-AVAILABILITY-SEPARATES-ABSENCE-FROM-NIL"))
+        (seeds (%bundle-name :property "CORE-RECORD-SEEDS-STAY-DECIMAL-TEXT"))
+        (cuts (%bundle-name :property "CORE-RECORD-REPORTS-EVERY-CUT"))
         ;; Taken before any swap, so a wrong implementation can defer to it.
         (real-read (fdefinition 'allowed-read-path))
-        (real-write (fdefinition 'ensure-write-path)))
+        (real-write (fdefinition 'ensure-write-path))
+        (real-availability (fdefinition 'field-availability))
+        (real-projection (fdefinition 'project-record))
+        (real-core-record (fdefinition 'project-core-record)))
     (list
      (list :function newline
            :description "returns its argument, never adding a newline"
@@ -780,7 +830,26 @@ the argument as it is after the call cannot see."
            :description "sends a spelling with a doubled separator to the file beside the right one"
            :replacement (%write-path-misreading-doubled-separators real-write)
            :targets (list (list :property spellings) (list :property project-writes))
-           :must-fail (list (list :property spellings))))))
+           :must-fail (list (list :property spellings)))
+     ;; Record fidelity.  Each wrong function calls the real one and bends one
+     ;; rule of its answer, so the fault is that rule and nothing else.  The
+     ;; properties call these functions on records they build; nothing reaches
+     ;; the filesystem or the MCP server.
+     (list :function 'field-availability
+           :description "reads a key present with NIL as absent"
+           :replacement (%availability-reading-nil-as-absent real-availability)
+           :targets (list (list :property availability))
+           :must-fail (list (list :property availability)))
+     (list :function 'project-record
+           :description "turns a record's seed back into a JSON number"
+           :replacement (%project-record-with-numeric-seeds real-projection)
+           :targets (list (list :property seeds))
+           :must-fail (list (list :property seeds)))
+     (list :function 'project-core-record
+           :description "claims a complete projection whatever its issues say"
+           :replacement (%core-record-claiming-completeness real-core-record)
+           :targets (list (list :property cuts))
+           :must-fail (list (list :property cuts))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put
