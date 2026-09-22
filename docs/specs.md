@@ -495,7 +495,7 @@ used. The opt-in tests check the restated required metadata against the real
 | `core-record-projects-each-field-by-its-role` | a boolean NIL is `(:bool nil)` (false); an absent observation is null; an empty collection is `[]`; a missing key is missing from `:data` while a present NIL phase is null; a collected capture value, even one shaped like cl-spec's unavailable marker, is an externalized value, with no invented `reason` or `type`. The value itself survives: its printed text is the standard printer's, and a list's object id names the record's own list in the same registry, while an atom has none |
 | `core-record-seeds-stay-decimal-text` | five seeds: small, around 2^53, just under cl-spec's 2^62 draw bound, anywhere below it, and past it. Each reaches `:data` as its decimal text, computed by integer division, while a small trial count stays a number |
 | `core-record-ignores-order-duplicates-and-unknown-keys` | reordered pairs, a later duplicate with another value (the first wins), and unknown keys leave every known field's projection and availability as they were; unknown keys are named, not guessed into `:data`, and change neither `complete` nor `schema_supported` |
-| `core-record-reports-every-cut` | all three limits, list length, characters and depth, each on its own record, pushed just under, to, just past and far past its bound. Under and at the bound, nothing is cut and `complete` is true. Past it, there is exactly one issue, at the field's path with the limit's reason, and `complete` is false. The kept part is the head, compared item by item and character by character. Every item and character differs from its neighbours, so a projector that kept the tail or reordered would show. An omitted count is the true excess when it says it is exact, and less when it says it is not. No issue appears inside `:data` |
+| `core-record-reports-every-cut` | all three limits, list length, characters and depth, each on its own record, pushed just under, to, just past and far past its bound. A list or string is whole up to and including its bound and cut past it. A depth is whole only below its bound: the container that reaches it is the one cut, externalized. Whole means no issue and `complete` true. Cut means exactly one issue, at the field's path with the limit's reason, and `complete` false. The kept part is the head, compared item by item and character by character. Every item and character differs from its neighbours, so a projector that kept the tail or reordered would show. An omitted count is the true excess when it says it is exact, and less when it says it is not. No issue appears inside `:data` |
 | `core-record-validation-separates-ok-unsupported-malformed` | three records, each one cause from a valid one: `:ok` and projected; `:malformed` (a dropped required key, NIL, an improper, odd-length or string-keyed plist, a wrong record or entity kind, no version) with no report; `:unsupported-schema` for another integer version, reported collected with `schema_supported` false and no `:data` |
 
 JSON's grammar allows any integer as a number. A seed stays text because a
@@ -515,7 +515,8 @@ number of calls per trial:
 - roles: 1 `project-core-record` call;
 - seeds: 5;
 - key relations: 4;
-- cuts: 4;
+- cuts: 12 on a passing trial, four sizes for each of the three limits (a failing
+  trial may stop sooner);
 - validation: 3 `validate-versioned-record` and 3 `project-core-record` calls.
 
 One seed of all six takes a few milliseconds.

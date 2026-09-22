@@ -317,14 +317,16 @@ sets; the values keep their own order."
       ((case cut-case))
     "Every trial pushes all three limits, one record at a time -- list length,
 string length and nesting depth -- to just under, at, just past and far past
-its bound.  Just under and at it, the record is projected whole: no issue,
-PROJECTION.COMPLETE true, and every item or character kept, in order.  Past
-it, the field is cut and the report says so: exactly one issue, at that
-field's path, with the limit's reason, and PROJECTION.COMPLETE false.  What is
-kept is the head, in order -- compared item by item and character by
-character, and every item and character here differs from its neighbours, so
-keeping the tail or reordering shows -- and a cut container is left as an
-externalized value.  An omitted count is the true excess when it says it is
+its bound.  The two sizes and the depth meet their bounds differently.  A list
+or a string is whole up to and including its bound and cut past it.  A depth
+is whole only below its bound: the container that reaches the bound is the one
+cut, and left as an externalized value.  A whole record has no issue,
+PROJECTION.COMPLETE true, and every item or character kept, in order.  A cut
+one says so: exactly one issue, at that field's path, with the limit's reason,
+and PROJECTION.COMPLETE false.  What a cut list or string keeps is its head,
+in order -- compared item by item and character by character, and every item
+and character here differs from its neighbours, so keeping the tail or
+reordering shows.  An omitted count is the true excess when it says it is
 exact, and less than it when it says it is not.  Fields away from the cut stay
 whole, and no issue is written into :DATA."
     (:about project-core-record project-record)
