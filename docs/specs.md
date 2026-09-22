@@ -22,9 +22,13 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/utils/paths:resolve-readable-path` | none | the same four |
 | `cl-mcp/src/utils/paths:ensure-write-path` | none (see *Write access*) | `write-resolves-project-targets-without-creating`, `write-refuses-outside-and-absolute`, `write-follows-existing-links`, `writer-changes-only-the-expected-entries`, `write-preserves-safe-spellings` |
 | `cl-mcp/src/fs:fs-write-file` | none | `write-refuses-outside-and-absolute`, `writer-changes-only-the-expected-entries` |
+| `cl-mcp/src/spec-core-record:field-availability` | none (see *Record fidelity*) | `core-record-availability-separates-absence-from-nil`, `core-record-ignores-order-duplicates-and-unknown-keys` |
+| `cl-mcp/src/spec-core-record:validate-versioned-record` | none | `core-record-validation-separates-ok-unsupported-malformed` |
+| `cl-mcp/src/spec-core-record:project-record` | none | `core-record-projects-each-field-by-its-role`, `core-record-seeds-stay-decimal-text`, `core-record-ignores-order-duplicates-and-unknown-keys`, `core-record-reports-every-cut` |
+| `cl-mcp/src/spec-core-record:project-core-record` | none | all five of those, and `core-record-validation-separates-ok-unsupported-malformed` |
 
 Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize`,
-`cl-mcp/specs/paths` and `cl-mcp/specs/write-paths`. Each Function Spec is
+`cl-mcp/specs/paths`, `cl-mcp/specs/write-paths` and `cl-mcp/specs/core-records`. Each Function Spec is
 registered on the production symbol itself. Each read-access property is
 `(:about ...)` both read functions; each write-access property names the
 function or functions it calls.
@@ -466,26 +470,122 @@ Not covered here: the writer, a link compared with the direct path it leads
 to, and anything outside the project. Refusals are the other properties' job.
 Those are the next unit of work.
 
+## Record fidelity
+
+`cl-mcp/src/spec-core-record` carries one cl-spec versioned record to an MCP
+client. `field-availability` says whether a field is there, and
+`validate-versioned-record` says whether the record can be read at all.
+`project-record` projects each field by what it means, and
+`project-core-record` puts that projection beside what cl-mcp knows about
+carrying it. The properties in `specs/core-records.lisp` check that the carrying
+changes nothing the record says. They run against these four public functions
+directly, never through `spec-check` or the bundle.
+
+What a record means is restated in `specs/core-record-fixtures.lisp` from
+cl-spec's public contract: the version-1 required metadata of its
+`SCHEMA-INFO`, and the fields `RESULT-DATA` documents as holding the
+`:not-collected` sentinel. Nothing there is read from the module under test.
+None of `*record-shapes*`, `+sentinel-fields+` or `+v1-required-metadata+` is
+used. The opt-in tests check the restated required metadata against the real
+`SCHEMA-INFO`.
+
+| Property | Checks, every trial |
+|---|---|
+| `core-record-availability-separates-absence-from-nil` | a missing key is `:absent`; a present NIL is `:collected`; `:not-collected` is `:not-collected` in a sentinel field and `:collected` in an ordinary one; at the front or the back of a record |
+| `core-record-projects-each-field-by-its-role` | a boolean NIL is `(:bool nil)` (false); an absent observation is null; an empty collection is `[]`; a missing key is missing from `:data` while a present NIL phase is null; a collected capture value, even one shaped like cl-spec's unavailable marker, is an externalized value, with no invented `reason` or `type`. The value itself survives: its printed text is the standard printer's, and a list's object id names the record's own list in the same registry, while an atom has none |
+| `core-record-seeds-stay-decimal-text` | five seeds: small, around 2^53, just under cl-spec's 2^62 draw bound, anywhere below it, and past it. Each reaches `:data` as its decimal text, computed by integer division, while a small trial count stays a number |
+| `core-record-ignores-order-duplicates-and-unknown-keys` | reordered pairs, a later duplicate with another value (the first wins), and unknown keys leave every known field's projection and availability as they were; unknown keys are named, not guessed into `:data`, and change neither `complete` nor `schema_supported` |
+| `core-record-reports-every-cut` | all three limits, list length, characters and depth, each on its own record, pushed just under, to, just past and far past its bound. A list or string is whole up to and including its bound and cut past it. A depth is whole only below its bound: the container that reaches it is the one cut, externalized. Whole means no issue and `complete` true. Cut means exactly one issue, at the field's path with the limit's reason, and `complete` false. The kept part is the head, compared item by item and character by character. Every item and character differs from its neighbours, so a projector that kept the tail or reordered would show. An omitted count is the true excess when it says it is exact, and less when it says it is not. No issue appears inside `:data` |
+| `core-record-validation-separates-ok-unsupported-malformed` | three records, each one cause from a valid one: `:ok` and projected; `:malformed` (a dropped required key, NIL, an improper, odd-length or string-keyed plist, a wrong record or entity kind, no version) with no report; `:unsupported-schema` for another integer version, reported collected with `schema_supported` false and no `:data` |
+
+JSON's grammar allows any integer as a number. A seed stays text because a
+consumer reading JSON into binary64 doubles rounds anything past 2^53, and a
+rounded seed reproduces a different run. cl-spec draws seeds below 2^62 and
+accepts any non-negative integer, so both sides of both bounds are generated.
+
+Every projection runs inside `with-isolated-object-registry`. That binds
+`*object-registry*` to a registry of the check's own, so opaque values never
+evict, or show, a user's `inspect-object` ids. It is a dynamic binding, so it
+covers the calling thread, which is where each check makes its calls. The
+cl-spec registry is a different thing, and the properties do not touch it.
+
+Each property runs 25 trials at `:normal` and 5 at `:smoke`, and makes a fixed
+number of calls per trial:
+- availability: 7 `field-availability` calls;
+- roles: 1 `project-core-record` call;
+- seeds: 5;
+- key relations: 4;
+- cuts: 12 on a passing trial, four sizes for each of the three limits (a failing
+  trial may stop sooner);
+- validation: 3 `validate-versioned-record` and 3 `project-core-record` calls.
+
+One seed of all six takes a few milliseconds.
+
+The fixed cases are in the default suite (`tests/spec-core-record-test.lisp`):
+- the JSON decoder setting itself;
+- a record taken to JSON with false, null, `[]`, a missing key and a present
+  null apart, and no `source`;
+- an array check that asks for a vector that is not a string before it looks
+  at the length. `(equalp #() "")` is true, so neither `""` nor `"lost"` may
+  pass for `[]` or for a non-empty array;
+- nine seeds from 0 to 2^64+1, before and after JSON;
+- every sentinel and value field in every state;
+- one reordered, duplicated and extended record;
+- each limit at 39/40/41 items, 29/30/31 characters, and depth 3/4/5, with
+  the kept items and characters compared, not only counted;
+- every single-cause malformation and four unsupported versions;
+- an opaque value's id resolving in the bound registry while the global
+  registry is unchanged.
+
+Records from a real cl-spec are the opt-in `tests/core-record-specs-test.lisp`,
+which `self-test` runs and CI requires:
+- Four declarations of the test's own sit in a cl-spec registry made for them:
+  a property that holds, one that fails, and the same pair of Function Specs.
+- Each runs once with seed 2^53+1. Its `RESULT-DATA` record goes through
+  `project-core-record`, the adapter's own core-record renderer, `yason`
+  encoding, and a decoder set to keep false, null, `[]` and a missing key apart.
+- Selected fields are compared with what the record itself says: record and
+  entity kind, status, the seed's decimal text, digest completeness as a JSON
+  boolean, each sentinel's availability, and null against an object for the
+  failure. Also checked: `projection.complete`, no unknown keys, and no
+  `source` key.
+- `elapsed` and the digest's value are not compared.
+- A missing cl-spec is a load failure there, not a skip.
+
+This is record-to-JSON, not an end-to-end check of JSON-RPC.
+
+Not covered: selection, the `verified` tally, `verification_gaps`, the legacy
+fallback, other cl-spec versions, Function Spec definition records, circular
+metadata (the existing termination tests keep that), and whether any tool
+passes these records on correctly.
+
 ## Dependencies
 
 ```
-cl-mcp/specs ──> cl-mcp/src/utils/{strings,sanitize,paths}, cl-mcp/src/fs
+cl-mcp/specs ──> cl-mcp/src/utils/{strings,sanitize,paths}, cl-mcp/src/fs,
+                 cl-mcp/src/spec-core-record
              ──> cl-spec/main, cl-spec/src/backends/check-it
 
 cl-mcp (load, run) ──X──> cl-mcp/specs, cl-spec
 tests.lisp ──> cl-mcp/tests/path-specs-test ──> cl-mcp/specs/path-fixtures
            ──> cl-mcp/tests/write-path-specs-test ──> cl-mcp/specs/write-fixtures
                                                        ──> cl-mcp/specs/path-fixtures
+           ──> cl-mcp/tests/spec-core-record-test ──> cl-mcp/specs/core-record-fixtures
                (no cl-spec; not the bundle)
+self-test  ──> cl-mcp/tests/core-record-specs-test ──> cl-spec (opt-in)
 ```
 
 Nothing in `cl-mcp.asd` or `main.lisp` refers to the bundle. `cl-mcp` is a
 package-inferred system, so `cl-mcp/specs` (`specs.lisp`) and its subsystems
 (`specs/*.lisp`) exist without any `.asd` entry. The runner's own tests,
-`cl-mcp/tests/specs-runner-test`, are left out of `tests.lisp`. The default
-suite does load `tests/path-specs-test.lisp`, `tests/write-path-specs-test.lisp`
-and the fixture libraries they use, `specs/path-fixtures.lisp` and
-`specs/write-fixtures.lisp`. None of them needs cl-spec or loads the bundle.
+`cl-mcp/tests/specs-runner-test`, and the real-record tests,
+`cl-mcp/tests/core-record-specs-test`, are left out of `tests.lisp`.
+The default suite does load these tests and the fixture libraries they use:
+- `tests/path-specs-test.lisp`, with `specs/path-fixtures.lisp`;
+- `tests/write-path-specs-test.lisp`, with `specs/write-fixtures.lisp`;
+- `tests/spec-core-record-test.lisp`, with `specs/core-record-fixtures.lisp`.
+
+None of them needs cl-spec or loads the bundle.
 
 Loading `cl-mcp/specs` registers the bundle in `cl-spec:*registry*` and does
 nothing else: no check runs, nothing is instrumented, and no server or worker
@@ -626,8 +726,8 @@ registry against the bundle's own listing (`contract-names`, `property-names`,
 `spec-names`, `generator-names`). It then runs every target under the fixed
 seeds `20260922`, `1` and `7777777`. These are Lisp integers; the same seed in
 `spec-check` is the string `"20260922"`. Properties run at profile `:normal`,
-from each property's `:trials` table: 200 for the string properties and 12 for
-the read- and write-access ones. Function Specs run with 200 trials. Each target has a
+from each property's `:trials` table: 200 for the string properties, 12 for the
+read- and write-access ones, and 25 for the record ones. Function Specs run with 200 trials. Each target has a
 120-second deadline per seed. A local `check` takes about 20 s, most of it the
 dependency-registration property.
 
@@ -694,8 +794,10 @@ checkout first in ASDF's search. Exit status: `0` passed, `1` the checks ran and
 something failed, `2` the script could not run them.
 
 - `self-test` runs `cl-mcp/tests/specs-runner-test`,
-  `cl-mcp/tests/path-specs-test` and `cl-mcp/tests/write-path-specs-test`, and
-  fails if any of them loads no test. The runner
+  `cl-mcp/tests/path-specs-test`, `cl-mcp/tests/write-path-specs-test` and
+  `cl-mcp/tests/core-record-specs-test`, and fails if any of them loads no
+  test. The last one needs cl-spec, so a missing cl-spec fails it rather than
+  skipping it. The runner
   tests use small fixtures, each registered in a registry made for that test. They check that
   the runner refuses a failing property, an empty selection, an unregistered
   name, zero trials, an undeclared profile, a contract that rejected every
@@ -704,7 +806,7 @@ something failed, `2` the script could not run them.
   re-registration, the printed and written reports, the worktree fingerprint
   (on a scratch git repository) and a full bundle run. You can run the same
   tests with `run-tests system=cl-mcp/tests/specs-runner-test`.
-- `negative-control` swaps in twelve wrong implementations, one at a time:
+- `negative-control` swaps in sixteen wrong implementations, one at a time:
   - an `ensure-trailing-newline` that returns its argument unchanged;
   - one that overwrites its argument with newlines and returns it;
   - a `sanitize-for-json` that returns `""`;
@@ -732,6 +834,22 @@ something failed, `2` the script could not run them.
     too, and passes: no existing generator spells `//`. Among the fixed Rove
     tests, `write-allows-project-targets-as-their-real-path` (its `src//./new.txt`
     case) catches it as well.
+
+  - a `field-availability` that reads a key present with NIL as absent. The
+    availability property must fail.
+  - a `project-record` that turns a record's seed back into a JSON number. The
+    seed property must fail.
+  - a `project-core-record` that claims a complete projection whatever its
+    issues say. The cut property must fail.
+  - a `project-record` that keeps the tail of an over-long list. It still cuts
+    the list and reports the cut correctly, so only the kept items are wrong.
+    The cut property must fail. Of the default suite's record tests,
+    only the new limit test catches this one. The first two are also caught by
+    older fixed tests (`present-nil-is-not-absent` and
+    `a-seed-is-decimal-text-even-inside-the-safe-range` among them).
+
+  Each wrong record function calls the real one and bends one rule of its
+  answer.
 
   `resolve-readable-path` is not replaced; it calls `allowed-read-path` for
   its decision. Nothing is written to a path that should be denied.

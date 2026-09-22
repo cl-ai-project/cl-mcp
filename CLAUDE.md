@@ -48,7 +48,11 @@ have properties only: take a `symbol=` baseline (no seed), re-check each propert
 The write boundary, `ensure-write-path` and `fs-write-file`, likewise: `symbol=` on each, then
 `property=`, and run `utils-paths-test`, `write-path-specs-test` and `fs-test`. Never try a
 write-path change with the MCP write tools on the working tree; the properties and tests write
-only into scratch trees of their own. Elsewhere the bundle is not required.
+only into scratch trees of their own. The record layer of the cl-spec adapter
+(`field-availability`, `validate-versioned-record`, `project-record`, `project-core-record` in
+`src/spec-core-record.lisp`) has properties too: `symbol=` on the one you change, then `property=`,
+and run `spec-core-record-test` and, with cl-spec loaded, `core-record-specs-test`. Elsewhere the
+bundle is not required.
 
 ## Architecture
 

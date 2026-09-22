@@ -162,8 +162,8 @@ fixture did not create, so the cleanup fails while the body unwinds."
                          cl-mcp/src/utils/sanitize:sanitize-for-json
                          cl-mcp/src/utils/sanitize:sanitize-error-message)))
     (ok (= 3 (length (contract-names))))
-    (ok (= 18 (length (property-names))))
-    (ok (= 18 (length (remove-duplicates (property-names)))))
+    (ok (= 24 (length (property-names))))
+    (ok (= 24 (length (remove-duplicates (property-names)))))
     (ok (%same-names-p (remove-if-not (lambda (name)
                                         (string= "CL-MCP/SPECS/PATHS"
                                                  (package-name (symbol-package name))))
@@ -177,7 +177,21 @@ fixture did not create, so the cleanup fails while the body unwinds."
                        (cl-mcp/specs/write-paths:property-names))
         "the write-path properties are the five of specs/write-paths.lisp")
     (ok (member 'cl-mcp/specs/write-paths::write-preserves-safe-spellings (property-names))
-        "the safe-spelling relation is listed under its own name"))
+        "the safe-spelling relation is listed under its own name")
+    (ok (equal (sort (mapcar #'symbol-name
+                             (remove-if-not (lambda (name)
+                                              (string= "CL-MCP/SPECS/CORE-RECORDS"
+                                                       (package-name (symbol-package name))))
+                                            (property-names)))
+                     #'string<)
+               (sort (list "CORE-RECORD-AVAILABILITY-SEPARATES-ABSENCE-FROM-NIL"
+                           "CORE-RECORD-PROJECTS-EACH-FIELD-BY-ITS-ROLE"
+                           "CORE-RECORD-SEEDS-STAY-DECIMAL-TEXT"
+                           "CORE-RECORD-IGNORES-ORDER-DUPLICATES-AND-UNKNOWN-KEYS"
+                           "CORE-RECORD-REPORTS-EVERY-CUT"
+                           "CORE-RECORD-VALIDATION-SEPARATES-OK-UNSUPPORTED-MALFORMED")
+                     #'string<))
+        "the record properties are exactly the six of specs/core-records.lisp"))
   (testing "the functions it covers include those checked by properties alone"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)
@@ -188,7 +202,11 @@ fixture did not create, so the cleanup fails while the body unwinds."
                            cl-mcp/src/utils/paths:allowed-read-path
                            cl-mcp/src/utils/paths:resolve-readable-path
                            cl-mcp/src/utils/paths:ensure-write-path
-                           cl-mcp/src/fs:fs-write-file)))))
+                           cl-mcp/src/fs:fs-write-file
+                           cl-mcp/src/spec-core-record:field-availability
+                           cl-mcp/src/spec-core-record:validate-versioned-record
+                           cl-mcp/src/spec-core-record:project-record
+                           cl-mcp/src/spec-core-record:project-core-record)))))
   (testing "a definition missing from the listing is reported"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)
