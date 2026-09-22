@@ -451,7 +451,8 @@ dleaf -> nothing.txt, doleaf -> ../outside/nothing.txt."
     (dolist (region '(:dependency :outside :project-other))
       (ok (eq (decision (write-target region '() '() "new" "txt") :dependency-registered t)
               :refused)
-          region))))
+          ;; Rove's reporter takes the description as a string.
+          (format nil "region=~S remains unwritable" region)))))
 
 (deftest generated-write-cases-agree-on-a-fixed-sample
   ;; One draw of each shape under a fixed random state, so the default suite
