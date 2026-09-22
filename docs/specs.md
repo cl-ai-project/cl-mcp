@@ -30,10 +30,16 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/spec-adapter-report::%contract-plist` (internal) | none | `check-verdict-effective-trials-only-from-a-usable-count` |
 | `cl-mcp/src/spec-adapter-report::%verified-p` (internal) | none | `check-verdict-verified-needs-evidence-from-every-result` |
 | `cl-mcp/src/spec-adapter-report::%verification-gaps` (internal) | none | `check-verdict-gaps-name-each-shortfall-and-nothing-else`, `check-verdict-verified-needs-evidence-from-every-result` |
+| `cl-mcp/src/spec-adapter-report::%target-argument-error` (internal) | none (see *Routing*) | `check-routing-target-arguments-are-exclusive` |
+| `cl-mcp/src/spec-adapter-report::%resolve-profile` (internal) | none | `check-routing-target-arguments-are-exclusive` |
+| `cl-mcp/src/tools/spec-entry:parse-seed-string` | none | `check-routing-seed-text-keeps-every-digit` |
+| `cl-mcp/src/spec-adapter-report::%select-properties` (internal) | none | `check-routing-selection-names-only-what-was-asked` |
+| `cl-mcp/src/spec-adapter-report::%trials-budget` (internal) | none | `check-routing-budget-comes-from-its-stated-source` |
+| `cl-mcp/src/spec-adapter-report::%definition-match` (internal) | none | `check-routing-digest-comparison-has-four-answers` |
 
 Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize`,
-`cl-mcp/specs/paths`, `cl-mcp/specs/write-paths`, `cl-mcp/specs/core-records`
-and `cl-mcp/specs/check-verdicts`. Each Function Spec is
+`cl-mcp/specs/paths`, `cl-mcp/specs/write-paths`, `cl-mcp/specs/core-records`,
+`cl-mcp/specs/check-verdicts` and `cl-mcp/specs/check-routing`. Each Function Spec is
 registered on the production symbol itself. Each read-access property is
 `(:about ...)` both read functions; each write-access property names the
 function or functions it calls.
@@ -687,15 +693,177 @@ in CI it does. The default `test` job has none, and the `specs` job, which has
 the pinned cl-spec, does not run the suite. Until a job runs it with a skip
 counted as a failure, those real results are checked locally only.
 
-Not covered: selecting from a real registry, profile/trials/seed/digest routing,
-the deadline and real timeouts, rendering and JSON-RPC, the legacy fallback
-beyond the two refusal readers, and a record availability of `unavailable`.
+Not covered: selecting from a real registry, profile/trials/seed/digest routing
+(see *Routing* below), the deadline and real timeouts, rendering and JSON-RPC,
+the legacy fallback beyond the two refusal readers, and a record availability
+of `unavailable`.
+
+## Routing
+
+Between a request and a runner, spec-check decides five things:
+- whether the target arguments are valid;
+- what the seed text means;
+- which definitions the request names;
+- which trial budget each run gets;
+- how a definition digest compares with the one the caller expected.
+
+`specs/check-routing.lisp` checks the functions that decide them, each called
+directly:
+
+| Function | Decides |
+|---|---|
+| `%target-argument-error`, `%resolve-profile` | exactly one of property, symbol and function; trials only with function; profile only with property or symbol; the profile keyword, never interned |
+| `parse-seed-string` | a seed's decimal text as an integer, or a refusal |
+| `%select-properties` | the names a selection runs, and what it reports as not run |
+| `%trials-budget` | the budget and where it came from |
+| `%definition-match` | not-checked, unknown, true or false |
+
+Three kinds of evidence are kept apart:
+1. **Generated properties** over descriptors and small stub APIs. They call no
+   runner, start no thread and use no real cl-spec.
+2. **Fixed tests with a recording spy**, in the default suite
+   (`tests/check-routing-test.lisp`). These show whether a decision reaches
+   the runner. `SPY-API` stands in for cl-spec:
+   - its runners take only the keywords the real ones take, and signal on any
+     other;
+   - they record their raw argument lists, and the registry and backend they
+     see on the thread `check-report` runs them on;
+   - the record lives in a closure, because that thread does not see the
+     caller's dynamic bindings.
+3. **A real cl-spec**, opt-in (`tests/check-routing-specs-test.lisp`). This
+   checks the stub's registration model against cl-spec itself. It wraps
+   cl-spec's own two runners in a copy of the API to record them, and
+   swaps nothing global.
+
+**Where expectations come from.** `specs/check-routing-fixtures.lisp` (no
+cl-spec) states each rule as data:
+- the target rule, as spec-check's description gives it;
+- a registry descriptor's relations: a Function Spec for `routing-f`, a
+  property of the same name, properties P1 to P3 `(:about routing-f)` in any
+  registration order, an unrelated U, and `routing-f` in another package;
+- distinct value ranges for a profile entry (0 to 40), the backend default
+  (100 to 199) and explicit trials (1000 to 1999);
+- decimal text written by integer division (`decimal-string`);
+- the digest table.
+
+Nothing is computed by the functions under test. A name meant to be unknown
+is only ever a string, and the property checks that trying it interns nothing.
+
+| Property | Run in every trial | Drawn | Calls per trial |
+|---|---|---|---|
+| `check-routing-target-arguments-are-exclusive` | all 8 presences of the three targets, each with and without trials and profile; no profile; three known profile spellings; three unknown names | the names, the trial count, the profile and its spelling | 39 |
+| `check-routing-seed-text-keeps-every-digit` | no seed (not seed 0); 0, 1, 9, 10, both sides of 2^53, 2^62 and 2^64, 10^40+7; eleven refused spellings of one seed (sign, whitespace, exponent, fraction, radix, `#.`, separator); the empty string and four non-strings | four seeds below 2^128, each with 0 to 3 leading zeros | 34 |
+| `check-routing-selection-names-only-what-was-asked` | sixteen requests (property= each target, symbol= and function= the subject, the other package and two unresolvable names) against a drawn registry and against it with a contract, a same-named property and a readable index; then adding U, reversing the order, removing one related property | the registry (contract, same-named property, which related ones and in which order, U, whether the index can be read) and each request's qualified or unqualified form | 38 to 40 |
+| `check-routing-budget-comes-from-its-stated-source` | a property with an entry for the profile, an entry of 0, an entry only for another profile, and no entry while the backend is absent, the reader signals, answers NIL or is missing; a contract with explicit trials, without, and without a backend | the entry, the default and the explicit trials | 11 |
+| `check-routing-digest-comparison-has-four-answers` | nine rows: three with nothing expected; nothing to compare; an incomplete digest, equal and not; two complete digests, equal and not | the digest, and which hex digit the other one changes | 9 |
+
+Each selection check also asserts two things:
+- no runner is called;
+- every reader is handed the registry it was given.
+
+Symbol resolution is exercised only for these names. The resolver itself is
+not re-specified.
+
+**Fixed cases, default suite** (`tests/check-routing-test.lisp`, 18 tests):
+- **Target arguments:** the eight target presences and the trials and profile
+  rules. Through `check-report`, no runner is called for any refused
+  combination, even with cl-spec not loaded.
+- **Profile:** none given is `:normal`, and `smoke` is `:smoke`. An unknown
+  name is refused, runs nothing and stays uninterned.
+- **Seed text:** twelve spellings from 0 to 10^40+7, leading zeros included,
+  and eighteen refused inputs.
+- **The entry refuses early:** `spec-check-response` refuses a bad seed or
+  trials (0, −1, 1,000,001, 1.5, `"3"`) before cl-spec is consulted. It
+  accepts 1 and 1,000,000 as far as the report. The target there resolves to
+  nothing, so nothing runs.
+- **Seed delivery:**
+  - The runner receives 0, 2^62+1 and 10^40+7 exactly, and the report shows
+    each as its text.
+  - With no seed, the runner receives `:seed NIL` and the report shows the
+    seed the result recorded.
+- **Fan-out:**
+  - nothing related runs nothing;
+  - one related property runs with the seed;
+  - two with a seed, 0 included, are refused before either runs;
+  - two with only an expected digest both run.
+- **Raw arguments:** a property's runner gets `(:profile :seed :registry)`.
+  A contract's gets `(:seed :registry :trials)`, with the backend default
+  when no trials are given. When the default cannot be read, the `:trials`
+  keyword is absent, not given as NIL.
+- **Budget records:** asked for 7, a result recording a budget of 5 and 2
+  trials is reported as budget 5 from `cl-spec result`, with 2 executed.
+- **Identity:** the registry the runner is given, and the registry and backend
+  its thread sees, are the objects the call captured. The budget came from
+  that same backend.
+- **Digests:**
+  - Per result: true, false, unknown (incomplete, equal or not) and
+    not-checked.
+  - A mismatch leaves `passed` and `verified` as they are, and a failed run
+    can still match.
+  - Overall, a false and an unknown make the replay unknown. An empty
+    selection is not checked.
+  - A run not started for lack of budget, or one that signals, is
+    not-checked.
+  - A property and a contract of one name keep their own digests.
+  - The digest the result recorded wins over the one read before the run.
+
+**Real cl-spec, opt-in** (`tests/check-routing-specs-test.lisp`, 5 tests). Two
+registries of the test's own hold the same declarations except for one
+related property. Each check binds `cl-spec:*registry*` around the call.
+- **Selection:**
+  - `symbol=` runs only P1 and P2, and names the contract and the same-named
+    property as not run;
+  - `property=` of the shared name runs that property;
+  - `function=` calls only `check-function`.
+- **Registries:** A runs P1 and P2 where B runs P1 alone. P2 is
+  not-registered in B, and nothing runs.
+- **Delivery:**
+  - A contract with trials 3 and seed 0: cl-spec's record says seed 0 and
+    budget 3.
+  - A property with the smoke profile and a seed past 2^62: cl-spec's record
+    says that seed and 2 trials.
+- **Replay:** the same declaration and seed replay as `true`/`true`.
+  Declaring P1 again with another docstring gives `false`, and the run still
+  passes.
+- **The entry:** `spec-check-response` reads `"00042"` as seed 42 and reports
+  `"42"`. With no seed, it reports the seed cl-spec drew.
+
+**In CI, a skip is not a pass.** `specs/suite-judge.lisp` reads a Rove run's
+per-test results. Every required test must have run, failed nothing, skipped
+nothing and asserted something. `ROVE:RUN`'s own answer counts a skipped test
+as passed: a run in which every test of `spec-integration-test` skipped came
+back `T`, and the judge fails it. `scripts/check-specs.lisp`'s `integration`
+mode runs one suite and judges it. It keeps the list of tests each suite must
+run apart from the suite, so deleting or renaming one fails the step.
+The `specs` job runs two steps, each in its own process:
+- `spec-integration-test` (14 tests);
+- `check-routing-specs-test` (5 tests).
+
+The default `test` job still lets `spec-integration-test` skip when cl-spec
+cannot be found. `tests/suite-judge-test.lisp`, in the default suite, checks
+the judge on results built from Rove's own classes:
+- a skip, including one nested in `testing`, fails the suite;
+- so do a failure, a missing required test, an empty run, a test that
+  asserted nothing, and a skip outside any test;
+- the system → suite → test nesting is read correctly.
+
+Found while writing this, and left as they are:
+- `parse-seed-string` accepts decimal digits of other scripts (`"１２"` reads
+  as 12): `digit-char-p` answers for any Unicode digit. The value is kept
+  exactly, and the report then shows `"12"`.
+- `%definition-match` compares digests without regard to case. The fixtures
+  never rely on that either way.
+
+Not covered: symbol resolution beyond these names; the listing and describe
+paths; the renderer; JSON-RPC end to end; real timeouts; and anything after
+the runner is called, which *Verdicts* covers.
 
 ## Dependencies
 
 ```
 cl-mcp/specs ──> cl-mcp/src/utils/{strings,sanitize,paths}, cl-mcp/src/fs,
-                 cl-mcp/src/spec-core-record, cl-mcp/src/spec-adapter-{core,report}
+                 cl-mcp/src/spec-core-record, cl-mcp/src/spec-adapter-{core,report},
+                 cl-mcp/src/tools/spec-entry
              ──> cl-spec/main, cl-spec/src/backends/check-it
 
 cl-mcp (load, run) ──X──> cl-mcp/specs, cl-spec
@@ -705,20 +873,30 @@ tests.lisp ──> cl-mcp/tests/path-specs-test ──> cl-mcp/specs/path-fixtur
            ──> cl-mcp/tests/spec-core-record-test ──> cl-mcp/specs/core-record-fixtures
            ──> cl-mcp/tests/check-verdict-test ──> cl-mcp/specs/check-verdict-fixtures
                                                 ──> cl-mcp/specs/core-record-fixtures
+           ──> cl-mcp/tests/check-routing-test ──> cl-mcp/specs/check-routing-fixtures
+                                                ──> cl-mcp/specs/core-record-fixtures
+           ──> cl-mcp/tests/suite-judge-test ──> cl-mcp/specs/suite-judge ──> rove
                (no cl-spec; not the bundle)
-self-test  ──> cl-mcp/tests/core-record-specs-test ──> cl-spec (opt-in)
+self-test   ──> cl-mcp/tests/core-record-specs-test ──> cl-spec (opt-in)
+integration ──> cl-mcp/tests/spec-integration-test, cl-mcp/tests/check-routing-specs-test
+                ──> cl-spec (opt-in), judged by cl-mcp/specs/suite-judge
 ```
 
 Nothing in `cl-mcp.asd` or `main.lisp` refers to the bundle. `cl-mcp` is a
 package-inferred system, so `cl-mcp/specs` (`specs.lisp`) and its subsystems
 (`specs/*.lisp`) exist without any `.asd` entry. The runner's own tests,
-`cl-mcp/tests/specs-runner-test`, and the real-record tests,
-`cl-mcp/tests/core-record-specs-test`, are left out of `tests.lisp`.
+`cl-mcp/tests/specs-runner-test`, the real-record tests,
+`cl-mcp/tests/core-record-specs-test`, and the real routing tests,
+`cl-mcp/tests/check-routing-specs-test`, are left out of `tests.lisp`.
+(`cl-mcp/tests/spec-integration-test` is in it, and skips there when cl-spec
+cannot be found.)
 The default suite does load these tests and the fixture libraries they use:
 - `tests/path-specs-test.lisp`, with `specs/path-fixtures.lisp`;
 - `tests/write-path-specs-test.lisp`, with `specs/write-fixtures.lisp`;
 - `tests/spec-core-record-test.lisp`, with `specs/core-record-fixtures.lisp`;
-- `tests/check-verdict-test.lisp`, with `specs/check-verdict-fixtures.lisp`.
+- `tests/check-verdict-test.lisp`, with `specs/check-verdict-fixtures.lisp`;
+- `tests/check-routing-test.lisp`, with `specs/check-routing-fixtures.lisp`;
+- `tests/suite-judge-test.lisp`, with `specs/suite-judge.lisp`.
 
 None of them needs cl-spec or loads the bundle.
 
@@ -862,7 +1040,7 @@ registry against the bundle's own listing (`contract-names`, `property-names`,
 seeds `20260922`, `1` and `7777777`. These are Lisp integers; the same seed in
 `spec-check` is the string `"20260922"`. Properties run at profile `:normal`,
 from each property's `:trials` table: 200 for the string properties, 12 for the
-read- and write-access ones, and 25 for the record and verdict ones. Function Specs run with 200 trials. Each target has a
+read- and write-access ones, and 25 for the record, verdict and routing ones. Function Specs run with 200 trials. Each target has a
 120-second deadline per seed. A local `check` takes about 20 s, most of it the
 dependency-registration property.
 
@@ -921,6 +1099,10 @@ ros run --load scripts/check-specs.lisp                                   # chec
 CL_MCP_SPECS_MODE=self-test        ros run --load scripts/check-specs.lisp
 CL_MCP_SPECS_MODE=negative-control ros run --load scripts/check-specs.lisp
 CL_MCP_SPECS_REPORT=specs-check.sexp ros run --load scripts/check-specs.lisp
+CL_MCP_SPECS_MODE=integration CL_MCP_SPECS_SUITE=cl-mcp/tests/spec-integration-test \
+  ros run --load scripts/check-specs.lisp
+CL_MCP_SPECS_MODE=integration CL_MCP_SPECS_SUITE=cl-mcp/tests/check-routing-specs-test \
+  ros run --load scripts/check-specs.lisp
 ```
 
 `sbcl --non-interactive --load scripts/check-specs.lisp` also works when
@@ -941,7 +1123,15 @@ something failed, `2` the script could not run them.
   re-registration, the printed and written reports, the worktree fingerprint
   (on a scratch git repository) and a full bundle run. You can run the same
   tests with `run-tests system=cl-mcp/tests/specs-runner-test`.
-- `negative-control` swaps in twenty-one wrong implementations, one at a time:
+- `integration` runs the one real-cl-spec suite `CL_MCP_SPECS_SUITE` names,
+  `cl-mcp/tests/spec-integration-test` or
+  `cl-mcp/tests/check-routing-specs-test`, and judges it from Rove's per-test
+  results (see *Routing*). A test that is missing, failed, skipped or asserted
+  nothing fails the run with status `1`. A suite it does not know, or one that
+  does not load, exits `2`. Both suites swap the cl-spec registry, or bind
+  one, while they run: use a process of their own, not the MCP worker you
+  are working in.
+- `negative-control` swaps in twenty-five wrong implementations, one at a time:
   - an `ensure-trailing-newline` that returns its argument unchanged;
   - one that overwrites its argument with newlines and returns it;
   - a `sanitize-for-json` that returns `""`;
@@ -998,8 +1188,18 @@ something failed, `2` the script could not run them.
     must fail: every trial's mixed list pairs a usable count with a result
     without one.
 
-  Each wrong record and verdict function calls the real one and bends one rule
-  of its answer. The verdict properties' own outcome is read from cl-spec's
+  - a `%select-properties` that also runs a symbol's own contract or same-named
+    property on `symbol=`. The selection property must fail: every trial
+    selects against a registry holding both.
+  - a `%trials-budget` that ignores the profile entry and explicit trials for
+    the backend default. The budget property must fail.
+  - a `parse-seed-string` that takes the seed through a double. The seed
+    property must fail on 2^53+1, which every trial reads.
+  - a `%definition-match` that counts an incomplete digest equal to the
+    expected one as a match. The digest property must fail.
+
+  Each wrong record, verdict and routing function calls the real one and bends
+  one rule of its answer. The verdict properties' own outcome is read from cl-spec's
   result, as for every control; `verified` and the MCP rendering play no part
   in judging a control.
 
@@ -1042,17 +1242,20 @@ The `specs` job in `.github/workflows/ci.yml` does the following:
 3. Checks that no other copy of cl-mcp is installed. The job does not run
    `ros install cl-ai-project/cl-mcp`, and the runner also fails when cl-mcp
    comes from anywhere but the checkout.
-4. Runs `self-test`, `check` and `negative-control` as separate processes, each
-   under `timeout 900` inside a 30-minute job, and uploads the report files.
+4. Runs `self-test`, `check`, `negative-control` and `integration` for each of
+   the two real-cl-spec suites, as separate processes, each under
+   `timeout 900` inside a 30-minute job, and uploads the report files.
 
 check-it and cl-mcp's other dependencies come from the current Quicklisp dist;
 the report records which one. The job uses no cache. The default `test` job is
-unchanged and still needs no cl-spec. The Lint job covers `specs.lisp`,
+unchanged and still needs no cl-spec. There, `spec-integration-test` skips
+when cl-spec cannot be found, as before; the `specs` job is where a skip fails.
+The Lint job covers `specs.lisp`,
 `specs/*.lisp` and `scripts/*.lisp` as well as `src/` and `tests/`.
 
 To reproduce the job locally, clone cl-spec at the pinned commit where
-Roswell's local-projects can see it, then run the three commands above from
-the checkout.
+Roswell's local-projects can see it, then run the commands above from the
+checkout.
 
 ## Adding to the bundle
 
