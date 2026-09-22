@@ -403,6 +403,17 @@ none.  CALLS is a cons whose CAR collects every run, most recent first."
   "Return the status of each of REPORT's results, in order."
   (mapcar (lambda (result) (getf result :status)) (getf report :results)))
 
+(defun %gaps-are (expected report &optional (description "the gaps are as expected"))
+  "Check that REPORT's gaps are EXPECTED as a set, and that each is listed once.
+
+A set comparison alone passes a gap listed twice.  That is what the public
+answer would carry if %VERIFICATION-GAPS and CHECK-REPORT both added the same
+gap -- no-properties-selected on an empty selection, which CHECK-REPORT adds
+itself -- and the gap property allows the helper either way."
+  (let ((gaps (getf report :verification-gaps)))
+    (ok (same-set-p expected gaps) description)
+    (ok (= (length gaps) (length (remove-duplicates gaps))) "each gap is listed once")))
+
 (defmacro with-registry-unchanged (() &body body)
   "Run BODY and check that the object registry holds as many objects after it."
   (let ((before (gensym "BEFORE")))
@@ -436,8 +447,7 @@ none.  CALLS is a cons whose CAR collects every run, most recent first."
             (ok (eql 1 (getf counts :failed)))
             (ok (eql 0 (getf counts :other)))))
         (testing "a failure is a verdict, not a gap"
-          (ok (same-set-p '(:rejection-counts-unmeasured :input-coverage-unmeasured)
-                          (getf report :verification-gaps))))))))
+          (%gaps-are '(:rejection-counts-unmeasured :input-coverage-unmeasured) report))))))
 
 (deftest check-report-verifies-a-passing-property-and-keeps-its-gaps
   (with-registry-unchanged ()
@@ -451,9 +461,8 @@ none.  CALLS is a cons whose CAR collects every run, most recent first."
         (ok (eq :completed (getf report :status)))
         (ok (getf report :verified))
         (ok (eql 1 (getf (getf report :counts) :passed)))
-        (ok (same-set-p '(:rejection-counts-unmeasured :input-coverage-unmeasured)
-                        (getf report :verification-gaps))
-            "verified, and the gaps are still there")))))
+        (%gaps-are '(:rejection-counts-unmeasured :input-coverage-unmeasured) report
+                   "verified, and the gaps are still there")))))
 
 (deftest check-report-verifies-a-contract-by-its-effective-trials
   (with-registry-unchanged ()
@@ -473,9 +482,8 @@ none.  CALLS is a cons whose CAR collects every run, most recent first."
         (ok (eq :completed (getf report :status)))
         (ok (eql 3 (getf contract :effective-trials)) "five trials, two refused")
         (ok (getf report :verified))
-        (ok (same-set-p '(:properties-not-run :input-coverage-unmeasured)
-                        (getf report :verification-gaps))
-            "the counted refusals leave no refusal gap; the unrun property is one")))))
+        (%gaps-are '(:properties-not-run :input-coverage-unmeasured) report
+                   "the counted refusals leave no refusal gap; the unrun property is one")))))
 
 (deftest check-report-does-not-verify-a-contract-that-refused-everything
   (with-registry-unchanged ()
@@ -495,8 +503,7 @@ none.  CALLS is a cons whose CAR collects every run, most recent first."
         (ok (eql 0 (getf contract :effective-trials)))
         (ok (eql 1 (getf (getf report :counts) :other)))
         (ok (eql 1 (cdr (assoc :skipped (getf (getf report :counts) :by-status)))))
-        (ok (same-set-p '(:skipped :input-coverage-unmeasured)
-                        (getf report :verification-gaps)))))))
+        (%gaps-are '(:skipped :input-coverage-unmeasured) report)))))
 
 (deftest check-report-does-not-verify-a-contract-with-an-unreached-case
   (with-registry-unchanged ()
@@ -526,8 +533,7 @@ none.  CALLS is a cons whose CAR collects every run, most recent first."
         (ok (eq :completed (getf report :status)))
         (ok (equal '(:passed) (%statuses report)) "cl-spec's passed stands")
         (ok (not (getf report :verified)) "but the unreached branch is not verified")
-        (ok (same-set-p '(:cases-never-called :input-coverage-unmeasured)
-                        (getf report :verification-gaps)))))))
+        (%gaps-are '(:cases-never-called :input-coverage-unmeasured) report)))))
 
 (deftest check-report-with-nothing-selected-runs-nothing-and-verifies-nothing
   (with-registry-unchanged ()
@@ -538,6 +544,8 @@ none.  CALLS is a cons whose CAR collects every run, most recent first."
         (ok (not (getf report :verified)))
         (ok (null (getf report :results)))
         (ok (eql 0 (getf (getf report :counts) :selected)))
-        (ok (same-set-p '(:no-properties-selected :rejection-counts-unmeasured
-                          :input-coverage-unmeasured)
-                        (getf report :verification-gaps)))))))
+        ;; Listed once: CHECK-REPORT adds no-properties-selected itself, so the
+        ;; helper must not have added it too.
+        (%gaps-are '(:no-properties-selected :rejection-counts-unmeasured
+                     :input-coverage-unmeasured)
+                   report)))))

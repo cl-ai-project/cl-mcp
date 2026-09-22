@@ -630,7 +630,9 @@ take it as a requirement.
 
 `no-properties-selected` comes from `check-report`'s empty-selection answer,
 not from `%verification-gaps`. The gap property lets an empty list carry it or
-not, and the fixed `check-report` test requires it.
+not, and the fixed `check-report` test requires it exactly once. Every fixed
+`check-report` test requires each gap to be listed once. A set comparison alone
+would miss a gap added by both the helper and `check-report`.
 
 Each property runs 25 trials at `:normal` and 5 at `:smoke`. Calls per trial:
 - counts: 5 `%counts` calls;
