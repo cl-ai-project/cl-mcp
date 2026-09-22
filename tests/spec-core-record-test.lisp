@@ -17,7 +17,28 @@
                 #:field-availability
                 #:project-core-record
                 #:*projection-max-depth*
-                #:*projection-max-length*))
+                #:*projection-max-length*)
+  (:import-from #:cl-mcp/src/object-registry
+                #:*object-registry*
+                #:registry-count
+                #:lookup-object)
+  ;; A bare :import-from makes the renderer a dependency: the JSON cases reach
+  ;; its internal %CORE-RECORD-HT, which is what turns a report into JSON.
+  (:import-from #:cl-mcp/src/tools/spec-response-builders)
+  (:import-from #:cl-mcp/specs/core-record-fixtures
+                #:+required-metadata+
+                #:+sentinel-fields+
+                #:+value-fields+
+                #:with-isolated-object-registry
+                #:decimal-string
+                #:make-result-record
+                #:record-without
+                #:record-with
+                #:object-field
+                #:node-at
+                #:object-keys
+                #:error-chain-record
+                #:chain-container-path))
 
 (in-package #:cl-mcp/tests/spec-core-record-test)
 
@@ -816,3 +837,299 @@ measured empty"
       (ok (equal '((:scalar "kind") (:scalar "plist") (:scalar "closed")
                    (:scalar nil) (:scalar "fields") (:scalar nil))
                  (second expected))))))
+
+(defun %core (record &rest options)
+  "Project RECORD as a result record, in a registry of its own; return
+\(values REPORT STATUS REASON)."
+  (with-isolated-object-registry
+    (apply #'project-core-record record :result-data :expected-record-kind :result
+           options)))
+
+(defun %json (report)
+  "Render REPORT with the adapter's own renderer, encode it as JSON text, and
+parse the text back so that false, null, [] and a missing key stay apart."
+  (yason:parse (with-output-to-string (stream)
+                 (yason:encode (cl-mcp/src/tools/spec-response-builders::%core-record-ht report)
+                               stream))
+               :object-as :hash-table :json-arrays-as-vectors t
+               :json-booleans-as-symbols t :json-nulls-as-keyword t))
+
+(defun %json-at (table &rest keys)
+  "Return (values VALUE PRESENT-P) for KEYS followed from the parsed TABLE."
+  (let ((value table) (present t))
+    (dolist (key keys (values value present))
+      (if (hash-table-p value)
+          (multiple-value-setq (value present) (gethash key value))
+          (return (values nil nil)))
+      (unless present (return (values nil nil))))))
+
+(deftest the-json-reader-keeps-false-null-empty-and-missing-apart
+  ;; Every JSON case below leans on this decoder setting, so check it first.
+  (let ((table (yason:parse "{\"f\":false,\"n\":null,\"a\":[],\"t\":true}"
+                            :object-as :hash-table :json-arrays-as-vectors t
+                            :json-booleans-as-symbols t :json-nulls-as-keyword t)))
+    (ok (eq 'yason:false (%json-at table "f")) "false is YASON:FALSE")
+    (ok (eq :null (%json-at table "n")) "null is :NULL")
+    (ok (equalp #() (%json-at table "a")) "[] is an empty vector")
+    (ok (eq 'yason:true (%json-at table "t")) "true is YASON:TRUE")
+    (ok (not (nth-value 1 (%json-at table "missing"))) "a missing key is not present")))
+
+(deftest a-core-record-reaches-json-with-each-role-intact
+  (let* ((record (record-without (make-result-record :definition-digest-complete nil)
+                                 :failure-phase))
+         (json (%json (%core record))))
+    (ok (eq 'yason:false (%json-at json "data" "definition_digest_complete"))
+        "a boolean NIL is false")
+    (ok (eq :null (%json-at json "data" "failure")) "an absent observation is null")
+    (ok (equalp #() (%json-at json "data" "counterexample")) "an empty collection is []")
+    (ok (not (nth-value 1 (%json-at json "data" "failure_phase")))
+        "a key missing from the record is missing from data")
+    (ok (eq :null (%json-at json "data" "shrink_report"))
+        "a sentinel's :NOT-COLLECTED is null in data")
+    (ok (equal "not-collected" (%json-at json "field_availability" "shrink_report"))
+        "and not-collected in field_availability")
+    (ok (equal "absent" (%json-at json "field_availability" "failure_phase"))
+        "the missing key is absent in field_availability")
+    (ok (equal "7" (%json-at json "data" "seed")) "the seed is text")
+    (ok (eql 3 (%json-at json "data" "trials")) "a small count stays a number")
+    (ok (eq 'yason:true (%json-at json "schema_supported")) "schema_supported is true")
+    (ok (not (nth-value 1 (%json-at json "source")))
+        "the raw record kept for the adapter never reaches JSON"))
+  (let ((json (%json (%core (make-result-record)))))
+    (ok (eq 'yason:true (%json-at json "data" "definition_digest_complete"))
+        "a boolean T is true")
+    (ok (eq :null (%json-at json "data" "failure_phase"))
+        "a present NIL phase is null, and present")))
+
+(deftest seeds-at-the-json-and-generator-boundaries-stay-decimal-text
+  ;; 2^53 +/- 1 is where a binary64 consumer starts to round; 2^62 is the
+  ;; bound of the seeds cl-spec draws, and cl-spec accepts any non-negative
+  ;; integer past it.  JSON's grammar allows every one of these as a number;
+  ;; text is for the consumers that would read one into a double.
+  (dolist (seed (list 0 1 42 (1- (expt 2 53)) (expt 2 53) (1+ (expt 2 53))
+                      (1- (expt 2 62)) (expt 2 62) (1+ (expt 2 64))))
+    (let* ((expected (decimal-string seed))
+           (report (%core (make-result-record :seed seed :trials 5)))
+           (data (getf report :data)))
+      (ok (equal (list :scalar expected) (object-field data "seed"))
+          (format nil "seed ~A projects as the text ~A" seed expected))
+      (ok (equal '(:scalar 5) (object-field data "trials"))
+          (format nil "beside seed ~A, trials stays the number 5" seed))
+      (ok (equal expected (%json-at (%json report) "data" "seed"))
+          (format nil "seed ~A is still the text ~A after JSON" seed expected)))))
+
+(deftest every-sentinel-and-value-field-keeps-its-three-states-apart
+  (let ((base (make-result-record)))
+    (dolist (position '(:front :back))
+      (dolist (key +sentinel-fields+)
+        (let ((label (format nil "~(~A~) at the ~(~A~)" key position)))
+          (ok (eq :absent (field-availability (record-without base key) key))
+              (format nil "~A: a missing key is absent" label))
+          (ok (eq :collected (field-availability (record-with base key nil :position position)
+                                                 key))
+              (format nil "~A: a present NIL is collected" label))
+          (ok (eq :not-collected
+                  (field-availability (record-with base key :not-collected :position position)
+                                      key))
+              (format nil "~A: :NOT-COLLECTED is not collected" label))
+          (ok (eq :collected (field-availability (record-with base key (list :x 1)
+                                                               :position position)
+                                                 key))
+              (format nil "~A: a value is collected" label))))
+      (dolist (key +value-fields+)
+        (let ((label (format nil "~(~A~) at the ~(~A~)" key position)))
+          (ok (eq :absent (field-availability (record-without base key) key))
+              (format nil "~A: a missing key is absent" label))
+          (ok (eq :collected (field-availability (record-with base key nil :position position)
+                                                 key))
+              (format nil "~A: a present NIL is collected" label))
+          (ok (eq :collected
+                  (field-availability (record-with base key :not-collected :position position)
+                                      key))
+              (format nil "~A: :NOT-COLLECTED is an ordinary value here" label)))))
+    (let* ((not-collected (let ((record base))
+                            (dolist (key +sentinel-fields+ record)
+                              (setf record (record-with record key :not-collected)))))
+           (report (%core not-collected)))
+      (dolist (key +sentinel-fields+)
+        (let ((json-key (substitute #\_ #\- (string-downcase (symbol-name key)))))
+          (multiple-value-bind (child present-p) (object-field (getf report :data) json-key)
+            (ok (and present-p (equal '(:scalar nil) child))
+                (format nil "~A: :NOT-COLLECTED is a present null in data" json-key)))
+          (ok (eq :not-collected (getf (getf report :field-availability) key))
+              (format nil "~A: and not-collected in field availability" json-key)))))))
+
+(deftest order-duplicates-and-unknown-keys-leave-known-meanings-alone
+  (let* ((base (make-result-record :status :passed :seed 11))
+         (reversed (loop with pairs = (loop for (key value) on base by #'cddr
+                                            collect (list key value))
+                         for pair in (reverse pairs) append (copy-list pair)))
+         (duplicated (append (copy-list base) (list :status :failed :trials 99)))
+         (extended (append (copy-list base) (list :x-future-alpha 1 :x-future-beta "b")))
+         (base-report (%core base)))
+    (flet ((same-known-fields-p (report)
+             (let ((expected (getf base-report :data))
+                   (actual (getf report :data)))
+               (and (null (set-exclusive-or (object-keys expected) (object-keys actual)
+                                            :test #'equal))
+                    (every (lambda (key)
+                             (equal (object-field expected key) (object-field actual key)))
+                           (object-keys expected))
+                    (equal (getf base-report :field-availability)
+                           (getf report :field-availability))))))
+      (let ((report (%core reversed)))
+        (ok (same-known-fields-p report) "reversed pairs: every known field is the same")
+        (ok (null (getf report :unknown-keys)) "reversed pairs: nothing unknown"))
+      (let ((report (%core duplicated)))
+        (ok (same-known-fields-p report) "a later duplicate: the first occurrence wins")
+        (ok (null (getf report :unknown-keys)) "a later duplicate is not unknown"))
+      (let ((report (%core extended)))
+        (ok (same-known-fields-p report) "unknown keys: every known field is the same")
+        (ok (equal '("x_future_alpha" "x_future_beta") (getf report :unknown-keys))
+            "unknown keys: both are named")
+        (ok (getf (getf report :projection) :complete)
+            "unknown keys do not make the projection incomplete")
+        (ok (getf report :schema-supported) "unknown keys do not unsettle the schema")
+        (ok (not (nth-value 1 (object-field (getf report :data) "x_future_alpha")))
+            "an unknown key is not guessed into data")))))
+
+(deftest each-limit-cuts-just-past-it-and-says-so
+  (flet ((issues (report) (getf (getf report :projection) :issues))
+         (complete-p (report) (getf (getf report :projection) :complete))
+         (words (count)
+           (loop for i below count
+                 collect (nth (mod i 3) '(:target-implementation :helper-implementations
+                                          :captured-state)))))
+    (testing "length: 39, 40 and 41 items against 40"
+      (let ((*projection-max-length* 40))
+        (dolist (count '(39 40))
+          (let ((report (%core (make-result-record :digest-exclusions (words count)))))
+            (ok (and (complete-p report) (null (issues report))
+                     (= count (length (second (object-field (getf report :data)
+                                                            "digest_exclusions")))))
+                (format nil "~D items: all kept, nothing reported" count))))
+        (let* ((report (%core (make-result-record :digest-exclusions (words 41))))
+               (issue (first (issues report))))
+          (ok (and (not (complete-p report)) (= 1 (length (issues report)))
+                   (equal '("digest_exclusions") (getf issue :path))
+                   (eq :length-limit (getf issue :reason))
+                   (eql 1 (getf issue :omitted-items)) (getf issue :omitted-items-exact-p))
+              "41 items: one exact length cut of 1, reported")
+          (ok (= 40 (length (second (object-field (getf report :data) "digest_exclusions"))))
+              "41 items: the first 40 are kept"))
+        (let ((issue (first (issues (%core (make-result-record
+                                            :digest-exclusions (words 82)))))))
+          (ok (and (not (getf issue :omitted-items-exact-p))
+                   (< (getf issue :omitted-items) 42))
+              "82 items: the count of 42 is not claimed, and says it is not exact"))))
+    (testing "chars: 29, 30 and 31 characters against 30"
+      (flet ((report-for (count)
+               (%core (make-result-record
+                       :status :failed
+                       :failure (list :status :failed
+                                      :condition-report (make-string count
+                                                                     :initial-element #\r)))
+                      :max-chars 30)))
+        (dolist (count '(29 30))
+          (let ((report (report-for count)))
+            (ok (and (complete-p report) (null (issues report))
+                     (equal (list :scalar (make-string count :initial-element #\r))
+                            (node-at (getf report :data) '("failure" "condition_report"))))
+                (format nil "~D characters: kept whole, nothing reported" count))))
+        (let* ((report (report-for 31))
+               (issue (first (issues report))))
+          (ok (and (not (complete-p report)) (= 1 (length (issues report)))
+                   (equal '("failure" "condition_report") (getf issue :path))
+                   (eq :char-limit (getf issue :reason))
+                   (eql 1 (getf issue :omitted-items)) (getf issue :omitted-items-exact-p)
+                   (equal (list :scalar (make-string 30 :initial-element #\r))
+                          (node-at (getf report :data) '("failure" "condition_report"))))
+              "31 characters: 30 kept, one exact character cut of 1 reported"))))
+    (testing "depth: the deepest container at 3, 4 and 5 against 4"
+      (let ((*projection-max-depth* 4))
+        (let ((report (%core (error-chain-record 3))))
+          (ok (and (complete-p report) (null (issues report))
+                   (eq :array (first (node-at (getf report :data)
+                                              (chain-container-path 3)))))
+              "deepest at 3: every container kept, nothing reported"))
+        (dolist (deepest '(4 5))
+          (let* ((report (%core (error-chain-record deepest)))
+                 (issue (first (issues report)))
+                 (path (chain-container-path 4)))
+            (ok (and (not (complete-p report)) (= 1 (length (issues report)))
+                     (eq :depth-limit (getf issue :reason))
+                     (equal path (getf issue :path))
+                     (eq :value (first (node-at (getf report :data) path))))
+                (format nil "deepest at ~D: the container at 4 is cut and reported" deepest))
+            (ok (equal '(:scalar "failed") (object-field (getf report :data) "status"))
+                (format nil "deepest at ~D: fields outside the chain are whole" deepest))))))))
+
+(deftest validation-names-each-single-cause
+  (let ((valid (make-result-record)))
+    (ok (eq :ok (validate-versioned-record valid :expected-record-kind :result
+                                                 :expected-entity-kind :property))
+        "the base record is valid")
+    (dolist (key +required-metadata+)
+      (ok (eq :malformed (validate-versioned-record (record-without valid key)))
+          (format nil "without ~(~A~): malformed" key)))
+    (loop for (label record) in (list (list "NIL" nil)
+                                      (list "an improper list" (append (copy-list valid) :tail))
+                                      (list "an odd-length plist"
+                                            (append (copy-list valid) (list :dangling)))
+                                      (list "a string indicator" (list* "status" :passed valid)))
+          do (ok (eq :malformed (validate-versioned-record record))
+                 (format nil "~A: malformed" label)))
+    (ok (eq :malformed (validate-versioned-record valid :expected-record-kind :definition))
+        "a record kind other than the expected one: malformed")
+    (ok (eq :malformed (validate-versioned-record valid :expected-entity-kind :function-spec))
+        "an entity kind other than the expected one: malformed")
+    (multiple-value-bind (report status) (%core (record-without valid :schema-version))
+      (ok (and (null report) (eq :malformed status))
+          "a record with no schema version is malformed and not projected"))
+    (dolist (version (list 0 2 99 (expt 2 62)))
+      (let ((unsupported (record-with valid :schema-version version :position :front)))
+        (multiple-value-bind (status reason) (validate-versioned-record unsupported)
+          (ok (and (eq :unsupported-schema status) (eql version reason))
+              (format nil "version ~D: unsupported, and named" version)))
+        (multiple-value-bind (report status) (%core unsupported)
+          (ok (and (eq :unsupported-schema status)
+                   (eq :collected (getf report :availability))
+                   (null (getf report :schema-supported))
+                   (eql version (getf report :schema-version))
+                   (null (getf report :data))
+                   (null (getf report :field-availability)))
+              (format nil "version ~D: collected, not understood, and not projected"
+                      version)))))))
+
+(deftest projection-registers-opaque-values-in-its-own-registry
+  ;; A collected capture value that is a list is externalized with an object
+  ;; id.  The id must live in the registry the caller bound, and the global
+  ;; one -- where a user's inspect-object ids live -- must be left alone.
+  (let ((global-count (registry-count *object-registry*))
+        (value (list 1 2 3)))
+    (with-isolated-object-registry
+      (let* ((record (make-result-record
+                      :status :failed
+                      :failure (list :status :failed
+                                     :state (list :capture
+                                                  (list :status :collected
+                                                        :declared (list 'before)
+                                                        :values (list (list :name 'before
+                                                                            :availability
+                                                                            :collected
+                                                                            :value value)))))))
+             (report (project-core-record record :result-data :expected-record-kind :result))
+             (node (node-at (getf report :data)
+                            '("failure" "state" "capture" "values" 0 "value")))
+             (id (getf (second node) :object-id)))
+        (ok (eq :value (first node)) "the list is externalized as a value")
+        ;; MAKE-RESULT-RECORD copies the failure, so the object the id names
+        ;; is the record's own copy of VALUE, not VALUE itself.
+        (ok (and id (eq (getf (first (getf (getf (getf (getf record :failure) :state)
+                                                 :capture)
+                                           :values))
+                              :value)
+                        (lookup-object id)))
+            "its id resolves, in the bound registry, to the record's own object")))
+    (ok (= global-count (registry-count *object-registry*))
+        "the global registry holds as many objects as before")))
