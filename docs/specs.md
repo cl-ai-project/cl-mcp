@@ -20,10 +20,14 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/utils/sanitize:sanitize-error-message` | a string of at most 500 characters, on one line, with no whitespace run and none at either end | `…-keeps-normalized-text`, `…-truncates-long-text`, `…-keeps-only-visible-words` |
 | `cl-mcp/src/utils/paths:allowed-read-path` | none (see *Read access*) | `read-allows-project-files-as-themselves`, `read-follows-dependency-registration`, `read-denies-unlisted-regions`, `read-judges-symlinks-by-their-target` |
 | `cl-mcp/src/utils/paths:resolve-readable-path` | none | the same four |
+| `cl-mcp/src/utils/paths:ensure-write-path` | none (see *Write access*) | `write-resolves-project-targets-without-creating`, `write-refuses-outside-and-absolute`, `write-follows-existing-links`, `writer-changes-only-the-expected-entries` |
+| `cl-mcp/src/fs:fs-write-file` | none | `write-refuses-outside-and-absolute`, `writer-changes-only-the-expected-entries` |
 
-Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize` and
-`cl-mcp/specs/paths`. Each Function Spec is registered on the production symbol
-itself. Each read-access property is `(:about ...)` both path functions.
+Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize`,
+`cl-mcp/specs/paths` and `cl-mcp/specs/write-paths`. Each Function Spec is
+registered on the production symbol itself. Each read-access property is
+`(:about ...)` both read functions; each write-access property names the
+function or functions it calls.
 
 The properties are chosen so that one check covers what another cannot. For
 example, the removal clause in `sanitize-for-json`'s contract passes an
@@ -203,14 +207,200 @@ the string properties, because every trial touches the disk and ASDF.
 Nearly all of that time is the functions under test consulting ASDF for every
 denied path (see *Known issues*).
 
+## Write access
+
+`ensure-write-path` decides where a write may land, and `fs-write-file` writes
+there. The properties in `specs/write-paths.lisp` check both against this
+policy:
+
+```
+an absolute argument                                    -> refused
+a target whose real location is outside the project     -> refused
+a .. right after a symlink, or after a name that does   -> refused
+  not exist yet
+anything else, whether the target exists or not yet     -> allowed, as its real path
+```
+
+The real location is where the OS will put the file. Every existing directory
+and symlink on the way is followed, and only the names that do not exist yet
+are taken as written. A registered ASDF system's directory outside the project
+is readable but never writable: before, during and after its registration.
+After a symlink, `..` means the parent of the link's target to the OS, but a
+lexical reading takes it as cancelling the link's name. After a name that does
+not exist yet, the OS cannot resolve `..` at all. Both are refused as
+uncheckable rather than guessed.
+
+The expectation comes from the case's descriptor alone:
+`expected-write-decision` in `specs/write-fixtures.lisp` reads the region the
+target is in, the spelling, and which segment a detour would go back over. It
+never calls the functions under test, `allowed-read-path`, `path-inside-p` or
+any helper they use. An allowed call must return the truename of the target's
+existing directory followed by its new names, compared as native strings.
+
+### What was found, and what changed
+
+The following were reproduced in scratch trees, each in a Lisp process of its
+own, before anything was fixed. Fixed tests pin each one (`e7b410a`,
+`2051f8e`).
+
+- `project/escape` was a link to `../outside/`. `ensure-write-path` allowed
+  `escape/new.txt` and `escape/new-dir/new.txt` and returned them under
+  `project/`, so `fs-write-file` created `outside/new.txt` and
+  `outside/new-dir/new.txt`. `escape/sentinel.txt`, which existed, was
+  refused. The old code merged the argument onto the root lexically and called
+  `truename` only when the whole path existed.
+- The same gap let a new file through a project link to a registered
+  dependency's directory.
+- A relative pathname, `#P"../outside/n1/new.txt"`, was allowed and written to
+  `outside/n1/`. A natively parsed pathname keeps `..` as `:up`,
+  `canonical-path` does not collapse it, and `uiop:subpathp` compares directory
+  lists lexically. The same path as a string was refused.
+- When the project root was a symlink alias, a new target was refused while an
+  existing one was allowed.
+- A project root that did not exist was taken as its own spelling, so a write
+  created it.
+- `plain.txt/x.txt` was allowed, and the write then failed inside
+  `ensure-directories-exist`. A dangling link as the target was allowed and
+  then replaced by a regular file.
+- Separately, `fs-write-file` "overwrote" an existing file without a type
+  (`Makefile`, `LICENSE`, `.hidden`) by writing `NAME.tmp` beside it and
+  reporting success. `rename-file` merges its new name with the temporary
+  file's pathname, which supplied the type `tmp`. `3284844` renames onto a
+  type of `:unspecific`, which merging leaves alone.
+- An existing directory named as the file to write (`src`, or a link to it)
+  came back as the directory itself. On main, `fs-write-file` then renamed its
+  temporary file onto itself, deleted it, and returned `T`, having written
+  nothing. After `3284844` the name was merged in instead, and a file named
+  `src/.file.<pid>.<serial>` appeared. Found in review of #171, and now
+  refused as `:directory-target`.
+
+`44ca65f` replaces the resolver. From the project root's truename, it takes the
+argument one name at a time, split natively (so a bracket or an asterisk is
+part of a name), and looks at each with `lstat`:
+
+- It enters a real directory.
+- It replaces a symlink with the real directory the link leads to. The link is
+  checked with `stat` first, because SBCL's `truename` returns a dangling link
+  as itself.
+- `..` leaves the real directory reached so far.
+- The first name that does not exist, and every name after it, is new.
+
+The write is allowed when the resulting real path is inside the root's
+truename, and that path is returned. Every refusal is a `write-path-refused`,
+a `simple-error`, whose `reason` says why.
+
+What changes for callers:
+
+- An allowed path comes back as its real path. `link-a/new.txt`, with `link-a`
+  a link to `src/`, returns `project/src/new.txt`.
+- These are refused now, each with its own reason. Before, they were allowed,
+  and a write then failed, replaced a dangling link, or (for a directory)
+  returned `T` without writing the file asked for:
+  - no file name: `""`, `dir/`, `.`, `dir/..` (`:no-file-name`);
+  - a project root that does not resolve (`:unresolvable-root`);
+  - an ancestor that is a file, or a link to one (`:non-directory-ancestor`);
+  - an ancestor that is a dangling link (`:unresolvable-ancestor`);
+  - `..` right after a link (`:parent-after-link`);
+  - `..` after a name that does not exist yet (`:parent-after-missing`);
+  - a final link that leads nowhere (`:unresolvable-target`);
+  - an existing directory, or a link to one, as the file to write
+    (`:directory-target`).
+- `:absolute` and `:outside-project` keep their old messages.
+- The read side is unchanged, and still resolves `..` lexically (see *Known
+  issues*).
+- The check and the write are not atomic. A directory swapped for a symlink
+  between them is not detected.
+
+| Property | About | Checks |
+|---|---|---|
+| `write-resolves-project-targets-without-creating` | `ensure-write-path` | project targets (existing, new, below one or two new directories) are allowed as their real path, in relative, pathname and detour spellings, with or without a root alias; absolute spellings and a detour back over a new directory are refused; nothing is created |
+| `write-refuses-outside-and-absolute` | both | a target in the dependency, `outside/` or `project-other/` is refused before, during and after the dependency's registration, and `fs-write-file` refuses it while registered; a project control is allowed relative and refused absolute in every phase |
+| `write-follows-existing-links` | `ensure-write-path` | one link in `project/` or `outside/`, to the target's directory or to an existing target file, decides by where it leads, for new and existing targets alike; `..` right after a link is refused |
+| `writer-changes-only-the-expected-entries` | both | on any of the above, `fs-write-file` adds exactly the expected directories and file with exactly the bytes written, or replaces the existing file's bytes, and nothing else in the tree changes, temporary files included; or it refuses and nothing changes |
+
+### Observing writes
+
+Write cases use the read fixture (see *Fixtures* above) with three additions:
+
+- `scratch-snapshot` lists the whole scratch tree, without following any link:
+  each entry's path below the scratch root, its kind, and a link's target or a
+  file's bytes. It records no times, so taking a snapshot changes nothing a
+  later one sees.
+- `snapshot-changes` compares two snapshots: added, removed and changed
+  entries.
+- `:adopt-new-entries` makes cleanup also remove, deepest first, whatever below
+  the scratch root the fixture did not create. It removes one entry at a time,
+  never follows a link, and lists each entry in `read-fixture-adopted`.
+  Adoption runs only when the fixture's own mkdir of the scratch directory
+  succeeded, and the path is still a directory. When the path was already
+  taken, by a directory or a symlink, mkdir fails, and cleanup lists, removes
+  and reports nothing below it. Before this check, a taken path had all its
+  entries adopted and deleted (found in review of #171). A test aims a fixture
+  at a taken path through `*scratch-name-function*`.
+
+Each check makes exactly one call, snapshots the tree just before and just
+after, and judges from those two snapshots while the tree still exists. Only
+then does cleanup adopt what was written. Only `write-path-refused` from that
+one call counts as a refusal; any other condition fails the trial. Every
+argument lies in the check's own scratch tree, so even a wrong implementation
+writes nowhere else. The negative control relies on that.
+
+### Domain
+
+- Targets in `project/`, the dependency (registered or not), `outside/` and
+  `project-other/`: zero to two existing directories, then zero to two new
+  ones, then a new or existing file. The names are plain, spaced, Japanese,
+  dotted and bracketed, with or without a type.
+- The target is reached directly, or through one link at the root of
+  `project/` or `outside/`. The link goes to the target's directory or to an
+  existing target file, and `outside/` links are reached through
+  `../outside/`.
+- Spellings: relative strings, relative pathnames, `./` plus a `D/../D` detour,
+  and absolute strings. The project root is given directly or as an alias.
+- Measured over 2000 draws per generator:
+  - project cases: 71 % allowed;
+  - link cases: 16 % allowed, and 35 % have the shape of the original escape
+    (a directory link out of the project, a new target, a relative spelling);
+  - writer cases: 27 % allowed, 12 % of the escape shape.
+  So one seed of 12 trials misses the escape shape with probability 0.6 % in
+  the link property and 21 % in the writer property. The fixed tests do not
+  depend on that.
+- Fixed tests only: dangling links, a file as an ancestor, no file name, an
+  existing directory or a link to one as the target, an unset or unresolvable
+  root, `..` in a relative pathname.
+- Not covered: races with the filesystem (TOCTOU), permissions and ACLs, hard
+  links, link chains and loops, mount namespaces, Windows paths, and what the
+  MCP tools do around `fs-write-file`.
+
+The fixed tests are in `tests/write-path-specs-test.lisp`, in the default
+suite:
+
+- the original escape, for the validator and the writer, with the sentinel
+  file left untouched;
+- the table of topologies behind every reason above;
+- the root alias, and the dependency before, during and after registration;
+- the writer's exact effects: new directories and file, an in-place update,
+  names without a type, and links;
+- the fixtures themselves: no new directory is created before the call, what
+  a write created is seen before it is adopted, adoption unlinks a link
+  without following it and also runs when the body signals, and a scratch
+  path that already exists, as a directory or a link, is neither adopted nor
+  reported, and every file in it keeps its bytes;
+- a fixed sample of the generators.
+
+Each write property runs 12 trials at `:normal` and 3 at `:smoke`. Each takes
+0.01–0.06 s per seed, in the native runner and in an MCP worker alike.
+
 ## Dependencies
 
 ```
-cl-mcp/specs ──> cl-mcp/src/utils/{strings,sanitize,paths}
+cl-mcp/specs ──> cl-mcp/src/utils/{strings,sanitize,paths}, cl-mcp/src/fs
              ──> cl-spec/main, cl-spec/src/backends/check-it
 
 cl-mcp (load, run) ──X──> cl-mcp/specs, cl-spec
 tests.lisp ──> cl-mcp/tests/path-specs-test ──> cl-mcp/specs/path-fixtures
+           ──> cl-mcp/tests/write-path-specs-test ──> cl-mcp/specs/write-fixtures
+                                                       ──> cl-mcp/specs/path-fixtures
                (no cl-spec; not the bundle)
 ```
 
@@ -218,8 +408,9 @@ Nothing in `cl-mcp.asd` or `main.lisp` refers to the bundle. `cl-mcp` is a
 package-inferred system, so `cl-mcp/specs` (`specs.lisp`) and its subsystems
 (`specs/*.lisp`) exist without any `.asd` entry. The runner's own tests,
 `cl-mcp/tests/specs-runner-test`, are left out of `tests.lisp`. The default
-suite does load `tests/path-specs-test.lisp` and the fixture library it uses,
-`specs/path-fixtures.lisp`. Neither needs cl-spec or loads the bundle.
+suite does load `tests/path-specs-test.lisp`, `tests/write-path-specs-test.lisp`
+and the fixture libraries they use, `specs/path-fixtures.lisp` and
+`specs/write-fixtures.lisp`. None of them needs cl-spec or loads the bundle.
 
 Loading `cl-mcp/specs` registers the bundle in `cl-spec:*registry*` and does
 nothing else: no check runs, nothing is instrumented, and no server or worker
@@ -265,11 +456,25 @@ spec-check   {"property": "cl-mcp/specs/paths::read-denies-unlisted-regions",
               "expect_definition_digest": "<likewise>"}
 ```
 
+The write boundary works the same way; run `symbol=` on each function, since
+`fs-write-file` has two of the four properties:
+
+```text
+spec-symbol  {"symbol": "cl-mcp/src/utils/paths:ensure-write-path"}
+spec-check   {"symbol": "cl-mcp/src/utils/paths:ensure-write-path", "profile": "normal",
+              "timeout_seconds": 300}
+spec-check   {"symbol": "cl-mcp/src/fs:fs-write-file", "profile": "normal",
+              "timeout_seconds": 300}
+```
+
 These run inside your worker. Each trial creates its scratch tree under the
 worker's temporary directory, and registers its ASDF system in the worker's
 image, which is the image that runs the functions under test. A pass there
 checks those functions in that worker. It is not an end-to-end check of the
-parent server's file tools.
+parent server's file tools. The parent keeps running the code it started with
+until the server restarts, so a fix to `ensure-write-path` does not reach the
+`fs-write-file` tool, or `lisp-edit-form`, before then. Do not try a write-path
+change by pointing the MCP write tools at the working tree.
 
 Things that are easy to get wrong here:
 
@@ -306,7 +511,8 @@ keep running the parent server's image until the server restarts.
    (`spec-symbol`, then `spec-describe`).
 2. Take a baseline: `spec-check function=` when the function has a Function
    Spec, `spec-check symbol=`, and the function's Rove tests with `run-tests`
-   (for the path functions: `utils-paths-test` and `path-specs-test`).
+   (for the read functions: `utils-paths-test` and `path-specs-test`; for the
+   write functions: `utils-paths-test`, `write-path-specs-test` and `fs-test`).
 3. Edit, reload as above, and re-check the same selections: once with the
    baseline's seeds and digests, and once without a seed.
 4. Report each call's `verification_gaps` as it gave them.
@@ -346,7 +552,7 @@ registry against the bundle's own listing (`contract-names`, `property-names`,
 seeds `20260922`, `1` and `7777777`. These are Lisp integers; the same seed in
 `spec-check` is the string `"20260922"`. Properties run at profile `:normal`,
 from each property's `:trials` table: 200 for the string properties and 12 for
-the read-access ones. Function Specs run with 200 trials. Each target has a
+the read- and write-access ones. Function Specs run with 200 trials. Each target has a
 120-second deadline per seed. A local `check` takes about 20 s, most of it the
 dependency-registration property.
 
@@ -412,8 +618,9 @@ Quicklisp and cl-spec can be found without Roswell. The script puts its own
 checkout first in ASDF's search. Exit status: `0` passed, `1` the checks ran and
 something failed, `2` the script could not run them.
 
-- `self-test` runs `cl-mcp/tests/specs-runner-test` and
-  `cl-mcp/tests/path-specs-test`, and fails if either loads no test. The runner
+- `self-test` runs `cl-mcp/tests/specs-runner-test`,
+  `cl-mcp/tests/path-specs-test` and `cl-mcp/tests/write-path-specs-test`, and
+  fails if any of them loads no test. The runner
   tests use small fixtures, each registered in a registry made for that test. They check that
   the runner refuses a failing property, an empty selection, an unregistered
   name, zero trials, an undeclared profile, a contract that rejected every
@@ -422,7 +629,7 @@ something failed, `2` the script could not run them.
   re-registration, the printed and written reports, the worktree fingerprint
   (on a scratch git repository) and a full bundle run. You can run the same
   tests with `run-tests system=cl-mcp/tests/specs-runner-test`.
-- `negative-control` swaps in eight wrong implementations, one at a time:
+- `negative-control` swaps in eleven wrong implementations, one at a time:
   - an `ensure-trailing-newline` that returns its argument unchanged;
   - one that overwrites its argument with newlines and returns it;
   - a `sanitize-for-json` that returns `""`;
@@ -437,8 +644,20 @@ something failed, `2` the script could not run them.
   - one that treats a string prefix of the project root as containment. Only
     the `project-other/` denial can catch it, in the unlisted-regions property.
 
+  - an `ensure-write-path` that refuses every path. The project and writer
+    properties must fail.
+  - the resolver from before the fix, which trusts new names below a link. The
+    link and writer properties must fail.
+  - one that allows whatever the read policy allows, so an absolute project
+    path and a registered dependency become writable. The refusal property
+    must fail.
+
   `resolve-readable-path` is not replaced; it calls `allowed-read-path` for
   its decision. Nothing is written to a path that should be denied.
+  `fs-write-file` is not replaced either; it calls `ensure-write-path`. A wrong
+  `ensure-write-path` does make `fs-write-file` write where it should not, but
+  only into the check's own scratch tree, where the write is observed and then
+  adopted by cleanup.
 
   For each, it requires that the targets named for it answer `:failed` with a
   counterexample, that every target passes again once the real function is
@@ -538,7 +757,8 @@ These are recorded here, not fixed in this change:
   other. When it does not, as here, it comes back unresolved and reading it
   fails. The read-access generators never put `..` after a link, and the file
   header says so. This is recorded, not tested: whether `..` should follow the
-  OS here is a policy question.
+  OS here is a policy question. `ensure-write-path` no longer has the problem:
+  it refuses `..` right after a link (see *Write access*).
 - Every denied path costs `allowed-read-path` a lookup of every registered ASDF
   system by name. That runs `find-system`, which reloads `.asd` files whose
   systems do not match their file names: check-it's, once cl-spec is loaded.

@@ -45,7 +45,10 @@ baseline, and re-check after reloading (`load-system cl-mcp` with `clear_fasls`,
 `cl-mcp/specs`). The read-access functions `allowed-read-path` and `resolve-readable-path`
 have properties only: take a `symbol=` baseline (no seed), re-check each property with
 `property=` and its own seed and digest, and run `utils-paths-test` and `path-specs-test`.
-Elsewhere the bundle is not required.
+The write boundary, `ensure-write-path` and `fs-write-file`, likewise: `symbol=` on each, then
+`property=`, and run `utils-paths-test`, `write-path-specs-test` and `fs-test`. Never try a
+write-path change with the MCP write tools on the working tree; the properties and tests write
+only into scratch trees of their own. Elsewhere the bundle is not required.
 
 ## Architecture
 

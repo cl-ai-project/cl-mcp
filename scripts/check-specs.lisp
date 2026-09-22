@@ -11,8 +11,9 @@
 ;;;;                      negative-control: swap in wrong implementations and
 ;;;;                        demand that the bundle catches them (this process
 ;;;;                        only -- it replaces production functions);
-;;;;                      self-test: run cl-mcp/tests/specs-runner-test and
-;;;;                        cl-mcp/tests/path-specs-test.
+;;;;                      self-test: run cl-mcp/tests/specs-runner-test,
+;;;;                        cl-mcp/tests/path-specs-test and
+;;;;                        cl-mcp/tests/write-path-specs-test.
 ;;;; CL_MCP_SPECS_REPORT  file to write the check or negative-control report
 ;;;;                      to, as one Lisp form.
 ;;;;
@@ -73,9 +74,11 @@ missing dependencies are fetched."
                                             (uiop:parse-native-namestring report)))))
 
 (defparameter *self-test-systems*
-  '("cl-mcp/tests/specs-runner-test" "cl-mcp/tests/path-specs-test")
-  "The test systems self-test runs: the runner's own verdicts, and the read
-fixtures with the read policy's fixed cases.")
+  '("cl-mcp/tests/specs-runner-test" "cl-mcp/tests/path-specs-test"
+    "cl-mcp/tests/write-path-specs-test")
+  "The test systems self-test runs: the runner's own verdicts, the read
+fixtures with the read policy's fixed cases, and the write fixtures with the
+write policy's.")
 
 (defun run-self-test ()
   "Run *SELF-TEST-SYSTEMS* and return an exit code.  A system that loaded no

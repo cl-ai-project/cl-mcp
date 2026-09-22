@@ -42,6 +42,8 @@
                 #:*project-root*)
   (:import-from #:cl-mcp/src/utils/paths
                 #:allowed-read-path
+                #:ensure-write-path
+                #:write-path-refused
                 #:canonical-path
                 #:path-inside-p)
   (:import-from #:cl-mcp/specs
@@ -635,6 +637,38 @@ denial of a prefix sibling can catch it."
           resolved
           (funcall real path)))))
 
+(defun %refuse-write-for-control (path)
+  "Signal the refusal the wrong ENSURE-WRITE-PATHs below give."
+  (error 'write-path-refused :path path :reason :outside-project
+                             :format-control "Write path ~A is outside project root"
+                             :format-arguments (list path)))
+
+(defun %write-path-lexically (path)
+  "A wrong ENSURE-WRITE-PATH, for the negative control: the implementation
+before the write boundary was fixed.  It merges PATH onto the project root
+lexically and resolves it with TRUENAME only when the whole path exists, so a
+new file or directory below a symlink to outside the project is allowed as the
+link's own spelling.  Every path it is given in a check lies in the check's
+own scratch tree, so what it lets through is written there and nowhere else."
+  (let ((pn (uiop:ensure-pathname path)))
+    (when (uiop:absolute-pathname-p pn)
+      (%refuse-write-for-control path))
+    (let ((real (or (ignore-errors (truename (canonical-path pn))) (canonical-path pn)))
+          (root (let ((directory (uiop:ensure-directory-pathname *project-root*)))
+                  (or (ignore-errors (uiop:ensure-directory-pathname (truename directory)))
+                      directory))))
+      (unless (path-inside-p real root)
+        (%refuse-write-for-control path))
+      real)))
+
+(defun %write-path-by-read-policy (path)
+  "A wrong ENSURE-WRITE-PATH, for the negative control: allows whatever
+ALLOWED-READ-PATH allows, so an absolute path in the project and a registered
+dependency's directory become writable.  ALLOWED-READ-PATH is not swapped in
+this control, so this is the real read decision."
+  (or (allowed-read-path path)
+      (%refuse-write-for-control path)))
+
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
@@ -651,6 +685,10 @@ the argument as it is after the call cannot see."
         (dependency-reads (%bundle-name :property "READ-FOLLOWS-DEPENDENCY-REGISTRATION"))
         (link-reads (%bundle-name :property "READ-JUDGES-SYMLINKS-BY-THEIR-TARGET"))
         (denied-reads (%bundle-name :property "READ-DENIES-UNLISTED-REGIONS"))
+        (project-writes (%bundle-name :property "WRITE-RESOLVES-PROJECT-TARGETS-WITHOUT-CREATING"))
+        (refused-writes (%bundle-name :property "WRITE-REFUSES-OUTSIDE-AND-ABSOLUTE"))
+        (link-writes (%bundle-name :property "WRITE-FOLLOWS-EXISTING-LINKS"))
+        (writes (%bundle-name :property "WRITER-CHANGES-ONLY-THE-EXPECTED-ENTRIES"))
         ;; Taken before any swap, so a wrong implementation can defer to it.
         (real-read (fdefinition 'allowed-read-path)))
     (list
@@ -699,7 +737,26 @@ the argument as it is after the call cannot see."
            :description "treats a string prefix of the project root as containment"
            :replacement (%read-path-by-string-prefix real-read)
            :targets (list (list :property denied-reads))
-           :must-fail (list (list :property denied-reads))))))
+           :must-fail (list (list :property denied-reads)))
+     ;; Write paths.  Only ENSURE-WRITE-PATH is replaced: FS-WRITE-FILE calls it
+     ;; for its decision.  Every argument a check passes lies in the check's own
+     ;; scratch tree, so a wrong implementation that lets a write through
+     ;; writes there, and the fixture removes it after the check has seen it.
+     (list :function 'ensure-write-path
+           :description "refuses every path"
+           :replacement #'%refuse-write-for-control
+           :targets (list (list :property project-writes) (list :property writes))
+           :must-fail (list (list :property project-writes) (list :property writes)))
+     (list :function 'ensure-write-path
+           :description "resolves lexically, as before the fix, trusting new names below a link"
+           :replacement #'%write-path-lexically
+           :targets (list (list :property link-writes) (list :property writes))
+           :must-fail (list (list :property link-writes) (list :property writes)))
+     (list :function 'ensure-write-path
+           :description "allows whatever the read policy allows"
+           :replacement #'%write-path-by-read-policy
+           :targets (list (list :property refused-writes))
+           :must-fail (list (list :property refused-writes))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put

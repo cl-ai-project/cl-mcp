@@ -30,6 +30,21 @@
 ;;;; READ-FIXTURE-CLEANUP-WARNING and the original error goes on.  The fixture's
 ;;;; ASDF system is its to remove from before LOAD-ASD runs, so a load that
 ;;;; fails after DEFSYSTEM is undone as well.
+;;;;
+;;;; A write check needs to see what the code under test created.
+;;;; SCRATCH-SNAPSHOT lists the whole tree without following a link, and
+;;;; SNAPSHOT-CHANGES compares two listings; a check takes both before the body
+;;;; returns, so nothing is judged after it has been removed.  With
+;;;; :ADOPT-NEW-ENTRIES, cleanup then also removes, deepest first, the entries
+;;;; below the scratch root that the fixture did not create, one by one, and
+;;;; lists them in READ-FIXTURE-ADOPTED.  Those are the only entries it removes
+;;;; that it did not make, and they are all inside its own tree.
+;;;;
+;;;; A tree is the fixture's own only once its mkdir of the scratch directory
+;;;; has returned; mkdir fails on anything already at that path, a directory
+;;;; or a symlink.  Until then cleanup lists, adopts and reports nothing below
+;;;; the path.  *SCRATCH-NAME-FUNCTION* chooses the path, so a test can aim a
+;;;; fixture at one that exists.
 
 (defpackage #:cl-mcp/specs/path-fixtures
   (:use #:cl)
@@ -38,7 +53,11 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:allowed-read-path
                 #:resolve-readable-path)
-  (:export #:draw-place
+  (:export #:*regions*
+           #:*name-parts*
+           #:*file-types*
+           #:*link-names*
+           #:draw-place
            #:draw-project-read-case
            #:draw-dependency-read-case
            #:draw-denied-read-case
@@ -48,11 +67,18 @@
            #:read-fixture-system-name
            #:read-fixture-registered
            #:read-fixture-root
+           #:read-fixture-adopted
            #:call-with-read-fixture
            #:with-read-fixture
+           #:*scratch-name-function*
+           #:default-scratch-name
            #:region-native
            #:place-native
+           #:relative-to-project
+           #:detour-spelling
            #:access-argument
+           #:scratch-snapshot
+           #:snapshot-changes
            #:expected-target
            #:fixture-symlink
            #:fixture-asd-native
@@ -186,15 +212,21 @@ does not matter; where it leads does."
 
 (defstruct (read-fixture (:constructor %make-read-fixture (scratch system-name)))
   "One scratch tree.  CREATED lists (KIND NATIVE-PATH) newest first.
-REGISTERED says the fixture's ASDF system is registered and checked -- the
-state the policy is judged by.  OWNS-REGISTRATION says cleanup must make sure
-the system is gone; it turns true before registration starts, so a load that
-fails halfway is still undone."
+OWNS-SCRATCH says this fixture created the scratch directory itself; nothing
+below a path it did not create is ever listed or removed.  REGISTERED says the
+fixture's ASDF system is registered and checked -- the state the policy is
+judged by.  OWNS-REGISTRATION says cleanup must make sure the system is gone;
+it turns true before registration starts, so a load that fails halfway is
+still undone.  ADOPT-NEW-ENTRIES lets cleanup also remove entries the code
+under test created in the tree; ADOPTED lists them."
   (scratch nil :read-only t)
   (system-name nil :read-only t)
   (created '())
+  (owns-scratch nil)
   (registered nil)
   (owns-registration nil)
+  (adopt-new-entries nil)
+  (adopted '())
   (root nil))
 
 (define-condition read-fixture-environment-error (error)
@@ -304,7 +336,7 @@ slash, so the functions see a directory named like a file."
           (:directory (format nil "~A/~A" link (%leaf (getf thing :target))))))
       (string-right-trim "/" (place-native fixture thing))))
 
-(defun %from-project (fixture native)
+(defun relative-to-project (fixture native)
   "Return NATIVE, a path inside the scratch tree, relative to project/."
   (let* ((scratch (read-fixture-scratch fixture))
          (below (subseq native (length scratch))))
@@ -312,9 +344,9 @@ slash, so the functions see a directory named like a file."
           ((uiop:string-prefix-p "project/" below) (subseq below (length "project/")))
           (t (concatenate 'string "../" below)))))
 
-(defun %detour (relative)
+(defun detour-spelling (relative)
   "Return RELATIVE with ./ in front and its first real directory D visited
-twice, as D/../D.  Only for place paths, which pass through no symlink."
+twice, as D/../D.  Only for paths that pass through no symlink."
   (let* ((segments (uiop:split-string relative :separator "/"))
          (position (position-if (lambda (segment)
                                   (not (member segment '("." "..") :test #'string=)))
@@ -334,10 +366,10 @@ parsed pathname, or a relative string with a detour (places only)."
     (ecase spelling
       (:absolute (copy-seq native))
       (:pathname (uiop:parse-native-namestring native))
-      (:relative (%from-project fixture native))
+      (:relative (relative-to-project fixture native))
       (:detour (if (getf thing :kind)
                    (error "A detour through a link is outside this domain.")
-                   (%detour (%from-project fixture native)))))))
+                   (detour-spelling (relative-to-project fixture native)))))))
 
 (defun expected-target (fixture thing)
   "Return the truename of the file or directory THING reaches, as FIXTURE
@@ -410,7 +442,10 @@ cleanup unlinks the link itself and never what it points to."
 (defun %materialize (fixture places links root-alias)
   "Create FIXTURE's tree: regions, PLACES, LINKS, the dependency's .asd, and the
 project-alias link when ROOT-ALIAS; set the root the body will see."
+  ;; mkdir fails on anything already at that path, a directory or a link, so
+  ;; once it returns the scratch directory is this fixture's own.
   (%make-directory fixture (read-fixture-scratch fixture))
+  (setf (read-fixture-owns-scratch fixture) t)
   (dolist (region *regions*)
     (%make-directory fixture (region-native fixture region))
     (%make-file fixture (concatenate 'string (region-native fixture region) "decoy.txt")
@@ -463,13 +498,111 @@ the registry itself, so a registration a failed load left half-made goes too."
     (setf (read-fixture-registered fixture) nil
           (read-fixture-owns-registration fixture) nil)))
 
+(defun %entry-kind (native)
+  "Return what the directory entry NATIVE is, without following it: :DIRECTORY,
+:LINK or :FILE (anything else that exists), or NIL when lstat fails."
+  (handler-case
+      (let ((type (logand (sb-posix:stat-mode (sb-posix:lstat native)) sb-posix:s-ifmt)))
+        (cond ((= type sb-posix:s-ifdir) :directory)
+              ((= type sb-posix:s-iflnk) :link)
+              (t :file)))
+    (sb-posix:syscall-error () nil)))
+
+(defun %directory-entries (directory)
+  "Return the names in the directory DIRECTORY, a native path ending in /,
+sorted, without . and .., read with readdir so no name goes through the
+pathname reader."
+  (let ((handle (sb-posix:opendir directory))
+        (names '()))
+    (unwind-protect
+         (loop for entry = (sb-posix:readdir handle)
+               until (sb-alien:null-alien entry)
+               do (let ((name (sb-posix:dirent-name entry)))
+                    (unless (member name '("." "..") :test #'string=)
+                      (push name names))))
+      (sb-posix:closedir handle))
+    (sort names #'string<)))
+
+(defun %walk-tree (directory)
+  "Return (NATIVE KIND) for every entry below DIRECTORY, parents before their
+children.  A directory's NATIVE ends in /.  Descends into real directories
+only: a symlink is listed, never followed."
+  (loop for name in (%directory-entries directory)
+        for native = (concatenate 'string directory name)
+        for kind = (%entry-kind native)
+        append (if (eq kind :directory)
+                   (let ((inside (concatenate 'string native "/")))
+                     (cons (list inside kind) (%walk-tree inside)))
+                   (list (list native kind)))))
+
+(defun %file-octets (native)
+  "Return the bytes of the regular file NATIVE."
+  (with-open-file (in (uiop:parse-native-namestring native)
+                      :element-type '(unsigned-byte 8))
+    (let ((octets (make-array (file-length in) :element-type '(unsigned-byte 8))))
+      (read-sequence octets in)
+      octets)))
+
+(defun scratch-snapshot (fixture)
+  "Return every entry of FIXTURE's scratch tree as (RELATIVE KIND DETAIL),
+parents first: RELATIVE is the path below the scratch root (a directory's ends
+in /), DETAIL a link's own target for :LINK, a file's bytes for :FILE, NIL for
+a :DIRECTORY.  No link is followed and no time is recorded, so reading the tree
+to take a snapshot cannot change what a later snapshot sees."
+  (let ((scratch (read-fixture-scratch fixture)))
+    (loop for (native kind) in (%walk-tree scratch)
+          collect (list (subseq native (length scratch))
+                        kind
+                        (case kind
+                          (:link (sb-posix:readlink native))
+                          (:file (%file-octets native))
+                          (t nil))))))
+
+(defun snapshot-changes (before after)
+  "Return how the snapshot AFTER differs from BEFORE, as
+\(:ADDED ENTRIES :REMOVED ENTRIES :CHANGED ((OLD NEW) ...)): an entry at the same
+path counts as changed when its kind, link target or bytes differ.  All three
+lists are empty when nothing changed."
+  (flet ((same-path (a b) (string= (first a) (first b)))
+         (same-entry (a b)
+           (and (eq (second a) (second b))
+                (equalp (third a) (third b))
+                (or (not (stringp (third a))) (string= (third a) (third b))))))
+    (list :added (remove-if (lambda (entry) (find entry before :test #'same-path)) after)
+          :removed (remove-if (lambda (entry) (find entry after :test #'same-path)) before)
+          :changed (loop for old in before
+                         for new = (find old after :test #'same-path)
+                         when (and new (not (same-entry old new)))
+                           collect (list old new)))))
+
 (defun %cleanup (fixture)
   "Unregister FIXTURE's system and remove what it created, newest first, one
-object at a time.  Return the failures; an empty list means everything went."
-  (let ((failures '()))
+object at a time.  When FIXTURE adopts new entries, first remove, deepest first,
+every entry of the scratch tree it did not create -- what the code under test
+wrote -- and list each in ADOPTED.  That happens only when FIXTURE created the
+scratch directory itself and it is still a directory, not a link: a path whose
+mkdir failed belongs to someone else, and nothing below it is listed, removed
+or reported.  Nothing outside the scratch tree is touched and no link is
+followed.  Return the failures; an empty list means everything went."
+  (let ((failures '())
+        (scratch (read-fixture-scratch fixture))
+        (owned (read-fixture-owns-scratch fixture)))
     (when (read-fixture-owns-registration fixture)
       (handler-case (unregister-dependency fixture)
         (error (condition) (push (list :unregister (princ-to-string condition)) failures))))
+    (when (and owned
+               (read-fixture-adopt-new-entries fixture)
+               (eq :directory (%entry-kind (string-right-trim "/" scratch))))
+      (let ((recorded (mapcar #'second (read-fixture-created fixture))))
+        (loop for (native kind) in (reverse (%walk-tree scratch))
+              unless (member native recorded :test #'string=)
+                do (push (list kind native) (read-fixture-adopted fixture))
+                   (handler-case (if (eq kind :directory)
+                                     (sb-posix:rmdir native)
+                                     (sb-posix:unlink native))
+                     (error (condition)
+                       (push (list :adopted kind native (princ-to-string condition))
+                             failures))))))
     (loop for (kind native) in (read-fixture-created fixture)
           do (handler-case (ecase kind
                              ((:file :link) (sb-posix:unlink native))
@@ -477,20 +610,31 @@ object at a time.  Return the failures; an empty list means everything went."
                (error (condition)
                  (push (list kind native (princ-to-string condition)) failures))))
     (setf (read-fixture-created fixture) '())
-    (when (probe-file (%directory-pathname (read-fixture-scratch fixture)))
-      (push (list :scratch-remains (read-fixture-scratch fixture)) failures))
+    (when (and owned (probe-file (%directory-pathname scratch)))
+      (push (list :scratch-remains scratch) failures))
     (nreverse failures)))
+
+(defun default-scratch-name (pid serial)
+  "Return the native path, ending in /, of the scratch directory the fixture
+numbered SERIAL in process PID tries to create under the temporary directory."
+  (format nil "~Acl-mcp-read-spec-~D-~D-~D/" (%native (uiop:temporary-directory))
+          pid serial (get-universal-time)))
+
+(defvar *scratch-name-function* 'default-scratch-name
+  "Function of a process id and a fixture serial that returns the native path,
+ending in /, of the scratch directory a new fixture tries to create.  Tests
+rebind it to aim a fixture at a path that already exists.")
 
 (defun %fresh-fixture ()
   "Return a fixture with a scratch path and a system name nothing uses yet."
   (let ((serial (sb-ext:atomic-incf (car *fixture-serial*)))
         (pid (sb-posix:getpid)))
     (%make-read-fixture
-     (format nil "~Acl-mcp-read-spec-~D-~D-~D/" (%native (uiop:temporary-directory))
-             pid serial (get-universal-time))
+     (funcall *scratch-name-function* pid serial)
      (format nil "cl-mcp-read-fixture-~D-~D" pid serial))))
 
-(defun call-with-read-fixture (thunk &key places links root-alias register-dependency)
+(defun call-with-read-fixture (thunk &key places links root-alias register-dependency
+                                          adopt-new-entries)
   "Build a scratch tree holding PLACES and LINKS, register its dependency system
 when REGISTER-DEPENDENCY, and call THUNK with the fixture while *PROJECT-ROOT*
 is bound to project/ -- or to project-alias, a symlink to it, when ROOT-ALIAS.
@@ -503,6 +647,7 @@ condition goes on and the failure is still reported as data."
   (%check-environment)
   (let ((fixture (%fresh-fixture))
         (normal-exit nil))
+    (setf (read-fixture-adopt-new-entries fixture) adopt-new-entries)
     (unwind-protect
          (multiple-value-prog1
              (progn
