@@ -74,10 +74,14 @@
 (defvar *scripted* nil
   "Argument lists the generator hands out, so no draw is needed.")
 
-(defun %register (registry &key (about t) (documentation "Twice its argument."))
+(defun %register (registry &key (about t) (wording :original))
   "Register this file's declarations in REGISTRY: a spec, a property of the
 subject's own name, a property (:about ...) it, a plain contract and one with
-named cases and state."
+named cases and state.
+
+WORDING picks which of three contracts is declared for the subject.  They are
+written out rather than built from a string: a docstring is part of the
+declaration, and this file evaluates nothing at run time to vary one."
   (let ((*registry* registry))
     (defspec inspection-small (range integer 0 100))
     (defgenerator inspection-arguments ()
@@ -94,12 +98,28 @@ named cases and state."
         (:about inspection-real-f)
         (:trials (:smoke 2 :normal 4))
         (evenp (inspection-real-f x))))
-    (eval `(defspec-function inspection-real-f
-             ,documentation
-             (:args (x inspection-small))
-             (:pre (note :pre))
-             (:returns (range integer 0 *))
-             (:post (note :post))))
+    (ecase wording
+      (:original
+       (defspec-function inspection-real-f
+         "Twice its argument."
+         (:args (x inspection-small))
+         (:pre (note :pre))
+         (:returns (range integer 0 *))
+         (:post (note :post))))
+      (:other
+       (defspec-function inspection-real-f
+         "The other registry's wording."
+         (:args (x inspection-small))
+         (:pre (note :pre))
+         (:returns (range integer 0 *))
+         (:post (note :post))))
+      (:again
+       (defspec-function inspection-real-f
+         "Declared again."
+         (:args (x inspection-small))
+         (:pre (note :pre))
+         (:returns (range integer 0 *))
+         (:post (note :post)))))
     (defspec-function inspection-cased-f
       "Two named cases, a capture and a state postcondition."
       (:args (x inspection-small))
@@ -247,7 +267,7 @@ their own rather than in an MCP worker someone is using."
 
 (deftest real-redefinition-reaches-describe-and-leaves-another-registry-alone
   (let ((first-registry (%registry))
-        (second-registry (%registry :documentation "The other registry's wording.")))
+        (second-registry (%registry :wording :other)))
     (flet ((documentation-of (registry)
              (let ((*registry* registry))
                (getf (describe-report (%api) :ok "function-spec"
@@ -256,7 +276,7 @@ their own rather than in an MCP worker someone is using."
       (ok (equal "Twice its argument." (documentation-of first-registry)))
       (ok (equal "The other registry's wording." (documentation-of second-registry)))
       (testing "declaring it again is what the description shows"
-        (%register first-registry :documentation "Declared again.")
+        (%register first-registry :wording :again)
         (ok (equal "Declared again." (documentation-of first-registry)))
         (ok (equal "The other registry's wording." (documentation-of second-registry))
             "and the other registry is untouched")))))

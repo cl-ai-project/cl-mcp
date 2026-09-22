@@ -57,6 +57,13 @@ own table is a failure rather than a quiet agreement.")
 (defvar *calls* '()
   "Every synthetic cl-spec function this process called, most recent first.")
 
+(define-condition synthetic-condition (error) ()
+  (:documentation "The class every synthetic cl-spec condition name is given.
+
+Named here rather than made at run time: the resolver only asks whether the
+name has a class, so one class under several names answers that question, and
+this file needs no EVAL to build a package."))
+
 ;;; ------------------------------------------------------------------------
 ;;; Building one
 
@@ -69,7 +76,10 @@ own table is a failure rather than a quiet agreement.")
 FUNCTIONS and OPTIONAL are fbound; UNFBOUND names are interned and left
 without a definition.  SPECIALS are bound to a value of their own, those in
 NIL-SPECIALS to NIL, and those in UNBOUND-SPECIALS are interned and left
-unbound.  CLASSES become condition classes."
+unbound.  CLASSES are given SYNTHETIC-CONDITION's class.
+
+The names are interned into this file's own package, which it deletes again;
+nothing is evaluated at run time to build one."
   (when (find-package "CL-SPEC")
     (error "A CL-SPEC package already exists; this suite must run in a process ~
 of its own."))
@@ -95,7 +105,9 @@ of its own."))
     (dolist (name unbound-specials)
       (export (intern name package) package))
     (dolist (name classes)
-      (eval `(define-condition ,(intern name package) (error) ())))
+      (let ((symbol (intern name package)))
+        (export symbol package)
+        (setf (find-class symbol) (find-class 'synthetic-condition))))
     package))
 
 (defun %destroy-cl-spec ()
