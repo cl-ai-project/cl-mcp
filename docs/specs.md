@@ -26,9 +26,14 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/spec-core-record:validate-versioned-record` | none | `core-record-validation-separates-ok-unsupported-malformed` |
 | `cl-mcp/src/spec-core-record:project-record` | none | `core-record-projects-each-field-by-its-role`, `core-record-seeds-stay-decimal-text`, `core-record-ignores-order-duplicates-and-unknown-keys`, `core-record-reports-every-cut` |
 | `cl-mcp/src/spec-core-record:project-core-record` | none | all five of those, and `core-record-validation-separates-ok-unsupported-malformed` |
+| `cl-mcp/src/spec-adapter-report::%counts` (internal) | none (see *Verdicts*) | `check-verdict-counts-keep-every-status` |
+| `cl-mcp/src/spec-adapter-report::%contract-plist` (internal) | none | `check-verdict-effective-trials-only-from-a-usable-count` |
+| `cl-mcp/src/spec-adapter-report::%verified-p` (internal) | none | `check-verdict-verified-needs-evidence-from-every-result` |
+| `cl-mcp/src/spec-adapter-report::%verification-gaps` (internal) | none | `check-verdict-gaps-name-each-shortfall-and-nothing-else`, `check-verdict-verified-needs-evidence-from-every-result` |
 
 Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize`,
-`cl-mcp/specs/paths`, `cl-mcp/specs/write-paths` and `cl-mcp/specs/core-records`. Each Function Spec is
+`cl-mcp/specs/paths`, `cl-mcp/specs/write-paths`, `cl-mcp/specs/core-records`
+and `cl-mcp/specs/check-verdicts`. Each Function Spec is
 registered on the production symbol itself. Each read-access property is
 `(:about ...)` both read functions; each write-access property names the
 function or functions it calls.
@@ -554,16 +559,125 @@ which `self-test` runs and CI requires:
 
 This is record-to-JSON, not an end-to-end check of JSON-RPC.
 
-Not covered: selection, the `verified` tally, `verification_gaps`, the legacy
-fallback, other cl-spec versions, Function Spec definition records, circular
-metadata (the existing termination tests keep that), and whether any tool
-passes these records on correctly.
+Not covered: selection, the `verified` tally and `verification_gaps` (see
+*Verdicts* below), the legacy fallback, other cl-spec versions, Function Spec
+definition records, circular metadata (the existing termination tests keep
+that), and whether any tool passes these records on correctly.
+
+## Verdicts
+
+Once a selection has run, `check-report` turns its results into four answers:
+`counts`, each contract's `effective_trials`, `verified` and
+`verification_gaps`. The properties in `specs/check-verdicts.lisp` check the
+four internal functions that compute them: `%counts`, `%contract-plist`,
+`%verified-p` and `%verification-gaps` in `cl-mcp/src/spec-adapter-report`.
+Each property calls its function directly, on its own thread. None goes through
+`check-report`, `spec-check` or the bundle. No public function or wrapper was
+added to reach them. Internal symbols are fine for `:about`, and `spec-symbol`
+takes them package-qualified (`cl-mcp/src/spec-adapter-report::%verified-p`).
+
+Two layers are kept apart, because the functions sit on either side of one
+normalization:
+- `%contract-plist` reads cl-spec's own answers. That is a v1 result record, or
+  the individual readers of an older cl-spec, reached through a `make-cl-spec-api`
+  stub.
+- The other three read what the adapter made of those answers: the result plists
+  `%result-plist` and `%run-one` return, and the selection plist the selection
+  step returns.
+
+`specs/check-verdict-fixtures.lisp` builds each shape the function really
+receives, and needs no cl-spec.
+
+**Where expectations come from.** Three tables in the fixture file restate what
+spec-check's description promises a client:
+- `+result-kinds+`: 36 kinds of result (every status, property and contract
+  runs, every refusal-count state, case report and schema state). Each row
+  gives three answers:
+  - can the result support `verified`;
+  - which gaps it justifies on its own;
+  - does it carry a refusal count a response may subtract with.
+- `+selection-kinds+`: the gaps each kind of selection justifies.
+- `+rejection-rows+`: one row per condition on a refusal count.
+
+Expected gaps are the rows' own gaps put together, plus two call-level rules:
+- `rejection-counts-unmeasured` unless every result is a contract run with a
+  usable count;
+- `input-coverage-unmeasured` always.
+
+Counts are counted from the drawn descriptors, and effective trials are the
+drawn `E - R`. Nothing is computed by the functions under test, by their
+helpers (`%evaluated-p` and the rest), by the renderer, or by `verified` itself.
+
+| Property | Checks, every trial |
+|---|---|
+| `check-verdict-counts-keep-every-status` | the empty list and two drawn lists of results. One holds each of the 13 statuses zero to three times; the other holds every status at least once. For each, every named field and `other` equal the number of results with those statuses. `by_status` has one positive entry per status that occurred and no other entry. `selected` equals the length, the sum of the named fields and `other`, and the sum of `by_status`. A reordered list tallies the same, and two lists joined tally the sum of theirs |
+| `check-verdict-effective-trials-only-from-a-usable-count` | every row, read from a v1 record and through the legacy readers, plus the unreadable row once for each of seven ways a count can be missing. Usable: a known `:pre` with 0 ≤ R ≤ E, or no `:pre` with R = 0, and E − R effective trials (0 when every input was refused). Unusable, with no effective trials (not 0, not the raw count): an unreadable count or trial count, R < 0, R > E, refusals without a `:pre`, an unknown `:pre`. Also checked: `rejected_readable` (the record declares the key, or the reader answered), `rejected_measured`, the overcounted and contradicted flags, and the failure reason with its readable flag. On the record path, the legacy readers answer differently and are never called |
+| `check-verdict-verified-needs-evidence-from-every-result` | one to four good results verify, in any order and under any names, seeds and timings. They still carry gaps. The empty list does not verify. One result of each of the 30 other kinds, alone or inserted among the good ones, refuses the verdict: every status but passed, zero or unknown trials, zero or unknown effective trials however many raw trials ran, a declared case never reached, a case report missing where cases are declared, cases whose existence is unknown, and a record whose schema is unsupported. A cut projection is not one of them |
+| `check-verdict-gaps-name-each-shortfall-and-nothing-else` | three lists each trial: a `property=` or `symbol=` run, a `function=` run, and a mixed list that always pairs a usable count with a result without one. The gaps must equal the expected set, with no duplicates. Then each result is taken away in turn, and so is the selection's shortfall. The gaps that result grounded must go, and the others must stay. Failed and error add no gap. A shrink that ran out is not `generation-incomplete`. Cases whose existence is unknown are not reported as uncovered |
+
+Two kinds of result never reach these functions from a real run. They are
+kept for the verdict property only, to show that each condition refuses on its
+own:
+- a passing property with no trial count. cl-spec refuses to build a result
+  whose `:trials` is not a non-negative integer.
+- an unreadable declaration beside a usable count. When the declaration cannot
+  be read, the adapter also takes its `:pre` as unknown, so the count is
+  unusable.
+
+The first reports `zero-trials`, the same gap as a budget of zero. Nothing
+in spec-check's description names a gap for it, and the gap property does not
+take it as a requirement.
+
+`no-properties-selected` comes from `check-report`'s empty-selection answer,
+not from `%verification-gaps`. The gap property lets an empty list carry it or
+not, and the fixed `check-report` test requires it.
+
+Each property runs 25 trials at `:normal` and 5 at `:smoke`. Calls per trial:
+- counts: 5 `%counts` calls;
+- effective trials: 25 `%contract-plist` calls;
+- verified: 64 `%verified-p` calls and 1 `%verification-gaps` call;
+- gaps: 8 to 15 `%verification-gaps` calls.
+
+Every trial reaches every row. A planted fault therefore needs no lucky draw to
+be caught.
+
+The fixed cases are in the default suite (`tests/check-verdict-test.lisp`).
+They need no cl-spec:
+- every row of the three tables once, with concrete expected values;
+- the joint between the two layers: the real `%contract-plist` output goes into
+  a result, and `%verified-p` and `%verification-gaps` read it. A hundred raw
+  trials beside an unreadable count is `effective-trials-unknown`, not
+  verified and not `zero-trials`;
+- `check-report` over a stub API that answers from v1 records and records every
+  run it is asked for, in six cases:
+  - a passing and a failing property;
+  - a passing property, verified with its two gaps;
+  - a contract verified from 5 trials minus 2 refusals, with `properties-not-run`;
+  - a contract that refused every input, answered `skipped`;
+  - a contract with a case never reached;
+  - an empty selection.
+
+  Each checks the recorded runs, `status`, the results, `counts`, `verified` and
+  the gaps, and that the object registry holds as many objects as before. The
+  stub keeps its record of calls in a closure. `check-report` runs each property
+  in a thread of its own, which does not see the caller's dynamic bindings.
+
+No real-cl-spec contrast was added. `tests/spec-integration-test.lisp` already
+reads a real contract through `spec-check` in each of these cases:
+- verified, with its refusals counted and no refusal gap;
+- skipped when every input is refused;
+- a case never reached;
+- generation exhaustion.
+
+Not covered: selecting from a real registry, profile/trials/seed/digest routing,
+the deadline and real timeouts, rendering and JSON-RPC, the legacy fallback
+beyond the two refusal readers, and a record availability of `unavailable`.
 
 ## Dependencies
 
 ```
 cl-mcp/specs ──> cl-mcp/src/utils/{strings,sanitize,paths}, cl-mcp/src/fs,
-                 cl-mcp/src/spec-core-record
+                 cl-mcp/src/spec-core-record, cl-mcp/src/spec-adapter-{core,report}
              ──> cl-spec/main, cl-spec/src/backends/check-it
 
 cl-mcp (load, run) ──X──> cl-mcp/specs, cl-spec
@@ -571,6 +685,8 @@ tests.lisp ──> cl-mcp/tests/path-specs-test ──> cl-mcp/specs/path-fixtur
            ──> cl-mcp/tests/write-path-specs-test ──> cl-mcp/specs/write-fixtures
                                                        ──> cl-mcp/specs/path-fixtures
            ──> cl-mcp/tests/spec-core-record-test ──> cl-mcp/specs/core-record-fixtures
+           ──> cl-mcp/tests/check-verdict-test ──> cl-mcp/specs/check-verdict-fixtures
+                                                ──> cl-mcp/specs/core-record-fixtures
                (no cl-spec; not the bundle)
 self-test  ──> cl-mcp/tests/core-record-specs-test ──> cl-spec (opt-in)
 ```
@@ -583,7 +699,8 @@ package-inferred system, so `cl-mcp/specs` (`specs.lisp`) and its subsystems
 The default suite does load these tests and the fixture libraries they use:
 - `tests/path-specs-test.lisp`, with `specs/path-fixtures.lisp`;
 - `tests/write-path-specs-test.lisp`, with `specs/write-fixtures.lisp`;
-- `tests/spec-core-record-test.lisp`, with `specs/core-record-fixtures.lisp`.
+- `tests/spec-core-record-test.lisp`, with `specs/core-record-fixtures.lisp`;
+- `tests/check-verdict-test.lisp`, with `specs/check-verdict-fixtures.lisp`.
 
 None of them needs cl-spec or loads the bundle.
 
@@ -727,7 +844,7 @@ registry against the bundle's own listing (`contract-names`, `property-names`,
 seeds `20260922`, `1` and `7777777`. These are Lisp integers; the same seed in
 `spec-check` is the string `"20260922"`. Properties run at profile `:normal`,
 from each property's `:trials` table: 200 for the string properties, 12 for the
-read- and write-access ones, and 25 for the record ones. Function Specs run with 200 trials. Each target has a
+read- and write-access ones, and 25 for the record and verdict ones. Function Specs run with 200 trials. Each target has a
 120-second deadline per seed. A local `check` takes about 20 s, most of it the
 dependency-registration property.
 
@@ -806,7 +923,7 @@ something failed, `2` the script could not run them.
   re-registration, the printed and written reports, the worktree fingerprint
   (on a scratch git repository) and a full bundle run. You can run the same
   tests with `run-tests system=cl-mcp/tests/specs-runner-test`.
-- `negative-control` swaps in sixteen wrong implementations, one at a time:
+- `negative-control` swaps in twenty-one wrong implementations, one at a time:
   - an `ensure-trailing-newline` that returns its argument unchanged;
   - one that overwrites its argument with newlines and returns it;
   - a `sanitize-for-json` that returns `""`;
@@ -848,8 +965,25 @@ something failed, `2` the script could not run them.
     older fixed tests (`present-nil-is-not-absent` and
     `a-seed-is-decimal-text-even-inside-the-safe-range` among them).
 
-  Each wrong record function calls the real one and bends one rule of its
-  answer.
+  - a `%counts` that drops every status without a field of its own from
+    `other` and `by_status`, while `selected` still counts it. The counts
+    property must fail.
+  - a `%contract-plist` that publishes the raw trial count as effective trials
+    whenever the refusal count cannot be subtracted with. The effective-trials
+    property must fail.
+  - a `%verified-p` that verifies an empty list of results. The verified
+    property must fail.
+  - a `%verified-p` that judges results as if every declared case had been
+    reached. The verified property must fail.
+  - a `%verification-gaps` that drops `rejection-counts-unmeasured` when any
+    one result, rather than every one, has a usable count. The gap property
+    must fail: every trial's mixed list pairs a usable count with a result
+    without one.
+
+  Each wrong record and verdict function calls the real one and bends one rule
+  of its answer. The verdict properties' own outcome is read from cl-spec's
+  result, as for every control; `verified` and the MCP rendering play no part
+  in judging a control.
 
   `resolve-readable-path` is not replaced; it calls `allowed-read-path` for
   its decision. Nothing is written to a path that should be denied.
