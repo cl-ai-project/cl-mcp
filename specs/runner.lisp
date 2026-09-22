@@ -24,6 +24,7 @@
                 #:find-property
                 #:find-function-spec
                 #:property-trials
+                #:property-targets
                 #:list-properties
                 #:list-function-specs
                 #:list-specs
@@ -37,6 +38,12 @@
                 #:call-check-result-status
                 #:call-check-result-failure-phase
                 #:call-check-data)
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:allowed-read-path
+                #:canonical-path
+                #:path-inside-p)
   (:import-from #:cl-mcp/specs
                 #:register-specifications
                 #:contract-names
@@ -55,6 +62,7 @@
            #:judge-entry
            #:judge-example
            #:bundle-consistency-problems
+           #:covered-functions
            #:report-ok-p
            #:exit-code
            #:git-state
@@ -128,6 +136,54 @@ value: (:STATUS :TIMEOUT) past SECONDS, (:STATUS :SIGNALLED ...) on an error."
     (error (condition)
       (values nil (list :status :signalled :condition (%condition-record condition))))))
 
+(defun %call-capturing-error-output (thunk)
+  "Call THUNK with *ERROR-OUTPUT* captured and its warnings recorded, and return
+THUNK's two values and a record of both, or NIL when there was neither.
+
+Output: (:ERROR-OUTPUT-LINES N :ERROR-OUTPUT-SAMPLE FIRST-LINE); the text beyond
+its first line is not kept.  The read-path properties make ASDF reload .asd
+files and warn about each one; counted, that noise no longer buries the report.
+
+Warnings: (:WARNINGS ((:TYPE NAME :COUNT N :REPORTS (TEXT ...)) ...)), one row
+per condition type in order of first appearance, with up to three distinct
+reports each, kept whole up to 2000 characters.  A warning is recorded, never
+muffled, so it is printed as before.  This is where a failure that must not be
+lost next to that noise goes -- a read fixture's cleanup failing while a
+property's own condition unwinds, say.
+
+Neither plays any part in a verdict."
+  (let ((captured (make-string-output-stream))
+        (rows '()))
+    (flet ((record (warning)
+             (let* ((type (%qualified-name (type-of warning)))
+                    (row (or (find type rows :key (lambda (row) (getf row :type))
+                                             :test #'string=)
+                             (let ((new (list :type type :count 0 :reports '())))
+                               (push new rows)
+                               new)))
+                    (text (%safe-text (handler-case (princ-to-string warning)
+                                        (error () "<report signalled>"))
+                                      :limit 2000)))
+               (incf (getf row :count))
+               (when (and (< (length (getf row :reports)) 3)
+                          (not (member text (getf row :reports) :test #'string=)))
+                 (setf (getf row :reports) (append (getf row :reports) (list text)))))))
+      (multiple-value-bind (value failure)
+          (handler-bind ((warning #'record))
+            (let ((*error-output* captured))
+              (funcall thunk)))
+        (let ((text (get-output-stream-string captured)))
+          (values value failure
+                  (append
+                   (when (plusp (length text))
+                     (list :error-output-lines (max 1 (count #\Newline text))
+                           :error-output-sample
+                           (%safe-text (subseq text 0 (or (position #\Newline text)
+                                                          (length text)))
+                                       :limit 200)))
+                   (when rows
+                     (list :warnings (reverse rows))))))))))
+
 (defun %result-record (result)
   "Return what the runner keeps of a cl-spec RESULT, read from its version 1
 RESULT-DATA record.  Any other schema version is :UNSUPPORTED-RESULT."
@@ -169,12 +225,14 @@ RESULT-DATA record.  Any other schema version is :UNSUPPORTED-RESULT."
              (append base (list :status :unknown-profile
                                 :declared-trials (property-trials property))))
             (t
-             (multiple-value-bind (result failure)
-                 (%call-with-deadline timeout-seconds
-                                      (lambda ()
-                                        (run-property name :profile profile :seed seed
-                                                           :registry registry)))
-               (append base (or failure (%result-record result)))))))))
+             (multiple-value-bind (result failure output)
+                 (%call-capturing-error-output
+                  (lambda ()
+                    (%call-with-deadline timeout-seconds
+                                         (lambda ()
+                                           (run-property name :profile profile :seed seed
+                                                              :registry registry)))))
+               (append base (or failure (%result-record result)) output)))))))
 
 (defun %declared-cases (name registry)
   "Return the case names the Function Spec NAME declares, in order."
@@ -186,14 +244,17 @@ RESULT-DATA record.  Any other schema version is :UNSUPPORTED-RESULT."
   (let ((base (list :kind :function-spec :name name :seed seed :requested-trials trials)))
     (if (not (nth-value 1 (find-function-spec name registry)))
         (append base (list :status :not-registered))
-        (multiple-value-bind (result failure)
-            (%call-with-deadline timeout-seconds
-                                 (lambda ()
-                                   (check-function name :trials trials :seed seed
-                                                        :registry registry)))
+        (multiple-value-bind (result failure output)
+            (%call-capturing-error-output
+             (lambda ()
+               (%call-with-deadline timeout-seconds
+                                    (lambda ()
+                                      (check-function name :trials trials :seed seed
+                                                           :registry registry)))))
           (append base
                   (list :declared-cases (%declared-cases name registry))
-                  (or failure (%result-record result)))))))
+                  (or failure (%result-record result))
+                  output)))))
 
 (defun %run-example (example registry timeout-seconds)
   "Check one concrete call (FUNCTION ARGUMENTS [CASE]) with CHECK-CALL."
@@ -361,23 +422,34 @@ kept as its logical namestring when it has no translation."
     (handler-case (uiop:native-namestring (translate-logical-pathname pathname))
       (error () (namestring pathname)))))
 
-(defun source-record ()
-  "Return, for each function the bundle contracts, the files its loaded
-definition came from."
-  (loop for name in (contract-names)
+(defun covered-functions (registry)
+  "Return every function the bundle makes a claim about, as registered in
+REGISTRY: those with a Function Spec, and each fbound (:about ...) target of its
+properties.  A function checked only by properties is covered too."
+  (remove-duplicates
+   (append (contract-names)
+           (loop for name in (property-names)
+                 for property = (find-property name registry)
+                 when property
+                   append (remove-if-not #'fboundp (property-targets property))))
+   :from-end t))
+
+(defun source-record (functions)
+  "Return, for each of FUNCTIONS, the files its loaded definition came from."
+  (loop for name in functions
         collect (list :name name :files (mapcar #'%native (%definition-files name)))))
 
-(defun source-problems (expected-root)
+(defun source-problems (expected-root functions)
   "Return problems when the cl-mcp under check was not loaded from
-EXPECTED-ROOT: the cl-mcp system's directory differs, or a contracted
-function's definition lives elsewhere.  NIL when EXPECTED-ROOT is NIL."
+EXPECTED-ROOT: the cl-mcp system's directory differs, or the definition of one
+of FUNCTIONS lives elsewhere.  NIL when EXPECTED-ROOT is NIL."
   (when expected-root
     (let* ((root (truename expected-root))
            (system-directory (asdf:system-source-directory "cl-mcp"))
            (problems (unless (and system-directory (equal (truename system-directory) root))
                        (list (list :cl-mcp-loaded-from (%native system-directory)
                                    :expected (%native root))))))
-      (dolist (name (contract-names))
+      (dolist (name functions)
         (let ((files (%definition-files name)))
           (if (null files)
               (push (list :source-unknown name) problems)
@@ -494,18 +566,19 @@ else fails the run.  Runs in a registry of its own, so CL-SPEC:*REGISTRY* and
 whatever else is registered there are neither read nor changed."
   (let ((registry (make-hash-table-registry)))
     (register-specifications registry)
-    (let* ((report (run-checks (bundle-targets) :registry registry :seeds seeds
+    (let* ((functions (covered-functions registry))
+           (report (run-checks (bundle-targets) :registry registry :seeds seeds
                                                 :profile profile :trials trials
                                                 :timeout-seconds timeout-seconds
                                                 :examples (call-examples)))
            (problems (append (getf report :problems)
                              (bundle-consistency-problems registry)
-                             (source-problems expected-root))))
+                             (source-problems expected-root functions))))
       (setf (getf report :problems) problems
             (getf report :ok) (null problems))
       (list* :mode :check
              :environment (environment-record expected-root)
-             :sources (source-record)
+             :sources (source-record functions)
              report))))
 
 ;;; ------------------------------------------------------------------------
@@ -519,6 +592,49 @@ whatever else is registered there are neither read nor changed."
             :key #'symbol-name :test #'string=)
       (error "The bundle has no ~(~A~) named ~A." kind name)))
 
+(defun %read-path-ignoring-dependencies (path)
+  "A wrong ALLOWED-READ-PATH, for the negative control: resolves PATH as the
+real one does but allows the project only, as if no ASDF system were
+registered."
+  (let* ((absolute (canonical-path path))
+         (resolved (or (ignore-errors (truename absolute)) absolute))
+         (normalized (if (uiop:directory-exists-p resolved)
+                         (uiop:ensure-directory-pathname resolved)
+                         resolved)))
+    (when (path-inside-p normalized
+                         (truename (uiop:ensure-directory-pathname *project-root*)))
+      normalized)))
+
+(defun %read-path-trusting-spelling (real)
+  "Return a wrong ALLOWED-READ-PATH, for the negative control: a path spelled
+under the project root is allowed as whatever it resolves to, without asking
+where that is; any other path goes to REAL, the real function.  It differs from
+REAL only where a path written inside the project leads outside it, so only a
+denial can catch it."
+  (lambda (path)
+    (let ((absolute (canonical-path path)))
+      (if (path-inside-p absolute (uiop:ensure-directory-pathname *project-root*))
+          (let ((resolved (or (ignore-errors (truename absolute)) absolute)))
+            (if (uiop:directory-exists-p resolved)
+                (uiop:ensure-directory-pathname resolved)
+                resolved))
+          (funcall real path)))))
+
+(defun %read-path-by-string-prefix (real)
+  "Return a wrong ALLOWED-READ-PATH, for the negative control: a resolved path
+whose native string merely starts with the project root's -- project-other/
+beside project/, say -- is allowed; any other path goes to REAL.  Only a
+denial of a prefix sibling can catch it."
+  (lambda (path)
+    (let* ((absolute (canonical-path path))
+           (resolved (or (ignore-errors (truename absolute)) absolute))
+           (root (string-right-trim
+                  "/" (uiop:native-namestring
+                       (truename (uiop:ensure-directory-pathname *project-root*))))))
+      (if (uiop:string-prefix-p root (uiop:native-namestring resolved))
+          resolved
+          (funcall real path)))))
+
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
@@ -530,7 +646,13 @@ the argument as it is after the call cannot see."
         (sanitize (%bundle-name :function-spec "SANITIZE-FOR-JSON"))
         (allowed (%bundle-name :property "SANITIZE-FOR-JSON-KEEPS-ALLOWED-TEXT"))
         (idempotent (%bundle-name :property "SANITIZE-FOR-JSON-IS-IDEMPOTENT"))
-        (unmodified (%bundle-name :property "SANITIZE-FOR-JSON-LEAVES-ITS-ARGUMENT-UNMODIFIED")))
+        (unmodified (%bundle-name :property "SANITIZE-FOR-JSON-LEAVES-ITS-ARGUMENT-UNMODIFIED"))
+        (project-reads (%bundle-name :property "READ-ALLOWS-PROJECT-FILES-AS-THEMSELVES"))
+        (dependency-reads (%bundle-name :property "READ-FOLLOWS-DEPENDENCY-REGISTRATION"))
+        (link-reads (%bundle-name :property "READ-JUDGES-SYMLINKS-BY-THEIR-TARGET"))
+        (denied-reads (%bundle-name :property "READ-DENIES-UNLISTED-REGIONS"))
+        ;; Taken before any swap, so a wrong implementation can defer to it.
+        (real-read (fdefinition 'allowed-read-path)))
     (list
      (list :function newline
            :description "returns its argument, never adding a newline"
@@ -554,7 +676,30 @@ the argument as it is after the call cannot see."
            :description "overwrites a string argument with a's and returns it"
            :replacement (lambda (value) (if (stringp value) (fill value #\a) value))
            :targets (list (list :property allowed) (list :property unmodified))
-           :must-fail (list (list :property allowed) (list :property unmodified))))))
+           :must-fail (list (list :property allowed) (list :property unmodified)))
+     ;; Read paths.  Only ALLOWED-READ-PATH is replaced: RESOLVE-READABLE-PATH
+     ;; calls it for its decision.  Nothing is ever written to a denied path.
+     (list :function 'allowed-read-path
+           :description "returns NIL for every path"
+           :replacement (lambda (path) (declare (ignore path)) nil)
+           :targets (list (list :property project-reads) (list :property dependency-reads))
+           :must-fail (list (list :property project-reads)
+                            (list :property dependency-reads)))
+     (list :function 'allowed-read-path
+           :description "allows the project only, ignoring registered ASDF systems"
+           :replacement #'%read-path-ignoring-dependencies
+           :targets (list (list :property project-reads) (list :property dependency-reads))
+           :must-fail (list (list :property dependency-reads)))
+     (list :function 'allowed-read-path
+           :description "allows any path written inside the project, wherever it leads"
+           :replacement (%read-path-trusting-spelling real-read)
+           :targets (list (list :property link-reads))
+           :must-fail (list (list :property link-reads)))
+     (list :function 'allowed-read-path
+           :description "treats a string prefix of the project root as containment"
+           :replacement (%read-path-by-string-prefix real-read)
+           :targets (list (list :property denied-reads))
+           :must-fail (list (list :property denied-reads))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put
@@ -612,9 +757,10 @@ the real one, and both runs used definitions with the same digests."
                   (run-checks targets :registry registry :seeds (list seed)
                                       :profile profile :trials trials
                                       :timeout-seconds timeout-seconds)))
+           (functions (covered-functions registry))
            (outcomes (loop for control in (%negative-controls)
                            collect (%negative-control-outcome control run)))
-           (problems (source-problems expected-root)))
+           (problems (source-problems expected-root functions)))
       (list :mode :negative-control
             :ok (and (null problems)
                      (every (lambda (outcome)
@@ -623,7 +769,7 @@ the real one, and both runs used definitions with the same digests."
                                    (getf outcome :same-digests)))
                             outcomes))
             :environment (environment-record expected-root)
-            :sources (source-record)
+            :sources (source-record functions)
             :problems problems
             :outcomes outcomes))))
 
@@ -700,6 +846,14 @@ the real one, and both runs used definitions with the same digests."
     (when (getf entry :digest)
       (format stream "      digest ~A (~:[incomplete~;complete~])~%"
               (getf entry :digest) (getf entry :digest-complete)))
+    (when (getf entry :error-output-lines)
+      (format stream "      stderr ~D line~:P captured (first line only kept): ~A~%"
+              (getf entry :error-output-lines) (getf entry :error-output-sample)))
+    (dolist (row (getf entry :warnings))
+      (format stream "      warning ~A x~D~%" (getf row :type) (getf row :count))
+      (dolist (text (getf row :reports))
+        ;; Whole for a failed run, where a warning may explain it; a line otherwise.
+        (format stream "        ~A~%" (%safe-text text :limit (if problems 2000 160)))))
     (when (getf entry :declared-cases)
       (format stream "      cases ~{~A~^, ~}~%"
               (if (consp report)

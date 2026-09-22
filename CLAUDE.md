@@ -42,7 +42,10 @@ touches a function the bundle covers (`ensure-trailing-newline`, `sanitize-for-j
 `sanitize-error-message`), load `cl-spec/check-it` and `cl-mcp/specs`, read the contract with
 `spec-symbol`/`spec-describe` before editing, take a `spec-check function=` and `symbol=`
 baseline, and re-check after reloading (`load-system cl-mcp` with `clear_fasls`, then
-`cl-mcp/specs`). Elsewhere the bundle is not required.
+`cl-mcp/specs`). The read-access functions `allowed-read-path` and `resolve-readable-path`
+have properties only: take a `symbol=` baseline (no seed), re-check each property with
+`property=` and its own seed and digest, and run `utils-paths-test` and `path-specs-test`.
+Elsewhere the bundle is not required.
 
 ## Architecture
 

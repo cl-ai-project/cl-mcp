@@ -36,6 +36,9 @@
                 #:property-names
                 #:spec-names
                 #:generator-names)
+  (:import-from #:cl-mcp/specs/path-fixtures
+                #:with-read-fixture
+                #:region-native)
   (:import-from #:cl-mcp/specs/runner
                 #:bundle-targets
                 #:run-checks
@@ -43,6 +46,7 @@
                 #:judge-entry
                 #:judge-example
                 #:bundle-consistency-problems
+                #:covered-functions
                 #:report-ok-p
                 #:exit-code
                 #:git-state
@@ -65,6 +69,9 @@
 (defun fixture-identity (x)
   "Fixture target: X."
   x)
+
+(defvar *strays* '()
+  "Files FIXTURE-FAILS-AND-CANNOT-CLEAN-UP left for the test to remove.")
 
 (defun %fixture-registry ()
   "Return a fresh registry holding every fixture below, and nothing else."
@@ -109,6 +116,18 @@
       (:trials (:normal 1))
       (sleep 3)
       (integerp x))
+    (defproperty fixture-fails-and-cannot-clean-up ((x (range integer 0 1)))
+      "Writes to stderr, then fails with its read fixture holding a file the
+fixture did not create, so the cleanup fails while the body unwinds."
+      (:trials (:normal 1))
+      (:shrink nil)
+      (format *error-output* "noise before the failure~%")
+      (with-read-fixture (fixture)
+        (let ((stray (concatenate 'string (region-native fixture :project) "stray.txt")))
+          (push stray *strays*)
+          (with-open-file (out (uiop:parse-native-namestring stray) :direction :output)
+            (write-string "not recorded" out)))
+        (error "body failed on purpose ~D" x)))
     cl-spec:*registry*))
 
 (defun %run (targets &rest options)
@@ -137,9 +156,29 @@
       (ok (%same-names-p (spec-names) (list-specs registry)))
       (ok (%same-names-p (generator-names) (list-generators registry)))
       (ok (null (bundle-consistency-problems registry)))))
-  (testing "the listing names three contracts and nine properties"
+  (testing "the listing names exactly the bundle's contracts and properties"
+    (ok (%same-names-p (contract-names)
+                       '(cl-mcp/src/utils/strings:ensure-trailing-newline
+                         cl-mcp/src/utils/sanitize:sanitize-for-json
+                         cl-mcp/src/utils/sanitize:sanitize-error-message)))
     (ok (= 3 (length (contract-names))))
-    (ok (= 9 (length (property-names)))))
+    (ok (= 13 (length (property-names))))
+    (ok (= 13 (length (remove-duplicates (property-names)))))
+    (ok (%same-names-p (remove-if-not (lambda (name)
+                                        (string= "CL-MCP/SPECS/PATHS"
+                                                 (package-name (symbol-package name))))
+                                      (property-names))
+                       (cl-mcp/specs/paths:property-names))
+        "the read-path properties are the four of specs/paths.lisp"))
+  (testing "the functions it covers include those checked by properties alone"
+    (let ((registry (make-hash-table-registry)))
+      (register-specifications registry)
+      (ok (%same-names-p (covered-functions registry)
+                         '(cl-mcp/src/utils/strings:ensure-trailing-newline
+                           cl-mcp/src/utils/sanitize:sanitize-for-json
+                           cl-mcp/src/utils/sanitize:sanitize-error-message
+                           cl-mcp/src/utils/paths:allowed-read-path
+                           cl-mcp/src/utils/paths:resolve-readable-path)))))
   (testing "a definition missing from the listing is reported"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)
@@ -258,6 +297,36 @@
          (entry (%only-entry report)))
     (ng (report-ok-p report))
     (ok (eq :timeout (getf entry :status)))))
+
+(deftest runner-keeps-a-cleanup-failure-apart-from-stderr-noise
+  ;; Ordinary stderr output comes first, then the body fails, then the
+  ;; fixture's cleanup fails too.  The report must keep the body's failure as
+  ;; the result and the cleanup failure in full, not just the first stderr line.
+  (setf *strays* '())
+  (let* ((report (%run '((:property fixture-fails-and-cannot-clean-up))))
+         (entry (%only-entry report))
+         (cleanup (find-if (lambda (row) (search "READ-FIXTURE-CLEANUP-WARNING"
+                                                 (getf row :type)))
+                           (getf entry :warnings))))
+    (unwind-protect
+         (progn
+           (ng (report-ok-p report))
+           (ok (eq :error (getf entry :status)) "the body's own failure is the result")
+           (ok (search "body failed on purpose" (getf (getf entry :condition) :report)))
+           (ok (search "noise before the failure" (getf entry :error-output-sample))
+               "ordinary stderr output is still counted and sampled")
+           (ok cleanup "the cleanup failure is kept as a structured warning")
+           (ok (and cleanup (= 1 (getf cleanup :count))))
+           (dolist (stray *strays*)
+             (let ((project (subseq stray 0 (- (length stray) (length "stray.txt")))))
+               (ok (and cleanup (some (lambda (text) (search project text))
+                                      (getf cleanup :reports)))
+                   "naming the directory the cleanup could not remove"))))
+      (dolist (stray *strays*)
+        (let ((project (subseq stray 0 (- (length stray) (length "stray.txt")))))
+          (sb-posix:unlink stray)
+          (sb-posix:rmdir project)
+          (sb-posix:rmdir (subseq project 0 (- (length project) (length "project/")))))))))
 
 (deftest judge-entry-defaults-to-failure
   (testing "any status but :PASSED is a problem"
