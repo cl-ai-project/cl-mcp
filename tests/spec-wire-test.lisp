@@ -251,24 +251,6 @@ seconds."
 ;;; ------------------------------------------------------------------------
 ;;; Comparing two answers
 
-(defun %leaves (value &optional (path ""))
-  "Return VALUE as (PATH . LEAF) pairs, one per JSON leaf.
-
-A leaf is kept as the value when it is a string or a number and as its JSON
-kind otherwise, so true, false, null and an empty array stay four answers."
-  (cond ((json-object-p value)
-         (let ((pairs '()))
-           (maphash (lambda (key child)
-                      (setf pairs (append pairs (%leaves child (format nil "~A.~A" path key)))))
-                    value)
-           pairs))
-        ((and (json-array-p value) (plusp (length value)))
-         (loop for child across value
-               for index from 0
-               append (%leaves child (format nil "~A[~D]" path index))))
-        ((or (stringp value) (numberp value)) (list (cons path value)))
-        (t (list (cons path (json-kind value t))))))
-
 (defun %run-dependent-p (path)
   "True for a field whose value belongs to one run in one image: how long it
 took, which object id the image handed out, and which registry object it
@@ -278,22 +260,81 @@ still a difference."
       (search "object_id" path)
       (search "environment.registry" path)))
 
-(defun %comparable (document)
-  "Return DOCUMENT's leaves with the run-dependent values reduced to kinds."
-  (mapcar (lambda (leaf)
-            (if (%run-dependent-p (car leaf))
-                (cons (car leaf)
-                      (if (numberp (cdr leaf)) :number (json-kind (cdr leaf) t)))
-                leaf))
-          (%leaves document)))
+(defun %differences (one other &optional (path ""))
+  "Return where the parsed JSON ONE and OTHER differ, as (PATH ONE OTHER)
+entries, walking both together.
 
-(defun %differences (one other)
-  "Return the leaves ONE and OTHER do not share, sorted by path."
-  (sort (set-exclusive-or (%comparable one) (%comparable other) :test #'equal)
-        #'string< :key #'car))
+The nodes are compared, not a flattening of them.  An object's keys are
+compared as a set, so a key one side lacks is a difference even when its
+value on the other side is an empty object; an array's length is compared
+before its elements; and a leaf is compared by value, so true against false
+is a difference and so is false against null.  Only at a run-dependent
+path (%RUN-DEPENDENT-P) is a leaf compared by its JSON kind instead, and
+even there a number against a null is a difference."
+  (flet ((here (a b) (list (list path a b))))
+    (cond
+      ((and (json-object-p one) (json-object-p other))
+       (let ((keys (union (loop for key being the hash-keys of one collect key)
+                          (loop for key being the hash-keys of other collect key)
+                          :test #'equal)))
+         (loop for key in (sort keys #'string<)
+               for child-path = (format nil "~A.~A" path key)
+               append (multiple-value-bind (a a-present) (gethash key one)
+                        (multiple-value-bind (b b-present) (gethash key other)
+                          (if (and a-present b-present)
+                              (%differences a b child-path)
+                              (list (list child-path
+                                          (if a-present a :absent)
+                                          (if b-present b :absent)))))))))
+      ((and (json-array-p one) (json-array-p other))
+       (if (/= (length one) (length other))
+           (here (list :length (length one)) (list :length (length other)))
+           (loop for a across one
+                 for b across other
+                 for index from 0
+                 append (%differences a b (format nil "~A[~D]" path index)))))
+      ((or (json-object-p one) (json-object-p other)
+           (json-array-p one) (json-array-p other))
+       (here one other))
+      ((%run-dependent-p path)
+       (unless (eq (json-kind one t) (json-kind other t))
+         (here one other)))
+      ((equal one other) '())
+      (t (here one other)))))
 
 ;;; ------------------------------------------------------------------------
 ;;; Tests
+
+(deftest the-comparison-sees-the-differences-it-claims-to
+  ;; The inline-against-pool test is only as good as this function: a
+  ;; comparison that reads true and false as one answer, or an empty object as
+  ;; nothing at all, would pass a transport that changed either.
+  (flet ((differ-p (one other)
+           (and (%differences (parse-response one) (parse-response other)) t)))
+    (loop for (label one other expected)
+            in '(("true against false" "{\"flag\":true}" "{\"flag\":false}" t)
+                 ("false against null" "{\"flag\":false}" "{\"flag\":null}" t)
+                 ("[] against null" "{\"xs\":[]}" "{\"xs\":null}" t)
+                 ("\"\" against []" "{\"s\":\"\"}" "{\"s\":[]}" t)
+                 ("a key holding {} against no key" "{\"x\":{}}" "{}" t)
+                 ("a key holding null against no key" "{\"x\":null}" "{}" t)
+                 ("one {} against two" "{\"xs\":[{}]}" "{\"xs\":[{},{}]}" t)
+                 ("a string against another" "{\"s\":\"a\"}" "{\"s\":\"b\"}" t)
+                 ("a deep false against true"
+                  "{\"a\":[{\"b\":{\"c\":false}}]}" "{\"a\":[{\"b\":{\"c\":true}}]}" t)
+                 ("an object against an array" "{\"x\":{}}" "{\"x\":[]}" t)
+                 ("the same document, keys in another order"
+                  "{\"a\":1,\"b\":[true,null,{}]}" "{\"b\":[true,null,{}],\"a\":1}" nil)
+                 ("elapsed times that differ only in value"
+                  "{\"results\":[{\"elapsed\":0.5}]}" "{\"results\":[{\"elapsed\":0.25}]}" nil)
+                 ("object ids that differ only in value"
+                  "{\"value\":{\"object_id\":3}}" "{\"value\":{\"object_id\":91}}" nil)
+                 ("an elapsed time against null"
+                  "{\"results\":[{\"elapsed\":0.5}]}" "{\"results\":[{\"elapsed\":null}]}" t)
+                 ("an object id against null"
+                  "{\"value\":{\"object_id\":3}}" "{\"value\":{\"object_id\":null}}" t))
+          do (ok (eq expected (differ-p one other))
+                 (format nil "~A: ~:[the same~;a difference~]" label expected)))))
 
 (deftest one-session-loads-discovers-checks-and-replays
   (with-wire-server (port :worker-pool t)
@@ -348,8 +389,8 @@ still a difference."
                      (ok (equal (json-at result "seed") (json-at again "seed")))
                      (ok (equal (json-at result "definition_digest")
                                 (json-at again "definition_digest")))
-                     (ok (equal (%leaves (json-at result "counterexample"))
-                                (%leaves (json-at again "counterexample"))))))))
+                     (ok (null (%differences (json-at result "counterexample")
+                                             (json-at again "counterexample"))))))))
              (testing "a check that holds arrives as true"
                (let ((checked (%tool client "spec-check" "function" (%fixture "WIRE-CLAMP")
                                      "trials" 20)))

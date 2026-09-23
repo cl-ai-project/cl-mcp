@@ -1193,7 +1193,7 @@ printing them as `"FALSE"`.
 ## The wire (3E-2)
 
 **Real cl-spec, a real server and real workers, opt-in**
-(`tests/spec-wire-test.lisp`, 5 tests). Everything above checks a builder's
+(`tests/spec-wire-test.lisp`, 6 tests). Everything above checks a builder's
 output or the adapter in the calling image. These tests are a client: a TCP
 server started with the `cl-spec` group, one TCP connection per session, the
 MCP handshake, and only the public tools. Every answer is parsed from the bytes
@@ -1222,12 +1222,19 @@ and the check-it backend, so `load-system` loads it by name.
 - **Inline against pool:** the same seven calls -- a failing property, a
   passing one, a contract, a compound counterexample, `spec-symbol`,
   `spec-describe` and `spec-list` -- go through a pooled server and then an
-  inline one. The two answers are compared leaf by leaf, keeping the JSON
-  kinds. Only three kinds of field are compared by kind alone: elapsed times,
-  object ids and the registry's printed identity. They belong to one run in one
-  image, and a `null` where a number was is still a difference. With the parse
-  fix taken out, this test reports `verified`, `thread_leaked` and
+  inline one. The two answers are compared node by node: an object's keys as
+  a set (a key holding `{}` is not a missing key), an array's length before its
+  elements, and every leaf by value (`true` is not `false`, `false` is not
+  `null`). Only three kinds of field are compared by JSON kind alone: elapsed
+  times, object ids and the registry's printed identity. They belong to one run
+  in one image, and a `null` where a number was is still a difference. With the
+  parse fix taken out, this test reports `verified`, `thread_leaked` and
   `results[0].thread_leaked` as `null`.
+- **The comparison itself:** fifteen fixed pairs, no server. They cover `true`
+  against `false`, `false` against `null`, a key holding `{}` against no key,
+  `[{}]` against `[{},{}]`, and an elapsed time that differs only in value
+  (the same) against one that is `null` (a difference). The inline-against-pool
+  test is only as strong as this function.
 
 It spawns processes, so it is not in `tests.lisp`: in the default suite it
 could only skip, and a suite that skips is a suite nobody ran. The `specs` job

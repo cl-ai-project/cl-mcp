@@ -141,6 +141,7 @@ test counts as a failure, not a pass."
     ;; It spawns worker processes, so it cannot skip its way to green here
     ;; the way it could in the default suite -- which is why it is not there.
     ("cl-mcp/tests/spec-wire-test"
+     "the-comparison-sees-the-differences-it-claims-to"
      "one-session-loads-discovers-checks-and-replays"
      "a-counterexample-object-belongs-to-the-session-that-made-it"
      "sessions-keep-their-own-registries-and-run-in-their-workers"
