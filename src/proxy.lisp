@@ -92,9 +92,14 @@ proxied requests.  Used by cancel-request to find which worker to kill.")
   "When *use-worker-pool* is non-nil, proxy the tool call to a worker
 process and wrap the result for JSON-RPC.  Otherwise execute INLINE-BODY.
 METHOD is a string like \"worker/eval\".  PARAMS-FORM builds the
-arguments hash-table.  ID is the JSON-RPC request id."
+arguments hash-table.  ID is the JSON-RPC request id.
+
+The worker's result goes to the client unread, so it is parsed with its JSON
+types kept: a false the worker wrote stays false rather than turning into the
+null an inline call would never have sent."
   `(if *use-worker-pool*
-       (result ,id (proxy-to-worker ,id ,method ,params-form))
+       (result ,id (proxy-to-worker ,id ,method ,params-form
+                                    :preserve-json-types t))
        (progn ,@inline-body)))
 
 (defun %resolve (pkg-name sym-name)
@@ -312,9 +317,13 @@ this request."
       (setf (gethash "timeout_seconds" params) +max-proxy-rpc-timeout+))
     params))
 
-(defun proxy-to-worker (id method params)
+(defun proxy-to-worker (id method params &key preserve-json-types)
   "Proxy a tool call to the session's dedicated worker process.
 Returns the worker's JSON-RPC result hash-table directly.
+PRESERVE-JSON-TYPES asks for the result parsed so that it encodes back to the
+JSON the worker wrote -- what a caller relaying it to the client needs.  A
+caller that reads the result itself (clos-describe) leaves it off and gets
+yason's defaults, which it was written against.
 Registers the request in *active-requests* so notifications/cancelled
 can map request-id to session and kill the worker.
 Uses atomic check-and-clear for crash notification to prevent
@@ -366,8 +375,12 @@ TOCTOU race with concurrent requests for the same session."
                        (%effective-rpc-timeout
                         (%clamp-timeout-param params))))
                  (handler-case
-                     (funcall %cached-worker-rpc% worker method params
-                              :timeout effective-timeout)
+                     ;; The keyword only when asked for, so a stand-in RPC
+                     ;; that takes only :TIMEOUT still serves the rest.
+                     (apply %cached-worker-rpc% worker method params
+                            :timeout effective-timeout
+                            (when preserve-json-types
+                              (list :preserve-json-types t)))
                    (error (e)
                      (cond
                        ((typep e worker-crashed-sym)

@@ -14,6 +14,9 @@
                 #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
+  ;; A bare :import-from declares the dependency; its reader is internal and
+  ;; found by name where it is used.
+  (:import-from #:cl-mcp/src/worker-client)
   (:import-from #:yason #:parse))
 
 (in-package #:cl-mcp/tests/protocol-test)
@@ -382,6 +385,28 @@
       (ok (= 42 (funcall sanitize-fn 42)) "integer passes through")
       (ok (eq t (funcall sanitize-fn t)) "t passes through")
       (ok (null (funcall sanitize-fn nil)) "nil passes through"))))
+
+(deftest json-literals-survive-the-encoding-retry-and-the-worker-rpc
+  (testing "the retry keeps true, false and null as literals, not their names"
+    (let* ((sanitize (find-symbol "%SANITIZE-FOR-ENCODING" :cl-mcp/src/protocol))
+           (clean (funcall sanitize (make-ht "t" 'yason:true "f" 'yason:false
+                                             "n" :null))))
+      (ok (equal "{\"t\":true,\"f\":false,\"n\":null}"
+                 (with-output-to-string (s) (yason:encode clean s))))))
+  (testing "a relayed worker result encodes back to the JSON the worker wrote"
+    (let* ((read (find-symbol "%READ-JSON-RPC-RESPONSE" :cl-mcp/src/worker-client))
+           (result "{\"verified\":false,\"digest\":null,\"gaps\":[],\"text\":\"\",\"ok\":true}")
+           (line (format nil "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":~A}~%" result)))
+      (flet ((relay (&rest options)
+               (with-input-from-string (stream line)
+                 (with-output-to-string (s)
+                   (yason:encode (apply read stream 7 nil options) s)))))
+        (ok (equal result (relay :preserve-json-types t))
+            "false, null, [] and \"\" are four answers and stay four")
+        ;; What the parent's own callers get, and read with truth tests.
+        (ok (equal "{\"verified\":null,\"digest\":null,\"gaps\":[],\"text\":\"\",\"ok\":true}"
+                   (relay))
+            "without the option false and null are the same NIL")))))
 
 (deftest encode-json-level2-succeeds-for-non-serializable
   (testing "%encode-json level-2 succeeds when sanitizer converts objects to strings"

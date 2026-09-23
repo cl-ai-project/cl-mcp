@@ -450,10 +450,16 @@ either issue."
       (write-line json-line stream)
       (force-output stream))))
 
-(defun %read-json-rpc-response (stream id timeout)
+(defun %read-json-rpc-response (stream id timeout &key preserve-json-types)
   "Read a JSON-RPC 2.0 response from STREAM matching ID.
 When TIMEOUT is non-NIL, signals SB-EXT:TIMEOUT after that many
 seconds.  Returns the parsed JSON hash-table on success.
+
+PRESERVE-JSON-TYPES parses the response so that encoding it again writes the
+same JSON: false as YASON:FALSE, true as YASON:TRUE, null as :NULL and every
+array as a vector.  Without it -- yason's defaults, which the parent's own
+callers read with Lisp truth tests -- false and null both arrive as NIL, and
+a result relayed to a client says null for both.
 Signals WORKER-RPC-ERROR for legitimate JSON-RPC error responses
 from the worker handler.  Signals SIMPLE-ERROR for protocol-level
 failures (parse errors, ID mismatches) which indicate stream
@@ -462,7 +468,12 @@ corruption."
            (let ((line (%read-line-limited stream nil +max-json-line-bytes+)))
              (unless line
                (error 'end-of-file :stream stream))
-             (let ((json (yason:parse line)))
+             (let ((json (if preserve-json-types
+                             (yason:parse line
+                                          :json-arrays-as-vectors t
+                                          :json-booleans-as-symbols t
+                                          :json-nulls-as-keyword t)
+                             (yason:parse line))))
                (unless (hash-table-p json)
                  (error "Invalid JSON-RPC response: not an object"))
                ;; Verify ID matches
@@ -947,9 +958,12 @@ worker in the first place."
   (and (eql +leaked-thread-exit-code+ (worker-last-exit-code worker))
        (%reported-a-leak-p worker)))
 
-(defun worker-rpc (worker method params &key timeout)
+(defun worker-rpc (worker method params &key timeout preserve-json-types)
   "Send a JSON-RPC request to WORKER and return the result hash-table.
 TIMEOUT, when non-NIL, is the maximum seconds to wait for a response.
+PRESERVE-JSON-TYPES keeps false and null apart in the result (see
+%READ-JSON-RPC-RESPONSE); a caller relaying the result to a client needs
+that, and one reading it with Lisp truth tests must not ask for it.
 
 Signals WORKER-CRASHED if the worker process has died (EOF on stream),
 timed out (sb-ext:timeout), encountered a stream/socket error, or if
@@ -1001,7 +1015,8 @@ without marking the worker as crashed."
           (progn
             (%send-json-rpc (worker-stream worker) id method params)
             (multiple-value-bind (result leaked)
-                (%read-json-rpc-response (worker-stream worker) id timeout)
+                (%read-json-rpc-response (worker-stream worker) id timeout
+                                         :preserve-json-types preserve-json-types)
               ;; Recorded for pool-status.  Nothing here acts on it: the
               ;; worker retires itself rather than waiting to be told, since
               ;; only it can see whether the thread is still running now.
