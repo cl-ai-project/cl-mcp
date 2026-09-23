@@ -1051,13 +1051,15 @@ USE-WORKER-POOL to take the proxy branch instead."
     ;; other key names would be caught by no test at all -- the worker would
     ;; silently fall back to NIL for that argument.
     (let ((captured nil)
+          (preserved nil)
           (original (fdefinition 'cl-mcp/src/proxy:proxy-to-worker)))
       (unwind-protect
            (progn
              (setf (fdefinition 'cl-mcp/src/proxy:proxy-to-worker)
-                   (lambda (id method params)
+                   (lambda (id method params &key preserve-json-types)
                      (declare (ignore id method))
-                     (setf captured params)
+                     (setf captured params
+                           preserved preserve-json-types)
                      (make-hash-table :test #'equal)))
              (call-macroexpand-tool
               (list "code" "(double-it 1)"
@@ -1071,6 +1073,8 @@ USE-WORKER-POOL to take the proxy branch instead."
         (setf (fdefinition 'cl-mcp/src/proxy:proxy-to-worker) original))
       (ok (hash-table-p captured)
           "the stub was reached, so the proxy branch really ran")
+      (ok preserved
+          "and asked for the result with its JSON types kept, since it goes to the client")
       (ok (equal '("forms" "level" "max_output_length" "note" "package"
                    "print_length" "print_level" "readtable" "sub_form")
                  (sort (loop for key being the hash-keys of captured

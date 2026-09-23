@@ -70,6 +70,14 @@
   "Maximum number of list/vector elements %sanitize-for-encoding will process.
 Guards against cyclic or extremely long lists causing OOM.")
 
+(defun %json-literal-p (object)
+  "Return true when OBJECT is how a JSON literal is held once parsed with its
+types kept: YASON:TRUE, YASON:FALSE or :NULL.
+
+They are symbols, so without this the retry below printed them -- a false a
+builder or a worker wrote went out as the string \"FALSE\"."
+  (member object '(yason:true yason:false :null)))
+
 (defun %sanitize-for-encoding (obj &optional (depth 0))
   "Recursively sanitize a JSON-compatible structure for encoding.
 Walks hash-tables, vectors, lists, and strings. Converts non-serializable
@@ -81,6 +89,7 @@ cyclic or extremely large structures."
       (typecase obj
         (string (sanitize-for-json obj))
         ((or number (member t nil)) obj)
+        ((satisfies %json-literal-p) obj)
         (t (or (ignore-errors (princ-to-string obj)) "#<depth-limit>")))))
   (typecase obj
     (string (sanitize-for-json obj))
@@ -127,6 +136,7 @@ cyclic or extremely large structures."
        (nreverse result)))
     (t (cond
          ((or (numberp obj) (eq obj t) (null obj)) obj)
+         ((%json-literal-p obj) obj)
          (t (or (ignore-errors (princ-to-string obj))
                 "#<unrepresentable>"))))))
 

@@ -66,6 +66,10 @@ run `spec-inspection-test`. So does the response layer (the four
 `build-spec-*-response` in `src/tools/spec-response-builders.lisp`): `symbol=`, then
 `property=`, and run `spec-responses-test` and `spec-response-builders-test`; a change to the
 replay line or to a JSON field also needs `spec-responses-specs-test` in its own process.
+A change to how a worker's result reaches the client (the parse in `src/worker-client.lisp`,
+`proxy-to-worker`/`with-proxy-dispatch`, or the encoder in `src/protocol.lisp`) needs
+`spec-wire-test` in its own process: it drives the spec tools over a real TCP server and
+workers and compares the pooled answers with the inline ones.
 Elsewhere the bundle is not required.
 
 ## Architecture

@@ -137,6 +137,16 @@ test counts as a failure, not a pass."
     ("cl-mcp/tests/spec-responses-specs-test"
      "a-property-replay-line-runs-the-property-it-names"
      "a-contract-replay-line-runs-the-contract-with-its-budget")
+    ;; A real TCP server and real workers, driven through the public tools.
+    ;; It spawns worker processes, so it cannot skip its way to green here
+    ;; the way it could in the default suite -- which is why it is not there.
+    ("cl-mcp/tests/spec-wire-test"
+     "the-comparison-sees-the-differences-it-claims-to"
+     "one-session-loads-discovers-checks-and-replays"
+     "a-counterexample-object-belongs-to-the-session-that-made-it"
+     "sessions-keep-their-own-registries-and-run-in-their-workers"
+     "a-stopped-server-leaves-no-worker-behind"
+     "inline-and-pool-send-the-same-json")
     ;; This one is the other way round: it needs a process with NO cl-spec,
     ;; because it builds a CL-SPEC package of its own to resolve against.  It
     ;; refuses to run when one is already there.

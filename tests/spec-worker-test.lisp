@@ -68,10 +68,11 @@ around it were interned."
 (defun %json-false-p (value)
   "Return true when VALUE is a JSON false that has crossed the worker RPC.
 
-Inline, a response carries YASON:FALSE; through a worker the same field is
-serialized to JSON and parsed back, and yason reads false as NIL.  Both
-render as false to a client, so the difference is only visible to a test
-holding the hash-table."
+These tests call PROXY-TO-WORKER without :PRESERVE-JSON-TYPES, the way a
+caller that reads the result itself does, so a false arrives as NIL here; the
+tools pass the option and relay YASON:FALSE.  What a client receives is
+checked on the wire, where the two cannot be confused, by
+tests/spec-wire-test.lisp."
   (or (null value) (eq value (find-symbol "FALSE" "YASON"))))
 
 (defun %load-cl-spec-and-fixture ()
