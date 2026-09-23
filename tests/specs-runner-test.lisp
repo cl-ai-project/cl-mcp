@@ -162,8 +162,8 @@ fixture did not create, so the cleanup fails while the body unwinds."
                          cl-mcp/src/utils/sanitize:sanitize-for-json
                          cl-mcp/src/utils/sanitize:sanitize-error-message)))
     (ok (= 3 (length (contract-names))))
-    (ok (= 46 (length (property-names))))
-    (ok (= 46 (length (remove-duplicates (property-names)))))
+    (ok (= 47 (length (property-names))))
+    (ok (= 47 (length (remove-duplicates (property-names)))))
     (ok (%same-names-p (remove-if-not (lambda (name)
                                         (string= "CL-MCP/SPECS/POOL-OWNERSHIP"
                                                  (package-name (symbol-package name))))
@@ -276,7 +276,9 @@ fixture did not create, so the cleanup fails while the body unwinds."
                            cl-mcp/src/pool:get-or-assign-worker
                            cl-mcp/src/pool:release-session
                            cl-mcp/src/pool:kill-session-worker
-                           cl-mcp/src/pool:shutdown-pool)))))
+                           cl-mcp/src/pool:shutdown-pool
+                           cl-mcp/src/proxy:proxy-to-worker
+                           cl-mcp/src/proxy:cancel-request)))))
   (testing "a definition missing from the listing is reported"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)

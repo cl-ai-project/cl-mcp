@@ -51,11 +51,14 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/pool:release-session` | none | the same two |
 | `cl-mcp/src/pool:kill-session-worker` | none | the same two |
 | `cl-mcp/src/pool:shutdown-pool` | none | the same two |
+| `cl-mcp/src/proxy:proxy-to-worker` | none (see *Request lifecycle*) | `request-lifecycle-keeps-its-promises` |
+| `cl-mcp/src/proxy:cancel-request` | none | the same |
 
 Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize`,
 `cl-mcp/specs/paths`, `cl-mcp/specs/write-paths`, `cl-mcp/specs/core-records`,
 `cl-mcp/specs/check-verdicts`, `cl-mcp/specs/check-routing`, `cl-mcp/specs/spec-inspection`,
-`cl-mcp/specs/spec-responses` and `cl-mcp/specs/pool-ownership`. Each Function Spec is
+`cl-mcp/specs/spec-responses`, `cl-mcp/specs/pool-ownership` and
+`cl-mcp/specs/request-lifecycle`. Each Function Spec is
 registered on the production symbol itself. Each read-access property is
 `(:about ...)` both read functions; each write-access property names the
 function or functions it calls.
@@ -1429,12 +1432,101 @@ by the circuit breaker, and the pool briefly over its cap during recovery
 (4D); `:crashed` overwriting `:released`, a cancelled spawn reporting the
 wrong message, and a runtime owner left pointing at a dead worker (4C).
 
+## Request lifecycle (4B)
+
+4A made each worker's ownership first-class. 4B does the same for each
+request: which request a cancellation acts on, what a request is reported to
+have done, and that nothing runs twice.
+
+**The record** (`src/request-lifecycle.lisp`). A proxied request is registered
+under its session and its JSON-RPC id -- the session is part of the identity,
+and the id is printed readably, so `1` and `"1"` stay two requests. It is
+registered first of all, before a worker is found for it, and moves through
+`:registered`, `:acquiring`, `:waiting-to-send`, `:executing` and
+`:responded`. `WORKER-RPC` calls two hooks while it holds the worker's
+stream: `before-send`, just before the bytes go out, and `after-receive`,
+once the answer has been read. So `:executing` means "this worker is running
+this request and nothing else".
+
+**Cancellation** acts by phase, under the registry lock:
+- before `:executing` it only marks the request, which stops at its next
+  boundary -- after the worker is found, or in `before-send` -- without
+  running, and its worker is left alone;
+- at `:executing` the worker is signalled while the registry still holds the
+  request there, and is remembered as stopped for a cancellation, so a
+  request queued behind it on that worker is refused in `before-send` instead
+  of being sent into a dying process;
+- at `:responded`, or once the request is gone, nothing is done.
+
+**Outcomes.** The phase a request reached decides what an error result the
+proxy builds may say (`execution_status`): `not-executed` before
+`:executing`, `execution-unknown` at it -- sent, no answer -- and
+`completed` once the worker answered, an error answer included. A request
+found a dead worker when its turn came is `not-executed`, not "timed out"
+or "crashed" itself. `repl-eval`'s own timeout is an error with
+`execution-unknown`, told by a sixth value rather than the raw value
+`:timeout`, which an expression may return.
+
+**Checking** (`specs/request-fixtures.lisp`). The real `proxy-to-worker`,
+`worker-rpc` and `cancel-request` run over a real socket to a fake worker, a
+TCP server in the image that keeps its own ledger of the requests it
+received and answers, errors, drops the connection or holds a request as
+scripted. Only the pool is stood in for. The ledger is the independent
+account: a request the fake worker never received did not run. A scenario
+fixes the worker's behavior for the request under test, where its
+cancellation arrives (never, while its worker is found, while it waits
+behind another request, while it runs, after its answer, or from another
+session) and whether a second request waits behind it -- 48 combinations,
+in fixed orderings, never raced.
+
+The checks, against the ledger: one result per request, nothing sent twice;
+an unsent request reports `not-executed` and a sent one never does; an
+answered one gets its answer, a worker error `completed`, a dropped one
+`execution-unknown`; a cancellation before the send withdraws the request
+and keeps the worker, one during it stops the worker and the request behind
+is told it did not run, and one after the answer or from another session
+changes nothing; nothing is left registered.
+
+- Generated: `request-lifecycle-keeps-its-promises` draws the scenarios.
+- Fixed (`tests/request-lifecycle-test.lisp`, default suite): the registry,
+  cancellation by phase, one case per fault below, the checks catching three
+  wrong lifecycles, and every combination of the real one.
+- Real worker (`tests/cancel-test.lisp`): a running `(sleep 30)` is
+  cancelled, its worker stopped, the result `execution-unknown`, and the
+  session goes on with a fresh worker.
+- Negative control: a cancellation that stops the worker whatever the
+  request's phase, an account that calls every request completed, and a
+  lookup that ignores the session.
+
+**What was found, and what changed.**
+- **a. A cancellation while the worker was being found was lost**, and the
+  request then ran: the request was registered, but a cancellation found no
+  worker to stop, removed the entry and returned. Now it marks the request,
+  which stops before it is sent.
+- **b. A cancellation stopped the session's worker, not the request**: a
+  request waiting behind another had the other one killed, and a cancellation
+  just after an answer could kill the session's next request. Now the worker
+  is stopped only while it runs the request named.
+- **c. Requests were keyed by id alone**, and every session numbers its
+  requests from the same small integers: two sessions' requests with the same
+  id overwrote each other, and the first to finish removed the other's entry.
+- **e. A request that never ran was reported as timing out or crashing
+  itself** -- the request queued behind one that timed out was told "Worker
+  RPC timed out ... took too long". Now it is told it was not run.
+- **f. A `repl-eval` timeout was a successful result.** Now it is an error
+  whose outcome is unknown.
+
+Left for later: a reset notice that can be delivered twice after a stopped
+worker (4C), no deadline on the stream lock and the write to the worker
+(4D), and the worker's idle read timing out in the middle of a line (4C) --
+see *Known issues*.
+
 ## Dependencies
 
 ```
 cl-mcp/specs ──> cl-mcp/src/utils/{strings,sanitize,paths}, cl-mcp/src/fs,
                  cl-mcp/src/spec-core-record, cl-mcp/src/spec-adapter-{core,report},
-                 cl-mcp/src/tools/spec-entry, cl-mcp/src/pool
+                 cl-mcp/src/tools/spec-entry, cl-mcp/src/pool, cl-mcp/src/proxy
              ──> cl-spec/main, cl-spec/src/backends/check-it
 
 cl-mcp (load, run) ──X──> cl-mcp/specs, cl-spec
@@ -1450,6 +1542,8 @@ tests.lisp ──> cl-mcp/tests/path-specs-test ──> cl-mcp/specs/path-fixtur
            ──> cl-mcp/tests/spec-inspection-test ──> cl-mcp/specs/spec-inspection-fixtures
            ──> cl-mcp/tests/pool-ownership-test ──> cl-mcp/specs/pool-fixtures
                                                  ──> cl-mcp/src/pool
+           ──> cl-mcp/tests/request-lifecycle-test ──> cl-mcp/specs/request-fixtures
+                                                    ──> cl-mcp/src/proxy
                (no cl-spec; not the bundle)
 self-test   ──> cl-mcp/tests/core-record-specs-test ──> cl-spec (opt-in)
 integration ──> cl-mcp/tests/spec-integration-test, cl-mcp/tests/check-routing-specs-test,
@@ -1478,7 +1572,8 @@ The default suite does load these tests and the fixture libraries they use:
 - `tests/check-routing-test.lisp`, with `specs/check-routing-fixtures.lisp`;
 - `tests/suite-judge-test.lisp`, with `specs/suite-judge.lisp`;
 - `tests/spec-inspection-test.lisp`, with `specs/spec-inspection-fixtures.lisp`;
-- `tests/pool-ownership-test.lisp`, with `specs/pool-fixtures.lisp`.
+- `tests/pool-ownership-test.lisp`, with `specs/pool-fixtures.lisp`;
+- `tests/request-lifecycle-test.lisp`, with `specs/request-fixtures.lisp`.
 
 None of them needs cl-spec or loads the bundle.
 
@@ -1897,6 +1992,16 @@ bundle run. Use it when a change touches a function the bundle covers.
 ## Known issues found while writing this
 
 These are recorded here, not fixed in this change:
+
+- **Requests, for 4C.** After a cancellation stops a worker, the reset it
+  owes can reach the session twice: the proxy clears the worker's flag when
+  it reports the stop, and `kill-worker`, running just after, sets it again.
+  The worker's idle read (`*worker-read-timeout*`) is a `with-timeout` around
+  `read-line`; firing mid-line, it drops the partial line and parses the rest
+  as a request, whose `id nil` reply the parent reads as a protocol error.
+- **Requests, for 4D.** Waiting for a worker's stream lock, and writing a
+  request to it, have no deadline: a request queued behind a long one waits
+  as long as that one runs.
 
 - **Pool, for 4D.** One crash can be counted twice by the circuit breaker:
   `%handle-worker-crash` marks a bound worker `:crashed`, releases the lock,

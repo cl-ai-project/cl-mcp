@@ -28,6 +28,40 @@ caller. Passing the string back into cl-mcp's own internals instead is the same 
 reverse — a path holding `[` re-read by the pathname reader becomes a wild pathname, which
 `truename` refuses.
 
+## Cancellation and `execution_status`
+
+With the worker pool, a tool call that runs in a worker is registered under
+its session and its JSON-RPC id from the moment it arrives. A
+`notifications/cancelled` for that id acts on that request only. The session
+is part of the identity, so another session's request with the same id is
+untouched.
+- **Before the request reaches its worker**, while a worker is found or
+  started, or while the request waits behind another on the same worker, it
+  is withdrawn and never sent. Its worker is kept.
+- **While its worker runs it**, that worker is stopped. A request waiting
+  behind it is not sent to the dying worker.
+- **After it was answered**, nothing happens.
+
+A cancelled request still gets a response, marked as below. Over stdio and
+TCP the server reads one message at a time, so a cancellation is read only
+after the request it names has been answered. Only HTTP can cancel a request
+in flight.
+
+An error result the proxy builds, rather than one a tool returned, carries
+`execution_status`. It says whether sending the request again could run it
+twice:
+- `"not-executed"`: the request never reached a worker. It was cancelled
+  first, no worker could be found or started, or the worker had stopped (for
+  example after a request ahead of it timed out) before this one was sent. It
+  did not run, and sending it again is safe.
+- `"execution-unknown"`: the request reached the worker and no answer came.
+  It timed out, the worker died, or the request was cancelled while it ran.
+  It may have run, partly or wholly. Nothing it changed was undone.
+- `"completed"`: the worker ran the request and answered with an error.
+
+No request is ever sent again automatically. The text of these results says
+the same as the field, since a client need show only the text.
+
 ## `repl-eval`
 Evaluate one or more forms and return the last value as a text item.
 
@@ -49,6 +83,10 @@ Output fields:
 - `stdout`: concatenated standard output from evaluation
 - `stderr`: concatenated standard error from evaluation
 - `result_object_id` (integer|null): when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
+- `isError` and `execution_status`: when the evaluation timed out, the result is an
+  error (`isError: true`) with `execution_status: "execution-unknown"`. It was stopped
+  partway, or could not be stopped at all, so whether it did what it was asked, and what it
+  changed, is unknown. An expression that merely returns `:timeout` is not an error.
 
 - `error_context` (object|null): when `repl-eval` returns a structured in-process error
   result, contains `condition_type`, `message`, `restarts`, and `frames` with local
