@@ -667,7 +667,7 @@ second line."
     :case-never-reached :properties-only :contract-only :generation-failed
     :timed-out-result :digest-moved :empty-counterexample
     :no-counterexample
-    :counterexample-not-collected :capture-collected-nil :capture-unavailable
+    :counterexample-unknown :capture-collected-nil :capture-unavailable
     :shrink-limited)
   "The sixteen spec-check answers these fixtures describe.
 
@@ -688,6 +688,15 @@ spec-check call carries that status today -- which is why it is not in
 it answers is checked here, apart from the positive examples so that a
 robustness case cannot be mistaken for a state the report layer builds.")
 
+(defparameter +run-facts+
+  '(:seed 3963993791726803706 :trials 25 :digest "fnv1a64-v1:00000000000000dd")
+  "The seed, trial count and definition digest of the fixtures' own run.
+
+Read by the result a report carries and by the cl-spec record projected
+beside it, so the top-level fields and core_result.data describe one run.
+The name is the one thing the two cannot share: the fixture names are
+strings in packages that do not exist, and a record names a symbol.")
+
 (defun %value (printed &key (type "integer") (complete t) (omitted 0) object-id)
   "Return one externalized value, as the report layer carries it."
   (list :printed printed :printed-complete complete :omitted-chars omitted
@@ -700,11 +709,14 @@ robustness case cannot be mistaken for a state the report layer builds.")
         collect (list :variable (symbol-data key) :value (%value text))))
 
 (defun %result (&key (name :property) (kind :property) (status :passed)
-                  (seed "3963993791726803706") (seed-p t) (profile :normal)
-                  (executed 25) (budget 25) contract counterexample
+                  (seed (format nil "~D" (getf +run-facts+ :seed))) (seed-p t)
+                  (profile :normal)
+                  (executed (getf +run-facts+ :trials))
+                  (budget (getf +run-facts+ :trials))
+                  contract counterexample
                   (counterexample-status :not-applicable) counterexample-unavailable-reason
                   shrunk (shrink-status :not-applicable) shrink-note
-                  (digest "fnv1a64-v1:00000000000000dd") (match :not-checked)
+                  (digest (getf +run-facts+ :digest)) (match :not-checked)
                   core-record message condition)
   "Return one per-property result, as %RESULT-PLIST builds it for a run that
 returned.
@@ -752,8 +764,9 @@ its thread was left running; a condition is carried as the condition."
    (list :property (symbol-data :property)
          :kind :property
          :status status
-         :trials (list :budget 25 :budget-source "backend-default")
-         :definition-digest "fnv1a64-v1:00000000000000dd"
+         :trials (list :budget (getf +run-facts+ :trials)
+                       :budget-source "backend-default")
+         :definition-digest (getf +run-facts+ :digest)
          :definition-digest-covers :property
          :definition-digest-complete t
          :definition-match :not-checked
@@ -779,7 +792,12 @@ makes.  Its :SOURCE is what the text is written from and its :DATA is what the
 JSON carries, so both have the shape a real report has.  The values under
 FIELDS are the ones the checks expect to find; nothing here recomputes them
 from the projection."
-  (let ((record (make-result-record :status status)))
+  (let ((record (make-result-record :status status
+                                    :seed (getf +run-facts+ :seed)
+                                    :trials (getf +run-facts+ :trials))))
+    ;; The same run as the result beside it, so the payload does not carry
+    ;; two seeds, two digests or two trial counts for one result.
+    (setf record (record-with record :definition-digest (getf +run-facts+ :digest)))
     (loop for (key value) on fields by #'cddr
           do (setf record (record-with record key value)))
     (multiple-value-bind (core state reason)
@@ -1157,18 +1175,24 @@ claim.  It is written here; nothing recomputes it from the report."
                          :verified :false
                          :counterexample :none
                          :text-must '("none reported by the backend"))))
-        (:counterexample-not-collected
+        (:counterexample-unknown
+         ;; A failure that returned, on a property whose argument list could
+         ;; not be read: an empty counterexample cannot be told from a
+         ;; missing one, so it is :UNKNOWN, not :NONE -- and not :UNAVAILABLE,
+         ;; which is for a run that returned no result at all.  With the
+         ;; definition unread, shrinking is not known to be on either.
          (values (report :verified nil
                          :results (list (%result :status :failed
-                                                 :counterexample-status :unavailable
+                                                 :counterexample-status :unknown
                                                  :counterexample-unavailable-reason
-                                                 "the backend recorded no arguments"
-                                                 :shrink-status :unavailable))
+                                                 "the property's argument list could not be read"
+                                                 :shrink-status :disabled))
                          :counts (failed-counts))
                  (expect :verdict :failed
                          :verified :false
-                         :counterexample :unavailable
-                         :text-must '("UNAVAILABLE"))))
+                         :counterexample :unknown
+                         :text-must '("UNKNOWN -- the property's argument list")
+                         :text-must-not '("none reported by the backend"))))
         (:capture-collected-nil
          ;; The captured value is NIL, and NIL is a value the code under test
          ;; produced.  Rendered as "unavailable" it would become a fact about

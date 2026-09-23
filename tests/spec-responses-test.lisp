@@ -331,10 +331,11 @@
       (ok (claims-p (line-starting-with text "verification gaps: ")
                     "cases-never-called")))))
 
-(deftest four-answers-about-a-counterexample-stay-four
+(deftest each-answer-about-a-counterexample-stays-its-own
   (dolist (row '((:empty-counterexample "present" 0)
                  (:no-counterexample "none" 0)
-                 (:counterexample-not-collected "unavailable" 0)
+                 ;; A failure whose argument list could not be read.
+                 (:counterexample-unknown "unknown" 0)
                  ;; A pass is not a verdict a counterexample belongs to.
                  (:passed-with-gaps "not-applicable" 0)
                  ;; A run that signalled before returning has none to show.
@@ -349,11 +350,11 @@
               (format nil "~(~A~) is ~A" case status))
           (ok (json-array-p (json-at result "counterexample")))
           (ok (eql count (length (json-at result "counterexample"))))))))
-  (testing "and the one that could not be read says why"
-    (multiple-value-bind (document text) (%check :counterexample-not-collected)
+  (testing "and the one whose emptiness cannot be read says why"
+    (multiple-value-bind (document text) (%check :counterexample-unknown)
       (let ((result (aref (json-at document "results") 0)))
         (ok (stringp (json-at result "counterexample_unavailable_reason"))))
-      (ok (claims-p text "UNAVAILABLE"))
+      (ok (claims-p text "UNKNOWN"))
       (ok (not (claims-p text "none reported"))
           "which is a different answer from the backend reporting none"))))
 
@@ -442,6 +443,24 @@
                  (json-at result "core_result" "data" "shrink_report" "termination"))
           "under the shrink report, where the result-data schema puts it"))))
 
+(deftest the-projected-record-describes-the-run-beside-it
+  ;; Every scenario that carries evidence projects a cl-spec record of its
+  ;; own.  One whose seed, digest or trial count differed from the result's
+  ;; would be two runs in one answer, and a later check comparing the two
+  ;; would start from a false premise.
+  (dolist (case '(:case-never-reached :capture-collected-nil :capture-unavailable
+                  :shrink-limited))
+    (multiple-value-bind (document text) (%check case)
+      (declare (ignore text))
+      (let* ((results (json-at document "results"))
+             (result (aref results (1- (length results))))
+             (data (json-at result "core_result" "data")))
+        (testing (format nil "~(~A~)" case)
+          (ok (equal (json-at result "seed") (json-at data "seed")))
+          (ok (equal (json-at result "definition_digest")
+                     (json-at data "definition_digest")))
+          (ok (eql (json-at result "trials" "executed") (json-at data "trials"))))))))
+
 (deftest every-scenario-speaks-the-report-layers-own-vocabulary
   ;; The descriptors claim to be states the report layer builds.  A value it
   ;; never emits -- a status of :ABSENT, a gap nobody appends -- would make a
@@ -487,14 +506,20 @@ the fields that only mean something together."
           :worker-reuse (getf report :worker-reuse)
           :verification-gaps (getf report :verification-gaps))))
 
-(defun %produced-report (entry &rest arguments)
+(defun %produced-report (entry &key (target :property) (timeout-seconds 30))
   "Return what CHECK-REPORT builds for one property whose stand-in run behaves
-as the SPY-API ENTRY says, with ARGUMENTS ahead of the defaults."
-  (let ((api (spy-api (list (list* :name 'routing-p1 :kind :property entry)))))
-    (apply #'check-report api :ok
-           (append arguments
-                   (list :property (values (designator :p1 :qualified))
-                         :timeout-seconds 30)))))
+as the SPY-API ENTRY says.
+
+TARGET :PROPERTY names the property itself.  :ABOUT selects it as a property
+about ROUTING-F instead, which is the selection whose definition is read when
+the result is described rather than when it is selected -- the one route by
+which a definition that cannot be read still reaches a run."
+  (let ((api (spy-api (list (list* :name 'routing-p1 :kind :property
+                                   :about (eq target :about) entry)))))
+    (apply #'check-report api :ok :timeout-seconds timeout-seconds
+           (ecase target
+             (:property (list :property (values (designator :p1 :qualified))))
+             (:about (list :symbol (values (designator :f :qualified))))))))
 
 (deftest each-scenario-is-a-combination-the-report-layer-builds
   ;; A vocabulary check passes a scenario whose every value occurs somewhere.
@@ -508,6 +533,9 @@ as the SPY-API ENTRY says, with ARGUMENTS ahead of the defaults."
                (:has-failure (:status :failed
                               :arguments (amount subject)
                               :counterexample (amount 68 subject 0)))
+               ;; A failure that returned, whose definition cannot be read.
+               (:counterexample-unknown (:status :failed :unreadable-definition t)
+                :target :about)
                (:generation-failed (:signal ,'spy-generator-unavailable))
                ;; Interruptible, so its thread is stopped and not leaked.
                (:timed-out-result (:sleep 5) :timeout-seconds 0.5))

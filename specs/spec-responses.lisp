@@ -378,10 +378,11 @@ that did not fit."
 (defun %counterexample-holds-p (facts document)
   "Return true when the evidence for a failure is the state it is in.
 
-Four answers, and they are not the same one.  An empty counterexample is a
-property of no arguments that failed; an absent one is a run with nothing to
-show; an unavailable one is evidence that could not be read; and a run that
-never got as far as generating has none to have."
+Several answers, and they are not the same one.  An empty counterexample is a
+property of no arguments that failed; one reported as none is a failure the
+backend gave no arguments for; an unknown one is a failure whose argument list
+could not be read, so its emptiness means nothing; an unavailable one belongs
+to a run that returned no result; and a pass has none to have."
   (let ((results (json-at document "results")))
     (or (zerop (length results))
         (let* ((result (aref results (1- (length results))))
@@ -394,7 +395,14 @@ never got as far as generating has none to have."
                  ;; The backend reported none, and the argument list was read:
                  ;; a statement about the run, not about cl-mcp.
                  (:none (and (equal "none" status) (zerop (length value))))
-                 ;; It could not be read, and the reason says so.
+                 ;; A failure whose argument list could not be read: an
+                 ;; empty list that cannot be called either answer, and the
+                 ;; reason says why.
+                 (:unknown (and (equal "unknown" status)
+                                (zerop (length value))
+                                (stringp (json-at result
+                                                  "counterexample_unavailable_reason"))))
+                 ;; The run returned no result to read, and the reason says so.
                  (:unavailable (and (equal "unavailable" status)
                                     (zerop (length value))
                                     (stringp (json-at result

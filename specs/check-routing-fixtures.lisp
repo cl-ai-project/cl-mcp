@@ -490,8 +490,9 @@ seed the result reports when the run was given none), :DEFINITION-DIGEST (a
 contract definition's own digest), :SIGNAL (a condition the run signals
 instead of answering -- SPY-GENERATOR-UNAVAILABLE is registered as cl-spec's
 generator-unavailable class), :SLEEP (seconds the run takes before it
-answers), :ARGUMENTS (a property's argument list) and :COUNTEREXAMPLE (the
-{variable value} plist the result records).
+answers), :ARGUMENTS (a property's argument list), :COUNTEREXAMPLE (the
+{variable value} plist the result records) and :UNREADABLE-DEFINITION (the
+property's definition reader signals).
 
 BACKEND-DEFAULT is what the backend-default reader answers, or :UNREADABLE for
 a reader that signals.  CALLS is a cons whose CAR collects, most recent first,
@@ -569,6 +570,8 @@ runner, the registry and backend it saw on its own thread."
                 (note :key :property-data :name name :arguments (list :registry registry))
                 (let ((entry (entry name :property)))
                   (unless entry (error 'routing-unknown-name))
+                  (when (getf entry :unreadable-definition)
+                    (error "The definition could not be projected."))
                   (%property-definition name :trials (getf entry :trials
                                                            (list :smoke 5 :normal 25))
                                              :arguments (getf entry :arguments))))
