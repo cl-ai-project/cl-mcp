@@ -39,6 +39,7 @@
   (:import-from #:cl-mcp/specs/check-verdicts)
   (:import-from #:cl-mcp/specs/check-routing)
   (:import-from #:cl-mcp/specs/spec-inspection)
+  (:import-from #:cl-mcp/specs/spec-responses)
   (:export #:register-specifications
            #:contract-names
            #:property-names
@@ -59,7 +60,8 @@ of the function it describes, not under a CL-MCP/SPECS package."
           (cl-mcp/specs/core-records:contract-names)
           (cl-mcp/specs/check-verdicts:contract-names)
           (cl-mcp/specs/check-routing:contract-names)
-          (cl-mcp/specs/spec-inspection:contract-names)))
+          (cl-mcp/specs/spec-inspection:contract-names)
+          (cl-mcp/specs/spec-responses:contract-names)))
 
 (defun property-names ()
   "Return the properties this bundle defines."
@@ -70,7 +72,8 @@ of the function it describes, not under a CL-MCP/SPECS package."
           (cl-mcp/specs/core-records:property-names)
           (cl-mcp/specs/check-verdicts:property-names)
           (cl-mcp/specs/check-routing:property-names)
-          (cl-mcp/specs/spec-inspection:property-names)))
+          (cl-mcp/specs/spec-inspection:property-names)
+          (cl-mcp/specs/spec-responses:property-names)))
 
 (defun spec-names ()
   "Return the named data specs this bundle defines."
@@ -81,7 +84,8 @@ of the function it describes, not under a CL-MCP/SPECS package."
           (cl-mcp/specs/core-records:spec-names)
           (cl-mcp/specs/check-verdicts:spec-names)
           (cl-mcp/specs/check-routing:spec-names)
-          (cl-mcp/specs/spec-inspection:spec-names)))
+          (cl-mcp/specs/spec-inspection:spec-names)
+          (cl-mcp/specs/spec-responses:spec-names)))
 
 (defun generator-names ()
   "Return the custom generators this bundle defines."
@@ -92,7 +96,8 @@ of the function it describes, not under a CL-MCP/SPECS package."
           (cl-mcp/specs/core-records:generator-names)
           (cl-mcp/specs/check-verdicts:generator-names)
           (cl-mcp/specs/check-routing:generator-names)
-          (cl-mcp/specs/spec-inspection:generator-names)))
+          (cl-mcp/specs/spec-inspection:generator-names)
+          (cl-mcp/specs/spec-responses:generator-names)))
 
 (defun call-examples ()
   "Return the bundle's concrete calls, as (FUNCTION ARGUMENTS [CASE]), which the
@@ -104,7 +109,8 @@ runner checks with CL-SPEC:CHECK-CALL apart from generated trials."
           (cl-mcp/specs/core-records:call-examples)
           (cl-mcp/specs/check-verdicts:call-examples)
           (cl-mcp/specs/check-routing:call-examples)
-          (cl-mcp/specs/spec-inspection:call-examples)))
+          (cl-mcp/specs/spec-inspection:call-examples)
+          (cl-mcp/specs/spec-responses:call-examples)))
 
 (defun register-specifications (&optional (registry *registry*))
   "Install every definition of this bundle in REGISTRY, the current
@@ -122,7 +128,8 @@ REGISTRY after the call returns: this does not bind a registry of its own."
     (cl-mcp/specs/core-records:register-specifications)
     (cl-mcp/specs/check-verdicts:register-specifications)
     (cl-mcp/specs/check-routing:register-specifications)
-    (cl-mcp/specs/spec-inspection:register-specifications))
+    (cl-mcp/specs/spec-inspection:register-specifications)
+    (cl-mcp/specs/spec-responses:register-specifications))
   (values (contract-names) (property-names)))
 
 ;;; Loading the bundle registers it where MCP's spec-list and spec-symbol look.

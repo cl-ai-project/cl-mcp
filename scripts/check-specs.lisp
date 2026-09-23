@@ -134,6 +134,9 @@ test counts as a failure, not a pass."
      "real-reads-run-no-form-of-the-declaration"
      "real-redefinition-reaches-describe-and-leaves-another-registry-alone"
      "real-entries-keep-the-kind-name-and-bounds-they-were-given")
+    ("cl-mcp/tests/spec-responses-specs-test"
+     "a-property-replay-line-runs-the-property-it-names"
+     "a-contract-replay-line-runs-the-contract-with-its-budget")
     ;; This one is the other way round: it needs a process with NO cl-spec,
     ;; because it builds a CL-SPEC package of its own to resolve against.  It
     ;; refuses to run when one is already there.
