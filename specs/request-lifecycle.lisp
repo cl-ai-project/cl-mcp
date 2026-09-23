@@ -10,9 +10,10 @@
 ;;;; A drawn scenario fixes what the worker does with the request under test
 ;;;; -- answers, answers with an error, drops the connection, or holds it --
 ;;;; where its cancellation arrives -- never, while its worker is found,
-;;;; while it waits behind another request, while it runs, after its answer,
-;;;; or from another session -- and whether a second request waits behind
-;;;; it.  The orderings are fixed, not raced.
+;;;; while it waits behind another request, while it runs, after its answer
+;;;; was read and before it was delivered, after its answer, or from another
+;;;; session -- and whether a second request waits behind it.  The orderings
+;;;; are fixed, not raced.
 ;;;;
 ;;;; Verified domain: one session's requests on one worker, three at most,
 ;;;; in those orderings.  Not covered: requests that race each other or a
@@ -82,8 +83,9 @@ one whose connection was dropped mid-run reports execution-unknown.  A
 cancellation acts on the request it names -- before the request reaches the
 worker it only withdraws it, and the worker is kept; while the worker runs it
 the worker is stopped, and a request waiting behind is told it did not run;
-after the answer, or from another session, nothing changes -- and nothing is
-left registered."
+between reading the answer and delivering it the cancellation stands and the
+answer is withheld, never both; after the answer, or from another session,
+nothing changes -- and nothing is left registered."
     (:about proxy-to-worker cancel-request)
     (:kind :invariant)
     (:trials (:smoke 12 :normal 48))

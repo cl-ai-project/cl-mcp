@@ -30,6 +30,8 @@
   (:import-from #:cl-mcp/src/request-lifecycle
                 #:find-request
                 #:request-phase
+                #:request-external-id
+                #:cancellation-requested-p
                 #:*requests*
                 #:*requests-lock*)
   (:import-from #:cl-mcp/src/log
@@ -109,11 +111,18 @@ parent closing it."
     (bt:condition-notify (fake-server-condvar server))))
 
 (defun %drop (server)
-  "Close SERVER's connection from its side, as a stopped worker's would be."
+  "Drop SERVER's connection from its side, as a stopped worker's would be.
+
+Shut down rather than closed: a close from this thread leaves the server's
+own thread blocked in its read on that socket for good, while a shutdown
+wakes it with end of file and sends the parent end of file too.  The thread
+closes the socket itself on its way out."
   (bt:with-lock-held ((fake-server-lock server))
     (setf (fake-server-dropped server) t)
     (bt:condition-notify (fake-server-condvar server)))
-  (ignore-errors (usocket:socket-close (fake-server-connection server))))
+  (ignore-errors
+   (sb-bsd-sockets:socket-shutdown (usocket:socket (fake-server-connection server))
+                                   :direction :io)))
 
 (defun %write-json (stream object)
   "Write OBJECT to STREAM as one JSON line."
@@ -162,7 +171,8 @@ parent closing it."
       (error () nil))
     (bt:with-lock-held ((fake-server-lock server))
       (setf (fake-server-dropped server) t)
-      (bt:condition-notify (fake-server-condvar server)))))
+      (bt:condition-notify (fake-server-condvar server)))
+    (ignore-errors (usocket:socket-close connection))))
 
 (defun %start-fake-server ()
   "Return a started fake server and the worker connected to it."
@@ -184,18 +194,12 @@ parent closing it."
                          :socket client :stream (usocket:socket-stream client)))))
 
 (defun %stop-fake-server (server worker)
-  "Close WORKER's end first, so SERVER's thread -- blocked reading the next
-request -- sees end of file and returns, and wait for it; only then close
-SERVER's own end and its listener.  Closing a socket from another thread does
-not wake a read blocked on it, and closing the server's end first races that
-read: seen in about one run in twenty-five as a five-second stall."
+  "Close WORKER's end, drop SERVER's -- a shutdown, which wakes its thread's
+read (%DROP) -- and wait a bounded time for that thread, which closes its
+socket on the way out; then close the listener."
   (ignore-errors (usocket:socket-close (cl-mcp/src/worker-client::worker-socket worker)))
-  (bt:with-lock-held ((fake-server-lock server))
-    ;; Wakes a thread waiting on a held request, which then returns.
-    (setf (fake-server-dropped server) t)
-    (bt:condition-notify (fake-server-condvar server)))
+  (%drop server)
   (sb-thread:join-thread (fake-server-thread server) :timeout 5 :default nil)
-  (ignore-errors (usocket:socket-close (fake-server-connection server)))
   (ignore-errors (usocket:socket-close (fake-server-listener server))))
 
 ;;; ------------------------------------------------------------------------
@@ -310,16 +314,40 @@ answer it with an error, drop the connection, or hold it until the scenario
 is done with it.")
 
 (defparameter +cancel-points+
-  '(:none :acquiring :waiting :executing :answered :other-session)
+  '(:none :acquiring :waiting :executing :answer-read :answered :other-session)
   "Where R's cancellation arrives: never; while its worker is being found;
 while it waits behind another request on the worker; while the worker runs
-it; after it was answered; or from another session using the same id.")
+it; after the worker's answer was read and before it was delivered; after it
+was answered; or from another session using the same id.")
 
 (defun draw-scenario ()
   "Draw a scenario with CL:RANDOM."
   (list :behavior (nth (random (length +behaviors+)) +behaviors+)
         :cancel (nth (random (length +cancel-points+)) +cancel-points+)
         :queued (zerop (random 2))))
+
+(defun %call-with-answer-paused (function)
+  "Call FUNCTION with two semaphores, READ and GO: while it runs, the answer to
+the request with id 7 is paused once it has been read and before it is
+delivered -- READ is signalled there, and delivery waits for GO.
+
+The pause is in NOTE-RESPONSE, the point where an answer and a cancellation
+are ordered, so a cancellation sent while it holds is one that reached the
+registry after the answer was read and before it was published."
+  (let* ((symbol 'cl-mcp/src/request-lifecycle:note-response)
+         (original (fdefinition symbol))
+         (read (sb-thread:make-semaphore))
+         (go (sb-thread:make-semaphore)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition symbol)
+                 (lambda (record)
+                   (when (eql 7 (request-external-id record))
+                     (sb-thread:signal-semaphore read)
+                     (sb-thread:wait-on-semaphore go :timeout 30))
+                   (funcall original record)))
+           (funcall function read go))
+      (setf (fdefinition symbol) original))))
 
 (defun run-scenario (scenario)
   "Run SCENARIO and return what happened, as a plist of observations.
@@ -333,59 +361,87 @@ is held there until the scenario lets it go, and Q, when queued, is started
 only once R is held -- so Q waits behind R on the worker's stream.  R's
 cancellation is sent at the scenario's point; afterwards R is let go as its
 BEHAVIOR says.  A request the scenario cancelled before it reached the worker
-has nothing ahead of Q, which is then started after R returns."
+has nothing ahead of Q, which is then started after R returns.
+
+For an :ANSWER-READ cancellation the worker answers at once -- with an error
+for an :ERROR behavior, a result otherwise -- and R is paused after reading
+the answer and before delivering it (%CALL-WITH-ANSWER-PAUSED).  The
+cancellation runs on a thread of its own, since ending the worker waits for
+the stream R holds; R is let go once the cancellation is registered.  The
+observed scenario records the behavior that ran."
   (destructuring-bind (&key behavior cancel queued) scenario
-    (with-fake-worker (server worker)
-      (let ((gate (and (eq cancel :acquiring) (sb-thread:make-semaphore)))
-            (reaches-worker (not (member cancel '(:acquiring :waiting))))
-            (blocker nil) (r nil) (q nil) (verdict :not-sent))
-        (when reaches-worker (hold server "worker/r"))
-        (when (eq cancel :waiting)
-          (hold server "worker/p")
-          (setf blocker (start-request "owner" 1 "worker/p"))
-          (await-received server "worker/p"))
-        (setf r (start-request "owner" 7 "worker/r" :gate gate))
-        ;; R held at the worker, and Q waiting behind it.
-        (when reaches-worker
-          (await-received server "worker/r")
-          (when queued
-            (setf q (start-request "owner" 8 "worker/q"))
-            (await-phase "owner" 8 :waiting-to-send)
-            ;; Registered as waiting; give it the moment to block on the stream.
-            (sleep 0.05)))
-        (ecase cancel
-          ((:none :answered) nil)
-          (:acquiring
-           (await-phase "owner" 7 :acquiring)
-           (setf verdict (cancel-request 7 "owner"))
-           (sb-thread:signal-semaphore gate))
-          (:waiting
-           (await-phase "owner" 7 :waiting-to-send)
-           (sleep 0.05)
-           (setf verdict (cancel-request 7 "owner"))
-           (release server "worker/p"))
-          (:executing
-           (setf verdict (cancel-request 7 "owner")))
-          (:other-session
-           (setf verdict (cancel-request 7 "intruder"))))
-        ;; Let R go as its behavior says -- unless its cancellation already
-        ;; dropped the connection under it.
-        (when (and reaches-worker (not (eq cancel :executing)))
-          (release server "worker/r" (if (eq behavior :hold) :answer behavior)))
-        (let ((r-result (request-result r)))
-          (when (eq cancel :answered)
-            (setf verdict (cancel-request 7 "owner")))
-          (when (and queued (null q))
-            (setf q (start-request "owner" 8 "worker/q")))
-          (list :scenario scenario
-                :verdict verdict
-                :r r-result
-                :q (and q (request-result q))
-                :p (and blocker (request-result blocker))
-                :received (bt:with-lock-held ((fake-server-lock server))
-                            (copy-list (fake-server-received server)))
-                :dropped (fake-server-dropped-p server)
-                :registry-empty (registry-empty-p)))))))
+    (when (eq cancel :answer-read)
+      (setf behavior (if (eq behavior :error) :error :answer)))
+    (flet ((run (read go)
+             (with-fake-worker (server worker)
+               (let ((gate (and (eq cancel :acquiring) (sb-thread:make-semaphore)))
+                     (held (not (member cancel '(:acquiring :waiting :answer-read))))
+                     (blocker nil) (r nil) (q nil) (verdict :not-sent))
+                 (if held
+                     (hold server "worker/r")
+                     (setf (gethash "worker/r" (fake-server-script server)) behavior))
+                 (when (eq cancel :waiting)
+                   (hold server "worker/p")
+                   (setf blocker (start-request "owner" 1 "worker/p"))
+                   (await-received server "worker/p"))
+                 (setf r (start-request "owner" 7 "worker/r" :gate gate))
+                 ;; R at the worker -- held there, or its answer read and
+                 ;; paused -- and Q waiting behind it.
+                 (when (or held read)
+                   (if read
+                       (sb-thread:wait-on-semaphore read :timeout 30)
+                       (await-received server "worker/r"))
+                   (when queued
+                     (setf q (start-request "owner" 8 "worker/q"))
+                     (await-phase "owner" 8 :waiting-to-send)
+                     ;; Registered as waiting; the moment to block on the stream.
+                     (sleep 0.05)))
+                 (ecase cancel
+                   ((:none :answered) nil)
+                   (:acquiring
+                    (await-phase "owner" 7 :acquiring)
+                    (setf verdict (cancel-request 7 "owner"))
+                    (sb-thread:signal-semaphore gate))
+                   (:waiting
+                    (await-phase "owner" 7 :waiting-to-send)
+                    (sleep 0.05)
+                    (setf verdict (cancel-request 7 "owner"))
+                    (release server "worker/p"))
+                   (:executing
+                    (setf verdict (cancel-request 7 "owner")))
+                   (:answer-read
+                    (let ((canceller (bt:make-thread
+                                      (lambda () (cancel-request 7 "owner"))
+                                      :name "answer-read-cancel"))
+                          (record (find-request "owner" 7)))
+                      (loop repeat 1000
+                            until (and record (cancellation-requested-p record))
+                            do (sleep 0.01))
+                      (sb-thread:signal-semaphore go)
+                      (setf verdict (bt:join-thread canceller))))
+                   (:other-session
+                    (setf verdict (cancel-request 7 "intruder"))))
+                 ;; Let a held R go as its behavior says -- unless its
+                 ;; cancellation already dropped the connection under it.
+                 (when (and held (not (eq cancel :executing)))
+                   (release server "worker/r" (if (eq behavior :hold) :answer behavior)))
+                 (let ((r-result (request-result r)))
+                   (when (eq cancel :answered)
+                     (setf verdict (cancel-request 7 "owner")))
+                   (when (and queued (null q))
+                     (setf q (start-request "owner" 8 "worker/q")))
+                   (list :scenario (list :behavior behavior :cancel cancel :queued queued)
+                         :verdict verdict
+                         :r r-result
+                         :q (and q (request-result q))
+                         :p (and blocker (request-result blocker))
+                         :received (bt:with-lock-held ((fake-server-lock server))
+                                     (copy-list (fake-server-received server)))
+                         :dropped (fake-server-dropped-p server)
+                         :registry-empty (registry-empty-p)))))))
+      (if (eq cancel :answer-read)
+          (%call-with-answer-paused #'run)
+          (run nil nil)))))
 
 (defun %received (observed method)
   (and (member method (getf observed :received) :test #'equal) t))
@@ -403,6 +459,9 @@ the fake worker received rather than what the proxy says.
 - A cancellation acts on the request named, and only while it runs does it
   stop the worker: cancelled before it ran, R is not sent and the worker is
   kept; after it was answered, or from another session, nothing changes.
+  Cancelled after R's answer was read and before it was delivered, the
+  cancellation stands and the answer is not delivered -- never both a
+  stopped worker and a success.
 - Q, queued behind R, is never reported as having run when it was not sent,
   and a cancellation of R that did not stop the worker leaves Q to run.
 - Nothing is left registered."
@@ -439,8 +498,12 @@ the fake worker received rather than what the proxy says.
              (when r-sent (add :cancelled-request-was-sent))
              (unless (equal "not-executed" (execution-status r))
                (add :cancelled-before-run-not-reported)))
-            (:executing
-             (unless (equal "execution-unknown" (execution-status r))
+            ((:executing :answer-read)
+             ;; Stopped while it ran -- or after its answer was read and
+             ;; before it was delivered, when the cancellation, not the
+             ;; answer, is what stands.
+             (unless (and (error-result-p r)
+                          (equal "execution-unknown" (execution-status r)))
                (add :cancelled-while-running-not-unknown
                     :status (execution-status r))))
             ((:none :answered :other-session)
@@ -458,8 +521,9 @@ the fake worker received rather than what the proxy says.
           ((:acquiring :waiting)
            (unless (eq :marked verdict) (add :wrong-verdict :verdict verdict))
            (when (getf observed :dropped) (add :worker-stopped-for-unsent-request)))
-          (:executing
-           (unless (eq :stopping verdict) (add :wrong-verdict :verdict verdict)))
+          ((:executing :answer-read)
+           (unless (eq :stopping verdict) (add :wrong-verdict :verdict verdict))
+           (unless (getf observed :dropped) (add :running-request-not-stopped)))
           (:answered
            (when (and verdict (not (eq :too-late verdict)))
              (add :wrong-verdict :verdict verdict)))
@@ -467,7 +531,7 @@ the fake worker received rather than what the proxy says.
            (when verdict (add :other-session-cancel-acted :verdict verdict))))
         ;; Q: runs unless R's cancellation stopped the worker under it.
         (when (and queued (hash-table-p q)
-                   (not (eq cancel :executing))
+                   (not (member cancel '(:executing :answer-read)))
                    (not (eq behavior :drop)))
           (when (error-result-p q) (add :queued-request-harmed :text (result-text q))))
         (unless (getf observed :registry-empty) (add :left-registered)))

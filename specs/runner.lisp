@@ -1460,6 +1460,15 @@ the argument as it is after the call cannot see."
            :replacement (lambda (record) (declare (ignore record)) :completed)
            :targets (list (list :property requests))
            :must-fail (list (list :property requests)))
+     (list :function 'cl-mcp/src/request-lifecycle:note-response
+           :description "publishes an answer although a cancellation stopped the worker first"
+           :replacement (lambda (record)
+                          (bt:with-lock-held (cl-mcp/src/request-lifecycle:*requests-lock*)
+                            (setf (cl-mcp/src/request-lifecycle:request-phase record)
+                                  :responded))
+                          :publish)
+           :targets (list (list :property requests))
+           :must-fail (list (list :property requests)))
      (list :function 'find-request
            :description "finds a request by its id alone, whichever session sent it"
            :replacement #'%find-request-ignoring-the-session

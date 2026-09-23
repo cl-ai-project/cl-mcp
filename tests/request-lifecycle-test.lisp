@@ -159,6 +159,40 @@
       (ok (not (getf observed :dropped)))
       (ok (not (error-result-p (getf observed :q))) "the next request still runs"))))
 
+(deftest an-answer-and-a-cancellation-are-never-both-delivered
+  ;; Found in review: the answer was read, then a cancellation reached the
+  ;; registry while the request was still :EXECUTING and stopped the worker,
+  ;; then the answer was published -- a success delivered from a worker whose
+  ;; session state had just been thrown away.  The answer and the
+  ;; cancellation are now ordered at one point, NOTE-RESPONSE; this pins the
+  ;; ordering where the cancellation wins.
+  (dolist (behavior '(:answer :error))
+    (testing (format nil "the worker answered with ~(~A~)" behavior)
+      (let ((observed (%scenario :behavior behavior :cancel :answer-read :queued t)))
+        (ok (null (scenario-violations observed)))
+        (ok (eq :stopping (getf observed :verdict)) "the cancellation stood")
+        (ok (getf observed :dropped) "and stopped the worker")
+        (ok (error-result-p (getf observed :r)) "so the answer was not delivered")
+        (ok (equal "execution-unknown" (execution-status (getf observed :r))))
+        (ok (search "cancelled while it was running" (result-text (getf observed :r))))
+        (ok (equal "not-executed" (execution-status (getf observed :q)))
+            "and the request behind it did not run"))))
+  (testing "when the answer gets there first, the cancellation is too late"
+    (let ((record (register-request "order" 1)))
+      (note-request-worker record (list :worker))
+      (begin-send record)
+      (ok (eq :publish (note-response record)))
+      (ok (eq :too-late (cancel-request-record record (lambda (w) (declare (ignore w))))))
+      (unregister-request record)))
+  (testing "when the cancellation gets there first, the answer is withdrawn"
+    (let ((record (register-request "order" 2)))
+      (note-request-worker record (list :worker))
+      (begin-send record)
+      (ok (eq :stopping (cancel-request-record record (lambda (w) (declare (ignore w))))))
+      (ok (eq :withdrawn (note-response record)))
+      (ok (eq :execution-unknown (request-outcome record)))
+      (unregister-request record))))
+
 (deftest another-session-cannot-cancel-a-request
   ;; c: requests were keyed by id alone, and every session numbers its
   ;; requests from the same small integers.
@@ -243,6 +277,15 @@
                              when (equal (cdr key) (prin1-to-string id))
                                return record)))
                    '(:behavior :answer :cancel :other-session :queued nil)))))
+    (testing "an answer published although a cancellation got there first"
+      (ok (member :cancelled-while-running-not-unknown
+                  (swapped-violations
+                   'note-response
+                   (lambda (record)
+                     (bt:with-lock-held (cl-mcp/src/request-lifecycle:*requests-lock*)
+                       (setf (cl-mcp/src/request-lifecycle:request-phase record) :responded))
+                     :publish)
+                   '(:behavior :answer :cancel :answer-read :queued nil)))))
     (testing "and every scenario of the real lifecycle passes"
       (ok (loop for behavior in +behaviors+
                 always (loop for cancel in +cancel-points+

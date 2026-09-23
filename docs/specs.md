@@ -1458,6 +1458,15 @@ this request and nothing else".
   of being sent into a dying process;
 - at `:responded`, or once the request is gone, nothing is done.
 
+**Answer against cancellation.** An answer read from the worker is delivered
+only through `note-response`, which orders it against a cancellation under
+the same lock: if the cancellation got there first, it has already signalled
+the worker, so the answer is withheld (`worker-rpc` signals
+`rpc-answer-withdrawn`, reported as cancelled while running,
+`execution-unknown`); otherwise the request becomes `:responded` and a later
+cancellation is too late. Never both -- a success delivered from a worker a
+cancellation stopped would describe a session whose state was just lost.
+
 **Outcomes.** The phase a request reached decides what an error result the
 proxy builds may say (`execution_status`): `not-executed` before
 `:executing`, `execution-unknown` at it -- sent, no answer -- and
@@ -1475,9 +1484,12 @@ scripted. Only the pool is stood in for. The ledger is the independent
 account: a request the fake worker never received did not run. A scenario
 fixes the worker's behavior for the request under test, where its
 cancellation arrives (never, while its worker is found, while it waits
-behind another request, while it runs, after its answer, or from another
-session) and whether a second request waits behind it -- 48 combinations,
-in fixed orderings, never raced.
+behind another request, while it runs, after its answer was read and before
+it was delivered, after its answer, or from another session) and whether a
+second request waits behind it -- 56 combinations, in fixed orderings, never
+raced. The read-but-not-delivered point pauses `note-response` on a
+semaphore, and the cancellation runs on a thread of its own, since ending
+the worker waits for the stream the paused request holds.
 
 The checks, against the ledger: one result per request, nothing sent twice;
 an unsent request reports `not-executed` and a sent one never does; an
@@ -1495,8 +1507,9 @@ changes nothing; nothing is left registered.
   cancelled, its worker stopped, the result `execution-unknown`, and the
   session goes on with a fresh worker.
 - Negative control: a cancellation that stops the worker whatever the
-  request's phase, an account that calls every request completed, and a
-  lookup that ignores the session.
+  request's phase, an account that calls every request completed, an answer
+  published although a cancellation got there first, and a lookup that
+  ignores the session.
 
 **What was found, and what changed.**
 - **a. A cancellation while the worker was being found was lost**, and the
@@ -1515,6 +1528,10 @@ changes nothing; nothing is left registered.
   RPC timed out ... took too long". Now it is told it was not run.
 - **f. A `repl-eval` timeout was a successful result.** Now it is an error
   whose outcome is unknown.
+- **Found in review: an answer and a cancellation could both be delivered.**
+  The answer was read, a cancellation then found the request still
+  `:executing` and stopped the worker, and the answer was published anyway.
+  They are now ordered at one point, as above.
 
 Left for later: a reset notice that can be delivered twice after a stopped
 worker (4C), no deadline on the stream lock and the write to the worker
