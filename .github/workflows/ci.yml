@@ -119,6 +119,11 @@ jobs:
           CL_MCP_SPECS_MODE=integration CL_MCP_SPECS_SUITE=cl-mcp/tests/spec-responses-specs-test \
             timeout 900 ros run --load scripts/check-specs.lisp
 
+      - name: Real cl-spec wire tests
+        run: |
+          CL_MCP_SPECS_MODE=integration CL_MCP_SPECS_SUITE=cl-mcp/tests/spec-wire-test \
+            timeout 900 ros run --load scripts/check-specs.lisp
+
       # The opposite requirement: this one needs a process with no cl-spec in
       # it, because it builds a CL-SPEC package of its own to resolve against.
       - name: API resolution against a synthetic cl-spec

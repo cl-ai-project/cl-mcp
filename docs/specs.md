@@ -1164,28 +1164,80 @@ only the payload. Moving to standard structured output is a separate
 proposal, not part of this.
 
 Not covered here: the tool entry points beyond that one round trip, the
-worker's own JSON round trip, JSON-RPC and the transports. Those are 3E-2.
+worker's own JSON round trip, JSON-RPC and the transports. Those are 3E-2 (see
+*The wire*).
 
-### A false becomes a null on the way through a worker
+### A false becomes a null on the way through a worker (fixed in 3E-2)
 
-Measured while writing this, not fixed here. With the worker pool enabled —
-the default — a response crosses JSON twice: the worker encodes it, the parent
-parses it with `yason:parse` and no arguments, and the parent encodes the
-result again. That middle parse turns every `false` into `NIL`, and the second
-encode writes `NIL` as `null`:
+Measured while writing this and fixed in 3E-2. With the worker pool enabled --
+the default -- a response crosses JSON twice: the worker encodes it, the parent
+parses it, and the parent encodes the result again. The middle parse used
+`yason:parse` with no arguments, which reads both `false` and `null` as `NIL`,
+and the second encode wrote `NIL` as `null`:
 
 ```text
 builder   {"verified":false,"gaps":[],"name":"","count":0,"absent":null}
 client    {"verified":null, "gaps":[],"name":"","count":0,"absent":null}
 ```
 
-`[]`, `""`, `0` and `null` survive; only `false` does not. So a caller reading
-a spec tool's result through a pooled worker sees `verified: null` where the
-builder said `false`. The properties here are about the builder, and they run
-against its own output, so they do not see this; the negative control
-"publishes a verified of false as null" is that exact fault, planted at the
-builder so a check can say whether it would be noticed. Fixing the boundary
-belongs to 3E-2, where the real transport is under test.
+`worker-rpc` and `proxy-to-worker` now take `:preserve-json-types`, which
+parses with booleans as `yason:true`/`yason:false`, null as `:null` and arrays
+as vectors, so the result encodes back to the JSON the worker wrote.
+`with-proxy-dispatch` -- every tool whose worker result goes to the client
+unread -- passes it. The pool's own RPCs (`worker/init-status`,
+`worker/set-project-root`) and `clos-describe`, which read the result with Lisp
+truth tests, do not: a `yason:false` is a true Lisp value. The encoder's retry
+(`%sanitize-for-encoding`) keeps the three literals as literals instead of
+printing them as `"FALSE"`.
+
+## The wire (3E-2)
+
+**Real cl-spec, a real server and real workers, opt-in**
+(`tests/spec-wire-test.lisp`, 5 tests). Everything above checks a builder's
+output or the adapter in the calling image. These tests are a client: a TCP
+server started with the `cl-spec` group, one TCP connection per session, the
+MCP handshake, and only the public tools. Every answer is parsed from the bytes
+on the socket with `false`, `true`, `null`, `[]` and a missing key kept apart.
+The declarations come from `tests/fixtures/spec-wire-fixture.lisp`, an inferred
+subsystem that nothing depends on. Its `:import-from` clauses pull in cl-spec
+and the check-it backend, so `load-system` loads it by name.
+
+- **One session end to end:** `load-system` (cl-spec, then the fixture), then
+  `spec-list`, `spec-symbol`, `spec-describe` and `spec-check` in the same
+  session. A failing check arrives with `verified` and `thread_leaked` as JSON
+  `false`, a decimal-string seed, a digest and its gaps. The Replay line it
+  printed is read back by its own grammar and run again: `faithful`, `match`,
+  the same seed, the same digest and the same counterexample. A passing
+  contract arrives as `true`.
+- **Evidence belongs to its session:** a compound counterexample's object id
+  inspects in the session that ran the check. Another session on the same
+  server gets "not found", because the object lives in the other worker.
+- **Sessions and where things run:** the declarations one session loaded are
+  not in another session's registry. `pool-status` shows two bound workers
+  with distinct pids, neither of them the server. The server's own image
+  never loaded the fixture, so no success here was the parent's.
+- **Clean-up:** after the server stops, every worker it spawned is gone
+  (reaped, not a zombie) and nothing listens on its port. The server macro
+  stops the server, its pool and its listener however the body exits.
+- **Inline against pool:** the same seven calls -- a failing property, a
+  passing one, a contract, a compound counterexample, `spec-symbol`,
+  `spec-describe` and `spec-list` -- go through a pooled server and then an
+  inline one. The two answers are compared leaf by leaf, keeping the JSON
+  kinds. Only three kinds of field are compared by kind alone: elapsed times,
+  object ids and the registry's printed identity. They belong to one run in one
+  image, and a `null` where a number was is still a difference. With the parse
+  fix taken out, this test reports `verified`, `thread_leaked` and
+  `results[0].thread_leaked` as `null`.
+
+It spawns processes, so it is not in `tests.lisp`: in the default suite it
+could only skip, and a suite that skips is a suite nobody ran. The `specs` job
+runs it as its own step, where a skip fails. The unit halves -- the parse
+option and the encoder's retry -- are in `tests/protocol-test.lisp`, in the
+default suite.
+
+Not covered: the other transports (stdio and HTTP share `process-json-line`
+with TCP but not its framing), `structuredContent`, and the pool's lifecycle
+under failure. Timeouts, crashes, cancellation and contention are Phase 4.
 
 ## Dependencies
 
@@ -1209,7 +1261,8 @@ tests.lisp ──> cl-mcp/tests/path-specs-test ──> cl-mcp/specs/path-fixtur
                (no cl-spec; not the bundle)
 self-test   ──> cl-mcp/tests/core-record-specs-test ──> cl-spec (opt-in)
 integration ──> cl-mcp/tests/spec-integration-test, cl-mcp/tests/check-routing-specs-test,
-                cl-mcp/tests/spec-inspection-specs-test ──> cl-spec (opt-in)
+                cl-mcp/tests/spec-inspection-specs-test, cl-mcp/tests/spec-responses-specs-test,
+                cl-mcp/tests/spec-wire-test ──> cl-spec (opt-in)
             ──> cl-mcp/tests/spec-api-resolution-test ──> NO cl-spec, by design
                 all judged by cl-mcp/specs/suite-judge
 ```
@@ -1220,7 +1273,8 @@ package-inferred system, so `cl-mcp/specs` (`specs.lisp`) and its subsystems
 `cl-mcp/tests/specs-runner-test`, the real-record tests,
 `cl-mcp/tests/core-record-specs-test`, the real routing tests,
 `cl-mcp/tests/check-routing-specs-test`, the real inspection tests,
-`cl-mcp/tests/spec-inspection-specs-test`, and the API resolution tests,
+`cl-mcp/tests/spec-inspection-specs-test`, the wire tests,
+`cl-mcp/tests/spec-wire-test`, and the API resolution tests,
 `cl-mcp/tests/spec-api-resolution-test`, are left out of `tests.lisp`.
 (`cl-mcp/tests/spec-integration-test` is in it, and skips there when cl-spec
 cannot be found.)
@@ -1460,7 +1514,8 @@ something failed, `2` the script could not run them.
   tests with `run-tests system=cl-mcp/tests/specs-runner-test`.
 - `integration` runs the one real-cl-spec suite `CL_MCP_SPECS_SUITE` names,
   `cl-mcp/tests/spec-integration-test` or
-  `cl-mcp/tests/check-routing-specs-test`, `cl-mcp/tests/spec-inspection-specs-test`
+  `cl-mcp/tests/check-routing-specs-test`, `cl-mcp/tests/spec-inspection-specs-test`,
+  `cl-mcp/tests/spec-responses-specs-test`, `cl-mcp/tests/spec-wire-test`
   or `cl-mcp/tests/spec-api-resolution-test`, and judges it from Rove's
   per-test results (see *Routing*).  The last one is the odd case: it needs a
   process with no cl-spec, and refuses to run when one is there. A test that is missing, failed, skipped or asserted
@@ -1602,9 +1657,9 @@ The `specs` job in `.github/workflows/ci.yml` does the following:
    `ros install cl-ai-project/cl-mcp`, and the runner also fails when cl-mcp
    comes from anywhere but the checkout.
 4. Runs `self-test`, `check`, `negative-control` and `integration` for each of
-   the four real-cl-spec suites (`spec-integration-test`,
+   the five real-cl-spec suites (`spec-integration-test`,
    `check-routing-specs-test`, `spec-inspection-specs-test`,
-   `spec-responses-specs-test`) and for the API resolution suite, as separate
+   `spec-responses-specs-test`, `spec-wire-test`) and for the API resolution suite, as separate
    processes, each under `timeout 900` inside a 30-minute job, and uploads the
    report files.
 
