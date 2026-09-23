@@ -286,7 +286,16 @@ fixture did not create, so the cleanup fails while the body unwinds."
                            cl-mcp/src/pool:shutdown-pool
                            cl-mcp/src/proxy:proxy-to-worker
                            cl-mcp/src/proxy:cancel-request
-                           cl-mcp/src/object-registry:lookup-object)))))
+                           cl-mcp/src/tools/pool-kill-worker::pool-kill-worker-handler
+                           cl-mcp/src/tools/pool-kill-worker::%with-resets
+                           cl-mcp/src/proxy:reset-notice
+                           cl-mcp/src/reset-events:record-termination
+                           cl-mcp/src/reset-events:claim-session-resets
+                           cl-mcp/src/reset-events:discard-session-resets
+                           cl-mcp/src/reset-events:discard-all-resets
+                           cl-mcp/src/object-registry:register-object
+                           cl-mcp/src/object-registry:lookup-object
+                           cl-mcp/src/object-registry:clear-registry)))))
   (testing "a definition missing from the listing is reported"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)
@@ -295,6 +304,28 @@ fixture did not create, so the cleanup fails while the body unwinds."
           "Registered next to the bundle but not in its listing."
           (integerp x)))
       (ok (find :unlisted (bundle-consistency-problems registry) :key #'first)))))
+
+(deftest reset-properties-name-what-their-negative-controls-break
+  ;; A function whose wrong implementation a property is shown to catch is
+  ;; one it makes a claim about, and has to be discoverable as such: listed
+  ;; in its (:about ...), and so in COVERED-FUNCTIONS and the source record.
+  ;; Checked for the reset properties, whose first version named only the
+  ;; pool's internal API while the negative control broke the tool's renderer.
+  (let ((registry (make-hash-table-registry))
+        (reset-properties (cl-mcp/specs/reset-events:property-names))
+        (checked 0))
+    (register-specifications registry)
+    (dolist (control (cl-mcp/specs/runner::%negative-controls))
+      (destructuring-bind (&key function must-fail &allow-other-keys) control
+        (dolist (target must-fail)
+          (destructuring-bind (kind name) target
+            (when (and (eq kind :property) (member name reset-properties))
+              (incf checked)
+              (ok (member function
+                          (cl-mcp/specs/runner::property-targets
+                           (find-property name registry)))
+                  (format nil "~S is an :about target of ~S" function name)))))))
+    (ok (<= 5 checked) "every reset control was looked at")))
 
 (deftest bundle-reregistration-is-stable
   (let ((registry (make-hash-table-registry)))

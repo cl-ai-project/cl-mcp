@@ -53,8 +53,12 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/pool:shutdown-pool` | none | the same two |
 | `cl-mcp/src/proxy:proxy-to-worker` | none (see *Request lifecycle*, *Reset events*) | `request-lifecycle-keeps-its-promises`, `resets-are-told-exactly-once`, `resets-are-told-exactly-once-when-the-pool-is-full` |
 | `cl-mcp/src/proxy:cancel-request` | none | `request-lifecycle-keeps-its-promises` |
-| `cl-mcp/src/pool:kill-session-worker` (resets) | none (see *Reset events*) | `resets-are-told-exactly-once`, `…-when-the-pool-is-full` |
-| `cl-mcp/src/object-registry:lookup-object` | none (see *Reset events*) | `object-ids-never-outlive-their-image` |
+| `cl-mcp/src/pool:kill-session-worker`, `release-session`, `shutdown-pool` (resets) | none (see *Reset events*) | `resets-are-told-exactly-once`, `…-when-the-pool-is-full` |
+| `cl-mcp/src/tools/pool-kill-worker::pool-kill-worker-handler` (internal; the tool) | none | the same two |
+| `cl-mcp/src/tools/pool-kill-worker::%with-resets` (internal) | none | the same two |
+| `cl-mcp/src/proxy:reset-notice` | none | the same two |
+| `cl-mcp/src/reset-events:record-termination`, `claim-session-resets`, `discard-session-resets`, `discard-all-resets` | none | the same two |
+| `cl-mcp/src/object-registry:register-object`, `lookup-object`, `clear-registry` | none (see *Reset events*) | `object-ids-never-outlive-their-image` |
 
 Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize`,
 `cl-mcp/specs/paths`, `cl-mcp/specs/write-paths`, `cl-mcp/specs/core-records`,
@@ -1635,6 +1639,11 @@ in the same runs.
 - Negative control: a claim that leaves the events pending, a claim that
   takes nothing, a later record replacing the first cause, a pool-kill-worker
   response that drops the resets it claimed, and a lookup by number alone.
+- `:about`: each reset property names the surfaces it drives -- the proxy and
+  the pool-kill-worker tool's handler -- and every function a negative
+  control breaks for it, plus the release and shutdown paths whose discard
+  it claims. `specs-runner-test` checks that every function a reset negative
+  control replaces is an `:about` target of the property that must catch it.
 
 **What was found, and what changed.**
 - **A1. A cancellation's reset was told twice** -- the proxy cleared the

@@ -27,11 +27,24 @@
                 #:defproperty
                 #:defgenerator)
   (:import-from #:cl-mcp/src/proxy
-                #:proxy-to-worker)
+                #:proxy-to-worker
+                #:reset-notice)
   (:import-from #:cl-mcp/src/pool
-                #:kill-session-worker)
+                #:kill-session-worker
+                #:release-session
+                #:shutdown-pool)
+  (:import-from #:cl-mcp/src/reset-events
+                #:record-termination
+                #:claim-session-resets
+                #:discard-session-resets
+                #:discard-all-resets)
   (:import-from #:cl-mcp/src/object-registry
-                #:lookup-object)
+                #:register-object
+                #:lookup-object
+                #:clear-registry)
+  ;; Bare: its handler, which define-tool names, is a surface the reset
+  ;; properties call.
+  (:import-from #:cl-mcp/src/tools/pool-kill-worker)
   (:import-from #:cl-mcp/specs/reset-fixtures
                 #:run-reset-sequence
                 #:random-reset-sequence
@@ -92,7 +105,24 @@ operations actually applied to it, and never once the session was released
 or the pool shut down first.  No worker is told that was not lost, and once
 every session has made a request, nothing is left untold.  The pool's
 ownership invariants hold throughout.  One standby, room for four."
-    (:about proxy-to-worker kill-session-worker)
+    ;; What the property makes a claim about: the surfaces it drives -- the
+    ;; proxy and the pool-kill-worker tool's own handler, whose responses are
+    ;; what is read -- and every function whose wrong implementation it is
+    ;; shown to catch (the negative control): the renderer the tool tells
+    ;; through, the notice, and the ledger's record and claim.  Discarding
+    ;; what a released session or a stopped pool was owed is claimed too,
+    ;; through the pool's release and shutdown.
+    (:about proxy-to-worker
+            cl-mcp/src/tools/pool-kill-worker::pool-kill-worker-handler
+            cl-mcp/src/tools/pool-kill-worker::%with-resets
+            reset-notice
+            kill-session-worker
+            release-session
+            shutdown-pool
+            record-termination
+            claim-session-resets
+            discard-session-resets
+            discard-all-resets)
     (:kind :invariant)
     (:trials (:smoke 10 :normal 60))
     (null (run-reset-sequence operations :warmup 1 :max-size 4)))
@@ -101,7 +131,18 @@ ownership invariants hold throughout.  One standby, room for four."
       ((operations reset-operations))
     "The same, with two standbys and room for two: requests are refused for
 want of room, and a refusal tells what the session is owed as well."
-    (:about proxy-to-worker kill-session-worker)
+    ;; The same surfaces as RESETS-ARE-TOLD-EXACTLY-ONCE.
+    (:about proxy-to-worker
+            cl-mcp/src/tools/pool-kill-worker::pool-kill-worker-handler
+            cl-mcp/src/tools/pool-kill-worker::%with-resets
+            reset-notice
+            kill-session-worker
+            release-session
+            shutdown-pool
+            record-termination
+            claim-session-resets
+            discard-session-resets
+            discard-all-resets)
     (:kind :invariant)
     (:trials (:smoke 10 :normal 60))
     (null (run-reset-sequence operations :warmup 2 :max-size 2)))
@@ -111,7 +152,7 @@ want of room, and a refusal tells what the session is owed as well."
     "An object id is found only in the registry that issued it, until that
 registry is cleared; in a replacement image, or after a clear, it is refused
 as stale -- never answered with another object."
-    (:about lookup-object)
+    (:about register-object lookup-object clear-registry)
     (:kind :invariant)
     (:trials (:smoke 30 :normal 200))
     (null (run-handle-sequence operations))))
