@@ -36,6 +36,9 @@
                 #:*log-level*)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht)
+  ;; Bare, as a dependency: the proxy resolves the pool's functions at run
+  ;; time, so a process that loaded only these fixtures would have none.
+  (:import-from #:cl-mcp/src/pool)
   ;; Bare: named in full, or through the BT nickname.
   (:import-from #:bordeaux-threads)
   (:import-from #:usocket)

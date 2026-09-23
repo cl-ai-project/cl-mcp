@@ -32,9 +32,7 @@
   (:use #:cl)
   (:import-from #:bordeaux-threads
                 #:make-lock #:with-lock-held)
-  (:export #:request-record
-           #:request-record-p
-           #:request-session-id
+  (:export #:request-session-id
            #:request-external-id
            #:request-phase
            #:request-worker
