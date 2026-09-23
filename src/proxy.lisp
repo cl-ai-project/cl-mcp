@@ -410,10 +410,14 @@ told here, once."
              (%proxy-error-result text outcome :events events :note note)))
       (cond
         ((typep condition %cached-rpc-not-sent-sym%)
-         (if (eq :cancelled (funcall %cached-rpc-not-sent-reason% condition))
-             (%cancelled-before-run-result events)
-             (fail "The worker this session was using was stopped to cancel another request before this one was sent to it."
-                   :not-executed)))
+         (case (funcall %cached-rpc-not-sent-reason% condition)
+           (:cancelled (%cancelled-before-run-result events))
+           (:busy
+            (fail "The session's worker was still running another request of this session when this one's deadline to start ran out, so this one was not sent to it."
+                  :not-executed))
+           (t
+            (fail "The worker this session was using was stopped to cancel another request before this one was sent to it."
+                  :not-executed))))
         ((typep condition %cached-rpc-answer-withdrawn-sym%)
          ;; The worker answered, but the cancellation reached the registry
          ;; first and stopped it: the cancellation is what is reported.  Its
@@ -509,6 +513,14 @@ sent, because it was written against state the session no longer has."
       (handler-case
           (apply %cached-worker-rpc% worker method params
                  :timeout effective-timeout
+                 ;; Waiting behind another request of the session is bounded
+                 ;; by the same figure, and ends at once when this request
+                 ;; is cancelled: it has not been sent, so nothing is lost.
+                 :lock-timeout effective-timeout
+                 :while-waiting (lambda ()
+                                  (if (cancellation-requested-p record)
+                                      :cancelled
+                                      :wait))
                  :before-send (lambda () (begin-send record))
                  :after-receive (lambda () (note-response record))
                  (when preserve-json-types

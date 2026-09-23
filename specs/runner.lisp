@@ -1210,6 +1210,8 @@ the argument as it is after the call cannot see."
           (%bundle-name :property "RESETS-ARE-TOLD-EXACTLY-ONCE-WHEN-THE-POOL-IS-FULL"))
         (handles
           (%bundle-name :property "OBJECT-IDS-NEVER-OUTLIVE-THEIR-IMAGE"))
+        (shutdowns
+          (%bundle-name :property "POOL-SHUTDOWN-LEAVES-NOTHING-BEHIND"))
         ;; Taken before any swap, so a wrong implementation can defer to it.
         (real-read (fdefinition 'allowed-read-path))
         (real-write (fdefinition 'ensure-write-path))
@@ -1543,7 +1545,27 @@ the argument as it is after the call cannot see."
            :description "resolves an id by its number alone, whatever image issued it"
            :replacement #'%lookup-ignoring-the-generation
            :targets (list (list :property handles))
-           :must-fail (list (list :property handles))))))
+           :must-fail (list (list :property handles)))
+     ;; Shutdown.  Each fault is a shutdown that returns owing something, or
+     ;; does not return: one that ends a worker without signalling it first
+     ;; and so waits behind the RPC holding its stream; one that does not
+     ;; wait for the spawns and endings in flight; and a pool that takes a
+     ;; worker out to end it without accounting for it.
+     (list :function 'cl-mcp/src/pool::%signal-worker
+           :description "ends a worker without signalling it, behind the RPC holding its stream"
+           :replacement (lambda (worker) (declare (ignore worker)) nil)
+           :targets (list (list :property shutdowns))
+           :must-fail (list (list :property shutdowns)))
+     (list :function 'cl-mcp/src/pool::%wait-for-work-in-flight
+           :description "returns from a shutdown without waiting for spawns and endings in flight"
+           :replacement (lambda (seconds) (declare (ignore seconds)) t)
+           :targets (list (list :property shutdowns))
+           :must-fail (list (list :property shutdowns)))
+     (list :function 'cl-mcp/src/pool::%begin-ending
+           :description "takes a worker out to end it without accounting for it"
+           :replacement #'identity
+           :targets (list (list :property shutdowns))
+           :must-fail (list (list :property shutdowns))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put

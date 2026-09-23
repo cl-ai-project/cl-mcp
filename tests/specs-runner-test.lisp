@@ -162,8 +162,14 @@ fixture did not create, so the cleanup fails while the body unwinds."
                          cl-mcp/src/utils/sanitize:sanitize-for-json
                          cl-mcp/src/utils/sanitize:sanitize-error-message)))
     (ok (= 3 (length (contract-names))))
-    (ok (= 50 (length (property-names))))
-    (ok (= 50 (length (remove-duplicates (property-names)))))
+    (ok (= 52 (length (property-names))))
+    (ok (= 52 (length (remove-duplicates (property-names)))))
+    (ok (%same-names-p (remove-if-not (lambda (name)
+                                        (string= "CL-MCP/SPECS/CONCURRENCY"
+                                                 (package-name (symbol-package name))))
+                                      (property-names))
+                       (cl-mcp/specs/concurrency:property-names))
+        "the concurrency properties are the two of specs/concurrency.lisp")
     (ok (%same-names-p (remove-if-not (lambda (name)
                                         (string= "CL-MCP/SPECS/RESET-EVENTS"
                                                  (package-name (symbol-package name))))
@@ -295,7 +301,16 @@ fixture did not create, so the cleanup fails while the body unwinds."
                            cl-mcp/src/reset-events:discard-all-resets
                            cl-mcp/src/object-registry:register-object
                            cl-mcp/src/object-registry:lookup-object
-                           cl-mcp/src/object-registry:clear-registry)))))
+                           cl-mcp/src/object-registry:clear-registry
+                           cl-mcp/src/pool::%spawn-and-bind
+                           cl-mcp/src/pool::%replenish-standbys
+                           cl-mcp/src/pool::%handle-worker-crash
+                           cl-mcp/src/pool::%signal-worker
+                           cl-mcp/src/pool::%wait-for-work-in-flight
+                           cl-mcp/src/pool::%begin-ending
+                           cl-mcp/src/pool::%end-worker
+                           cl-mcp/src/pool::%check-worker-health
+                           cl-mcp/src/pool::%effective-pool-size)))))
   (testing "a definition missing from the listing is reported"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)
@@ -305,14 +320,15 @@ fixture did not create, so the cleanup fails while the body unwinds."
           (integerp x)))
       (ok (find :unlisted (bundle-consistency-problems registry) :key #'first)))))
 
-(deftest reset-properties-name-what-their-negative-controls-break
+(deftest reset-and-concurrency-properties-name-what-their-negative-controls-break
   ;; A function whose wrong implementation a property is shown to catch is
   ;; one it makes a claim about, and has to be discoverable as such: listed
   ;; in its (:about ...), and so in COVERED-FUNCTIONS and the source record.
   ;; Checked for the reset properties, whose first version named only the
   ;; pool's internal API while the negative control broke the tool's renderer.
   (let ((registry (make-hash-table-registry))
-        (reset-properties (cl-mcp/specs/reset-events:property-names))
+        (reset-properties (append (cl-mcp/specs/reset-events:property-names)
+                                  (cl-mcp/specs/concurrency:property-names)))
         (checked 0))
     (register-specifications registry)
     (dolist (control (cl-mcp/specs/runner::%negative-controls))
@@ -325,7 +341,7 @@ fixture did not create, so the cleanup fails while the body unwinds."
                           (cl-mcp/specs/runner::property-targets
                            (find-property name registry)))
                   (format nil "~S is an :about target of ~S" function name)))))))
-    (ok (<= 5 checked) "every reset control was looked at")))
+    (ok (<= 8 checked) "every reset and shutdown control was looked at")))
 
 (deftest bundle-reregistration-is-stable
   (let ((registry (make-hash-table-registry)))

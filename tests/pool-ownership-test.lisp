@@ -83,6 +83,20 @@
                '((:acquire "s0") (:run-work) (:acquire "s1") (:acquire "s0")
                  (:release "s0") (:run-work) (:kill-session "s1") (:run-work)))))))
 
+(defmacro %with-spawn-in-flight ((session) &body body)
+  "Run BODY while SESSION's entry is a placeholder whose spawn is counted, as
+an on-demand spawn's is from the acquire that decides it until its worker is
+registered; take both away afterwards."
+  `(progn
+     (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+       (setf (gethash ,session cl-mcp/src/pool::*affinity-map*)
+             (cl-mcp/src/pool::make-worker-placeholder :session-id ,session))
+       (cl-mcp/src/pool::%begin-spawn))
+     (unwind-protect (progn ,@body)
+       (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+         (remhash ,session cl-mcp/src/pool::*affinity-map*))
+       (cl-mcp/src/pool::%end-spawn))))
+
 (deftest the-checks-tell-at-rest-from-in-between
   (with-fake-pool (ledger :warmup 1)
     ;; INITIALIZE-POOL queued a replenish; nothing has run it.
@@ -97,14 +111,10 @@
         (run-pending-work ledger)
         (ok (null (ownership-violations ledger :stable t)))))
     (testing "a placeholder is legal in between and not at rest"
-      (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
-        (setf (gethash "s9" cl-mcp/src/pool::*affinity-map*)
-              (cl-mcp/src/pool::make-worker-placeholder :session-id "s9")))
-      (ok (null (ownership-violations ledger)))
-      (ok (member :placeholder-at-rest
-                  (violation-kinds (ownership-violations ledger :stable t))))
-      (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
-        (remhash "s9" cl-mcp/src/pool::*affinity-map*)))))
+      (%with-spawn-in-flight ("s9")
+        (ok (null (ownership-violations ledger)))
+        (ok (member :placeholder-at-rest
+                    (violation-kinds (ownership-violations ledger :stable t))))))))
 
 (deftest the-checks-catch-a-pool-that-agrees-with-itself
   ;; Wrong pools whose lists stay consistent, so only a check made from
@@ -216,15 +226,11 @@
       (setf (gethash standby (cl-mcp/specs/pool-fixtures::ledger-dead ledger)) t)
       ;; Room for exactly that one standby: dropping it frees the slot, so
       ;; the acquire spawns.  Take the slot first, so the refusal fires.
-      (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
-        (setf (gethash "s9" cl-mcp/src/pool::*affinity-map*)
-              (cl-mcp/src/pool::make-worker-placeholder :session-id "s9")))
-      (ok (handler-case (progn (get-or-assign-worker "s0") nil)
-            (cl-mcp/src/pool:pool-capacity-exceeded () t))
-          "the pool is full")
-      (ok (killed-p ledger standby) "and the dead standby it dropped was ended")
-      (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
-        (remhash "s9" cl-mcp/src/pool::*affinity-map*))
+      (%with-spawn-in-flight ("s9")
+        (ok (handler-case (progn (get-or-assign-worker "s0") nil)
+              (cl-mcp/src/pool:pool-capacity-exceeded () t))
+            "the pool is full")
+        (ok (killed-p ledger standby) "and the dead standby it dropped was ended"))
       (ok (null (ownership-violations ledger))))))
 
 (deftest a-crashed-standby-recovery-ends-leaves-the-standby-list

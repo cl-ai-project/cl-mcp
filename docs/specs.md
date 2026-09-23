@@ -59,12 +59,16 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/proxy:reset-notice` | none | the same two |
 | `cl-mcp/src/reset-events:record-termination`, `claim-session-resets`, `discard-session-resets`, `discard-all-resets` | none | the same two |
 | `cl-mcp/src/object-registry:register-object`, `lookup-object`, `clear-registry` | none (see *Reset events*) | `object-ids-never-outlive-their-image` |
+| `cl-mcp/src/pool:shutdown-pool`, `get-or-assign-worker`, `release-session` (concurrency) | none (see *Concurrency and shutdown*) | `pool-shutdown-leaves-nothing-behind`, `pool-holds-while-operations-overlap` |
+| `cl-mcp/src/pool::%spawn-and-bind`, `%replenish-standbys`, `%handle-worker-crash`, `%signal-worker`, `%wait-for-work-in-flight`, `%begin-ending`, `%end-worker` (internal) | none | `pool-shutdown-leaves-nothing-behind` |
+| `cl-mcp/src/pool:kill-session-worker`, `cl-mcp/src/pool::%check-worker-health`, `%handle-worker-crash`, `%effective-pool-size` (internal) | none | `pool-holds-while-operations-overlap` |
 
 Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize`,
 `cl-mcp/specs/paths`, `cl-mcp/specs/write-paths`, `cl-mcp/specs/core-records`,
 `cl-mcp/specs/check-verdicts`, `cl-mcp/specs/check-routing`, `cl-mcp/specs/spec-inspection`,
 `cl-mcp/specs/spec-responses`, `cl-mcp/specs/pool-ownership`,
-`cl-mcp/specs/request-lifecycle` and `cl-mcp/specs/reset-events`. Each Function Spec is
+`cl-mcp/specs/request-lifecycle`, `cl-mcp/specs/reset-events` and
+`cl-mcp/specs/concurrency`. Each Function Spec is
 registered on the production symbol itself. Each read-access property is
 `(:about ...)` both read functions; each write-access property names the
 function or functions it calls.
@@ -1682,6 +1686,107 @@ in the same runs.
 
 The external `worker_reuse` field for every tool is a separate phase.
 
+## Concurrency and shutdown (4D)
+
+4A checked the pool's ownership one operation at a time. 4D checks it when
+operations overlap -- clients acting at once, background work running on its
+own threads, a shutdown arriving in the middle -- and what waiting for a
+worker costs a request.
+
+**Work in flight outside the lock.** Spawning and ending a worker take
+seconds, so the pool does both outside `*pool-lock*`, and in between the
+worker is in none of its lists. Each is now accounted for from the moment it
+is decided, in the critical section that decides it: a spawn is counted
+(`%begin-spawn`) until its worker is registered -- in the same critical
+section, so it is never counted twice -- or ended; a worker taken out of the
+lists is listed as ending (`%begin-ending`) until it is ended (`%end-worker`).
+The pool's size, which the cap limits, is the workers it tracks plus the
+spawns in flight: a replenishment's spawn, which has no placeholder, counts
+from the start, and a worker being ended does not.
+
+**Shutdown.** `shutdown-pool` stops the pool under its lock, joins the
+health monitor, waits for every spawn and ending in flight
+(`%wait-for-work-in-flight`, bounded by the worker startup timeout plus 15
+s), waits for the replenishment and recovery threads, then records every
+worker it still holds as ended by the shutdown, signals each -- so an RPC
+blocked on one lets go of its stream, as `release-session` already did --
+and ends them. When it returns, the pool owes nothing. Background work notes
+the pool generation it was started for (`*pool-generation*`), and a
+replenishment still spawning when its pool stopped gives its worker to no
+later pool.
+
+**Crash recovery and the breaker.** `%handle-worker-crash` now decides
+everything about a death in one critical section: the worker is published
+`:crashed`, its death counted against the breaker
+(`%count-crash-against-breaker`) -- an acquire meeting it cannot count it
+again -- taken out of every list, and, for a bound one, the session's entry
+replaced by a placeholder whose spawn is counted. The replacement is spawned
+by `%spawn-and-bind`, like an acquire's; a request for the session waits on
+the placeholder instead of spawning a second one.
+
+**Waiting for a worker.** A request waits for its session's worker while
+another request of the session runs on it. `worker-rpc` now takes
+`:lock-timeout` and `:while-waiting` (`%call-with-stream-held`), and the
+proxy passes both: the wait is bounded by the request's own RPC budget, and
+ends within a tenth of a second of the request being cancelled. Either way
+the request was not sent: `not-executed`. The deadline on the exchange now
+covers writing the request as well as reading the answer. A full pool
+refuses at once (`pool-capacity-exceeded`, `not-executed`); there is no
+queue, and 4D keeps it that way.
+
+**Checking** (`specs/concurrency-fixtures.lisp`). The real pool with fake
+workers, whose background work runs on real threads, and a fake lifecycle
+with a ledger of its own: every spawn and ending and when it completed,
+which processes died, every thread the pool started.
+
+- *Shutdown scenarios* fix with semaphores what is in flight when
+  `shutdown-pool` is called -- an acquire's spawn, a replenishment's, a
+  recovery's, a worker being ended, an RPC holding a worker's stream -- and
+  open the gates only once the shutdown has begun, in a drawn order, with or
+  without an acquire arriving after. Deterministic. The checks: the shutdown
+  returns, within a bound and without anything but its own signal letting a
+  held RPC go; afterwards every worker is ended, no spawn or ending completes
+  later, the lists and counts are empty, and no pool thread runs; and no
+  acquire it overtook, or made after it began, was lent a worker.
+- *Concurrent runs* let two to four clients apply drawn operations at once,
+  while an observer checks, under the pool's lock and then the ledger's,
+  what must hold at every moment: nothing held or tracked twice, nothing
+  ended held, the size within the cap, and every live worker tracked, being
+  spawned or being ended. A shutdown made while they run ends each run,
+  judged as above, and no worker is lent to two sessions or after the
+  shutdown. The interleaving is the scheduler's: a seed replays the
+  operations, not the run.
+
+- Generated: `pool-shutdown-leaves-nothing-behind` draws scenarios;
+  `pool-holds-while-operations-overlap` draws plans.
+- Fixed (`tests/concurrency-test.lisp`, default suite): each in-flight kind
+  alone and all together; the checks catching four wrong implementations;
+  one ordering per defect below; the waits; the full pool. Real process
+  (`pool-test`): a shutdown behind a running `(sleep 60)` returns at once
+  and the worker's process is gone.
+- Negative control: a shutdown that does not signal its workers, one that
+  does not wait for work in flight, and a pool that takes a worker out to
+  end it without accounting for it.
+
+**What was found, and what changed.**
+- **Shutdown waited behind a running request**: it ended workers without
+  signalling them, and ending one waits for its stream.
+- **Shutdown returned while it still owed work**: it waited about 5 s for
+  replenishment and not at all for an acquire's spawn or a worker being
+  ended elsewhere.
+- **A replenishment could feed the next pool** after its own was shut down.
+- **One crash could count twice** against the breaker.
+- **Recovery could take the pool over its cap**, and an acquire for the same
+  session spawned a second replacement beside it.
+- **A surplus standby was ended under `*pool-lock*`**, stopping every session
+  for up to two seconds.
+- **A queued request waited without a deadline**, and a cancelled one went on
+  waiting until the request ahead of it finished.
+
+Left: the pool's own RPCs wait for a worker's stream without a deadline, and
+the worker's idle read timing out mid-line is for the transport/deadline
+phase.
+
 ## Dependencies
 
 ```
@@ -2158,18 +2263,12 @@ These are recorded here, not fixed in this change:
   (`*worker-read-timeout*`) is a `with-timeout` around `read-line`; firing
   mid-line, it drops the partial line and parses the rest as a request, whose
   `id nil` reply the parent reads as a protocol error.
-- **Requests, for 4D.** Waiting for a worker's stream lock, and writing a
-  request to it, have no deadline: a request queued behind a long one waits
-  as long as that one runs.
-
-- **Pool, for 4D.** One crash can be counted twice by the circuit breaker:
-  `%handle-worker-crash` marks a bound worker `:crashed`, releases the lock,
-  and pushes the crash history without checking `crash-history-pushed-p`;
-  `get-or-assign-worker` can count the same crash in that gap. Crash recovery
-  spawns its replacement without a placeholder or a cap check, so the pool can
-  briefly hold one worker over `*max-pool-size*` when an acquire replaces the
-  same crashed worker at the same time. `%replenish-standbys` ends a surplus
-  worker while holding `*pool-lock*`, which can take about two seconds.
+- **Requests and pool, fixed in 4D.** A queued request's wait for the
+  worker's stream now has a deadline and ends when it is cancelled; the
+  breaker counts a crash once; recovery counts against the cap from the start;
+  a surplus standby is ended outside `*pool-lock*` (see *Concurrency and
+  shutdown*). Waiting for the stream in the pool's own RPCs (the root sync,
+  the init monitor's polling) is still unbounded.
 - **Pool, fixed in 4C.** `release-session`'s in-flight RPC no longer marks
   the released worker `:crashed`; a cancelled spawn keeps its own message;
   `*runtime-owner*` forgets a dead worker and is cleared on release and

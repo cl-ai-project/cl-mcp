@@ -309,6 +309,41 @@ in the cleanup form regardless of success or failure."
     (setf (gethash "package" ht) package)
     ht))
 
+(deftest e2e-shutdown-does-not-wait-behind-a-running-request
+  (testing "a shutdown ends a worker in the middle of a long request, promptly"
+    ;; SHUTDOWN-POOL used to end each worker without the signal that breaks
+    ;; an RPC in progress, and ending one takes the stream that RPC holds:
+    ;; the shutdown waited for the request, as long as it ran.
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (let ((*use-worker-pool* t)
+          (session "e2e-shutdown-busy"))
+      (with-pool ()
+        (let* ((worker (get-or-assign-worker session))
+               (process (cl-mcp/src/worker-client:worker-process-info worker))
+               (request (bt:make-thread
+                         (lambda ()
+                           (let ((*current-session-id* session))
+                             (proxy-to-worker 1 "worker/eval"
+                                              (%make-eval-params "(sleep 60)"))))
+                         :name "e2e-shutdown-busy-request")))
+          ;; Until the request is running on the worker.
+          (loop repeat 500
+                until (let ((record (cl-mcp/src/request-lifecycle:find-request session 1)))
+                        (and record
+                             (eq :executing
+                                 (cl-mcp/src/request-lifecycle:request-phase record))))
+                do (sleep 0.02))
+          (sleep 0.2)
+          (let ((start (get-internal-real-time)))
+            (shutdown-pool)
+            (let ((took (/ (- (get-internal-real-time) start)
+                           internal-time-units-per-second)))
+              (ok (< took 10) (format nil "it returned in ~,1Fs, not 60" took))))
+          (ok (not (sb-ext:process-alive-p process)) "the worker's process is gone")
+          (let ((result (bt:join-thread request)))
+            (ok (gethash "isError" result) "and the request was told it failed")))))))
+
 (deftest e2e-repl-eval-through-worker
   (testing "proxy-to-worker routes eval through pool to worker"
     (unless (spawn-available-p)
