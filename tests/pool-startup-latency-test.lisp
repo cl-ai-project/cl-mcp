@@ -19,8 +19,6 @@
   (:use #:cl)
   (:import-from #:rove
                 #:deftest #:testing #:ok #:skip)
-  (:import-from #:bordeaux-threads
-                #:with-lock-held)
   (:import-from #:cl-mcp/src/pool
                 #:*worker-pool-warmup*
                 #:*health-check-interval-seconds*
@@ -85,12 +83,8 @@ the warmup target within a generous bound"
     (unless (spawn-available-p)
       (skip "sbcl not available"))
     (%with-fast-pool-defaults (:warmup 2)
-      ;; Defensive reset: if a prior test aborted before its replenish
-      ;; thread settled, *replenish-running* may still be t and
-      ;; %schedule-replenish would skip the spawn.  The pool is not
-      ;; running here so this cannot race a real replenish thread.
-      (with-lock-held (cl-mcp/src/pool::*pool-lock*)
-        (setf cl-mcp/src/pool::*replenish-running* nil))
+      ;; No defensive reset is needed: the replenishment flag belongs to a
+      ;; pool generation, and INITIALIZE-POOL starts a new one.
       (unwind-protect
            (progn
              (initialize-pool)
@@ -141,7 +135,7 @@ the warmup target within a generous bound"
           ;; in the background after run's shutdown-pool returns.  The
           ;; replenish loop self-terminates once *pool-running* is nil.
           (loop repeat 600  ; 60 s ceiling
-                while cl-mcp/src/pool::*replenish-running*
+                while (cl-mcp/src/pool::%replenish-running-p)
                 do (sleep 0.1)))))))
 
 (deftest first-tools-call-with-no-standby-completes-within-deadline

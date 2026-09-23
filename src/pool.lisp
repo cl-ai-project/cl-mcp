@@ -218,13 +218,6 @@ Enable the pool to use it.")))
 (defvar *pool-running* nil
   "Flag controlling the health monitor loop.  Set to NIL to stop.")
 
-(defvar *replenish-running* nil
-  "Flag preventing concurrent replenish threads.  Set under *pool-lock*.")
-
-(defvar *replenish-thread* nil
-  "The handle of the replenishment last started, or NIL.  SHUTDOWN-POOL waits
-for it when it is a thread.  Set under *pool-lock*.")
-
 (defvar *recovery-threads* nil
   "List of active crash recovery threads.  Maintained under *pool-lock*.")
 
@@ -319,7 +312,7 @@ The fifth lifecycle seam, beside the four above.")
   (funcall *signal-worker-function* worker))
 
 ;;; ---------------------------------------------------------------------------
-;;; Work in flight outside the pool lock
+;;; Work in flight outside the pool lock, owned by a pool generation
 ;;;
 ;;; Spawning and ending a worker take seconds, so the pool does both outside
 ;;; *POOL-LOCK*.  In between, the worker is in none of the pool's lists: a
@@ -331,70 +324,110 @@ The fifth lifecycle seam, beside the four above.")
 ;;; critical section that decides it: a spawn operation is counted, and a
 ;;; worker taken out to be ended is listed.  SHUTDOWN-POOL waits until both
 ;;; are gone (%WAIT-FOR-WORK-IN-FLIGHT).
+;;;
+;;; The account belongs to the pool GENERATION that decided the work, not to
+;;; the image.  A shutdown gives up on work that outlives its deadline, and
+;;; a pool initialized after it is a new generation: work the old one still
+;;; owes counts against the old one's account -- its cap, its replenishment
+;;; flag -- and never the new one's, and it adds nothing to the new pool.
 ;;; ---------------------------------------------------------------------------
 
-(defvar *spawns-in-flight* 0
-  "Spawn operations decided and not yet finished: each ends with its worker
-registered in the pool's lists, or ended.  Guarded by *POOL-LOCK*.")
+(defstruct (pool-generation (:conc-name generation-)
+                            (:constructor %make-generation (id)))
+  "One pool, from INITIALIZE-POOL to the next: the background work it
+decided, and whether it is still owed.  Every slot is guarded by
+*POOL-LOCK*."
+  (id 0)
+  ;; Spawn operations decided and not yet finished: each ends with its
+  ;; worker registered in the pool's lists, or ended.
+  (spawns 0)
+  ;; Workers taken out of the pool's lists to be ended, and not ended yet.
+  (ending '())
+  ;; True from the decision to replenish until that replenishment ends; one
+  ;; at a time per generation.
+  (replenish-running nil)
+  ;; The replenishment's handle, published in the critical section that
+  ;; decides it.
+  (replenish-thread nil))
 
-(defvar *ending-workers* '()
-  "Workers taken out of the pool's lists to be ended, and not ended yet.
-Guarded by *POOL-LOCK*.")
+(defvar *generation* (%make-generation 0)
+  "The pool generation that is running, or was last.  INITIALIZE-POOL starts a
+new one.  Background work notes the generation it was started for and adds
+nothing to a later one.  Guarded by *POOL-LOCK*.")
+
+(defvar *ending-generation* (make-hash-table :test 'eq :weakness :key)
+  "Each worker being ended, mapped to the generation that took it out, so its
+ending is taken off that generation's account.  Guarded by *POOL-LOCK*.")
 
 (defvar *work-in-flight-condvar*
   (bt:make-condition-variable :name "pool-work-in-flight")
   "Broadcast, with *POOL-LOCK* held, whenever a spawn operation finishes or a
-worker in *ENDING-WORKERS* has been ended.")
+worker being ended has been ended.")
 
 (defun %begin-spawn ()
-  "Count a spawn operation as in flight.  Call with *POOL-LOCK* held, in the
-critical section that decides the spawn, so no shutdown can look between the
-decision and the count."
-  (incf *spawns-in-flight*))
+  "Count a spawn operation as in flight for the running generation, and
+return that generation, which the operation must finish on.  Call with
+*POOL-LOCK* held, in the critical section that decides the spawn, so no
+shutdown can look between the decision and the count."
+  (incf (generation-spawns *generation*))
+  *generation*)
 
-(defun %end-spawn ()
-  "Count a spawn operation as finished -- its worker registered or ended.
+(defun %hand-over-spawn (generation)
+  "Finish GENERATION's spawn operation because its worker is registered, and
+tracked from now on in its place.  Call with *POOL-LOCK* held, in the
+critical section that registers it, so the worker is never counted twice."
+  (decf (generation-spawns generation))
+  (%condition-broadcast *work-in-flight-condvar*))
+
+(defun %end-spawn (generation)
+  "Finish GENERATION's spawn operation -- its worker ended, or never made.
 Takes *POOL-LOCK*."
   (bt:with-lock-held (*pool-lock*)
-    (decf *spawns-in-flight*)
-    (%condition-broadcast *work-in-flight-condvar*)))
+    (%hand-over-spawn generation)))
 
 (defun %begin-ending (worker)
-  "List WORKER as taken out of the pool's lists to be ended, and return it.
-Call with *POOL-LOCK* held, in the critical section that takes it out."
-  (push worker *ending-workers*)
+  "List WORKER as taken out of the pool's lists to be ended, on the running
+generation's account, and return it.  Call with *POOL-LOCK* held, in the
+critical section that takes it out."
+  (push worker (generation-ending *generation*))
+  (setf (gethash worker *ending-generation*) *generation*)
   worker)
 
 (defun %end-worker (worker)
   "End WORKER, listed by %BEGIN-ENDING, outside *POOL-LOCK*, and then take it
-off the list however ending it went."
+off its generation's account however ending it went."
   (unwind-protect (ignore-errors (%kill-worker worker))
     (bt:with-lock-held (*pool-lock*)
-      (setf *ending-workers* (remove worker *ending-workers*))
+      (let ((generation (gethash worker *ending-generation*)))
+        (when generation
+          (setf (generation-ending generation)
+                (remove worker (generation-ending generation)))
+          (remhash worker *ending-generation*)))
       (%condition-broadcast *work-in-flight-condvar*))))
 
-(defun %wait-for-work-in-flight (seconds)
-  "Wait up to SECONDS until no spawn operation is in flight and no worker is
-waiting to be ended.  Returns true when that was reached; otherwise NIL, with
-what is still in flight as the second and third values."
+(defun %wait-for-work-in-flight (seconds &optional (generation *generation*))
+  "Wait up to SECONDS until GENERATION has no spawn operation in flight and no
+worker waiting to be ended.  Returns true when that was reached; otherwise
+NIL, with what is still in flight as the second and third values."
   (let ((deadline (+ (get-internal-real-time)
                      (* seconds internal-time-units-per-second))))
     (bt:with-lock-held (*pool-lock*)
       (loop
-        (when (and (zerop *spawns-in-flight*) (null *ending-workers*))
+        (when (and (zerop (generation-spawns generation))
+                   (null (generation-ending generation)))
           (return t))
         (let ((remaining (/ (- deadline (get-internal-real-time))
                             internal-time-units-per-second)))
           (unless (plusp remaining)
-            (return (values nil *spawns-in-flight* (length *ending-workers*))))
+            (return (values nil (generation-spawns generation)
+                            (length (generation-ending generation)))))
           (bt:condition-wait *work-in-flight-condvar* *pool-lock*
                              :timeout (min remaining 1)))))))
 
-(defvar *pool-generation* 0
-  "Which pool is running: INITIALIZE-POOL counts up.  Background work notes
-the generation it was started for and adds nothing to a later one -- a
-replenishment still spawning when its pool was shut down must not hand its
-worker to the pool initialized after.  Guarded by *POOL-LOCK*.")
+(defun %replenish-running-p ()
+  "True while the running generation's replenishment is under way."
+  (bt:with-lock-held (*pool-lock*)
+    (generation-replenish-running *generation*)))
 
 (defun %with-owner-reset (thunk)
   "Test helper: reset ownership/failure state under *pool-lock*, then run THUNK."
@@ -700,26 +733,29 @@ condition variable until the spawn completes or fails."
 
 (defun %effective-pool-size ()
   "Return the effective pool size: the workers the pool tracks plus the spawn
-operations in flight, which the cap limits.  Every spawn is counted from the
+operations the running generation has in flight, which the cap limits.  Every spawn is counted from the
 decision to its end (%BEGIN-SPAWN) -- an on-demand spawn behind its
 placeholder, a recovery's, a replenishment's without one -- and hands its
 count to its worker in the critical section that registers it, so no worker
 is counted twice or missed.  A worker taken out of the lists to be ended is
 not counted: it is going.  Must be called with *pool-lock* held."
-  (+ (length *all-workers*) *spawns-in-flight*))
+  (+ (length *all-workers*) (generation-spawns *generation*)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal -- spawn and bind
 ;;; ---------------------------------------------------------------------------
 
-(defun %spawn-and-bind (session-id placeholder)
+(defun %spawn-and-bind (session-id placeholder generation)
   "Spawn a worker, bind it to SESSION-ID, and notify waiting threads.
 On failure, clean up the affinity map entry and notify waiters of
 the failure.
 Returns the worker on success.  Signals an error if the spawn was
 cancelled (e.g. release-session during spawn) or failed.
 
-Finishes the spawn operation its caller counted (%BEGIN-SPAWN) however it
+GENERATION is the pool generation that counted the spawn (%BEGIN-SPAWN);
+the worker is registered only while that generation is running.
+
+Finishes the spawn operation its caller counted however it
 ends: in the critical section that registers the worker, which then counts
 in its place, or once the worker is ended."
   (let ((counted t))
@@ -744,6 +780,7 @@ in its place, or once the worker is ended."
                     ;; when a new pool was initialized meanwhile: its map does
                     ;; not hold this placeholder.
                     ((or (not *pool-running*)
+                         (not (eq generation *generation*))
                          (not (eq (gethash session-id *affinity-map*) placeholder)))
                      (setf cancelled t
                            shut-down t)
@@ -753,9 +790,8 @@ in its place, or once the worker is ended."
                      (push new-worker *all-workers*)
                      ;; Tracked now, so no longer a spawn in flight: one
                      ;; critical section, so it is never counted twice.
-                     (decf *spawns-in-flight*)
-                     (setf counted nil)
-                     (%condition-broadcast *work-in-flight-condvar*))))
+                     (%hand-over-spawn generation)
+                     (setf counted nil))))
                 (cond
                   (cancelled
                    (bt:with-lock-held ((worker-placeholder-lock placeholder))
@@ -811,7 +847,7 @@ in its place, or once the worker is ended."
             (when new-worker
               (record-worker-termination new-worker :stopped :owed nil)
               (ignore-errors (%kill-worker new-worker))))))
-      (when counted (%end-spawn)))))
+      (when counted (%end-spawn generation)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal -- wait for placeholder
@@ -851,15 +887,16 @@ deadline to ensure the waiter outlives the actual spawn attempt."
 ;;; Internal -- standby replenishment
 ;;; ---------------------------------------------------------------------------
 
-(defun %replenish-standbys (&optional (generation *pool-generation*))
+(defun %replenish-standbys (generation)
   "Spawn standby workers until the pool has *worker-pool-warmup*
 standbys.  Respects *max-pool-size* to avoid growing the pool
 beyond the configured cap.  Called in a background thread.
 Exits early when *pool-running* becomes NIL (shutdown in progress).
 
-GENERATION is the pool this replenishment was started for
-(*POOL-GENERATION*): a worker it spawns is handed to that pool only, never
-to one initialized after it was shut down.
+GENERATION is the pool this replenishment was started for, and owns it: a
+worker it spawns is handed to that pool only, never to one initialized after
+it was shut down, and when it ends it clears that generation's flag, not a
+later one's.
 
 Each spawn is counted from the decision (%BEGIN-SPAWN), so the cap, which
 counts spawns in flight, holds while it runs, and a shutdown waits for it.
@@ -871,7 +908,7 @@ session's next request goes through that lock."
             (let ((need-more nil))
               (bordeaux-threads:with-lock-held (*pool-lock*)
                 (when (and *pool-running*
-                           (eql generation *pool-generation*)
+                           (eq generation *generation*)
                            (< (length *standby-workers*) *worker-pool-warmup*)
                            (< (%effective-pool-size) *max-pool-size*))
                   (setf need-more t)
@@ -884,7 +921,7 @@ session's next request goes through that lock."
                            (bordeaux-threads:with-lock-held (*pool-lock*)
                              (cond
                                ((not (and *pool-running*
-                                          (eql generation *pool-generation*)))
+                                          (eq generation *generation*)))
                                 (setf surplus w stop t))
                                ;; Its own spawn is still counted in the size,
                                ;; so the cap is exceeded only if registering
@@ -897,9 +934,8 @@ session's next request goes through that lock."
                                 (push w *standby-workers*)
                                 (push w *all-workers*)
                                 ;; Tracked now: hand its count to it.
-                                (decf *spawns-in-flight*)
-                                (setf counted nil)
-                                (%condition-broadcast *work-in-flight-condvar*))))
+                                (%hand-over-spawn generation)
+                                (setf counted nil))))
                            (unless surplus
                              (log-event :info "pool.standby.spawned"
                                         "worker_id" (worker-id w))))
@@ -909,37 +945,41 @@ session's next request goes through that lock."
                          (setf stop t)))
                   (when surplus
                     (ignore-errors (%kill-worker surplus)))
-                  (when counted (%end-spawn)))
+                  (when counted (%end-spawn generation)))
                 (when stop (return)))))
     (bordeaux-threads:with-lock-held (*pool-lock*)
-      (setf *replenish-running* nil))))
+      (setf (generation-replenish-running generation) nil))))
 
 (defun %schedule-replenish ()
-  "Spawn a background thread to replenish standby workers if needed.
-Skips if a replenish thread is already running.  Captures the
-caller's dynamic bindings for *worker-pool-warmup* and *max-pool-size*
-and re-binds them inside the replenish thread, so callers (including
-tests) can let-bind these vars and have the value honoured -- SBCL's
-bt:make-thread does not propagate dynamic bindings to the new thread."
-  (let ((should-start nil) (generation nil))
+  "Start a replenishment of standby workers if one is needed and none is
+under way for the running generation.
+
+Decided, started and published in one critical section: the flag, the
+start of the background work and its handle together, so a shutdown taking
+the lock afterwards finds the handle to wait for, and one taking it before
+leaves nothing to start.  Starting background work under *POOL-LOCK* only
+creates a thread; the work takes the lock itself once it runs.
+
+Captures the caller's dynamic bindings for *worker-pool-warmup* and
+*max-pool-size* and re-binds them inside the replenish thread, so callers
+(including tests) can let-bind these vars and have the value honoured --
+SBCL's bt:make-thread does not propagate dynamic bindings to the new
+thread."
+  (let ((warmup *worker-pool-warmup*)
+        (max-size *max-pool-size*))
     (bt:with-lock-held (*pool-lock*)
-      (when (and *pool-running*
-                 (not *replenish-running*)
-                 (< (length *standby-workers*) *worker-pool-warmup*))
-        (setf *replenish-running* t
-              should-start t
-              generation *pool-generation*)))
-    (when should-start
-      (let ((warmup *worker-pool-warmup*)
-            (max-size *max-pool-size*))
-        (let ((handle (%start-pool-work
-                       (lambda ()
-                         (let ((*worker-pool-warmup* warmup)
-                               (*max-pool-size* max-size))
-                           (%replenish-standbys generation)))
-                       "pool-replenish")))
-          (bt:with-lock-held (*pool-lock*)
-            (setf *replenish-thread* handle)))))))
+      (let ((generation *generation*))
+        (when (and *pool-running*
+                   (not (generation-replenish-running generation))
+                   (< (length *standby-workers*) warmup))
+          (setf (generation-replenish-running generation) t
+                (generation-replenish-thread generation)
+                (%start-pool-work
+                 (lambda ()
+                   (let ((*worker-pool-warmup* warmup)
+                         (*max-pool-size* max-size))
+                     (%replenish-standbys generation)))
+                 "pool-replenish")))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal -- crash recovery
@@ -997,6 +1037,7 @@ the shutdown ends the worker."
         (exit-code nil)
         (exit-status nil)
         (placeholder nil)
+        (spawn-generation nil)
         (tripped nil))
     ;; Read before the lock and recorded inside it: SB-EXT:PROCESS-STATUS is
     ;; only a struct read, but *POOL-LOCK* is the lock every session's next
@@ -1035,8 +1076,8 @@ the shutdown ends the worker."
              (tripped (remhash session-id *affinity-map*))
              (t
               (setf placeholder (make-worker-placeholder :session-id session-id)
-                    (gethash session-id *affinity-map*) placeholder)
-              (%begin-spawn)))))
+                    (gethash session-id *affinity-map*) placeholder
+                    spawn-generation (%begin-spawn))))))
         (:standby
          (setf was-standby t)
          (setf retired-p (%record-worker-death crashed-worker
@@ -1082,7 +1123,8 @@ the shutdown ends the worker."
     (cond
       (placeholder
        (handler-case
-           (let ((new-worker (%spawn-and-bind session-id placeholder)))
+           (let ((new-worker (%spawn-and-bind session-id placeholder
+                                              spawn-generation)))
              (log-event :info "pool.worker.recovered"
                         "old_worker_id" (worker-id crashed-worker)
                         "new_worker_id" (worker-id new-worker)
@@ -1271,9 +1313,10 @@ Serialized by *init-lock* to prevent concurrent initialization."
             *runtime-init-disabled* nil)
       (clrhash *init-attributable-crashes*)
       (clrhash *crash-history*)
-      ;; A new pool: background work started for an earlier one adds
-      ;; nothing to this one.
-      (incf *pool-generation*))
+      ;; A new pool, with an account of its own: background work an earlier
+      ;; one still owes -- a spawn its shutdown gave up waiting for -- counts
+      ;; against that one's cap and flags, and adds nothing to this one.
+      (setf *generation* (%make-generation (1+ (generation-id *generation*)))))
     ;; Start health monitor.  Sets *pool-running* to T, which gates
     ;; the replenish thread below: %replenish-standbys exits early
     ;; if *pool-running* is NIL, so the monitor must come up first.
@@ -1312,15 +1355,24 @@ order:
   each spawn ends with its worker registered or ended -- a spawn finishing
   now sees the pool stopped and ends its own -- and each worker taken out to
   be ended is ended;
-- the replenishment and recovery threads are joined;
+- the replenishment and recovery threads are waited for, within the same
+  deadline;
 - every worker still listed is recorded as ended by the shutdown, signalled
   first so an RPC blocked on it lets go of its stream, and ended.
 
-A spawn that does not finish within %SHUTDOWN-WAIT-SECONDS is logged and
-left to end its own worker, which it does on seeing the pool stopped."
+A spawn or a thread that does not finish within %SHUTDOWN-WAIT-SECONDS is
+logged and left to end its own worker, which it does on seeing the pool
+stopped.  It stays on the stopped generation's account: a pool initialized
+afterwards is a new generation, whose cap and flags it does not touch."
   (log-event :info "pool.shutting-down")
-  (bt:with-lock-held (*pool-lock*)
-    (setf *pool-running* nil))
+  (let ((generation (bt:with-lock-held (*pool-lock*)
+                      (setf *pool-running* nil)
+                      *generation*)))
+    (%shutdown-generation generation)))
+
+(defun %shutdown-generation (generation)
+  "The body of SHUTDOWN-POOL, for GENERATION: the pool generation it stopped,
+whose work it waits for and whose workers it ends."
   ;; Clear stale request records so pool restart starts clean
   (clear-requests)
   ;; Wake health monitor immediately instead of waiting up to its poll interval.
@@ -1339,30 +1391,34 @@ left to end its own worker, which it does on seeing the pool stopped."
              (max 0 (/ (- deadline (get-internal-real-time))
                        internal-time-units-per-second))))
       (multiple-value-bind (quiet spawns ending)
-          (%wait-for-work-in-flight (remaining))
+          (%wait-for-work-in-flight (remaining) generation)
         (unless quiet
           (log-event :warn "pool.shutdown.work-still-in-flight"
                      "spawns" spawns "ending" ending)))
-      ;; The replenishment thread: its spawn is done, so it leaves at its
-      ;; next check of *POOL-RUNNING*.  Only a thread is waited for: a
-      ;; handle that is not one is work *START-POOL-THREAD-FUNCTION* ran some
-      ;; other way, which sees the pool stopped whenever it runs.
-      (let ((handle (bordeaux-threads:with-lock-held (*pool-lock*)
-                      *replenish-thread*)))
-        (when (bordeaux-threads:threadp handle)
-          (loop while (and (plusp (remaining))
-                           (bordeaux-threads:thread-alive-p handle))
-                do (sleep *shutdown-replenish-wait-seconds*))))))
-  ;; Wait for in-flight recovery threads
-  (let ((threads (bordeaux-threads:with-lock-held (*pool-lock*)
-                   (copy-list *recovery-threads*))))
-    (dolist (th threads)
-      ;; A handle that is not a thread is work *START-POOL-THREAD-FUNCTION*
-      ;; ran some other way; there is nothing to join.
-      (when (and (bordeaux-threads:threadp th)
-                 (bordeaux-threads:thread-alive-p th))
-        (handler-case (bordeaux-threads:join-thread th)
-          (error () nil)))))
+      ;; The replenishment and recovery threads, within the same deadline:
+      ;; their spawns are done, so they leave at their next look at the
+      ;; pool.  A recovery still spawning past the deadline is left to end
+      ;; its own worker, as a spawn is -- joining it without a deadline
+      ;; would wait as long as the spawn does.  Only a thread is waited
+      ;; for: a handle that is not one is work *START-POOL-THREAD-FUNCTION*
+      ;; ran some other way, which sees the pool stopped whenever it runs.
+      (let ((threads (remove-if-not
+                      #'bordeaux-threads:threadp
+                      (bordeaux-threads:with-lock-held (*pool-lock*)
+                        (cons (generation-replenish-thread generation)
+                              (copy-list *recovery-threads*))))))
+        (loop while (and (plusp (remaining))
+                         (some #'bordeaux-threads:thread-alive-p threads))
+              do (sleep *shutdown-replenish-wait-seconds*))
+        (let ((running (remove-if-not #'bordeaux-threads:thread-alive-p threads)))
+          (when running
+            (log-event :warn "pool.shutdown.threads-still-running"
+                       "threads" (format nil "~{~A~^,~}"
+                                         (mapcar #'bordeaux-threads:thread-name
+                                                 running)))))
+        (dolist (thread threads)
+          (unless (bordeaux-threads:thread-alive-p thread)
+            (ignore-errors (bordeaux-threads:join-thread thread)))))))
   ;; Snapshot and end all workers.
   (let ((workers nil))
     (bordeaux-threads:with-lock-held (*pool-lock*)
@@ -1428,7 +1484,7 @@ slip through.
 Signals an error if the pool is shutting down or if the worker
 cannot be created."
   (let ((entry nil) (need-spawn nil) (assigned-from-standby nil)
-        (old-worker-to-kill nil) (standbys-to-kill '())
+        (old-worker-to-kill nil) (standbys-to-kill '()) (spawn-generation nil)
         (capacity-exceeded nil) (circuit-breaker-tripped nil))
     (bordeaux-threads:with-lock-held (*pool-lock*)
       (unless *pool-running*
@@ -1536,7 +1592,7 @@ cannot be created."
                       need-spawn t)
                 ;; Counted here, where it is decided; %SPAWN-AND-BIND
                 ;; finishes it.
-                (%begin-spawn))))))
+                (setf spawn-generation (%begin-spawn)))))))
     ;; Kill orphaned worker outside the lock.  For timeout/stream-error
     ;; crashes the OS process may still be alive; without this it would
     ;; leak as an untracked SBCL process.
@@ -1561,7 +1617,7 @@ cannot be created."
                      (%schedule-replenish)
                      assigned-from-standby)
                     (need-spawn
-                     (%spawn-and-bind session-id entry))
+                     (%spawn-and-bind session-id entry spawn-generation))
                     (t (%wait-for-placeholder entry)))))
       ;; Sync the parent's *project-root* to a newly assigned worker.
       ;; At initialize time the worker doesn't exist yet, so the root

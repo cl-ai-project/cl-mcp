@@ -288,8 +288,9 @@ there."
                         cl-mcp/src/pool::*affinity-map*)
                pairs)
         :size (cl-mcp/src/pool::%effective-pool-size)
-        :spawns cl-mcp/src/pool::*spawns-in-flight*
-        :ending (copy-list cl-mcp/src/pool::*ending-workers*)
+        :spawns (cl-mcp/src/pool::generation-spawns cl-mcp/src/pool::*generation*)
+        :ending (copy-list (cl-mcp/src/pool::generation-ending
+                            cl-mcp/src/pool::*generation*))
         :running (and cl-mcp/src/pool::*pool-running* t)))
 
 (defun %duplicates (list)

@@ -1704,16 +1704,26 @@ The pool's size, which the cap limits, is the workers it tracks plus the
 spawns in flight: a replenishment's spawn, which has no placeholder, counts
 from the start, and a worker being ended does not.
 
+The account belongs to a **pool generation** (`pool-generation`), not to the
+image: each `initialize-pool` starts a new one, and every piece of background
+work -- a spawn, an ending, a replenishment with its flag and its thread --
+is charged to the generation that decided it. Work a shutdown gave up on
+stays on the stopped generation's account, so it neither fills the next
+pool's cap nor blocks its replenishment, and its worker is registered into
+no later pool. A replenishment is decided, started and published in one
+critical section, so a shutdown either sees its handle or leaves it nothing
+to start.
+
 **Shutdown.** `shutdown-pool` stops the pool under its lock, joins the
-health monitor, waits for every spawn and ending in flight
-(`%wait-for-work-in-flight`, bounded by the worker startup timeout plus 15
-s), waits for the replenishment and recovery threads, then records every
-worker it still holds as ended by the shutdown, signals each -- so an RPC
-blocked on one lets go of its stream, as `release-session` already did --
-and ends them. When it returns, the pool owes nothing. Background work notes
-the pool generation it was started for (`*pool-generation*`), and a
-replenishment still spawning when its pool stopped gives its worker to no
-later pool.
+health monitor, then -- all within one deadline, the worker startup timeout
+plus 15 s -- waits for its generation's spawns and endings in flight
+(`%wait-for-work-in-flight`) and for the replenishment and recovery threads;
+then it records every worker it still holds as ended by the shutdown,
+signals each -- so an RPC blocked on one lets go of its stream, as
+`release-session` already did -- and ends them. When it returns, the pool
+owes nothing, unless some work outlived the deadline: that is logged, ends
+its own worker when it returns, and stays on the stopped generation's
+account.
 
 **Crash recovery and the breaker.** `%handle-worker-crash` now decides
 everything about a death in one critical section: the worker is published
@@ -1780,6 +1790,14 @@ which processes died, every thread the pool started.
   session spawned a second replacement beside it.
 - **A surplus standby was ended under `*pool-lock*`**, stopping every session
   for up to two seconds.
+- **Found in review:** the recovery threads were joined after the deadline,
+  without one, so a recovery stuck in its spawn held the shutdown forever; a
+  replenishment decided before a shutdown could start after it returned,
+  its handle published too late for the shutdown to see; and the spawn
+  count, the replenishment flag and its handle were image-wide, so a spawn
+  an old pool's shutdown gave up on filled the next pool's cap -- with a cap
+  of one, every session refused. All three are fixed by charging the work to
+  its generation; each has a fixed case.
 - **A queued request waited without a deadline**, and a cancelled one went on
   waiting until the request ahead of it finished.
 

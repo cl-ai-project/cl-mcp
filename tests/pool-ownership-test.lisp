@@ -87,15 +87,16 @@
   "Run BODY while SESSION's entry is a placeholder whose spawn is counted, as
 an on-demand spawn's is from the acquire that decides it until its worker is
 registered; take both away afterwards."
-  `(progn
-     (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
-       (setf (gethash ,session cl-mcp/src/pool::*affinity-map*)
-             (cl-mcp/src/pool::make-worker-placeholder :session-id ,session))
-       (cl-mcp/src/pool::%begin-spawn))
-     (unwind-protect (progn ,@body)
-       (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
-         (remhash ,session cl-mcp/src/pool::*affinity-map*))
-       (cl-mcp/src/pool::%end-spawn))))
+  (let ((generation (gensym "GENERATION")))
+    `(let ((,generation
+             (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+               (setf (gethash ,session cl-mcp/src/pool::*affinity-map*)
+                     (cl-mcp/src/pool::make-worker-placeholder :session-id ,session))
+               (cl-mcp/src/pool::%begin-spawn))))
+       (unwind-protect (progn ,@body)
+         (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+           (remhash ,session cl-mcp/src/pool::*affinity-map*))
+         (cl-mcp/src/pool::%end-spawn ,generation)))))
 
 (deftest the-checks-tell-at-rest-from-in-between
   (with-fake-pool (ledger :warmup 1)

@@ -126,7 +126,9 @@
   (testing "a shutdown that does not wait returns before a spawn it owes"
     (ok (member :spawned-after-shutdown
                 (%with-replaced 'cl-mcp/src/pool::%wait-for-work-in-flight
-                                (lambda (seconds) (declare (ignore seconds)) t)
+                                (lambda (seconds &optional generation)
+                                  (declare (ignore seconds generation))
+                                  t)
                                 (lambda () (%kinds-of-scenario '(:acquire-spawn)))))))
   (testing "a worker taken out to be ended and not accounted for outlives it"
     (ok (intersection '(:ended-after-shutdown :live-after-shutdown)
@@ -219,7 +221,7 @@
       ;; generation that is no longer the running one.  (Not by lowering the
       ;; cap: the replenishment thread has bound the value it started with.)
       (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
-        (incf cl-mcp/src/pool::*pool-generation*))
+        (setf cl-mcp/src/pool::*generation* (cl-mcp/src/pool::%make-generation -1)))
       (let ((ending (sb-thread:make-semaphore))
             (waited nil))
         ;; End it slowly, and time how long the pool lock takes meanwhile.
@@ -270,6 +272,102 @@
         (ok (not (member stale (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
                                  (copy-list cl-mcp/src/pool::*all-workers*))))
             "and the new pool never took it")))))
+
+(deftest a-shutdown-waits-for-a-recovery-no-longer-than-its-deadline
+  ;; Found in review: the recovery threads were joined after the deadline,
+  ;; without one, so a recovery stuck in its spawn held the shutdown for as
+  ;; long as the spawn took -- forever, for one that never returned.
+  (with-concurrent-pool (ledger :warmup 0 :max-size 4)
+    (let ((worker (get-or-assign-worker "s0"))
+          (base (%spawns-begun ledger))
+          (gate (%gate-spawns ledger)))
+      (%mark-dead ledger worker)
+      (cl-mcp/src/pool::%check-worker-health)
+      (%await (lambda () (>= (%spawns-begun ledger) (1+ base))))
+      ;; A one-second deadline (startup timeout + 15).
+      (setf cl-mcp/src/worker-client::*worker-startup-timeout* -14)
+      (let ((start (get-internal-real-time)))
+        (shutdown-pool)
+        (let ((took (/ (- (get-internal-real-time) start)
+                       internal-time-units-per-second)))
+          (ok (< took 3) (format nil "it gave up at its deadline: ~,1Fs" took))))
+      ;; The recovery ends its own worker once its spawn returns.
+      (sb-thread:signal-semaphore gate 10)
+      (ok (%await (lambda ()
+                    (every (lambda (w) (ended-p ledger w))
+                           (%ledger-value
+                            cl-mcp/specs/concurrency-fixtures::ledger-spawned ledger))))
+          "and the late replacement is ended by the recovery itself"))))
+
+(deftest a-replenishment-decided-before-a-shutdown-is-waited-for
+  ;; Found in review: the replenishment was decided under the lock and its
+  ;; thread started and published after it, so a shutdown in between saw
+  ;; neither a spawn nor a handle, returned, and the thread started after.
+  ;; Now the start and the handle are in the deciding critical section:
+  ;; here the start is held there, so the shutdown can only follow it.
+  (with-concurrent-pool (ledger :warmup 0 :max-size 4)
+    (let ((starting (sb-thread:make-semaphore))
+          (go (sb-thread:make-semaphore))
+          (real cl-mcp/src/pool::*start-pool-thread-function*)
+          (returned-at nil))
+      (setf cl-mcp/src/pool::*start-pool-thread-function*
+            (lambda (thunk name)
+              (when (equal name "pool-replenish")
+                (sb-thread:signal-semaphore starting)
+                (sb-thread:wait-on-semaphore go :timeout 10))
+              (funcall real thunk name)))
+      (let ((scheduler (bt:make-thread
+                        (lambda ()
+                          (let ((cl-mcp/src/pool:*worker-pool-warmup* 1))
+                            (cl-mcp/src/pool::%schedule-replenish)))
+                        :name "replenish-scheduler")))
+        (ok (sb-thread:wait-on-semaphore starting :timeout 10)
+            "the replenishment is decided and about to start")
+        (let ((shutdown (bt:make-thread
+                         (lambda () (shutdown-pool)
+                           (setf returned-at (get-internal-real-time)))
+                         :name "replenish-shutdown")))
+          (sleep 0.1)
+          (ok (null returned-at) "the shutdown cannot pass the decision")
+          (sb-thread:signal-semaphore go)
+          (bt:join-thread scheduler)
+          (bt:join-thread shutdown)
+          (ok (null (cl-mcp/specs/concurrency-fixtures::after-shutdown-violations
+                     ledger returned-at))
+              "and once it returns, the replenishment has come and gone"))))))
+
+(deftest a-pool-left-owing-work-does-not-weigh-on-the-next
+  ;; Found in review: the spawn count was one global, so a spawn an old pool's
+  ;; shutdown gave up on counted against the next pool's cap -- with a cap of
+  ;; one, the new pool refused every session until the spawn returned.  So
+  ;; did the old replenishment's flag, which kept the new pool from
+  ;; replenishing.
+  (with-concurrent-pool (ledger :warmup 0 :max-size 1)
+    (let ((gate (%gate-spawns ledger))
+          (base (%spawns-begun ledger)))
+      (let ((stuck (bt:make-thread (lambda ()
+                                     (ignore-errors (get-or-assign-worker "s0")))
+                                   :name "stuck-acquire")))
+        (setf cl-mcp/src/pool:*worker-pool-warmup* 1)
+        (cl-mcp/src/pool::%schedule-replenish)
+        (%await (lambda () (>= (%spawns-begun ledger) (1+ base))))
+        (setf cl-mcp/src/worker-client::*worker-startup-timeout* -14)
+        (shutdown-pool)
+        ;; New spawns are not gated; the old ones still wait on the gate
+        ;; they took.
+        (bt:with-lock-held ((cl-mcp/specs/concurrency-fixtures::ledger-lock ledger))
+          (setf (cl-mcp/specs/concurrency-fixtures::ledger-spawn-gate ledger) nil))
+        (setf cl-mcp/src/pool:*worker-pool-warmup* 0)
+        (initialize-pool)
+        (ok (typep (get-or-assign-worker "s1") 'cl-mcp/src/worker-client:worker)
+            "the new pool lends its one worker, the old spawn notwithstanding")
+        (sb-thread:signal-semaphore gate 10)
+        (bt:join-thread stuck)
+        (ok (%await (lambda ()
+                      (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                        (zerop (cl-mcp/src/pool::generation-spawns
+                                cl-mcp/src/pool::*generation*)))))
+            "and the new pool's account never held the old spawn")))))
 
 ;;; ------------------------------------------------------------------------
 ;;; Waiting for a worker

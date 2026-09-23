@@ -1558,7 +1558,9 @@ the argument as it is after the call cannot see."
            :must-fail (list (list :property shutdowns)))
      (list :function 'cl-mcp/src/pool::%wait-for-work-in-flight
            :description "returns from a shutdown without waiting for spawns and endings in flight"
-           :replacement (lambda (seconds) (declare (ignore seconds)) t)
+           :replacement (lambda (seconds &optional generation)
+                          (declare (ignore seconds generation))
+                          t)
            :targets (list (list :property shutdowns))
            :must-fail (list (list :property shutdowns)))
      (list :function 'cl-mcp/src/pool::%begin-ending
