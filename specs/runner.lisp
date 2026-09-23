@@ -72,6 +72,9 @@
   (:import-from #:cl-mcp/src/spec-adapter-core
                 #:api-fn
                 #:definition-digest)
+  (:import-from #:cl-mcp/src/pool
+                #:release-session
+                #:shutdown-pool)
   (:import-from #:cl-mcp/specs
                 #:register-specifications
                 #:contract-names
@@ -1053,6 +1056,17 @@ definition as unchanged on the strength of a record that was refused."
                 (funcall real api name registry :property stripped :data-key key)
                 (values nil nil)))))))
 
+(defun %without-ending-workers (real)
+  "Return a wrong version of REAL, a pool operation, for the negative control:
+it does everything REAL does except end the workers it lets go of -- the pool's
+kill is bound to do nothing around the call.  The pool's lists look exactly as
+they should afterwards; only a record kept outside the pool shows the
+processes nobody owns."
+  (lambda (&rest arguments)
+    (let ((cl-mcp/src/pool::*kill-worker-function*
+            (lambda (worker) (declare (ignore worker)) nil)))
+      (apply real arguments))))
+
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
@@ -1102,6 +1116,10 @@ the argument as it is after the call cannot see."
                         "SPEC-CHECK-RESPONSE-CARRIES-THE-VERDICT-AND-ITS-RESERVATIONS"))
         (response-replay
           (%bundle-name :property "SPEC-CHECK-REPLAY-LINE-ASKS-FOR-THE-RUN-IT-REPORTS"))
+        (pool-sequences
+          (%bundle-name :property "POOL-OWNERSHIP-HOLDS-OVER-OPERATION-SEQUENCES"))
+        (pool-full
+          (%bundle-name :property "POOL-OWNERSHIP-HOLDS-WHEN-THE-POOL-IS-FULL"))
         ;; Taken before any swap, so a wrong implementation can defer to it.
         (real-read (fdefinition 'allowed-read-path))
         (real-write (fdefinition 'ensure-write-path))
@@ -1121,7 +1139,9 @@ the argument as it is after the call cannot see."
         (real-list-response (fdefinition 'build-spec-list-response))
         (real-check-response (fdefinition 'build-spec-check-response))
         (real-declaration (fdefinition '%describe-function-spec))
-        (real-digest (fdefinition 'definition-digest)))
+        (real-digest (fdefinition 'definition-digest))
+        (real-release (fdefinition 'release-session))
+        (real-shutdown (fdefinition 'shutdown-pool)))
     (list
      (list :function newline
            :description "returns its argument, never adding a newline"
@@ -1333,7 +1353,18 @@ the argument as it is after the call cannot see."
            :description "digests from the readers when the record's own digest was refused"
            :replacement (%digest-falling-back-from-a-refused-record real-digest)
            :targets (list (list :property digest-source))
-           :must-fail (list (list :property digest-source))))))
+           :must-fail (list (list :property digest-source)))
+     (list :function 'release-session
+           :description "lets a released session's worker go without ending it"
+           :replacement (%without-ending-workers real-release)
+           :targets (list (list :property pool-sequences) (list :property pool-full))
+           :must-fail (list (list :property pool-sequences)))
+     (list :function 'shutdown-pool
+           :description "empties its lists without ending the workers in them"
+           :replacement (%without-ending-workers real-shutdown)
+           :targets (list (list :property pool-sequences) (list :property pool-full))
+           :must-fail (list (list :property pool-sequences)
+                            (list :property pool-full))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put

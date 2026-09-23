@@ -8,15 +8,16 @@
 ;;;;   cl-mcp/specs --> cl-mcp/src/utils/{strings,sanitize,paths}, cl-mcp/src/fs,
 ;;;;                    cl-mcp/src/spec-core-record,
 ;;;;                    cl-mcp/src/spec-adapter-{core,report},
-;;;;                    cl-mcp/src/tools/spec-entry,
+;;;;                    cl-mcp/src/tools/spec-entry, cl-mcp/src/pool,
 ;;;;                    cl-spec/main, cl-spec/src/backends/check-it
 ;;;;
 ;;;; (The default suite does load specs/path-fixtures.lisp,
 ;;;; specs/write-fixtures.lisp, specs/core-record-fixtures.lisp,
-;;;; specs/check-verdict-fixtures.lisp, specs/check-routing-fixtures.lisp and
-;;;; specs/suite-judge.lisp, for its fixed read, write, record, verdict and
-;;;; routing cases and the integration judge; those files need no cl-spec and
-;;;; load nothing of this bundle.)
+;;;; specs/check-verdict-fixtures.lisp, specs/check-routing-fixtures.lisp,
+;;;; specs/pool-fixtures.lisp and specs/suite-judge.lisp, for its fixed read,
+;;;; write, record, verdict, routing and pool-ownership cases and the
+;;;; integration judge; those files need no cl-spec and load nothing of this
+;;;; bundle.)
 ;;;;
 ;;;; Loading this system registers the bundle in CL-SPEC:*REGISTRY* and does
 ;;;; nothing else: no check runs, no function is instrumented, no server or
@@ -40,6 +41,7 @@
   (:import-from #:cl-mcp/specs/check-routing)
   (:import-from #:cl-mcp/specs/spec-inspection)
   (:import-from #:cl-mcp/specs/spec-responses)
+  (:import-from #:cl-mcp/specs/pool-ownership)
   (:export #:register-specifications
            #:contract-names
            #:property-names
@@ -61,7 +63,8 @@ of the function it describes, not under a CL-MCP/SPECS package."
           (cl-mcp/specs/check-verdicts:contract-names)
           (cl-mcp/specs/check-routing:contract-names)
           (cl-mcp/specs/spec-inspection:contract-names)
-          (cl-mcp/specs/spec-responses:contract-names)))
+          (cl-mcp/specs/spec-responses:contract-names)
+          (cl-mcp/specs/pool-ownership:contract-names)))
 
 (defun property-names ()
   "Return the properties this bundle defines."
@@ -73,7 +76,8 @@ of the function it describes, not under a CL-MCP/SPECS package."
           (cl-mcp/specs/check-verdicts:property-names)
           (cl-mcp/specs/check-routing:property-names)
           (cl-mcp/specs/spec-inspection:property-names)
-          (cl-mcp/specs/spec-responses:property-names)))
+          (cl-mcp/specs/spec-responses:property-names)
+          (cl-mcp/specs/pool-ownership:property-names)))
 
 (defun spec-names ()
   "Return the named data specs this bundle defines."
@@ -85,7 +89,8 @@ of the function it describes, not under a CL-MCP/SPECS package."
           (cl-mcp/specs/check-verdicts:spec-names)
           (cl-mcp/specs/check-routing:spec-names)
           (cl-mcp/specs/spec-inspection:spec-names)
-          (cl-mcp/specs/spec-responses:spec-names)))
+          (cl-mcp/specs/spec-responses:spec-names)
+          (cl-mcp/specs/pool-ownership:spec-names)))
 
 (defun generator-names ()
   "Return the custom generators this bundle defines."
@@ -97,7 +102,8 @@ of the function it describes, not under a CL-MCP/SPECS package."
           (cl-mcp/specs/check-verdicts:generator-names)
           (cl-mcp/specs/check-routing:generator-names)
           (cl-mcp/specs/spec-inspection:generator-names)
-          (cl-mcp/specs/spec-responses:generator-names)))
+          (cl-mcp/specs/spec-responses:generator-names)
+          (cl-mcp/specs/pool-ownership:generator-names)))
 
 (defun call-examples ()
   "Return the bundle's concrete calls, as (FUNCTION ARGUMENTS [CASE]), which the
@@ -110,7 +116,8 @@ runner checks with CL-SPEC:CHECK-CALL apart from generated trials."
           (cl-mcp/specs/check-verdicts:call-examples)
           (cl-mcp/specs/check-routing:call-examples)
           (cl-mcp/specs/spec-inspection:call-examples)
-          (cl-mcp/specs/spec-responses:call-examples)))
+          (cl-mcp/specs/spec-responses:call-examples)
+          (cl-mcp/specs/pool-ownership:call-examples)))
 
 (defun register-specifications (&optional (registry *registry*))
   "Install every definition of this bundle in REGISTRY, the current
@@ -129,7 +136,8 @@ REGISTRY after the call returns: this does not bind a registry of its own."
     (cl-mcp/specs/check-verdicts:register-specifications)
     (cl-mcp/specs/check-routing:register-specifications)
     (cl-mcp/specs/spec-inspection:register-specifications)
-    (cl-mcp/specs/spec-responses:register-specifications))
+    (cl-mcp/specs/spec-responses:register-specifications)
+    (cl-mcp/specs/pool-ownership:register-specifications))
   (values (contract-names) (property-names)))
 
 ;;; Loading the bundle registers it where MCP's spec-list and spec-symbol look.

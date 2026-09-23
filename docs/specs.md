@@ -47,11 +47,15 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/tools/spec-response-builders:build-spec-symbol-response` | none | `spec-symbol-response-separates-registration-from-failure`, `spec-response-json-…` |
 | `cl-mcp/src/tools/spec-response-builders:build-spec-describe-response` | none | `spec-describe-response-carries-the-declaration-it-was-given`, `spec-response-json-…` |
 | `cl-mcp/src/tools/spec-response-builders:build-spec-check-response` | none | `spec-check-response-carries-the-verdict-and-its-reservations`, `spec-check-replay-line-asks-for-the-run-it-reports`, `spec-response-json-…` |
+| `cl-mcp/src/pool:get-or-assign-worker` | none (see *Pool ownership*) | `pool-ownership-holds-over-operation-sequences`, `pool-ownership-holds-when-the-pool-is-full` |
+| `cl-mcp/src/pool:release-session` | none | the same two |
+| `cl-mcp/src/pool:kill-session-worker` | none | the same two |
+| `cl-mcp/src/pool:shutdown-pool` | none | the same two |
 
 Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize`,
 `cl-mcp/specs/paths`, `cl-mcp/specs/write-paths`, `cl-mcp/specs/core-records`,
-`cl-mcp/specs/check-verdicts`, `cl-mcp/specs/check-routing`, `cl-mcp/specs/spec-inspection` and
-`cl-mcp/specs/spec-responses`. Each Function Spec is
+`cl-mcp/specs/check-verdicts`, `cl-mcp/specs/check-routing`, `cl-mcp/specs/spec-inspection`,
+`cl-mcp/specs/spec-responses` and `cl-mcp/specs/pool-ownership`. Each Function Spec is
 registered on the production symbol itself. Each read-access property is
 `(:about ...)` both read functions; each write-access property names the
 function or functions it calls.
@@ -1246,12 +1250,126 @@ Not covered: the other transports (stdio and HTTP share `process-json-line`
 with TCP but not its framing), `structuredContent`, and the pool's lifecycle
 under failure. Timeouts, crashes, cancellation and contention are Phase 4.
 
+## Pool ownership (4A)
+
+Phase 4 moves from the cl-spec tools to what runs them: the worker pool. 4A
+is ownership. Which worker does the pool hold, which does it lend to which
+session, which does it take back, and does it end every one it lets go of?
+Deadlines and cancellation (4B), abnormal exits and worker replacement (4C)
+and concurrency (4D) come after it.
+
+**How the real pool is run.** `src/pool.lisp` reaches a worker's process only
+through four specials: `*spawn-worker-function*`,
+`*kill-worker-function*`, `*worker-alive-function*` and
+`*start-pool-thread-function*`. Each defaults to the function production
+uses, and nothing in the pool rebinds them. The health monitor's iteration is
+`%check-worker-health`, which the monitor thread calls.
+`specs/pool-fixtures.lisp` sets the specials for one run and puts them back:
+- workers have no process;
+- background work (standby replenishment, crash recovery) is queued and runs
+  only when an operation asks for it;
+- the health check runs as an operation.
+
+The fakes and the declarations live under `specs/`. Nothing in `src/` refers
+to them.
+
+**Three records, kept apart.**
+- The **ledger** is written by the fake lifecycle alone. It records every
+  worker the pool was handed, every worker the pool ended, and every fake
+  process that died.
+- The **pool's own lists** (`*all-workers*`, `*standby-workers*`,
+  `*affinity-map*`, read under its lock) are what the invariants are about.
+- The **model** records what the operations promise a caller: which session
+  was lent which worker, and which workers are known unusable. It says what
+  must not happen, not how the pool should keep its lists, so it is not a
+  second pool.
+
+**Invariants.** Some hold between any two operations; others hold only at
+rest, when nothing is queued. With work queued the pool is legitimately
+between states.
+- *Always:*
+  - no worker is held twice;
+  - every held worker is tracked, once;
+  - no ended worker is held or tracked;
+  - every worker the ledger says the pool was handed and did not end is
+    tracked (a worker in no list and never ended is an orphan);
+  - a mapped worker names its own session;
+  - the pool counts no more than its cap.
+- *At rest:* no placeholder is left in the map, and the tracked list is
+  exactly the mapped workers and the standbys.
+- *After a shutdown:* the pool holds nothing, and every worker it was handed
+  has been ended.
+- *Model:*
+  - a newly lent worker is `:bound` to its session and not known unusable;
+  - a worker is lent to one session only;
+  - a session gets its worker back while that worker is usable;
+  - a released or killed session's worker is ended;
+  - a refused acquire leaves nothing mapped for the session.
+
+**The fixture's own cleanup.** After a run the fixture shuts the pool down and
+drains the queue. Only then does it end, itself, any worker the pool left live.
+Each such worker is reported as `:reaped-by-fixture`, so the cleanup cannot
+make a leak disappear. `a-leak-is-reported-and-not-hidden-by-the-fixture`
+plants one (`(:stray-spawn)`) and checks that it is reported as an orphan
+while the pool runs, as live after the shutdown, and as reaped by the
+fixture.
+
+**Generated** (`specs/pool-ownership.lisp`, 2 properties):
+`pool-ownership-holds-over-operation-sequences` (one standby, room for four)
+and `pool-ownership-holds-when-the-pool-is-full` (two standbys, room for two,
+so the standbys fill the pool). Each draws 5 to 30 operations over four
+sessions:
+- acquire, release and kill a session's worker;
+- a worker's process dies;
+- an RPC times out and marks a worker crashed;
+- a health check;
+- running the queued work;
+- a spawn failure;
+- shutdown and restart.
+
+The generator does not shrink. A counterexample is the whole sequence, and
+each violation names the operation index it followed.
+
+**Fixed** (`tests/pool-ownership-test.lisp`, in the default suite): the checks
+catch a leak, and tell at-rest from in-between. Regression cases pin the
+three faults below. With real processes, a released session's process, a
+crashed standby's, a dead standby's and every process left at a shutdown are
+all gone afterwards (reaped, not zombies).
+
+**What was found, and what changed.** Mapping the pool turned up three ways
+it lost track of a worker it owned. The fixed case for each fails against the
+old code. The generated sequences catch the first two (18 of 200 random
+sequences failed against the old code); the third needs an ordering no
+sequential run produces.
+- **A standby an RPC marked crashed was lent.** A timed-out RPC (the
+  project-root broadcast reaches every standby) marks the standby `:crashed`
+  and closes its connection, while the process lives on until the reaper gets
+  to it. The standby loop checked only that the process was alive, so it
+  bound the crashed worker to a session. It now also requires `:standby`.
+- **A dead standby was dropped, not ended.** It left the lists, and its
+  connection and stderr thread were left to nobody. It is now ended outside
+  the lock. The capacity refusal, which used to be signalled inside the lock
+  before anything could end it, now comes after.
+- **A spawn that finished after a shutdown was registered.** `shutdown-pool`
+  does not wait for on-demand spawns. A spawn completing afterwards was put
+  into the emptied map, and the next `initialize-pool` forgot it. The process
+  was never killed. `%spawn-and-bind` now registers only while the pool runs
+  and the map still holds its own placeholder. Otherwise it ends the worker
+  and signals `pool-shutting-down`. This one needs two threads in a fixed
+  order (a spawn that has started, a shutdown, then the spawn finishing),
+  pinned with semaphores. It is the one ordering test in 4A.
+
+Found and left for later phases (see *Known issues*): one crash counted twice
+by the circuit breaker, and the pool briefly over its cap during recovery
+(4D); `:crashed` overwriting `:released`, a cancelled spawn reporting the
+wrong message, and a runtime owner left pointing at a dead worker (4C).
+
 ## Dependencies
 
 ```
 cl-mcp/specs ──> cl-mcp/src/utils/{strings,sanitize,paths}, cl-mcp/src/fs,
                  cl-mcp/src/spec-core-record, cl-mcp/src/spec-adapter-{core,report},
-                 cl-mcp/src/tools/spec-entry
+                 cl-mcp/src/tools/spec-entry, cl-mcp/src/pool
              ──> cl-spec/main, cl-spec/src/backends/check-it
 
 cl-mcp (load, run) ──X──> cl-mcp/specs, cl-spec
@@ -1265,6 +1383,8 @@ tests.lisp ──> cl-mcp/tests/path-specs-test ──> cl-mcp/specs/path-fixtur
                                                 ──> cl-mcp/specs/core-record-fixtures
            ──> cl-mcp/tests/suite-judge-test ──> cl-mcp/specs/suite-judge ──> rove
            ──> cl-mcp/tests/spec-inspection-test ──> cl-mcp/specs/spec-inspection-fixtures
+           ──> cl-mcp/tests/pool-ownership-test ──> cl-mcp/specs/pool-fixtures
+                                                 ──> cl-mcp/src/pool
                (no cl-spec; not the bundle)
 self-test   ──> cl-mcp/tests/core-record-specs-test ──> cl-spec (opt-in)
 integration ──> cl-mcp/tests/spec-integration-test, cl-mcp/tests/check-routing-specs-test,
@@ -1292,7 +1412,8 @@ The default suite does load these tests and the fixture libraries they use:
 - `tests/check-verdict-test.lisp`, with `specs/check-verdict-fixtures.lisp`;
 - `tests/check-routing-test.lisp`, with `specs/check-routing-fixtures.lisp`;
 - `tests/suite-judge-test.lisp`, with `specs/suite-judge.lisp`;
-- `tests/spec-inspection-test.lisp`, with `specs/spec-inspection-fixtures.lisp`.
+- `tests/spec-inspection-test.lisp`, with `specs/spec-inspection-fixtures.lisp`;
+- `tests/pool-ownership-test.lisp`, with `specs/pool-fixtures.lisp`.
 
 None of them needs cl-spec or loads the bundle.
 
@@ -1711,6 +1832,23 @@ bundle run. Use it when a change touches a function the bundle covers.
 ## Known issues found while writing this
 
 These are recorded here, not fixed in this change:
+
+- **Pool, for 4D.** One crash can be counted twice by the circuit breaker:
+  `%handle-worker-crash` marks a bound worker `:crashed`, releases the lock,
+  and pushes the crash history without checking `crash-history-pushed-p`;
+  `get-or-assign-worker` can count the same crash in that gap. Crash recovery
+  spawns its replacement without a placeholder or a cap check, so the pool can
+  briefly hold one worker over `*max-pool-size*` when an acquire replaces the
+  same crashed worker at the same time. `%replenish-standbys` ends a surplus
+  worker while holding `*pool-lock*`, which can take about two seconds.
+- **Pool, for 4C.** `release-session` marks a worker `:released` and then
+  sends SIGTERM "to break any in-flight RPC"; that RPC marks it `:crashed`
+  before `kill-worker` makes it `:dead` -- transient, and the worker is in no
+  list by then. A cancelled spawn's placeholder message ("Session released
+  during spawn.") is overwritten by the failure cleanup ("Worker process failed
+  to start."), so which one a waiter sees depends on timing.
+  `*runtime-owner*` is not cleared when its worker crashes or the pool shuts
+  down; the owner election works around it.
 
 - `sanitize-error-message` does not fully remove a nested `#<...>`, or one with
   `>` inside a quoted name, although its docstring says it strips `#<...>`.

@@ -70,6 +70,11 @@ A change to how a worker's result reaches the client (the parse in `src/worker-c
 `proxy-to-worker`/`with-proxy-dispatch`, or the encoder in `src/protocol.lisp`) needs
 `spec-wire-test` in its own process: it drives the spec tools over a real TCP server and
 workers and compares the pooled answers with the inline ones.
+So does the pool's ownership (`get-or-assign-worker`, `release-session`,
+`kill-session-worker`, `shutdown-pool` and what they call in `src/pool.lisp`): `symbol=` on the
+function you change, then `property=` for each of the two `pool-ownership-*` properties, and run
+`pool-ownership-test`; its real-process case and the other pool suites spawn workers, so run them
+in a fresh process (`rove`/`ros`), not the MCP worker you are working in.
 Elsewhere the bundle is not required.
 
 ## Architecture
