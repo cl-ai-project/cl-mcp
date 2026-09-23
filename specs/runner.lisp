@@ -87,6 +87,7 @@
   ;; wrong implementations that replace their functions.
   (:import-from #:cl-mcp/src/reset-events)
   (:import-from #:cl-mcp/src/object-registry)
+  (:import-from #:cl-mcp/src/tools/pool-kill-worker)
   (:import-from #:bordeaux-threads)
   (:import-from #:cl-mcp/specs
                 #:register-specifications
@@ -1529,6 +1530,13 @@ the argument as it is after the call cannot see."
      (list :function 'cl-mcp/src/reset-events:record-termination
            :description "lets a later record replace the cause decided first"
            :replacement (%record-replacing-the-first-cause real-record)
+           :targets (list (list :property resets) (list :property resets-full))
+           :must-fail (list (list :property resets)))
+     (list :function 'cl-mcp/src/tools/pool-kill-worker::%with-resets
+           :description "claims the session's resets and leaves them out of the kill's response"
+           :replacement (lambda (text events &key worker-in-place)
+                          (declare (ignore events worker-in-place))
+                          text)
            :targets (list (list :property resets) (list :property resets-full))
            :must-fail (list (list :property resets)))
      (list :function 'cl-mcp/src/object-registry:lookup-object

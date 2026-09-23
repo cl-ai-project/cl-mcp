@@ -69,8 +69,10 @@ Primitives (numbers, strings, symbols, characters) are excluded."
 ;;; Handles
 
 (defun %new-generation ()
-  "Return a fresh generation token."
-  (generate-random-hex-string 6))
+  "Return a fresh generation token: 128 random bits.  The id's one promise is
+that a stale handle never names another object, which a generation shared
+by two images would break; at this width that is not a matter of luck."
+  (generate-random-hex-string 16))
 
 (defun %generation (registry)
   "Return REGISTRY's generation, drawing one first if it has none.  Called

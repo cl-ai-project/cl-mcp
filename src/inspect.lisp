@@ -444,7 +444,7 @@ current object id."
      (make-ht "error" t
               "code" "INVALID_OBJECT_ID"
               "message" (format nil "~S is not an object id: ids are strings such as ~
-\"o-1a2b3c4d5e6f-17\", taken from result_object_id or an [object-id: ...] marker."
+\"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-17\", taken from result_object_id or an [object-id: ...] marker."
                                 id)))))
 
 (defun inspect-object-by-id (id &key (max-depth 1) (max-elements 50))
@@ -629,7 +629,7 @@ the JSON."
   :description "Inspect an object's internal structure by ID.
 Objects are registered when repl-eval returns non-primitive values (result_object_id field).
 Use this to drill down into complex data structures like CLOS instances, structures, lists, arrays, and hash-tables.
-An object id is an opaque string such as \"o-1a2b3c4d5e6f-17\", valid only in the
+An object id is an opaque string such as \"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-17\", valid only in the
 worker image that issued it: once that worker is replaced -- a crash, a timeout,
 pool-kill-worker, a cancellation -- its ids are refused as OBJECT_STALE rather
 than resolved to anything else."

@@ -74,8 +74,8 @@ session exactly once, naming the worker and why it ended:
 
 ```
 Worker 12 stopped unexpectedly (eof, exit code 1). This session's Lisp state
-(loaded systems, defined functions, package state) was lost with it, and the
-session now runs on a new worker. Run load-system again to restore your
+(loaded systems, defined functions, package state) was lost with it. The
+session is now using another worker. Run load-system again to restore your
 environment. This request was not run; send it again if you still need it.
 ```
 
@@ -83,7 +83,13 @@ It is told by the first response that can: the request that met the loss,
 or else the session's next request, which is then not run
 (`not-executed`) because it was written against state that no longer
 exists. Several losses not yet told are told together. A `pool-kill-worker`
-response tells the kill itself and any earlier loss not yet told. Nothing is
+response tells the kill itself (`Worker 12 was stopped by pool-kill-worker.`)
+and any earlier loss not yet told.
+
+The notice says only what is known. `The session is now using another worker.`
+is added only when this response acquired one; otherwise it says nothing
+about a worker to come, since whether the next call gets one depends on the
+pool's capacity and on a spawn that has not happened. Nothing is
 told after the session is released, or after the server's pool shuts down.
 
 Object ids (`result_object_id`, `[object-id: ...]`) belong to the worker that
@@ -109,7 +115,7 @@ Output fields:
 - `content`: last value as text
 - `stdout`: concatenated standard output from evaluation
 - `stderr`: concatenated standard error from evaluation
-- `result_object_id` (string|null): an opaque id, such as `"o-1a2b3c4d5e6f-17"`; when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
+- `result_object_id` (string|null): an opaque id, such as `"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-17"`; when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
 - `isError` and `execution_status`: when the evaluation timed out, the result is an
   error (`isError: true`) with `execution_status: "execution-unknown"`. It was stopped
   partway, or could not be stopped at all, so whether it did what it was asked, and what it
@@ -161,8 +167,9 @@ An id is valid only in the worker image that issued it. Once that worker is
 replaced -- a crash, a timeout, `pool-kill-worker`, a cancellation -- its ids
 are refused as `OBJECT_STALE`, never resolved to an object of the new image.
 An id of the current image whose object was evicted (only the most recent
-1000 are kept) is `OBJECT_NOT_FOUND`; anything that is not an id, such as an
-integer from an older client, is `INVALID_OBJECT_ID`.
+1000 are kept) is `OBJECT_NOT_FOUND`; a string that is not an id is
+`INVALID_OBJECT_ID`. An integer, as an older client sends, is refused before
+any lookup by the argument check: `id must be a string`.
 - `max_depth` (integer, optional): Nesting depth for expansion (0=summary only, default=1)
 - `max_elements` (integer, optional): Maximum elements for lists/arrays/hash-tables (default=50)
 
@@ -187,11 +194,11 @@ Example workflow:
 ```json
 // 1. Evaluate code that returns a complex object
 {"method":"tools/call","params":{"name":"repl-eval","arguments":{"code":"(make-hash-table)"}}}
-// Response includes: "result_object_id": "o-1a2b3c4d5e6f-42"
+// Response includes: "result_object_id": "o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-42"
 
 // 2. Inspect the object
-{"method":"tools/call","params":{"name":"inspect-object","arguments":{"id":"o-1a2b3c4d5e6f-42"}}}
-// Response: {"kind":"hash-table","test":"EQL","entries":[...],"id":"o-1a2b3c4d5e6f-42"}
+{"method":"tools/call","params":{"name":"inspect-object","arguments":{"id":"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-42"}}}
+// Response: {"kind":"hash-table","test":"EQL","entries":[...],"id":"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-42"}
 ```
 
 ## `load-system`

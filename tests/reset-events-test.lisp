@@ -39,7 +39,12 @@
                 #:result-text
                 #:execution-status
                 #:run-scenario
-                #:scenario-violations)
+                #:scenario-violations
+                #:await-phase
+                #:received-p
+                #:fake-server-dropped-p)
+  (:import-from #:cl-mcp/src/proxy
+                #:cancel-request)
   (:import-from #:cl-mcp/src/object-registry))
 
 (in-package #:cl-mcp/tests/reset-events-test)
@@ -249,6 +254,58 @@ death, as the stop that THUNK decided produces -- and return R's result."
       (ok (equal '((990001 . :cancelled)) told)
           (format nil "one notice, naming the cancellation: ~S" told)))))
 
+(defun %owe-owner-a-crash (id)
+  "Record that a worker with ID, bound to session \"owner\", crashed, and
+return it: a reset the session is owed and has not been told."
+  (let ((dead (cl-mcp/src/worker-client::make-worker
+               :id id :state :bound :session-id "owner")))
+    (record-worker-termination dead :crashed :reason "eof")
+    dead))
+
+(deftest a-cancellation-during-acquire-tells-only-what-it-knows
+  ;; A reset is pending; a request is cancelled while its worker is being
+  ;; found.  The acquire succeeds, the worker stays the session's, and the
+  ;; notice may say so -- and nothing about a worker still to come.
+  (%owe-owner-a-crash -31)
+  (unwind-protect
+       (with-fake-worker (server worker)
+         (let* ((gate (sb-thread:make-semaphore))
+                (r (start-request "owner" 7 "worker/r" :gate gate)))
+           (await-phase "owner" 7 :acquiring)
+           (cancel-request 7 "owner")
+           (sb-thread:signal-semaphore gate)
+           (let* ((result (request-result r))
+                  (text (result-text result)))
+             (ok (equal "not-executed" (execution-status result)))
+             (ok (equal '((-31 . :crashed)) (told-in text)) "the reset is told once")
+             (ok (search "The session is now using another worker." text)
+                 "the worker the acquire found is said to be in place")
+             (ok (not (search "next request" text)) "no future worker is promised")
+             (ok (not (received-p server "worker/r")) "the request did not run")
+             (ok (not (fake-server-dropped-p server)) "and its worker was kept")
+             (ok (eq :bound (worker-state worker))))))
+    (discard-session-resets "owner")))
+
+(deftest a-pool-error-tells-a-reset-without-promising-a-worker
+  (%owe-owner-a-crash -32)
+  (unwind-protect
+       (let* ((cl-mcp/src/proxy::*current-session-id* "owner")
+              (cl-mcp/src/proxy::%cached-get-or-assign%
+                (progn (cl-mcp/src/proxy::%ensure-cached-bindings)
+                       (lambda (session)
+                         (declare (ignore session))
+                         (error "Pool size limit reached."))))
+              (result (cl-mcp/src/proxy:proxy-to-worker 9 "worker/eval"
+                                                        (make-hash-table :test 'equal)))
+              (text (result-text result)))
+         (declare (ignorable cl-mcp/src/proxy::%cached-get-or-assign%))
+         (ok (search "Pool error" text))
+         (ok (equal '((-32 . :crashed)) (told-in text)))
+         (ok (not (search "now using" text)) "no worker was found, so none is claimed")
+         (ok (not (search "new worker" text)))
+         (ok (equal "not-executed" (execution-status result))))
+    (discard-session-resets "owner")))
+
 ;;; ------------------------------------------------------------------------
 ;;; The checks catch wrong implementations
 
@@ -318,6 +375,34 @@ death, as the stop that THUNK decided produces -- and return R's result."
                            (:request "s0"))))
       (let ((violations (run-reset-sequence operations)))
         (ok (null violations) (format nil "~S" violations))))))
+
+(deftest the-reset-checks-catch-a-kill-that-tells-nothing
+  ;; The kill's own response is where it is told: a pool-kill-worker that
+  ;; claims the resets and then drops them from its text tells nobody.
+  (let ((operations '((:run-work) (:acquire "s0") (:kill-session "s0")
+                      (:request "s0"))))
+    (ok (null (run-reset-sequence operations)) "the real tool tells the kill")
+    (ok (member :never-told
+                (%kinds-under 'cl-mcp/src/tools/pool-kill-worker::%with-resets
+                              (lambda (text events &key worker-in-place)
+                                (declare (ignore events worker-in-place))
+                                text)
+                              operations)))))
+
+(deftest the-reset-checks-catch-a-notice-claiming-a-worker
+  ;; A notice that says the session is using another worker when the pool
+  ;; holds none for it.
+  (let ((operations '((:run-work) (:acquire "s0") (:session-rpc-crash "s0")
+                      (:release "s0") (:acquire "s1") (:session-rpc-crash "s1")
+                      (:kill-session "s1"))))
+    (ok (null (run-reset-sequence operations)))
+    (ok (member :claims-a-worker-it-lacks
+                (%kinds-under 'cl-mcp/src/proxy:reset-notice
+                              (let ((real (fdefinition 'cl-mcp/src/proxy:reset-notice)))
+                                (lambda (events &key worker-in-place)
+                                  (declare (ignore worker-in-place))
+                                  (funcall real events :worker-in-place t)))
+                              operations)))))
 
 (deftest the-handle-check-catches-a-registry-that-ignores-generations
   (let ((operations '((:register 0) (:replace 0) (:register 0) (:lookup 0 0)

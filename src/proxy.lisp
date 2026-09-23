@@ -50,7 +50,8 @@
            #:%invalidate-proxy-cache
            #:*current-session-id*
            #:cancel-request
-           #:termination-phrase))
+           #:termination-phrase
+           #:reset-notice))
 
 (in-package #:cl-mcp/src/proxy)
 
@@ -189,18 +190,22 @@ cancellation stopped is that decision, not the EOF it produced."
       (:shutdown "was stopped when the worker pool shut down")
       (:stopped "was stopped by the worker pool"))))
 
-(defun %reset-notice (events &key replaced)
+(defun reset-notice (events &key worker-in-place)
   "Tell EVENTS -- state-loss events a session is being told for the first
 time, oldest first -- as text: one sentence per worker, then what that cost.
-REPLACED says the session already runs on a new worker; otherwise its next
-request starts one.
+
+Only what the caller knows is said.  WORKER-IN-PLACE says the session holds
+another worker at this moment -- one was acquired for this very response --
+and only then is that said.  Nothing is said about a worker still to come:
+whether the next request gets one depends on capacity and on a spawn that
+has not happened.
 
 Each sentence begins \"Worker <id>\", so a worker's end is named once, in the
-response that tells it, and nowhere else."
+response that tells it, and nowhere else.  Every response that tells a reset
+renders it here, the pool-kill-worker response included."
   (format nil "~{~A~^ ~} This session's Lisp state (loaded systems, defined ~
-               functions, package state) was lost with ~:[it~;them~]~:[, and ~
-               the session's next request starts a new worker~;, and the ~
-               session now runs on a new worker~]. Run load-system again to ~
+               functions, package state) was lost with ~:[it~;them~].~:[~; The ~
+               session is now using another worker.~] Run load-system again to ~
                restore your environment."
           (mapcar (lambda (event)
                     (format nil "Worker ~A ~A."
@@ -208,7 +213,7 @@ response that tells it, and nowhere else."
                             (termination-phrase event)))
                   events)
           (cdr events)
-          replaced))
+          worker-in-place))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Cached late-bound function references
@@ -358,14 +363,14 @@ request that may have run must not be sent again blindly."
               (format nil "~A ~A" (gethash "text" item) sentence))))
     result))
 
-(defun %proxy-error-result (text outcome &key events note replaced)
+(defun %proxy-error-result (text outcome &key events note worker-in-place)
   "Return an error result saying TEXT and then telling EVENTS, when there are
-any (%RESET-NOTICE, with REPLACED), marked with OUTCOME as its
+any (RESET-NOTICE, with WORKER-IN-PLACE), marked with OUTCOME as its
 execution_status.  For :NOT-EXECUTED and :EXECUTION-UNKNOWN the text ends
 with what that means for the caller, or with NOTE (%WITH-EXECUTION-STATUS);
 :COMPLETED, a request the worker answered with an error, needs no such
 sentence.  With TEXT NIL, the notice is the whole message."
-  (let* ((notice (and events (%reset-notice events :replaced replaced)))
+  (let* ((notice (and events (reset-notice events :worker-in-place worker-in-place)))
          (message (format nil "~@[~A~]~:[~; ~]~@[~A~]"
                           text (and text notice) notice))
          (result (make-ht "content" (text-content message) "isError" t)))
@@ -374,11 +379,13 @@ sentence.  With TEXT NIL, the notice is the whole message."
                result)
         (%with-execution-status result outcome note))))
 
-(defun %cancelled-before-run-result (&optional events)
+(defun %cancelled-before-run-result (&optional events worker-in-place)
   "Return the result for a request cancelled before it reached its worker,
-telling EVENTS as well when the session was owed any."
+telling EVENTS as well when the session was owed any.  WORKER-IN-PLACE says
+a worker was already acquired for the request, and stays the session's."
   (%proxy-error-result "Request cancelled before it was sent to the worker."
-                       :not-executed :events events :note "It was not run."))
+                       :not-executed :events events :note "It was not run."
+                       :worker-in-place worker-in-place))
 
 (defun %proxied-request-failure (record session-id method worker condition)
   "Return the result for RECORD's call failing with CONDITION, classified by
@@ -483,9 +490,10 @@ sent, because it was written against state the session no longer has."
                  :events (claim-session-resets session-id)))))))
     ;; A cancellation that arrived while the worker was being found or
     ;; started: the worker stays the session's, the request does not run.
+    ;; That worker was acquired, so the notice may say the session has one.
     (when (cancellation-requested-p record)
       (return-from %run-proxied-request
-        (%cancelled-before-run-result (claim-session-resets session-id))))
+        (%cancelled-before-run-result (claim-session-resets session-id) t)))
     (note-request-worker record worker)
     (let ((events (claim-session-resets session-id)))
       (when events
@@ -494,7 +502,8 @@ sent, because it was written against state the session no longer has."
                    "workers" (format nil "~{~A~^,~}"
                                      (mapcar #'reset-event-worker-id events)))
         (return-from %run-proxied-request
-          (%proxy-error-result nil :not-executed :events events :replaced t))))
+          (%proxy-error-result nil :not-executed :events events
+                              :worker-in-place t))))
     (log-event :debug "proxy.forward" "session" session-id "method" method)
     (let ((effective-timeout (%effective-rpc-timeout (%clamp-timeout-param params))))
       (handler-case

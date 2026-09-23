@@ -223,7 +223,7 @@
                       "reset should be nil (spawn failed)")
                   (ok (equal t (gethash "isError" result))
                       "isError should be t")
-                  (ok (search "spawn failed"
+                  (ok (search "starting a replacement failed"
                               (gethash "text"
                                        (aref (gethash "content" result) 0)))
                       "message should mention spawn failure")))

@@ -12,7 +12,13 @@
                 #:inspect-object-by-id
                 #:generate-result-preview)
   (:import-from #:cl-mcp/src/tools/response-builders
-                #:build-inspect-response))
+                #:build-inspect-response)
+  (:import-from #:cl-mcp/src/tools/registry
+                #:get-tool-handler)
+  (:import-from #:cl-mcp/src/state
+                #:make-state)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*))
 
 (in-package #:cl-mcp/tests/inspect-test)
 
@@ -579,3 +585,24 @@
                      (coerce (ht-get result "elements") 'list)))))))
   (testing "nor a repl-eval result preview"
     (ok (not (nth-value 1 (gethash "hint" (generate-result-preview (find-class 'test-person))))))))
+
+;;; The tool's own refusals, as a client meets them
+
+(defun %inspect-tool-message (id)
+  "Call the inspect-object tool inline with ID and return what it said: the
+text of a tool error, or a JSON-RPC error's message."
+  (let* ((*use-worker-pool* nil)
+         (args (let ((ht (make-hash-table :test 'equal)))
+                 (setf (gethash "id" ht) id)
+                 ht))
+         (response (funcall (get-tool-handler "inspect-object") (make-state) 1 args))
+         (result (gethash "result" response))
+         (error (gethash "error" response)))
+    (cond (error (gethash "message" error))
+          (result (gethash "text" (aref (gethash "content" result) 0))))))
+
+(deftest inspect-object-refuses-what-is-not-an-id
+  (testing "an integer, as an older client sends, is refused by the argument check"
+    (ok (search "id must be a string" (%inspect-tool-message 5))))
+  (testing "a string that is not an id reaches the lookup and is refused there"
+    (ok (search "is not an object id" (%inspect-tool-message "5")))))

@@ -19,8 +19,9 @@
 ;;;;   is released or the pool shut down before it was told.
 ;;;; - What the session was TOLD is read from the responses themselves: each
 ;;;;   reset notice names its worker as "Worker <id>", with a phrase saying
-;;;;   why it ended.  A pool-kill-worker call is read from what
-;;;;   KILL-SESSION-WORKER hands its caller to tell.
+;;;;   why it ended.  A pool-kill-worker call is the real tool's response,
+;;;;   read the same way.  A notice that says the session is using another
+;;;;   worker must be one the pool bears out.
 ;;;;
 ;;;; Each loss must be told exactly once, to its own session, with a cause
 ;;;; the harness actually applied; nothing else may be told; and once every
@@ -28,20 +29,22 @@
 
 (defpackage #:cl-mcp/specs/reset-fixtures
   (:use #:cl)
-  (:import-from #:cl-mcp/src/pool
-                #:kill-session-worker)
   (:import-from #:cl-mcp/src/proxy
-                #:proxy-to-worker)
+                #:proxy-to-worker
+                #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/state
-                #:*current-session-id*)
+                #:*current-session-id*
+                #:make-state)
+  (:import-from #:cl-mcp/src/tools/registry
+                #:get-tool-handler)
+  ;; Bare: the tool registers itself when its file is loaded.
+  (:import-from #:cl-mcp/src/tools/pool-kill-worker)
   (:import-from #:cl-mcp/src/worker-client
                 #:worker
                 #:worker-id
                 #:worker-state
                 #:worker-last-crash-reason)
   (:import-from #:cl-mcp/src/reset-events
-                #:reset-event-worker-id
-                #:reset-event-cause
                 #:pending-session-resets
                 #:discard-all-resets)
   (:import-from #:cl-mcp/src/object-registry
@@ -248,7 +251,30 @@ the violations of what it said about itself."
       (push (list :kind :not-executed-but-received :session session) violations))
     (dolist (pair (told-in (%result-text result)))
       (%note-told account session (car pair) (cdr pair)))
-    (values result violations)))
+    (values result (append violations
+                           (%in-place-violations session (%result-text result))))))
+
+(defun %in-place-violations (session text)
+  "Return a violation when TEXT says SESSION is now using another worker and
+the pool holds no bound worker for it."
+  (when (and (search "The session is now using another worker." text)
+             (not (let ((entry (cdr (assoc session (getf (pool-snapshot) :map)
+                                           :test #'equal))))
+                    (and (typep entry 'worker) (eq :bound (worker-state entry))))))
+    (list (list :kind :claims-a-worker-it-lacks :session session))))
+
+(defun %kill-through-the-tool (account session reset)
+  "Call the real pool-kill-worker tool for SESSION, with RESET, and record what
+its response told.  Returns its violations."
+  (let* ((*current-session-id* session)
+         (*use-worker-pool* t)
+         (args (make-ht "reset" (if reset t nil)))
+         (response (funcall (get-tool-handler "pool-kill-worker")
+                            (make-state) (incf (account-next-request account)) args))
+         (text (%result-text (gethash "result" response))))
+    (dolist (pair (told-in text))
+      (%note-told account session (car pair) (cdr pair)))
+    (%in-place-violations session text)))
 
 ;;; ------------------------------------------------------------------------
 ;;; D. The checks
@@ -322,7 +348,9 @@ recorded; two are this file's:
 
   (:request SESSION)            a request through the real proxy
   (:request-crash SESSION)      a request whose worker dies while running it
-  (:session-rpc-crash SESSION)  an RPC to SESSION's worker times out"
+  (:session-rpc-crash SESSION)  an RPC to SESSION's worker times out
+  (:kill-session SESSION)       the pool-kill-worker tool, as it is called
+  (:kill-session-reset SESSION) the same with reset=true"
   (destructuring-bind (kind &optional argument) operation
     (case kind
       (:request
@@ -338,19 +366,24 @@ recorded; two are this file's:
            (cl-mcp/src/worker-client::%mark-worker-crashed worker "timeout")
            (setf (gethash worker (cl-mcp/specs/pool-fixtures::model-unusable model)) t)))
        '())
-      (:kill-session
+      ((:kill-session :kill-session-reset)
        (let ((target (%bound-worker argument)))
          (when target (%apply-cause account target :killed))
-         ;; What KILL-SESSION-WORKER hands its caller to tell is what the
-         ;; pool-kill-worker response tells.
-         (multiple-value-bind (outcome told) (kill-session-worker argument)
-           (declare (ignore outcome))
-           (dolist (event told)
-             (%note-told account argument (reset-event-worker-id event)
-                         (reset-event-cause event))))
-         ;; RUN-OPERATION's own check of a kill, against the worker it ended.
-         (cl-mcp/specs/pool-fixtures::%check-after-release ledger model argument
-                                                            target)))
+         ;; The real tool, whose response is what tells the kill.
+         (let ((found (%kill-through-the-tool account argument
+                                              (eq kind :kill-session-reset))))
+           (if (eq kind :kill-session-reset)
+               ;; A reset binds a new worker, which the account notes after
+               ;; this operation; the killed one must still have been ended.
+               (append found
+                       (when (and target (not (killed-p ledger target)))
+                         (list (list :kind :released-but-live :session argument
+                                     :worker (worker-id target)))))
+               ;; RUN-OPERATION's own check of a kill, against the worker it
+               ;; ended.
+               (append found
+                       (cl-mcp/specs/pool-fixtures::%check-after-release
+                        ledger model argument target))))))
       (t
        (case kind
          (:release
@@ -453,6 +486,7 @@ holds."
                   (cond ((< roll 25) (list :request session))
                         ((< roll 32) (list :request-crash session))
                         ((< roll 42) (list :session-rpc-crash session))
+                        ((< roll 46) (list :kill-session-reset session))
                         (t (random-operation))))))
 
 (defun reset-violation-kinds (violations)

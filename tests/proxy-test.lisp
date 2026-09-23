@@ -64,7 +64,7 @@
 
 (deftest reset-notice-names-each-worker-and-its-cause
  (testing "a crash is told with its reason and how the process ended"
-  (let ((text (cl-mcp/src/proxy::%reset-notice
+  (let ((text (cl-mcp/src/proxy:reset-notice
                (list (make-event :reason "eof" :exit-status "exited"
                                  :exit-code 137)))))
     (ok (search "Worker 7 stopped unexpectedly (eof, exit code 137)." text))
@@ -74,14 +74,14 @@
  (testing "a process that had not exited reports no exit status"
   ;; "exit_status=running" described a process that was still alive when
   ;; its connection failed: it said nothing about how it ended.
-  (let ((text (cl-mcp/src/proxy::%reset-notice
+  (let ((text (cl-mcp/src/proxy:reset-notice
                (list (make-event :reason "stream-error" :exit-status "running"
                                  :exit-code "unknown")))))
     (ok (search "stopped unexpectedly (stream-error)." text))
     (ok (not (search "running" text)))
     (ok (not (search "unknown" text)))))
  (testing "with nothing known, no empty parenthetical"
-  (let ((text (cl-mcp/src/proxy::%reset-notice (list (make-event)))))
+  (let ((text (cl-mcp/src/proxy:reset-notice (list (make-event)))))
     (ok (search "Worker 7 stopped unexpectedly." text))
     (ok (not (search "()" text)))))
  (testing "a decision is told as the decision, not as a crash"
@@ -89,21 +89,28 @@
                   (:killed "was stopped by pool-kill-worker")
                   (:timeout "did not answer within its deadline")
                   (:retired "left a thread that could not be stopped")))
-    (let ((text (cl-mcp/src/proxy::%reset-notice
+    (let ((text (cl-mcp/src/proxy:reset-notice
                  (list (make-event :cause (first case) :reason "eof")))))
       (ok (search (second case) text) (format nil "~(~A~) is told" (first case)))
       (ok (not (search "unexpectedly" text))
           (format nil "~(~A~) is not called a crash" (first case))))))
  (testing "several resets are told together, oldest first, in one notice"
-  (let ((text (cl-mcp/src/proxy::%reset-notice
+  (let ((text (cl-mcp/src/proxy:reset-notice
                (list (make-event :worker-id 3 :reason "eof")
                      (make-event :worker-id 4 :cause :killed))
-               :replaced t)))
+               :worker-in-place t)))
     (ok (< (search "Worker 3" text) (search "Worker 4" text)))
     (ok (search "was lost with them" text))
-    (ok (search "now runs on a new worker" text))
+    (ok (search "The session is now using another worker." text))
     (ok (= 1 (count-matches "load-system again" text))
-        "the advice is given once"))))
+        "the advice is given once")))
+ (testing "nothing is said about a worker still to come"
+  ;; Whether the next request gets a worker depends on capacity and on a
+  ;; spawn that has not happened; a notice that does not know says nothing.
+  (let ((text (cl-mcp/src/proxy:reset-notice (list (make-event)))))
+    (ok (not (search "now using" text)))
+    (ok (not (search "next request" text)))
+    (ok (not (search "new worker" text))))))
 
 (defun count-matches (needle haystack)
   "Count the occurrences of NEEDLE in HAYSTACK."
