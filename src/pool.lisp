@@ -948,6 +948,11 @@ to prevent recovery threads from spawning orphan workers."
            (%leave-owed-reset session-id owed)
            (remhash session-id *affinity-map*)
            (setf was-bound t))
+         ;; A crashed standby too: an RPC timeout marks a standby :CRASHED
+         ;; before the monitor finds its process dead, and left on this list
+         ;; it is a worker the pool has ended, still offered as a standby and
+         ;; still counted as one when replenishing.
+         (setf *standby-workers* (remove crashed-worker *standby-workers*))
          (setf *all-workers* (remove crashed-worker *all-workers*)))
         (otherwise (return-from %handle-worker-crash))))
     (log-event :warn "pool.worker.crashed" "worker_id"
