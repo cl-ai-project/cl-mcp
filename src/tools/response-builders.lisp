@@ -174,7 +174,8 @@ visible before locals were written here at all."
      &key include-result-preview
           (preview-max-depth 1)
           (preview-max-elements 8)
-          max-output-length)
+          max-output-length
+          timed-out)
   "Build the standard repl-eval response hash-table.
 Called by both the inline tool path and the worker handler.
 Returns a hash-table with content, stdout, stderr, and optional
@@ -183,7 +184,10 @@ The content text includes stdout/stderr/error-context/object-id
 so that MCP clients rendering only content[].text still see them --
 each displayed frame's locals included (%WRITE-FRAME-LOCALS), with the
 structural preview of one from a locals_preview_frames frame expanded
-under it."
+under it.
+
+TIMED-OUT, repl-eval's sixth value, marks the response an error whose
+execution_status is \"execution-unknown\"."
   (let ((ht (make-ht "stdout" stdout "stderr" stderr))
         (object-id nil)
         (effective-limit (or max-output-length *default-max-output-length*)))
@@ -211,6 +215,12 @@ under it."
     (when error-context
       (setf (gethash "error_context" ht)
             (%build-error-context-ht error-context)))
+    (when timed-out
+      ;; A timeout is not a result.  The evaluation was stopped partway, or
+      ;; could not be stopped at all, so whether it did what it was asked --
+      ;; and what it changed -- is not known.
+      (setf (gethash "isError" ht) t
+            (gethash "execution_status" ht) "execution-unknown"))
     ;; Build enriched text for content[].text so MCP clients see everything
     (let ((enriched
             (with-output-to-string (s)

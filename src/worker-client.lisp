@@ -26,6 +26,8 @@
            #:spawn-worker
            #:worker-rpc
            #:worker-rpc-error
+           #:rpc-not-sent
+           #:rpc-not-sent-reason
            #:worker-tcp-port
            #:worker-swank-port
            #:worker-pid
@@ -121,6 +123,17 @@ Each thread terminates and self-removes after reaping its process.")
   (:documentation "Legitimate JSON-RPC error response from a worker handler.
 Distinct from protocol errors (parse failure, ID mismatch) which
 indicate stream corruption and require marking the worker crashed."))
+
+(define-condition rpc-not-sent (error)
+  ((worker :initarg :worker :reader rpc-not-sent-worker)
+   (reason :initarg :reason :reader rpc-not-sent-reason))
+  (:report (lambda (condition stream)
+             (format stream "The request was not sent to worker ~A: ~(~A~)."
+                     (ignore-errors (worker-id (rpc-not-sent-worker condition)))
+                     (rpc-not-sent-reason condition))))
+  (:documentation "Signalled by WORKER-RPC when its BEFORE-SEND hook withheld
+the request.  Nothing reached the worker, whose stream and state are as they
+were: the request did not run."))
 
 (define-condition line-too-long (error)
   ((limit :initarg :limit :reader line-too-long-limit))
@@ -958,12 +971,20 @@ worker in the first place."
   (and (eql +leaked-thread-exit-code+ (worker-last-exit-code worker))
        (%reported-a-leak-p worker)))
 
-(defun worker-rpc (worker method params &key timeout preserve-json-types)
+(defun worker-rpc (worker method params &key timeout preserve-json-types
+                                             before-send after-receive)
   "Send a JSON-RPC request to WORKER and return the result hash-table.
 TIMEOUT, when non-NIL, is the maximum seconds to wait for a response.
 PRESERVE-JSON-TYPES keeps false and null apart in the result (see
 %READ-JSON-RPC-RESPONSE); a caller relaying the result to a client needs
 that, and one reading it with Lisp truth tests must not ask for it.
+
+BEFORE-SEND, when given, is called with the stream held, just before the
+request is sent: it returns :SEND to let it go, or a keyword saying why not,
+and RPC-NOT-SENT is signalled with that keyword -- the worker untouched.
+AFTER-RECEIVE, when given, is called with the stream still held once the
+worker's answer has been read, a JSON-RPC error answer included.  Between the
+two the worker is running this request and nothing else.
 
 Signals WORKER-CRASHED if the worker process has died (EOF on stream),
 timed out (sb-ext:timeout), encountered a stream/socket error, or if
@@ -1010,6 +1031,13 @@ without marking the worker as crashed."
                             (or (worker-last-crash-reason worker)
                                 "already-dead"))
                            (t "already-dead"))))
+    ;; The last moment the request can be withheld: nothing has been sent,
+    ;; and with the stream held nothing else can be running on the worker.
+    ;; A refusal touches neither the stream nor the worker's state.
+    (when before-send
+      (let ((verdict (funcall before-send)))
+        (unless (eq :send verdict)
+          (error 'rpc-not-sent :worker worker :reason verdict))))
     (let ((id (incf (worker-request-counter worker))))
       (handler-case
           (progn
@@ -1022,6 +1050,7 @@ without marking the worker as crashed."
               ;; only it can see whether the thread is still running now.
               (setf (worker-leaked-threads worker)
                     (if (integerp leaked) leaked 0))
+              (when after-receive (funcall after-receive))
               result))
         (end-of-file ()
           ;; A worker that retired for carrying a leaked thread exits without
@@ -1051,6 +1080,8 @@ without marking the worker as crashed."
           (let ((leaked (worker-rpc-error-leaked-threads e)))
             (setf (worker-leaked-threads worker)
                   (if (integerp leaked) leaked 0)))
+          ;; An error the worker returned is still an answer: the request ran.
+          (when after-receive (funcall after-receive))
           (error e))
         (error (e)
           ;; Protocol error (parse failure, ID mismatch, etc.).

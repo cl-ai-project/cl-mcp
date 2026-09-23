@@ -131,7 +131,7 @@ read in the original package. Use separate repl-eval calls or specify the
      (error 'arg-validation-error
             :arg-name "max_output_length"
             :message "max_output_length must be a non-negative integer"))
-   (multiple-value-bind (printed raw-value stdout stderr error-context)
+   (multiple-value-bind (printed raw-value stdout stderr error-context timed-out)
        (repl-eval code :package (or package *package*) :print-level print-level
         :print-length print-length
         :timeout-seconds (or timeout-seconds 300)
@@ -145,4 +145,5 @@ read in the original package. Use separate repl-eval calls or specify the
                                   :include-result-preview include-result-preview
                                   :preview-max-depth (or preview-max-depth 1)
                                   :preview-max-elements (or preview-max-elements 8)
-                                  :max-output-length max-output-length)))))
+                                  :max-output-length max-output-length
+                                  :timed-out timed-out)))))
