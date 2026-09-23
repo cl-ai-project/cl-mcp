@@ -117,16 +117,23 @@ and a failure would be buried under the answers these tests read anyway."
 
 Read from the socket and parsed with the five JSON answers kept apart, so a
 false here is a false the server wrote.  A line that answers something else
--- a notification -- is passed over."
+-- a notification -- is passed over.
+
+An empty answer from WAIT-FOR-INPUT is not taken for the deadline -- CI saw
+one 1.4 seconds into a 300-second wait: a signal
+interrupts the wait too, and a server whose workers are exiting sends this
+process SIGCHLD.  Only the clock says the deadline passed."
   (let ((stream (client-stream client))
         (deadline (+ (get-universal-time) +call-timeout-seconds+)))
     (loop
-      (let ((remaining (- deadline (get-universal-time))))
-        (unless (and (plusp remaining)
-                     (usocket:wait-for-input (client-socket client)
-                                             :timeout remaining :ready-only t))
-          (error "No answer to request ~A within ~D seconds."
-                 id +call-timeout-seconds+)))
+      ;; LISTEN first: a line already in the stream's buffer leaves nothing
+      ;; for the socket to report.
+      (loop until (or (listen stream)
+                      (usocket:wait-for-input (client-socket client)
+                                              :timeout 1 :ready-only t))
+            when (> (get-universal-time) deadline)
+              do (error "No answer to request ~A within ~D seconds."
+                        id +call-timeout-seconds+))
       (let* ((line (or (read-line stream nil nil)
                        (error "The server closed the connection.")))
              (document (parse-response line)))
