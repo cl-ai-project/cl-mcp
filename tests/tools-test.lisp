@@ -698,7 +698,7 @@
              (text (and first (gethash "text" first)))
              (object-id (gethash "result_object_id" result)))
         (ok (stringp text) "content text should be a string")
-        (ok (integerp object-id) "result_object_id should be present")
+        (ok (stringp object-id) "result_object_id should be present")
         ;; Object ID should be visible in the content text
         (ok (search "object-id:" text)
             "content text should include [object-id: N]")
@@ -1493,7 +1493,7 @@
                           (result-eval (gethash "result" obj-eval))
                           (object-id (and result-eval
                                           (gethash "result_object_id" result-eval))))
-                     (if (integerp object-id)
+                     (if (stringp object-id)
                          (progn
                            (record-id object-id)
                            (let* ((req-inspect (format nil
@@ -1502,7 +1502,7 @@
                                                         "{\"jsonrpc\":\"2.0\","
                                                         "\"id\":~A,\"method\":\"tools/call\","
                                                         "\"params\":{\"name\":\"inspect-object\","
-                                                        "\"arguments\":{\"id\":~A}}}")
+                                                        "\"arguments\":{\"id\":\"~A\"}}}")
                                                        (+ 20000 (* thread-index 100) iter)
                                                        object-id))
                                   (obj-inspect (parse (%pjl req-inspect)))

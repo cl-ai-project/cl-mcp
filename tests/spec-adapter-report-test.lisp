@@ -397,7 +397,7 @@ fixture never exercised.")
          (report (cl-mcp/src/spec-adapter-report::%result-plist
                   api nil (%sym "ADD") :property '(:executed 1)
                   '(:value nil :complete nil :covers :property) nil 2000 nil)))
-    (ok (integerp (getf (getf report :condition) :object-id)))))
+    (ok (stringp (getf (getf report :condition) :object-id)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Environment and availability

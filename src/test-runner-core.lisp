@@ -541,10 +541,12 @@ machine-readable hash-table (failed:1, framework \"timeout\") rather than
 an opaque RPC-level error, mirroring MAKE-LOAD-FAILURE-RESULT.
 
 THREAD-LEAKED says whether the run thread could actually be stopped.  The two
-cases need different advice: a run that unwound left the worker healthy and
-can simply be retried with a longer timeout, whereas a leaked thread is still
-executing in the worker -- holding whatever locks it had -- and the session
-will not recover until the worker is replaced."
+cases need different advice: a run that unwound left no thread of its own
+running, and can be retried with a longer timeout -- though whatever state the
+tests changed before the deadline stays changed, and threads the suite started
+are not tracked -- whereas a leaked thread is still executing in the worker,
+holding whatever locks it had, and the session will not recover until the
+worker is replaced."
   (make-test-result
    :passed 0
    :failed 1

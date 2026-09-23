@@ -51,14 +51,20 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/pool:release-session` | none | the same two |
 | `cl-mcp/src/pool:kill-session-worker` | none | the same two |
 | `cl-mcp/src/pool:shutdown-pool` | none | the same two |
-| `cl-mcp/src/proxy:proxy-to-worker` | none (see *Request lifecycle*) | `request-lifecycle-keeps-its-promises` |
-| `cl-mcp/src/proxy:cancel-request` | none | the same |
+| `cl-mcp/src/proxy:proxy-to-worker` | none (see *Request lifecycle*, *Reset events*) | `request-lifecycle-keeps-its-promises`, `resets-are-told-exactly-once`, `resets-are-told-exactly-once-when-the-pool-is-full` |
+| `cl-mcp/src/proxy:cancel-request` | none | `request-lifecycle-keeps-its-promises` |
+| `cl-mcp/src/pool:kill-session-worker`, `release-session`, `shutdown-pool` (resets) | none (see *Reset events*) | `resets-are-told-exactly-once`, `…-when-the-pool-is-full` |
+| `cl-mcp/src/tools/pool-kill-worker::pool-kill-worker-handler` (internal; the tool) | none | the same two |
+| `cl-mcp/src/tools/pool-kill-worker::%with-resets` (internal) | none | the same two |
+| `cl-mcp/src/proxy:reset-notice` | none | the same two |
+| `cl-mcp/src/reset-events:record-termination`, `claim-session-resets`, `discard-session-resets`, `discard-all-resets` | none | the same two |
+| `cl-mcp/src/object-registry:register-object`, `lookup-object`, `clear-registry` | none (see *Reset events*) | `object-ids-never-outlive-their-image` |
 
 Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize`,
 `cl-mcp/specs/paths`, `cl-mcp/specs/write-paths`, `cl-mcp/specs/core-records`,
 `cl-mcp/specs/check-verdicts`, `cl-mcp/specs/check-routing`, `cl-mcp/specs/spec-inspection`,
-`cl-mcp/specs/spec-responses`, `cl-mcp/specs/pool-ownership` and
-`cl-mcp/specs/request-lifecycle`. Each Function Spec is
+`cl-mcp/specs/spec-responses`, `cl-mcp/specs/pool-ownership`,
+`cl-mcp/specs/request-lifecycle` and `cl-mcp/specs/reset-events`. Each Function Spec is
 registered on the production symbol itself. Each read-access property is
 `(:about ...)` both read functions; each write-access property names the
 function or functions it calls.
@@ -1533,10 +1539,148 @@ changes nothing; nothing is left registered.
   `:executing` and stopped the worker, and the answer was published anyway.
   They are now ordered at one point, as above.
 
-Left for later: a reset notice that can be delivered twice after a stopped
-worker (4C), no deadline on the stream lock and the write to the worker
-(4D), and the worker's idle read timing out in the middle of a line (4C) --
-see *Known issues*.
+Left for later: the reset notice after a stopped worker (fixed in 4C, see
+*Reset events*), no deadline on the stream lock and the write to the worker
+(4D), and the worker's idle read timing out in the middle of a line (the
+transport/deadline phase) -- see *Known issues*.
+
+## Reset events (4C)
+
+When a worker ends, the session it was bound to loses its Lisp state. 4C
+makes each such loss an event, told to that session exactly once, and says
+truthfully why it happened.
+
+**The ledger** (`src/reset-events.lisp`). One worker's end is one event:
+which worker, which session's state it held, why it ended, how its process
+exited, and whether the session has been told. Causes are `:crashed`,
+`:timeout` (the proxy's deadline abandoned it), `:retired` (it exited rather
+than serve a request while carrying a leaked thread), `:cancelled`, `:killed`
+(pool-kill-worker), `:released`, `:shutdown` and `:stopped` (the pool ended
+it for any other reason -- a fallback nobody should need).
+
+- **The first cause recorded is kept.** A decision is recorded before the
+  signal that carries it out: `cancel-request` records `:cancelled` before
+  SIGTERM, `kill-session-worker` `:killed`, `release-session` `:released`,
+  `shutdown-pool` `:shutdown`. The EOF, stream error or dead process that
+  follows adds only exit details (`amend-termination-exit`), never a new
+  cause. A worker the pool already let go stays `:released` or `:dead`;
+  `%mark-worker-crashed` no longer turns it `:crashed`.
+- **Owed only by a bound worker.** An event is owed to the session the worker
+  was bound to when it ended. A standby's end, a released session's worker
+  and a shutdown owe nobody. A release discards what its session was owed, so
+  a session reusing the id is not told someone else's loss; a shutdown
+  discards everything.
+- **Told once, by whoever claims it.** `claim-session-resets` hands a
+  session's pending events to one response and marks them delivered:
+  the failed request that met the death (in band), the session's next
+  request in its place (out of band, `not-executed`), a pool error, or the
+  pool-kill-worker response, which receives them as `kill-session-worker`'s
+  second value and names each one, its own kill included. Several
+  pending events are told together, oldest first, in one response. Nothing is
+  copied to a replacement worker any more: the per-worker
+  `needs-reset-notification` flag, the owed-reset table and the hand-off
+  code are gone.
+
+Each told worker is one sentence, `Worker <id> <why>`, followed once by what
+it cost: `This session's Lisp state (loaded systems, defined functions,
+package state) was lost with it.` Only what the response knows is said:
+`The session is now using another worker.` is added only where this response
+acquired one (the out-of-band notice, a cancellation after a successful
+acquire, `pool-kill-worker` with `reset`), and nothing is ever promised about
+a worker still to come. The pool-kill-worker response renders its own kill
+the same way, through the same `reset-notice`.
+
+**Object ids** (`src/object-registry.lisp`) are opaque strings,
+`o-<generation>-<n>`, the generation 128 random bits. A registry draws its
+generation when it first hands out an id, and a new one whenever it is cleared. A worker that is replaced
+numbers its objects from 1 again, so an integer id from the old image used to
+name whatever the new one registered first; now `inspect-object` refuses it
+as `OBJECT_STALE`. An id of this generation whose object was evicted is
+`OBJECT_NOT_FOUND`, and a string that is not an id `INVALID_OBJECT_ID`; an
+integer from an older client is refused by the argument check before any
+lookup (`id must be a string`).
+
+**Checking** (`specs/reset-fixtures.lisp`). The pool runs with fake workers
+as in 4A, and a request is the real `proxy-to-worker` with only the socket
+replaced: the fake RPC answers, or meets the worker's death as `worker-rpc`
+does. The harness keeps its own account -- which worker each session was
+lent, which ended while bound and how, which losses were excused by a
+release or shutdown -- and reads what was told from the responses' text
+(`Worker <id> <phrase>`), a kill's included: `pool-kill-worker` is called as
+the real tool, never read from the ledger or from what the pool hands the
+tool. A notice that says the session is using another worker must match a
+worker the pool holds bound for it. After every operation, and after a drain in which every
+session asks until a request reaches its worker: each loss told at most once,
+to its own session, only after it happened and never once excused, with a
+cause the harness applied; at the end every loss told, the ledger empty, and
+after the shutdown nothing left owed. 4A's ownership invariants are checked
+in the same runs.
+
+- Generated: `resets-are-told-exactly-once` (one standby, room for four) and
+  `…-when-the-pool-is-full` (two and two) draw pool operations, requests,
+  requests whose worker dies under them, and RPC timeouts on the worker a
+  session holds. `object-ids-never-outlive-their-image` draws registrations,
+  lookups, clears and replaced images over two registries: an id is found
+  only where it was issued and until a clear, refused as stale anywhere else,
+  never answered with another object.
+- The request-lifecycle scenarios (4B) also count the notices: a worker
+  stopped or dropped is named exactly once across the scenario's responses,
+  none otherwise, and nothing is left owed.
+- Fixed (`tests/reset-events-test.lisp`, default suite): the ledger's rules,
+  one sequence per defect below, three orderings fixed on a held fake worker
+  (a cause found first survives the EOF; a kill during a request is told as
+  a kill, by the kill; a cancellation is told once, as one), a pending reset
+  crossed with a cancellation during a successful acquire (told once; the
+  acquired worker kept and said to be in place; no future worker promised),
+  a pool error telling a reset, and the checks catching seven wrong
+  implementations. Real processes: `pool-test` (a
+  replaced worker's object id is stale), `worker-leaked-thread-test` (a
+  retirement is owed, told and discarded as above).
+- Negative control: a claim that leaves the events pending, a claim that
+  takes nothing, a later record replacing the first cause, a pool-kill-worker
+  response that drops the resets it claimed, and a lookup by number alone.
+- `:about`: each reset property names the surfaces it drives -- the proxy and
+  the pool-kill-worker tool's handler -- and every function a negative
+  control breaks for it, plus the release and shutdown paths whose discard
+  it claims. `specs-runner-test` checks that every function a reset negative
+  control replaces is an `:about` target of the property that must catch it.
+
+**What was found, and what changed.**
+- **A1. A cancellation's reset was told twice** -- the proxy cleared the
+  worker's flag, and `kill-worker` set it again -- and the second notice said
+  "crashed and was restarted".
+- **A2. pool-kill-worker left an older untold reset** for the next request.
+  Its response now tells it.
+- **A3. A death met by a request and found by the health monitor** was told
+  by both, with different reasons.
+- **A4. Of two deaths before either was told, only the first was kept.**
+- **B5. A request running when its worker was killed or released** was told
+  the worker crashed and was restarted: the EOF overwrote `:released` with
+  `:crashed`.
+- **B6. Messages said "was restarted", "was terminated" and "has been
+  reset"** before any of it had happened. They now say what is known: the
+  state was lost, and -- only where this response acquired one -- that the
+  session is using another worker. (Found in review: the first version still
+  promised "the session's next request starts a new worker", which nothing
+  knew; and a cancellation after a successful acquire said so while the
+  session kept the worker it had just acquired.)
+- **B7. A request a worker retired on was "may have run"**; the worker
+  retires on receiving a request, before running it, so it is `not-executed`.
+- **B8. `exit_status=running`** was shown for a process that had not exited;
+  only an exit code or signal is shown now.
+- **B9. A cancelled spawn's message** was overwritten by "failed to start".
+- **C10. `*runtime-owner*` kept naming a dead worker**; when its worker
+  crashes it now forgets the worker but keeps the session, so another live
+  session cannot take the runtime over. It is cleared on release, shutdown
+  and pool-kill-worker (the explicit re-arm, as before).
+- **C11. Object ids were per-image integers**, so a stale id resolved to
+  another object.
+- **Unsupported wording.** `load-system`'s response carried `worker_healthy`,
+  an undocumented field that said only that the load never started; it is
+  now an internal key the builder removes. `make-timeout-result` no longer
+  calls a worker healthy after a timeout.
+
+The external `worker_reuse` field for every tool is a separate phase.
 
 ## Dependencies
 
@@ -2010,12 +2154,10 @@ bundle run. Use it when a change touches a function the bundle covers.
 
 These are recorded here, not fixed in this change:
 
-- **Requests, for 4C.** After a cancellation stops a worker, the reset it
-  owes can reach the session twice: the proxy clears the worker's flag when
-  it reports the stop, and `kill-worker`, running just after, sets it again.
-  The worker's idle read (`*worker-read-timeout*`) is a `with-timeout` around
-  `read-line`; firing mid-line, it drops the partial line and parses the rest
-  as a request, whose `id nil` reply the parent reads as a protocol error.
+- **Requests, for the transport/deadline phase.** The worker's idle read
+  (`*worker-read-timeout*`) is a `with-timeout` around `read-line`; firing
+  mid-line, it drops the partial line and parses the rest as a request, whose
+  `id nil` reply the parent reads as a protocol error.
 - **Requests, for 4D.** Waiting for a worker's stream lock, and writing a
   request to it, have no deadline: a request queued behind a long one waits
   as long as that one runs.
@@ -2028,14 +2170,10 @@ These are recorded here, not fixed in this change:
   briefly hold one worker over `*max-pool-size*` when an acquire replaces the
   same crashed worker at the same time. `%replenish-standbys` ends a surplus
   worker while holding `*pool-lock*`, which can take about two seconds.
-- **Pool, for 4C.** `release-session` marks a worker `:released` and then
-  sends SIGTERM "to break any in-flight RPC"; that RPC marks it `:crashed`
-  before `kill-worker` makes it `:dead` -- transient, and the worker is in no
-  list by then. A cancelled spawn's placeholder message ("Session released
-  during spawn.") is overwritten by the failure cleanup ("Worker process failed
-  to start."), so which one a waiter sees depends on timing.
-  `*runtime-owner*` is not cleared when its worker crashes or the pool shuts
-  down; the owner election works around it.
+- **Pool, fixed in 4C.** `release-session`'s in-flight RPC no longer marks
+  the released worker `:crashed`; a cancelled spawn keeps its own message;
+  `*runtime-owner*` forgets a dead worker and is cleared on release and
+  shutdown (see *Reset events*).
 
 - `sanitize-error-message` does not fully remove a nested `#<...>`, or one with
   `>` inside a quoted name, although its docstring says it strips `#<...>`.

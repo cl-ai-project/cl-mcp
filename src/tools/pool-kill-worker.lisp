@@ -11,7 +11,8 @@
   (:import-from #:cl-mcp/src/state
                 #:*current-session-id*)
   (:import-from #:cl-mcp/src/proxy
-                #:*use-worker-pool*)
+                #:*use-worker-pool*
+                #:reset-notice)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/pool
@@ -20,6 +21,16 @@
   (:export #:pool-kill-worker))
 
 (in-package #:cl-mcp/src/tools/pool-kill-worker)
+
+(defun %with-resets (text events &key worker-in-place)
+  "Return TEXT followed by EVENTS told as every reset notice is (RESET-NOTICE):
+the kill's own worker and any earlier loss the session had not been told,
+each named \"Worker <id>\" with why it ended.  This response is the one
+that tells them.  With no EVENTS, TEXT alone."
+  (if events
+      (format nil "~A ~A" text
+              (reset-notice events :worker-in-place worker-in-place))
+      text))
 
 (define-tool "pool-kill-worker"
   :description "Kill the worker process bound to the current session.
@@ -57,19 +68,24 @@ the next tool call that needs a worker."))
                          "Cannot identify session. No worker to kill.")
                         "killed" nil)))
       (t
-       (let ((kill-result (kill-session-worker session-id)))
+       (multiple-value-bind (kill-result events)
+           (kill-session-worker session-id)
          (case kill-result
            (:no-worker
             (result id
                     (make-ht "content"
                              (text-content
-                              "No worker is bound to this session.")
+                              (%with-resets
+                               "No worker is bound to this session."
+                               events))
                              "killed" nil)))
            (:placeholder
             (result id
                     (make-ht "content"
                              (text-content
-                              "Worker spawn was in progress and has been cancelled.")
+                              (%with-resets
+                               "Worker spawn was in progress and has been cancelled."
+                               events))
                              "killed" nil
                              "cancelled_spawn" t)))
            (:killed
@@ -82,7 +98,9 @@ the next tool call that needs a worker."))
                              (make-ht
                               "content"
                               (text-content
-                               "Worker killed and replaced with a fresh one. Run load-system to restore your environment.")
+                               (%with-resets
+                                "Worker killed and replaced."
+                                events :worker-in-place t))
                               "killed" t
                               "reset" t)))
                  (error (e)
@@ -93,9 +111,11 @@ the next tool call that needs a worker."))
                            (make-ht
                             "content"
                             (text-content
-                             (format nil
-                                     "Worker killed but replacement spawn failed: ~A. The next tool call will retry automatically."
-                                     (princ-to-string e)))
+                             (%with-resets
+                              (format nil
+                                      "Worker killed, but starting a replacement failed: ~A. A later tool call that needs a worker tries again."
+                                      (princ-to-string e))
+                              events))
                             "killed" t
                             "reset" nil
                             "isError" t)))))
@@ -104,6 +124,8 @@ the next tool call that needs a worker."))
                        (make-ht
                         "content"
                         (text-content
-                         "Worker killed. A fresh one will spawn on the next tool call. Run load-system to restore your environment.")
+                         (%with-resets
+                          "Worker killed. No worker is bound to this session until a tool call needs one."
+                          events))
                         "killed" t
                         "reset" nil)))))))))))

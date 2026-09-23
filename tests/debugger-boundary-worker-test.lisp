@@ -409,7 +409,7 @@
              (sb-ext:process-status process) (sb-ext:process-exit-code process)
              (%worker-text result))
       (ok (gethash "isError" result))
-      (ok (search "crashed" (%worker-text result)))
+      (ok (search "stopped unexpectedly" (%worker-text result)))
       (ok (not (gethash "error_context" result)))
       (ok (equal "eof" (worker-last-crash-reason worker)))
       (ok (member (worker-state worker) '(:crashed :dead)))
@@ -424,14 +424,16 @@
       (ok (with-lock-held (*reaper-threads-lock*)
             (notany #'thread-alive-p *reaper-threads*))
           "the exited child's asynchronous reaper has finished")
-      ;; A crash notification can consume the next request; retry only that form.
+      ;; The request that met the exit told the reset, so the next request
+      ;; is not told it again: it reaches the replacement.
       (let ((recovered nil))
         (loop repeat 3
               for retry = (%worker-eval "(+ 20 22)")
               do (%note "exit retry text=~A" (%worker-text retry))
               if (not (gethash "isError" retry))
                 do (setf recovered retry) and return nil
-              else do (ok (search "crashed" (%worker-text retry))))
+              else do (ok nil (format nil "retry told again: ~A"
+                                      (%worker-text retry))))
         (ok recovered "documented retry reaches a replacement")
         (when recovered
           (ok (string= "42" (%worker-text recovered)))

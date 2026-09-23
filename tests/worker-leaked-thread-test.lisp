@@ -32,6 +32,15 @@
   (:import-from #:cl-mcp/src/pool)
   (:import-from #:cl-mcp/src/project-root)
   (:import-from #:cl-mcp/src/proxy)
+  (:import-from #:cl-mcp/src/reset-events
+                #:pending-session-resets
+                #:claim-session-resets
+                #:reset-event-cause
+                #:reset-event-status
+                #:reset-event-reason
+                #:reset-event-worker-id
+                #:reset-event-exit-code
+                #:reset-event-exit-status)
   (:import-from #:yason))
 
 (in-package #:cl-mcp/tests/worker-leaked-thread-test)
@@ -484,17 +493,17 @@ initialization pool-wide for")
                    (reason-of worker))
             "a retirement is still reported as one once the worker is :dead")))
     (testing "but a worker that did not crash reports no reason of its own"
-      ;; A replacement carries the details of the death that produced it,
-      ;; and one killed deliberately -- pool-kill-worker, a cancellation,
-      ;; shutdown -- has not crashed at all.  Reporting the carried string
-      ;; would describe someone else's death as this worker's, and for
-      ;; "timeout" the user is then told an operation they never ran took
-      ;; too long.
+      ;; One killed deliberately -- pool-kill-worker, a cancellation,
+      ;; shutdown -- has not crashed at all, and why it ended is the reset
+      ;; ledger's record, not a transport failure.
       (let ((worker (dead-worker)))
-        (setf (cl-mcp/src/worker-client::worker-stream worker) nil
-              (cl-mcp/src/worker-client:worker-last-crash-reason worker)
-              "timeout")
-        (ok (equal "already-dead" (reason-of worker)))))))
+        (cl-mcp/src/worker-client:kill-worker worker)
+        ;; What KILL-WORKER does to a real worker's connection; this one has
+        ;; no socket for it to close.
+        (setf (cl-mcp/src/worker-client::worker-stream worker) nil)
+        (ok (equal "already-dead" (reason-of worker)))
+        (ok (eq :stopped (cl-mcp/src/reset-events:termination-cause worker))
+            "and the ledger says it was stopped")))))
 
 (deftest marking-a-crash-does-not-wait-on-a-worker-that-is-still-running
   ;; The stderr drain thread ends when the worker's pipe closes, so waiting
@@ -675,6 +684,7 @@ initialization pool-wide for")
                                   :name "probe-drain"))
            (worker (cl-mcp/src/worker-client::make-worker
                     :state :bound
+                    :session-id "last-words"
                     :process-info process
                     :stderr-thread drain)))
       (unwind-protect
@@ -684,10 +694,10 @@ initialization pool-wide for")
              (ok (null (cl-mcp/src/worker-client::worker-stderr-thread worker))
                  "and the slot no longer points at it")
              ;; A kill resets the session's state as surely as a crash does,
-             ;; and the flag is how the replacement knows to say so.
-             (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
-                  worker)
+             ;; and a bound worker ended with no cause decided still owes it.
+             (ok (equal '(:stopped) (owed "last-words"))
                  "the reset it owes the user is recorded"))
+        (cl-mcp/src/reset-events:discard-session-resets "last-words")
         (ignore-errors (bt:destroy-thread drain))))))
 
 (deftest pool-status-shows-a-worker-that-is-carrying-one
@@ -947,19 +957,17 @@ without re-deriving it from a string that will be copied elsewhere")
               (ok replacement
                   "the session is recovered rather than halted on its first
 retirement, against a threshold of one")
-              ;; The replacement is handed its predecessor's crash details so
-              ;; the user can be told why the session was reset.  It has not
-              ;; itself retired, and answering otherwise -- by reading those
-              ;; inherited details as its own classification -- would leave
-              ;; this session's breaker off for as long as the session lived,
-              ;; since every later replacement inherits them again.  A crash
-              ;; loop is the thing the breaker exists for.
-              (ok (equal
-                   cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
-                   (cl-mcp/src/worker-client:worker-last-crash-reason
-                    replacement))
-                  "it carries the reason forward, which is how the user's
-next call learns why the session was reset")
+              ;; Why the session was reset is the ledger's to tell, not the
+              ;; replacement's: it has not itself retired, and answering
+              ;; otherwise would leave this session's breaker off for as long
+              ;; as the session lived.  A crash loop is the thing the breaker
+              ;; exists for.
+              (ok (equal '(:retired) (owed session))
+                  "the session is owed the retirement, which is how the
+user's next call learns why the session was reset")
+              (ok (null (cl-mcp/src/worker-client:worker-last-crash-reason
+                         replacement))
+                  "and the replacement carries no death of its own")
               (ok (not (cl-mcp/src/worker-client::worker-retired-p replacement))
                   "the fresh worker has not retired")
               (sb-posix:kill (cl-mcp/src/worker-client:worker-pid replacement)
@@ -1029,6 +1037,10 @@ next call learns why the session was reset")
       (ok (init-disabled-after-start "eof")
           "while a real crash there still disables it"))))
 
+(defun owed (session)
+  "The causes SESSION is owed and has not been told, oldest first."
+  (mapcar #'reset-event-cause (pending-session-resets session)))
+
 (deftest a-retirement-on-the-pools-own-rpc-still-reaches-the-user
   ;; The pool sends RPCs of its own: the project-root sync after
   ;; fs-set-project-root, the init monitor's polling.  Their errors are
@@ -1039,7 +1051,7 @@ next call learns why the session was reset")
   ;; root sync is a request like any other, so a worker carrying a leaked
   ;; thread retires on it.  Their next call would otherwise land in a fresh
   ;; image with their systems unloaded and nothing said about it.
-  (testing "the reset it owes is handed to the replacement"
+  (testing "the reset it owes waits in the ledger for the session"
     (unless (spawn-available-p)
       (skip "worker processes cannot be spawned here"))
     (with-pool ()
@@ -1052,44 +1064,34 @@ next call learns why the session was reset")
          session (namestring (uiop:temporary-directory)))
         (ok (not (eq :bound (cl-mcp/src/worker-client:worker-state worker)))
             "the worker retired on it")
-        (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
+        (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session))
+              (events (pending-session-resets session)))
           (ok (not (eq worker replacement)) "the session gets a new worker")
-          (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
-               replacement)
-              "which owes the user the notification nobody delivered")
-          ;; And can say what it was.  The notification is built from the
-          ;; crash details the replacement carries, so handing over the debt
-          ;; without them turns the one message this branch exists to
-          ;; produce back into "your worker crashed".
-          (ok (equal cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
-                     (cl-mcp/src/worker-client:worker-last-crash-reason
-                      replacement))
+          (ok (= 1 (length events))
+              "the session is owed the notification nobody delivered, once")
+          ;; And can say what it was: announced as a crash, a retirement is
+          ;; the one message this branch exists to stop.
+          (ok (eq :retired (reset-event-cause (first events)))
               "explained by what actually happened")
-          ;; The whole account travels, not just the headline.  The exit
-          ;; code is the part that says the death was deliberate, and it is
-          ;; recorded by the same write that publishes the death, so a
-          ;; reader copying the debt cannot catch it half-written.
+          (ok (eql (cl-mcp/src/worker-client:worker-id worker)
+                   (reset-event-worker-id (first events)))
+              "about the worker that retired, not its replacement")
+          ;; The exit code is the part that says the death was deliberate,
+          ;; and it is recorded by the same write that publishes the death.
           (ok (eql cl-mcp/src/utils/deadline::+leaked-thread-exit-code+
-                   (cl-mcp/src/worker-client:worker-last-exit-code
-                    replacement))
+                   (reset-event-exit-code (first events)))
               "down to the exit code it left")
-          (ok (equal "exited"
-                     (cl-mcp/src/worker-client:worker-last-exit-status
-                      replacement)))
-          ;; And the session is no longer owed anything: it is on a worker
-          ;; that someone can find, so a copy left here would arrive twice.
-          (ok (null (gethash session cl-mcp/src/pool::*owed-resets*))
-              "the session's copy is dropped once the worker carries it"))))))
+          (ok (equal "exited" (reset-event-exit-status (first events)))))))))
 
 (deftest an-owed-reset-outlives-the-worker-that-owed-it
-  ;; The debt belongs to the session, because the paths that throw a dead
-  ;; worker away do not all have a replacement in hand to give it to.  Each
-  ;; of these lost it, and losing it means the user's next call lands in a
-  ;; fresh image -- systems unloaded, definitions gone -- with nothing said.
+  ;; The reset belongs to the session, because the paths that throw a dead
+  ;; worker away do not all have a replacement in hand.  Each of these lost
+  ;; it once, and losing it means the user's next call lands in a fresh
+  ;; image -- systems unloaded, definitions gone -- with nothing said.
   (testing "recovery that drops the worker without replacing it keeps it"
     ;; The health monitor reaching a worker another thread has already marked
     ;; crashed: this arm removes it from the pool and only schedules
-    ;; replenishment, so there is nothing to hand the debt to.
+    ;; replenishment.
     (unless (spawn-available-p)
       (skip "worker processes cannot be spawned here"))
     (with-pool ()
@@ -1100,17 +1102,10 @@ next call learns why the session was reset")
         (cl-mcp/src/pool::%handle-worker-crash worker)
         (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
           (ok (not (eq worker replacement)))
-          (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
-               replacement)
-              "the reset survives the worker it was owed by")
-          (ok (equal cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
-                     (cl-mcp/src/worker-client:worker-last-crash-reason
-                      replacement))
-              "with what to say about it")))))
-  (testing "a warm standby takes it on just as a fresh spawn does"
-    ;; The two ways a session gets its next worker are different code, and
-    ;; every other test here has an empty standby list, so this one is
-    ;; exercised by nothing.
+          (ok (equal '(:retired) (owed session))
+              "the reset survives the worker it was owed by, with its cause")))))
+  (testing "a warm standby does not change what is owed"
+    ;; The two ways a session gets its next worker are different code.
     (unless (spawn-available-p)
       (skip "worker processes cannot be spawned here"))
     (with-pool ()
@@ -1124,15 +1119,8 @@ next call learns why the session was reset")
           (push standby cl-mcp/src/pool::*all-workers*))
         (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
           (ok (eq standby replacement) "the standby is what gets assigned")
-          (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
-               replacement)
-              "and it carries the reset")
-          (ok (equal cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
-                     (cl-mcp/src/worker-client:worker-last-crash-reason
-                      replacement))
-              "with what to say about it")
-          (ok (null (gethash session cl-mcp/src/pool::*owed-resets*))
-              "and the session's copy is dropped once it is bound")))))
+          (ok (equal '(:retired) (owed session))
+              "and the reset is still owed, once")))))
   (testing "the circuit breaker halting recovery does not swallow it"
     ;; The breaker gives up on recovery and returns, clearing the history as
     ;; it goes -- so the session is served again on the next request, by a
@@ -1149,11 +1137,10 @@ next call learns why the session was reset")
           (cl-mcp/src/pool::%handle-worker-crash worker)
           (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
             (ok (not (eq worker replacement)))
-            (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
-                 replacement)
+            (ok (equal '(:crashed) (owed session))
                 "the session is told, even though recovery gave up"))))))
   (testing "and a released session leaves none behind for the next one"
-    ;; A debt can outlive the affinity entry -- recovery drops the worker
+    ;; A reset can outlive the affinity entry -- recovery drops the worker
     ;; and only then is the session released -- and a session id can come
     ;; back.  Left behind, it greets whoever reuses the id with a crash that
     ;; was not theirs.
@@ -1165,14 +1152,14 @@ next call learns why the session was reset")
         (cl-mcp/src/worker-client::%mark-worker-crashed
          worker cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*)
         (cl-mcp/src/pool::%handle-worker-crash worker)
-        (ok (gethash session cl-mcp/src/pool::*owed-resets*)
-            "the debt is waiting with no worker to hold it")
-        (cl-mcp/src/pool:release-session session)
-        (ok (null (gethash session cl-mcp/src/pool::*owed-resets*))
-            "and goes when the session it belonged to does"))))
+        (let ((event (first (pending-session-resets session))))
+          (ok event "the reset is waiting with no worker to hold it")
+          (cl-mcp/src/pool:release-session session)
+          (ok (null (owed session))
+              "and goes when the session it belonged to does")
+          (ok (eq :discarded (reset-event-status event))
+              "as discarded, not as told")))))
   (testing "a replacement that cannot be spawned does not consume it"
-    ;; The debt used to live in one call's local variable, so a spawn that
-    ;; failed took it with it and the retry came back silently fresh.
     (unless (spawn-available-p)
       (skip "worker processes cannot be spawned here"))
     (with-pool ()
@@ -1182,9 +1169,7 @@ next call learns why the session was reset")
          worker cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*)
         ;; Two ways to fail, because they fail in different places: no room
         ;; in the pool gives up before the spawn is attempted, while a
-        ;; handshake that times out fails inside it, after the debt has been
-        ;; taken out of the session's hands and put on a worker that is then
-        ;; thrown away.
+        ;; handshake that times out fails inside it.
         (ok (handler-case
                 (let ((cl-mcp/src/pool:*max-pool-size* 0))
                   (cl-mcp/src/pool:get-or-assign-worker session)
@@ -1198,24 +1183,16 @@ next call learns why the session was reset")
                   nil)
               (error () t))
             "and then the spawn itself fails")
-        (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
-          (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
-               replacement)
-              "the retry still owes the user the reset")
-          (ok (equal cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
-                     (cl-mcp/src/worker-client:worker-last-crash-reason
-                      replacement))
-              "and still knows why"))))))
+        (cl-mcp/src/pool:get-or-assign-worker session)
+        (ok (equal '(:retired) (owed session))
+            "the retry still owes the user the reset, and still knows why")))))
 
 (deftest an-owed-reset-is-neither-lost-nor-invented
-  ;; The debt has one more way to go missing and one way to be made up, and
-  ;; both are about which worker is holding it when something goes wrong.
-  (testing "a replacement corrupted while being set up hands it back"
-    ;; The last drop site: the project-root sync runs against a worker the
-    ;; pool has just assigned, and when it kills that worker the pool throws
-    ;; it away and signals.  By then the debt is on that worker and the
-    ;; session's copy is gone, so it would be lost from both places at once
-    ;; -- the user's state reset twice with nothing said either time.
+  (testing "a replacement corrupted while being set up is owed as well"
+    ;; The project-root sync runs against a worker the pool has just
+    ;; assigned, and when it kills that worker the pool throws it away and
+    ;; signals.  Both ends are recorded: the first worker's, which held the
+    ;; user's state, and the replacement's.
     (unless (spawn-available-p)
       (skip "worker processes cannot be spawned here"))
     (with-pool ()
@@ -1248,111 +1225,103 @@ next call learns why the session was reset")
                    "the request fails rather than returning a dead worker"))
           (setf (fdefinition 'cl-mcp/src/pool::send-root-to-session-worker)
                 real))
-        (ok (gethash session cl-mcp/src/pool::*owed-resets*)
-            "and the reset is back with the session")
-        (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
-          (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
-               replacement)
-              "so the next request is still told")))))
-  (testing "a death already reported to the user is not recorded as owed"
-    ;; KILL-WORKER sets the flag on anything it kills, and the pool kills a
-    ;; crashed worker before deciding what to do about it.  Reading the flag
-    ;; after that would find a debt the proxy had already delivered and
-    ;; settled, and hand the user the same message twice.
+        (ok (equal '(:retired :crashed) (owed session))
+            "and both resets wait for the session, oldest first"))))
+  (testing "a death already reported to the user is not owed again"
+    ;; The pool kills a crashed worker before deciding what to do about it,
+    ;; and meets it again when replacing it.  Neither may record a second
+    ;; reset for a death the proxy has already told.
     (unless (spawn-available-p)
       (skip "worker processes cannot be spawned here"))
     (with-pool ()
       (let* ((session "owed-reset-already-told")
              (worker (cl-mcp/src/pool:get-or-assign-worker session)))
         (cl-mcp/src/worker-client::%mark-worker-crashed worker "eof")
-        ;; The proxy reporting the death, which is what consumes the debt.
-        (ok (cl-mcp/src/worker-client:check-and-clear-reset-notification
-             worker)
-            "the death is reported to the request that met it")
+        ;; The proxy telling the death to the request that met it.
+        (ok (= 1 (length (claim-session-resets session)))
+            "the death is told to the request that met it")
         (cl-mcp/src/pool::%handle-worker-crash worker)
-        (ok (null (gethash session cl-mcp/src/pool::*owed-resets*))
+        (cl-mcp/src/pool:get-or-assign-worker session)
+        (ok (null (owed session))
             "so nothing is left owed to say again"))))
-  (testing "recovery that does replace the worker takes the debt off the session"
+  (testing "recovery that replaces the worker records its death once"
     (unless (spawn-available-p)
       (skip "worker processes cannot be spawned here"))
     (with-pool ()
       (let* ((session "owed-reset-recovered")
              (worker (cl-mcp/src/pool:get-or-assign-worker session)))
-        (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
-          (setf (gethash session cl-mcp/src/pool::*owed-resets*)
-                (list "eof" "exited" 1)))
         (sb-posix:kill (cl-mcp/src/worker-client:worker-pid worker)
                        sb-posix:sigkill)
         (sleep 0.5)
         (cl-mcp/src/pool::%handle-worker-crash worker)
-        (ok (null (gethash session cl-mcp/src/pool::*owed-resets*))
-            "the replacement carries it, so the session no longer does")
-        (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
-          (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
-               replacement)
-              "and it is the replacement that carries it")))))
+        ;; And again, as the health monitor and a request can both meet it.
+        (cl-mcp/src/pool::%handle-worker-crash worker)
+        (cl-mcp/src/pool:get-or-assign-worker session)
+        (let ((events (pending-session-resets session)))
+          (ok (equal '(:crashed) (mapcar #'reset-event-cause events))
+              "one death, one reset")
+          (ok (equal "signaled" (reset-event-exit-status (first events)))
+              "with how it ended")))))
   (testing "shutting the pool down discards what nobody will be told"
     (unless (spawn-available-p)
       (skip "worker processes cannot be spawned here"))
     (with-pool ()
-      (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
-        (setf (gethash "owed-reset-shutdown" cl-mcp/src/pool::*owed-resets*)
-              (list "eof" "exited" 1)))
-      (cl-mcp/src/pool:shutdown-pool)
-      (ok (zerop (hash-table-count cl-mcp/src/pool::*owed-resets*))
-          "nothing survives to greet a later session"))))
+      (let* ((session "owed-reset-shutdown")
+             (worker (cl-mcp/src/pool:get-or-assign-worker session)))
+        (cl-mcp/src/worker-client::%mark-worker-crashed worker "eof")
+        (let ((event (first (pending-session-resets session))))
+          (cl-mcp/src/pool:shutdown-pool)
+          (ok (null (owed session))
+              "nothing survives to greet a later session")
+          (ok (eq :discarded (reset-event-status event))))))))
 
 (deftest an-owed-reset-is-not-handed-out-where-none-is-owed
-  ;; Every other assertion about the debt is that it arrives.  These are the
-  ;; other half: it does not arrive where nothing is owed, it is not
-  ;; recorded a second time once someone has delivered it, and the first
-  ;; debt is the one the session keeps.  Each of these was a mutation the
-  ;; suite could not tell from the real thing.
-  (testing "a session with nothing owed gets a worker that says nothing"
+  ;; Every other assertion about a reset is that it arrives.  These are the
+  ;; other half: it does not arrive where nothing is owed, it is not owed a
+  ;; second time once told, and no death is dropped for another.
+  (testing "a session with nothing owed is owed nothing"
     (unless (spawn-available-p)
       (skip "worker processes cannot be spawned here"))
     (with-pool ()
       (let ((worker (cl-mcp/src/pool:get-or-assign-worker "no-debt-session")))
-        (ok (not (cl-mcp/src/worker-client:worker-needs-reset-notification
-                  worker))
+        (ok (null (owed "no-debt-session"))
             "or every session's first call would open with a crash report")
         (ok (null (cl-mcp/src/worker-client:worker-last-crash-reason worker))
-            "and it has no death to describe"))))
-  (testing "the request that met the death is not made to report it twice"
-    ;; The proxy reports a death it met mid-request and settles the debt.
-    ;; The pool meeting the same worker afterwards -- this is the common
-    ;; path, a user's request finding its crashed worker still bound --
-    ;; must not record it as owed again.
+            "and its worker has no death to describe"))))
+  (testing "a worker that ended bound to no session is owed to nobody"
     (unless (spawn-available-p)
       (skip "worker processes cannot be spawned here"))
     (with-pool ()
-      (let* ((session "no-debt-already-told")
-             (worker (cl-mcp/src/pool:get-or-assign-worker session)))
-        (cl-mcp/src/worker-client::%mark-worker-crashed worker "eof")
-        (ok (cl-mcp/src/worker-client:check-and-clear-reset-notification
-             worker)
-            "the request that met it reports the death")
-        (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
-          (ok (not (eq worker replacement)))
-          (ok (not (cl-mcp/src/worker-client:worker-needs-reset-notification
-                    replacement))
-              "so the replacement does not report it again")))))
-  (testing "the debt a session already has is the one it keeps"
-    ;; Two deaths can be left with a session before either is delivered.
-    ;; The first is what the user has been waiting to hear about; the second
-    ;; is a worker they never got to use.
-    (let ((cl-mcp/src/pool::*owed-resets* (make-hash-table :test 'equal)))
-      (cl-mcp/src/pool::%leave-owed-reset "two-deaths" (list "first" "e" 1))
-      (cl-mcp/src/pool::%leave-owed-reset "two-deaths" (list "second" "e" 2))
-      (ok (equal "first"
-                 (first (gethash "two-deaths" cl-mcp/src/pool::*owed-resets*))))))
-  (testing "a replacement's inherited exit code does not vote on its own death"
-    ;; A replacement carries its predecessor's exit code to explain the
-    ;; reset.  If it then leaks a thread itself and dies where the status
-    ;; cannot be read, that inherited 70 plus its own count would read as a
-    ;; retirement -- a real crash excused from the breaker and from init
-    ;; attribution, which is the failure the whole per-worker classification
-    ;; exists to prevent.
+      (let ((standby (cl-mcp/src/worker-client:spawn-worker)))
+        (unwind-protect
+             (progn
+               (cl-mcp/src/worker-client::%mark-worker-crashed standby "eof")
+               (ok (eq :unowed
+                       (reset-event-status
+                        (cl-mcp/src/reset-events:worker-termination standby)))))
+          (ignore-errors (cl-mcp/src/worker-client:kill-worker standby))))))
+  (testing "two deaths before either is told are both owed, in order"
+    ;; Each is a separate loss of the session's state; neither stands in
+    ;; for the other.
+    (let ((first-worker (cl-mcp/src/worker-client::make-worker
+                         :id -1 :state :bound :session-id "two-deaths"))
+          (second-worker (cl-mcp/src/worker-client::make-worker
+                          :id -2 :state :bound :session-id "two-deaths")))
+      (unwind-protect
+           (progn
+             (cl-mcp/src/worker-client:record-worker-termination
+              first-worker :crashed :reason "first")
+             (cl-mcp/src/worker-client:record-worker-termination
+              second-worker :crashed :reason "second")
+             (ok (equal '("first" "second")
+                        (mapcar #'reset-event-reason
+                                (pending-session-resets "two-deaths")))))
+        (cl-mcp/src/reset-events:discard-session-resets "two-deaths"))))
+  (testing "a stale exit code does not vote on a worker's own death"
+    ;; An exit code is only a fact once this worker's process has exited.
+    ;; A 70 left in the slot plus its own leak count would otherwise read as
+    ;; a retirement -- a real crash excused from the breaker and from init
+    ;; attribution.
     (let ((worker (cl-mcp/src/worker-client::make-worker
                    :state :bound :leaked-threads 1)))
       (setf (cl-mcp/src/worker-client:worker-last-exit-code worker)
@@ -1362,11 +1331,8 @@ next call learns why the session was reset")
           "nothing this worker left says it retired")
       (ok (equal "unknown"
                  (cl-mcp/src/worker-client:worker-last-exit-code worker))
-          "and the inherited code is not kept as its own")))
-  (testing "a recovery whose own replacement fails leaves the debt behind"
-    ;; The spawn inside crash recovery, rather than the one in
-    ;; get-or-assign-worker: a different handler, and the only thing
-    ;; standing between a failed recovery and a session reset in silence.
+          "and the stale code is not kept as its own")))
+  (testing "a recovery whose own replacement fails leaves the reset owed"
     (unless (spawn-available-p)
       (skip "worker processes cannot be spawned here"))
     (with-pool ()
@@ -1377,12 +1343,8 @@ next call learns why the session was reset")
         (sleep 0.5)
         (let ((cl-mcp/src/worker-client::*worker-startup-timeout* 0.01))
           (cl-mcp/src/pool::%handle-worker-crash worker))
-        (ok (gethash session cl-mcp/src/pool::*owed-resets*)
-            "the debt outlives the recovery that could not finish")
-        (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
-          (ok (cl-mcp/src/worker-client:worker-needs-reset-notification
-               replacement)
-              "and reaches the next worker the session gets"))))))
+        (ok (equal '(:crashed) (owed session))
+            "the reset outlives the recovery that could not finish")))))
 
 (deftest retirement-is-visible-where-it-has-to-be
   (testing "real work retires; only observation is exempt"
@@ -1510,126 +1472,122 @@ next call learns why the session was reset")
           (if had
               (sb-posix:setenv "MCP_WORKER_SECRET" had 1)
               (sb-posix:unsetenv "MCP_WORKER_SECRET"))))))
-  (testing "the user is told a worker was replaced, not that it crashed"
+  (testing "the user is told a worker retired, not that it crashed"
     ;; Driven through PROXY-TO-WORKER, the function a tool call actually
     ;; reaches, rather than the builder it calls: the builder can be right
-    ;; about every reason while the proxy hands it the wrong one, and then
-    ;; what every user sees is the generic crash text.
-    (flet ((text-for (reason)
+    ;; about every cause while the proxy hands it the wrong one.
+    (flet ((result-for (reason session)
              (let* ((worker (cl-mcp/src/worker-client::make-worker
-                             :state :bound))
-                    (cl-mcp/src/proxy::*current-session-id* "leak-probe-session")
+                             :id -10 :state :bound :session-id session))
+                    (cl-mcp/src/proxy::*current-session-id* session)
                     (cl-mcp/src/proxy::%cached-get-or-assign%
                       (lambda (session) (declare (ignore session)) worker))
-                    (cl-mcp/src/proxy::%cached-check-and-clear%
-                      (lambda (w) (declare (ignore w)) nil))
                     (cl-mcp/src/proxy::%cached-worker-rpc%
                       (lambda (w method params &key timeout before-send
                                                    after-receive)
                         (declare (ignore method params timeout after-receive))
                         ;; Sent, then the worker died: the order the real
-                        ;; WORKER-RPC keeps.
+                        ;; WORKER-RPC keeps, and what it does on its way out.
                         (when before-send (funcall before-send))
+                        (cl-mcp/src/worker-client::%mark-worker-crashed
+                         w reason)
                         (error 'cl-mcp/src/worker-client:worker-crashed
                                :worker w :reason reason)))
                     (cl-mcp/src/proxy::%cached-worker-crashed-sym%
                       'cl-mcp/src/worker-client:worker-crashed)
                     (cl-mcp/src/proxy::%cached-worker-crashed-reason%
-                      #'cl-mcp/src/worker-client:worker-crashed-reason)
-                    (cl-mcp/src/proxy::%cached-worker-last-crash-reason%
-                      #'cl-mcp/src/worker-client:worker-last-crash-reason)
-                    (cl-mcp/src/proxy::%cached-worker-last-exit-status%
-                      #'cl-mcp/src/worker-client:worker-last-exit-status)
-                    (cl-mcp/src/proxy::%cached-worker-last-exit-code%
-                      #'cl-mcp/src/worker-client:worker-last-exit-code))
-               (gethash "text"
-                        (aref (gethash "content"
-                                       (cl-mcp/src/proxy:proxy-to-worker
-                                        "leak-probe-request" "repl-eval" nil))
-                              0)))))
-      (ok (search "left a thread that could not be stopped"
-                  (text-for
-                   cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*))
-          "a retirement says what actually happened")
-      (ok (search "crashed" (text-for "eof"))
-          "and a crash still reads as one"))
-    ;; The other way the message is delivered, and the one production
-    ;; usually takes: the worker died between requests, the pool replaced it,
-    ;; and the next call gets the one-time notification from the replacement
-    ;; -- which is why the pool copies the dead worker's reason onto it.
-    (flet ((text-after-reset (reason)
-             (let* ((worker (cl-mcp/src/worker-client::make-worker
-                             :state :bound))
-                    (cl-mcp/src/proxy::*current-session-id* "leak-probe-reset")
+                      #'cl-mcp/src/worker-client:worker-crashed-reason))
+               (declare (ignorable cl-mcp/src/proxy::%cached-get-or-assign%
+                                   cl-mcp/src/proxy::%cached-worker-rpc%
+                                   cl-mcp/src/proxy::%cached-worker-crashed-sym%
+                                   cl-mcp/src/proxy::%cached-worker-crashed-reason%))
+               (prog1 (cl-mcp/src/proxy:proxy-to-worker
+                       "leak-probe-request" "repl-eval" nil)
+                 (cl-mcp/src/reset-events:discard-session-resets session))))
+           (text (result)
+             (gethash "text" (aref (gethash "content" result) 0))))
+      (let ((retired (result-for
+                      cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*
+                      "leak-probe-retired")))
+        (ok (search "left a thread that could not be stopped" (text retired))
+            "a retirement says what actually happened")
+        ;; The worker retires on receiving a request, before dispatching it.
+        (ok (equal "not-executed" (gethash "execution_status" retired))
+            "and that the request it retired on did not run"))
+      (let ((crashed (result-for "eof" "leak-probe-crashed")))
+        (ok (search "stopped unexpectedly (eof)" (text crashed))
+            "and a crash still reads as one")
+        (ok (equal "execution-unknown" (gethash "execution_status" crashed))))))
+  (testing "the next request is told a reset nobody reported"
+    ;; The other way a reset is delivered, and the one production usually
+    ;; takes: the worker died between requests, and the session's next call
+    ;; is told in its place.
+    (flet ((text-after-reset (cause session)
+             (let* ((dead (cl-mcp/src/worker-client::make-worker
+                           :id -11 :state :bound :session-id session))
+                    (worker (cl-mcp/src/worker-client::make-worker
+                             :id -12 :state :bound :session-id session))
+                    (cl-mcp/src/proxy::*current-session-id* session)
                     (cl-mcp/src/proxy::%cached-get-or-assign%
                       (lambda (session) (declare (ignore session)) worker))
-                    (cl-mcp/src/proxy::%cached-check-and-clear%
-                      (lambda (w) (declare (ignore w)) t))
-                    (cl-mcp/src/proxy::%cached-worker-last-crash-reason%
-                      #'cl-mcp/src/worker-client:worker-last-crash-reason)
-                    (cl-mcp/src/proxy::%cached-worker-last-exit-status%
-                      #'cl-mcp/src/worker-client:worker-last-exit-status)
-                    (cl-mcp/src/proxy::%cached-worker-last-exit-code%
-                      #'cl-mcp/src/worker-client:worker-last-exit-code))
-               (setf (cl-mcp/src/worker-client:worker-last-crash-reason worker)
-                     reason)
-               (gethash "text"
-                        (aref (gethash "content"
-                                       (cl-mcp/src/proxy:proxy-to-worker
-                                        "leak-probe-reset-request"
-                                        "repl-eval" nil))
-                              0)))))
+                    (cl-mcp/src/proxy::%cached-worker-rpc%
+                      (lambda (&rest args)
+                        (declare (ignore args))
+                        (error "the request was sent"))))
+               (declare (ignorable cl-mcp/src/proxy::%cached-get-or-assign%
+                                   cl-mcp/src/proxy::%cached-worker-rpc%))
+               (cl-mcp/src/worker-client:record-worker-termination dead cause)
+               (let ((result (cl-mcp/src/proxy:proxy-to-worker
+                              "leak-probe-reset-request" "repl-eval" nil)))
+                 (ok (equal "not-executed" (gethash "execution_status" result)))
+                 (ok (null (pending-session-resets session))
+                     "telling it settles it")
+                 (gethash "text" (aref (gethash "content" result) 0))))))
       (ok (search "left a thread that could not be stopped"
-                  (text-after-reset
-                   cl-mcp/src/utils/deadline:*retired-leaked-thread-reason*))
-          "the replacement's one-time notification says it too")
-      (ok (search "crashed" (text-after-reset "eof"))
-          "and still reads as a crash when it was one"))
-    ;; Delivering the message settles what the death owed the user.  The
-    ;; pool hands an *undelivered* one to the replacement, so a proxy that
-    ;; reports the death without consuming it produces the message twice --
-    ;; and, before the flag meant this, a pool that read it the other way
-    ;; round produced it neither time for a death nobody reported.
-    (let* ((worker (cl-mcp/src/worker-client::make-worker :state :bound))
-           (cl-mcp/src/proxy::*current-session-id* "leak-probe-consume")
+                  (text-after-reset :retired "leak-probe-reset-retired"))
+          "the notification says it retired")
+      (ok (search "Worker -11 stopped unexpectedly"
+                  (text-after-reset :crashed "leak-probe-reset-crashed"))
+          "and still reads as a crash when it was one")))
+  (testing "a death told in the request that met it is not told again"
+    (let* ((session "leak-probe-consume")
+           (worker (cl-mcp/src/worker-client::make-worker
+                    :id -13 :state :bound :session-id session))
+           (calls 0)
+           (cl-mcp/src/proxy::*current-session-id* session)
            (cl-mcp/src/proxy::%cached-get-or-assign%
              (lambda (session) (declare (ignore session)) worker))
-           (cl-mcp/src/proxy::%cached-check-and-clear%
-             #'cl-mcp/src/worker-client:check-and-clear-reset-notification)
            (cl-mcp/src/proxy::%cached-worker-rpc%
-             (lambda (w method params &key timeout before-send after-receive)
-               (declare (ignore method params timeout after-receive))
-               ;; Sent, then the worker died: the order the real WORKER-RPC
-               ;; keeps.
+             (lambda (w method params &key timeout before-send after-receive
+                                           preserve-json-types)
+               (declare (ignore method params timeout after-receive
+                                preserve-json-types))
+               (incf calls)
                (when before-send (funcall before-send))
-               ;; What %MARK-WORKER-CRASHED does on its way out.
-               (setf (cl-mcp/src/worker-client:worker-needs-reset-notification
-                      w)
-                     t)
-               (error 'cl-mcp/src/worker-client:worker-crashed
-                      :worker w :reason "eof")))
+               (cond ((= calls 1)
+                      (cl-mcp/src/worker-client::%mark-worker-crashed w "eof")
+                      (error 'cl-mcp/src/worker-client:worker-crashed
+                             :worker w :reason "eof"))
+                     (t (make-hash-table :test 'equal)))))
            (cl-mcp/src/proxy::%cached-worker-crashed-sym%
              'cl-mcp/src/worker-client:worker-crashed)
            (cl-mcp/src/proxy::%cached-worker-crashed-reason%
-             #'cl-mcp/src/worker-client:worker-crashed-reason)
-           (cl-mcp/src/proxy::%cached-worker-last-crash-reason%
-             #'cl-mcp/src/worker-client:worker-last-crash-reason)
-           (cl-mcp/src/proxy::%cached-worker-last-exit-status%
-             #'cl-mcp/src/worker-client:worker-last-exit-status)
-           (cl-mcp/src/proxy::%cached-worker-last-exit-code%
-             #'cl-mcp/src/worker-client:worker-last-exit-code))
+             #'cl-mcp/src/worker-client:worker-crashed-reason))
       ;; Bound for PROXY-TO-WORKER to find, not for this body to read: they
       ;; are the proxy's own cached bindings, and it resolves them itself.
       (declare (ignorable cl-mcp/src/proxy::%cached-get-or-assign%
-                          cl-mcp/src/proxy::%cached-check-and-clear%
                           cl-mcp/src/proxy::%cached-worker-rpc%
                           cl-mcp/src/proxy::%cached-worker-crashed-sym%
-                          cl-mcp/src/proxy::%cached-worker-crashed-reason%
-                          cl-mcp/src/proxy::%cached-worker-last-crash-reason%
-                          cl-mcp/src/proxy::%cached-worker-last-exit-status%
-                          cl-mcp/src/proxy::%cached-worker-last-exit-code%))
-      (cl-mcp/src/proxy:proxy-to-worker "leak-probe-consume-request"
-                                        "repl-eval" nil)
-      (ok (not (cl-mcp/src/worker-client:worker-needs-reset-notification
-                worker))
-          "reporting the death here settles the reset it owed"))))
+                          cl-mcp/src/proxy::%cached-worker-crashed-reason%))
+      (let ((first (cl-mcp/src/proxy:proxy-to-worker "leak-probe-consume-1"
+                                                     "repl-eval" nil)))
+        (ok (search "Worker -13 stopped unexpectedly"
+                    (gethash "text" (aref (gethash "content" first) 0)))
+            "the request that met the death tells it"))
+      ;; The next request goes to a worker that answers.
+      (setf worker (cl-mcp/src/worker-client::make-worker
+                    :id -14 :state :bound :session-id session))
+      (let ((second (cl-mcp/src/proxy:proxy-to-worker "leak-probe-consume-2"
+                                                      "repl-eval" nil)))
+        (ok (null (gethash "isError" second))
+            "and the next request is answered, not told it again")))))

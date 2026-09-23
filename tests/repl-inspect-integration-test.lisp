@@ -134,7 +134,7 @@
                 (result (gethash "result" obj))
                 (object-id (gethash "result_object_id" result)))
            (ok object-id "Should have result_object_id")
-           (ok (integerp object-id) "result_object_id should be integer")
+           (ok (stringp object-id) "result_object_id should be a string handle")
            ;; Verify we can look up the object
            (ok (lookup-object object-id) "Object should be in registry")))))))
 
@@ -172,7 +172,7 @@
            (let* ((inspect-req (format nil
                                  "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",~
                                   \"params\":{\"name\":\"inspect-object\",~
-                                  \"arguments\":{\"id\":~A}}}"
+                                  \"arguments\":{\"id\":\"~A\"}}}"
                                  object-id))
                   (inspect-resp (cl-mcp/src/protocol:process-json-line inspect-req))
                   (inspect-obj (yason:parse inspect-resp))
@@ -206,7 +206,7 @@
              ;; Note: MY-LIST local may or may not be visible depending on optimization
              ;; If found, verify we can inspect it
              (when found-object-id
-               (ok (integerp found-object-id) "object-id should be integer")
+               (ok (stringp found-object-id) "object-id should be a string handle")
                (let ((inspect-result (inspect-object-by-id found-object-id)))
                  (ok (string= "list" (ht-get inspect-result "kind"))
                      "Should be able to inspect the local"))))))))))

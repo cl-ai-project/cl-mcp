@@ -9,14 +9,16 @@
 ;;;;                    cl-mcp/src/spec-core-record,
 ;;;;                    cl-mcp/src/spec-adapter-{core,report},
 ;;;;                    cl-mcp/src/tools/spec-entry, cl-mcp/src/pool, cl-mcp/src/proxy,
+;;;;                    cl-mcp/src/object-registry,
 ;;;;                    cl-spec/main, cl-spec/src/backends/check-it
 ;;;;
 ;;;; (The default suite does load specs/path-fixtures.lisp,
 ;;;; specs/write-fixtures.lisp, specs/core-record-fixtures.lisp,
 ;;;; specs/check-verdict-fixtures.lisp, specs/check-routing-fixtures.lisp,
-;;;; specs/pool-fixtures.lisp, specs/request-fixtures.lisp and
-;;;; specs/suite-judge.lisp, for its fixed read, write, record, verdict,
-;;;; routing, pool-ownership and request-lifecycle cases and the
+;;;; specs/pool-fixtures.lisp, specs/request-fixtures.lisp,
+;;;; specs/reset-fixtures.lisp and specs/suite-judge.lisp, for its fixed read,
+;;;; write, record, verdict, routing, pool-ownership, request-lifecycle and
+;;;; reset-event cases and the
 ;;;; integration judge; those files need no cl-spec and load nothing of this
 ;;;; bundle.)
 ;;;;
@@ -44,6 +46,7 @@
   (:import-from #:cl-mcp/specs/spec-responses)
   (:import-from #:cl-mcp/specs/pool-ownership)
   (:import-from #:cl-mcp/specs/request-lifecycle)
+  (:import-from #:cl-mcp/specs/reset-events)
   (:export #:register-specifications
            #:contract-names
            #:property-names
@@ -67,7 +70,8 @@ of the function it describes, not under a CL-MCP/SPECS package."
           (cl-mcp/specs/spec-inspection:contract-names)
           (cl-mcp/specs/spec-responses:contract-names)
           (cl-mcp/specs/pool-ownership:contract-names)
-          (cl-mcp/specs/request-lifecycle:contract-names)))
+          (cl-mcp/specs/request-lifecycle:contract-names)
+          (cl-mcp/specs/reset-events:contract-names)))
 
 (defun property-names ()
   "Return the properties this bundle defines."
@@ -81,7 +85,8 @@ of the function it describes, not under a CL-MCP/SPECS package."
           (cl-mcp/specs/spec-inspection:property-names)
           (cl-mcp/specs/spec-responses:property-names)
           (cl-mcp/specs/pool-ownership:property-names)
-          (cl-mcp/specs/request-lifecycle:property-names)))
+          (cl-mcp/specs/request-lifecycle:property-names)
+          (cl-mcp/specs/reset-events:property-names)))
 
 (defun spec-names ()
   "Return the named data specs this bundle defines."
@@ -95,7 +100,8 @@ of the function it describes, not under a CL-MCP/SPECS package."
           (cl-mcp/specs/spec-inspection:spec-names)
           (cl-mcp/specs/spec-responses:spec-names)
           (cl-mcp/specs/pool-ownership:spec-names)
-          (cl-mcp/specs/request-lifecycle:spec-names)))
+          (cl-mcp/specs/request-lifecycle:spec-names)
+          (cl-mcp/specs/reset-events:spec-names)))
 
 (defun generator-names ()
   "Return the custom generators this bundle defines."
@@ -109,7 +115,8 @@ of the function it describes, not under a CL-MCP/SPECS package."
           (cl-mcp/specs/spec-inspection:generator-names)
           (cl-mcp/specs/spec-responses:generator-names)
           (cl-mcp/specs/pool-ownership:generator-names)
-          (cl-mcp/specs/request-lifecycle:generator-names)))
+          (cl-mcp/specs/request-lifecycle:generator-names)
+          (cl-mcp/specs/reset-events:generator-names)))
 
 (defun call-examples ()
   "Return the bundle's concrete calls, as (FUNCTION ARGUMENTS [CASE]), which the
@@ -124,7 +131,8 @@ runner checks with CL-SPEC:CHECK-CALL apart from generated trials."
           (cl-mcp/specs/spec-inspection:call-examples)
           (cl-mcp/specs/spec-responses:call-examples)
           (cl-mcp/specs/pool-ownership:call-examples)
-          (cl-mcp/specs/request-lifecycle:call-examples)))
+          (cl-mcp/specs/request-lifecycle:call-examples)
+          (cl-mcp/specs/reset-events:call-examples)))
 
 (defun register-specifications (&optional (registry *registry*))
   "Install every definition of this bundle in REGISTRY, the current
@@ -145,7 +153,8 @@ REGISTRY after the call returns: this does not bind a registry of its own."
     (cl-mcp/specs/spec-inspection:register-specifications)
     (cl-mcp/specs/spec-responses:register-specifications)
     (cl-mcp/specs/pool-ownership:register-specifications)
-    (cl-mcp/specs/request-lifecycle:register-specifications))
+    (cl-mcp/specs/request-lifecycle:register-specifications)
+    (cl-mcp/specs/reset-events:register-specifications))
   (values (contract-names) (property-names)))
 
 ;;; Loading the bundle registers it where MCP's spec-list and spec-symbol look.

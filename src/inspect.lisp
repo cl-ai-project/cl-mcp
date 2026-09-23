@@ -422,11 +422,38 @@ superclasses, subclasses and methods with source lines."
 lists its methods with their specializers and source lines."
                   setf-p (qualified-symbol-name base) (qualified-symbol-name base))))))))
 
+(defun %lookup-failure (id why)
+  "Return the error result for handle ID, which names no object here, WHY
+being LOOKUP-OBJECT's third value."
+  (ecase why
+    (:stale
+     (make-ht "error" t
+              "code" "OBJECT_STALE"
+              "message" (format nil "Object ~A is stale: it was registered by an ~
+earlier worker image, or before its registry was cleared, and the object it named ~
+went with that state. Evaluate the expression again for a current object id."
+                                id)))
+    (:evicted
+     (make-ht "error" t
+              "code" "OBJECT_NOT_FOUND"
+              "message" (format nil "Object ~A is no longer registered: only the ~
+most recently registered objects are kept. Evaluate the expression again for a ~
+current object id."
+                                id)))
+    (:invalid
+     (make-ht "error" t
+              "code" "INVALID_OBJECT_ID"
+              "message" (format nil "~S is not an object id: ids are strings such as ~
+\"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-17\", taken from result_object_id or an [object-id: ...] marker."
+                                id)))))
+
 (defun inspect-object-by-id (id &key (max-depth 1) (max-elements 50))
-  "Inspect object by ID from the registry.
-Returns a hash-table with inspection results or error info."
-  (let ((object (lookup-object id)))
-    (if object
+  "Inspect the object the handle ID names in the registry.
+Returns a hash-table with inspection results or error info.  A handle from an
+earlier worker image or an earlier generation of the registry is refused as
+stale (OBJECT_STALE); it never resolves to another object."
+  (multiple-value-bind (object found-p why) (lookup-object id)
+    (if found-p
         (handler-case
             (let ((seen (make-hash-table :test 'eq))
                   (active (make-hash-table :test 'eq))
@@ -443,12 +470,8 @@ Returns a hash-table with inspection results or error info."
           (serious-condition (e)
             (make-ht "error" t
                      "code" "INSPECTION_FAILED"
-                     "message" (format nil
-                                       "Cannot inspect object ID ~A: ~A (object may have been garbage-collected)"
-                                       id e))))
-        (make-ht "error" t
-                 "code" "OBJECT_NOT_FOUND"
-                 "message" (format nil "Object ID ~A not found (may have been evicted from cache)" id)))))
+                     "message" (format nil "Cannot inspect object ~A: ~A" id e))))
+        (%lookup-failure id why))))
 
 (defun generate-result-preview (object &key (max-depth 1) (max-elements 8))
   "Generate a lightweight preview of OBJECT for inclusion in repl-eval response.
@@ -605,9 +628,13 @@ the JSON."
 (define-tool "inspect-object"
   :description "Inspect an object's internal structure by ID.
 Objects are registered when repl-eval returns non-primitive values (result_object_id field).
-Use this to drill down into complex data structures like CLOS instances, structures, lists, arrays, and hash-tables."
-  :args ((object-id :type :integer :json-name "id" :required t
-                    :description "Object ID from repl-eval result_object_id or previous inspection")
+Use this to drill down into complex data structures like CLOS instances, structures, lists, arrays, and hash-tables.
+An object id is an opaque string such as \"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-17\", valid only in the
+worker image that issued it: once that worker is replaced -- a crash, a timeout,
+pool-kill-worker, a cancellation -- its ids are refused as OBJECT_STALE rather
+than resolved to anything else."
+  :args ((object-id :type :string :json-name "id" :required t
+                    :description "Object ID (a string) from repl-eval result_object_id, an [object-id: ...] marker, or a previous inspection")
          (max-depth :type :integer :json-name "max_depth"
                     :description "Nesting depth for expansion (0=summary only, default=1)")
          (max-elements :type :integer :json-name "max_elements"

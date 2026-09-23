@@ -792,7 +792,7 @@ the test skips loudly instead of reporting a green it did not earn."
                 (ok (hash-table-p (gethash "value" marker)))
                 (ok (search "UNAVAILABLE"
                             (gethash "printed" (gethash "value" marker))))
-                (ok (integerp (gethash "object_id" (gethash "value" marker))))
+                (ok (stringp (gethash "object_id" (gethash "value" marker))))
                 ;; The unavailable-only key must not appear.
                 (ok (null (gethash "reason" marker))))
               (testing "the hash table is structurally unavailable"

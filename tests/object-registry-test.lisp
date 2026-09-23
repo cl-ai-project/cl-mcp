@@ -41,7 +41,7 @@
     (let ((registry (make-object-registry)))
       (let* ((obj (list 1 2 3))
              (id (register-object obj registry)))
-        (ok (integerp id))
+        (ok (stringp id))
         (ok (eq obj (lookup-object id registry)))))))
 
 (deftest register-returns-nil-for-primitives
@@ -106,12 +106,49 @@
       (dotimes (i 100)
         (push (register-object (list i) registry) ids))
       ;; All IDs should be unique
-      (ok (= 100 (length (remove-duplicates ids)))))))
+      (ok (= 100 (length (remove-duplicates ids :test #'equal)))))))
 
-(deftest ids-monotonically-increase
-  (testing "IDs monotonically increase"
+(deftest a-handle-names-its-generation
+  ;; A worker that is replaced starts a fresh image, whose registry numbers
+  ;; its objects from 1 again.  A handle the old image issued must be
+  ;; refused there, never resolved to whatever the new one holds under the
+  ;; same number.
+  (testing "a handle from another image is stale, not another object"
+    (let* ((old (make-object-registry))
+           (new (make-object-registry))
+           (handle (register-object (list :old) old))
+           (other (list :new)))
+      (register-object other new)
+      (multiple-value-bind (object found-p why) (lookup-object handle new)
+        (ok (null object))
+        (ok (not found-p))
+        (ok (eq :stale why)))
+      (ok (eq :stale (nth-value 2 (lookup-object handle new)))
+          "and asking again does not change the answer")))
+  (testing "clearing a registry makes every handle it issued stale"
+    (let* ((registry (make-object-registry))
+           (handle (register-object (list :before) registry)))
+      (clear-registry registry)
+      (register-object (list :after) registry)
+      (ok (eq :stale (nth-value 2 (lookup-object handle registry))))
+      (ok (null (lookup-object handle registry)))))
+  (testing "a handle of this generation whose object was evicted says so"
+    (let* ((registry (make-object-registry))
+           (handle (register-object (list :first) registry)))
+      (dotimes (i +max-registry-size+)
+        (register-object (list i) registry))
+      (ok (eq :evicted (nth-value 2 (lookup-object handle registry))))))
+  (testing "an integer, or a string of the wrong shape, is not a handle"
     (let ((registry (make-object-registry)))
-      (let ((id1 (register-object (list 1) registry))
-            (id2 (register-object (list 2) registry))
-            (id3 (register-object (list 3) registry)))
-        (ok (< id1 id2 id3))))))
+      (register-object (list :x) registry)
+      (dolist (bogus (list 1 "1" "o-" "o-abc" "o--1" "o-abc-0" "o-abc-x" nil))
+        (ok (eq :invalid (nth-value 2 (lookup-object bogus registry)))
+            (format nil "~S is refused as invalid" bogus)))))
+  (testing "a handle this generation issued is found"
+    (let* ((registry (make-object-registry))
+           (object (list :here))
+           (handle (register-object object registry)))
+      (multiple-value-bind (found found-p why) (lookup-object handle registry)
+        (ok (eq object found))
+        (ok found-p)
+        (ok (null why))))))

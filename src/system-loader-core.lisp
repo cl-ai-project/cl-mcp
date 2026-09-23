@@ -411,11 +411,14 @@ registering it."
              (setf (gethash "status" ht) "error")
              (setf (gethash "duration_ms" ht) elapsed-ms)
              ;; Carried so the response builder can withhold its standing
-             ;; advice to replace the worker: for a failure that leaves the
-             ;; image intact -- another load still holding the lock -- that
-             ;; advice would destroy work about to finish.
+             ;; advice to replace the worker.  A transient error means this
+             ;; load never started -- another load still holds the lock --
+             ;; so it changed nothing, and that advice would destroy work
+             ;; about to finish.  That is all it says: not that the image is
+             ;; sound, which nothing here has checked.  The builder consumes
+             ;; the key; it is not part of the response.
              (when (typep err 'transient-error)
-               (setf (gethash "worker_healthy" ht) t))
+               (setf (gethash "load_not_started" ht) t))
              (setf (gethash "message" ht)
                    (sanitize-for-json
                     (or saved-text

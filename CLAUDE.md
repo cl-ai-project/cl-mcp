@@ -78,6 +78,14 @@ in a fresh process (`rove`/`ros`), not the MCP worker you are working in.
 So does a request's lifecycle (`proxy-to-worker`, `cancel-request`, the hooks `worker-rpc` calls,
 and `src/request-lifecycle.lisp`): `property=request-lifecycle-keeps-its-promises`, then run
 `request-lifecycle-test` and `cancel-test` (the latter spawns a worker; fresh process).
+So do state-loss events (`src/reset-events.lisp`; wherever a worker's end is recorded or told --
+`%mark-worker-crashed`, `kill-worker`, `record-worker-termination`, the pool's crash, release,
+kill and shutdown paths, the proxy's failure results) and object ids (`src/object-registry.lisp`):
+`property=` for `resets-are-told-exactly-once`, `…-when-the-pool-is-full` and
+`object-ids-never-outlive-their-image`, then run `reset-events-test`, `request-lifecycle-test`,
+and, in a fresh process, `worker-leaked-thread-test` and `pool-test`. A worker's end is recorded
+before the signal that carries it out, and only the first record counts; a reset is told only by
+claiming it (`claim-session-resets`), never by copying it to a replacement.
 Elsewhere the bundle is not required.
 
 ## Architecture

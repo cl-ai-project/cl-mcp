@@ -440,7 +440,7 @@ notation instead of running forever."
 
   (:printed <string> :printed-complete <boolean> :omitted-chars <integer>
    :restorable <boolean> :print-level <integer> :print-length <integer>
-   :type <string> :object-id <integer-or-nil>)
+   :type <string> :object-id <string-or-nil>)
 
 No Lisp value is emitted as a JSON number: an integer seed or a rational can
 exceed what a JSON consumer holds exactly, and a rounded number that looks

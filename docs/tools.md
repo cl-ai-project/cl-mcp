@@ -62,6 +62,39 @@ twice:
 No request is ever sent again automatically. The text of these results says
 the same as the field, since a client need show only the text.
 
+A request whose worker was retired -- it exits on receiving a request while
+it still carries a thread an earlier deadline could not stop -- is
+`not-executed`: it retires before running it.
+
+### When a session loses its worker
+
+Each worker a session loses -- it crashed, timed out, retired, was stopped
+to cancel a request, or was killed with `pool-kill-worker` -- is told to that
+session exactly once, naming the worker and why it ended:
+
+```
+Worker 12 stopped unexpectedly (eof, exit code 1). This session's Lisp state
+(loaded systems, defined functions, package state) was lost with it. The
+session is now using another worker. Run load-system again to restore your
+environment. This request was not run; send it again if you still need it.
+```
+
+It is told by the first response that can: the request that met the loss,
+or else the session's next request, which is then not run
+(`not-executed`) because it was written against state that no longer
+exists. Several losses not yet told are told together. A `pool-kill-worker`
+response tells the kill itself (`Worker 12 was stopped by pool-kill-worker.`)
+and any earlier loss not yet told.
+
+The notice says only what is known. `The session is now using another worker.`
+is added only when this response acquired one; otherwise it says nothing
+about a worker to come, since whether the next call gets one depends on the
+pool's capacity and on a spawn that has not happened. Nothing is
+told after the session is released, or after the server's pool shuts down.
+
+Object ids (`result_object_id`, `[object-id: ...]`) belong to the worker that
+issued them; see `inspect-object`.
+
 ## `repl-eval`
 Evaluate one or more forms and return the last value as a text item.
 
@@ -82,7 +115,7 @@ Output fields:
 - `content`: last value as text
 - `stdout`: concatenated standard output from evaluation
 - `stderr`: concatenated standard error from evaluation
-- `result_object_id` (integer|null): when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
+- `result_object_id` (string|null): an opaque id, such as `"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-17"`; when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
 - `isError` and `execution_status`: when the evaluation timed out, the result is an
   error (`isError: true`) with `execution_status: "execution-unknown"`. It was stopped
   partway, or could not be stopped at all, so whether it did what it was asked, and what it
@@ -91,7 +124,7 @@ Output fields:
 - `error_context` (object|null): when `repl-eval` returns a structured in-process error
   result, contains `condition_type`, `message`, `restarts`, and `frames` with local
   variable inspection. The content text carries the same thing: each displayed frame is followed by its locals as
-  `NAME = VALUE`, with `[object-id: N]` on a non-primitive one, capped at 10 per frame.
+  `NAME = VALUE`, with `[object-id: ID]` on a non-primitive one, capped at 10 per frame.
   `locals_preview_frames` expands the entries, elements or slots of a non-primitive local in
   the top N frames underneath it, nested as deep as `locals_preview_max_depth` reached. A
   value over 200 characters is cut with its full length noted, and a preview over 20 lines
@@ -128,7 +161,15 @@ Drill down into non-primitive objects by ID. Objects are registered when `repl-e
 returns non-primitive results (the `result_object_id` field).
 
 Input:
-- `id` (integer, required): Object ID from `repl-eval`'s `result_object_id` or from a previous `inspect-object` call
+- `id` (string, required): Object ID from `repl-eval`'s `result_object_id`, an `[object-id: ...]` marker, or a previous `inspect-object` call
+
+An id is valid only in the worker image that issued it. Once that worker is
+replaced -- a crash, a timeout, `pool-kill-worker`, a cancellation -- its ids
+are refused as `OBJECT_STALE`, never resolved to an object of the new image.
+An id of the current image whose object was evicted (only the most recent
+1000 are kept) is `OBJECT_NOT_FOUND`; a string that is not an id is
+`INVALID_OBJECT_ID`. An integer, as an older client sends, is refused before
+any lookup by the argument check: `id must be a string`.
 - `max_depth` (integer, optional): Nesting depth for expansion (0=summary only, default=1)
 - `max_elements` (integer, optional): Maximum elements for lists/arrays/hash-tables (default=50)
 
@@ -153,11 +194,11 @@ Example workflow:
 ```json
 // 1. Evaluate code that returns a complex object
 {"method":"tools/call","params":{"name":"repl-eval","arguments":{"code":"(make-hash-table)"}}}
-// Response includes: "result_object_id": 42
+// Response includes: "result_object_id": "o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-42"
 
 // 2. Inspect the object
-{"method":"tools/call","params":{"name":"inspect-object","arguments":{"id":42}}}
-// Response: {"kind":"hash-table","test":"EQL","entries":[...],"id":42}
+{"method":"tools/call","params":{"name":"inspect-object","arguments":{"id":"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-42"}}}
+// Response: {"kind":"hash-table","test":"EQL","entries":[...],"id":"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-42"}
 ```
 
 ## `load-system`
@@ -969,6 +1010,11 @@ Output fields:
 - `isError` (boolean|null): true if kill succeeded but replacement spawn failed
 
 In both modes, you must call `load-system` again to restore previously loaded systems.
+
+The response also tells any earlier loss of the session's worker that had not
+been told yet (see *When a session loses its worker*), so the next request is
+not told it again. A request that was running on the killed worker is told
+the worker "was stopped by pool-kill-worker", with `execution-unknown`.
 
 Example requests:
 ```json

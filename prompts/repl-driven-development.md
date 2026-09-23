@@ -71,7 +71,7 @@ the text a client actually renders.)
 
 **Key guarantees:**
 - **Session affinity**: All calls route to the same dedicated worker. `load-system` then `code-find` works (shared state).
-- **Crash recovery**: Replacement auto-spawned; next call returns one-time crash notification. Re-issue `load-system`.
+- **Crash recovery**: Replacement auto-spawned. Each lost worker is told once -- by the call that met it, or else the next call, which is then not run -- naming the worker and why it ended. Re-issue `load-system`. Object ids from the lost worker are refused as stale.
 - **File edits and test reload**: `lisp-edit-form` writes to disk in parent. `run-tests` automatically force-reloads the test system before execution, so edited files are picked up. For `repl-eval` or `code-*` tools, you still need `load-system` or `(load "path")` to see changes.
 
 ## Shell Command Policy
@@ -170,7 +170,7 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
    under each frame, its locals as `NAME = VALUE`:
    - `condition_type`, `message`, `restarts` head the block
    - `frames`: stack frames with function names, source locations, local variables
-   - Locals include `[object-id: N]` for non-primitives (drill down via `inspect-object`)
+   - Locals include `[object-id: ID]` for non-primitives (drill down via `inspect-object`)
    - Local capture requires `(declare (optimize (debug 3)))` in the function; without it
      the frame is listed with no locals under it
    - At most 10 locals per frame are listed; the rest are counted, and a value

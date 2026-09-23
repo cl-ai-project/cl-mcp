@@ -15,9 +15,7 @@
                 #:worker-tcp-port #:worker-swank-port
                 #:worker-pid #:worker-state
                 #:worker-id #:worker-session-id
-                #:worker-needs-reset-notification
                 #:worker-crash-history-pushed-p
-                #:clear-reset-notification
                 #:worker-last-crash-reason
                 #:worker-last-exit-status
                 #:worker-last-exit-code)
@@ -73,8 +71,6 @@ in the cleanup form regardless of success or failure."
           "pid is nil by default")
       (ok (null (worker-session-id w))
           "session-id is nil by default")
-      (ok (null (worker-needs-reset-notification w))
-          "needs-reset-notification is nil by default")
       (ok (null (worker-last-crash-reason w))
           "last-crash-reason is nil by default")
       (ok (null (worker-last-exit-status w))
@@ -83,16 +79,6 @@ in the cleanup form regardless of success or failure."
           "last-exit-code is nil by default")
       (ok (zerop (cl-mcp/src/worker-client::worker-request-counter w))
           "request-counter is 0 by default"))))
-
-(deftest clear-reset-notification-clears-flag
-  (testing "clear-reset-notification sets the flag to nil"
-    (let ((w (cl-mcp/src/worker-client:make-worker
-              :needs-reset-notification t)))
-      (ok (worker-needs-reset-notification w)
-          "flag is set before clearing")
-      (clear-reset-notification w)
-      (ok (null (worker-needs-reset-notification w))
-          "flag is nil after clearing"))))
 
 (deftest crash-details-stored-on-worker
   (testing "make-worker with crash details stores them correctly"
@@ -106,40 +92,6 @@ in the cleanup form regardless of success or failure."
           "exit status stored")
       (ok (equal 11 (worker-last-exit-code w))
           "exit code stored"))))
-
-(deftest crash-notification-includes-details
-  (testing "crash notification message includes reason and exit info"
-    (let* ((result (cl-mcp/src/proxy::%crash-notification-result
-                    :reason "eof"
-                    :exit-status "signaled"
-                    :exit-code 11))
-           (content (gethash "content" result))
-           (text (gethash "text" (aref content 0))))
-      (ok (search "eof" text)
-          "message includes crash reason")
-      (ok (search "exit_status=signaled" text)
-          "message includes exit status")
-      (ok (search "exit_code=11" text)
-          "message includes exit code")))
-  (testing "crash notification with no details still works"
-    (let* ((result (cl-mcp/src/proxy::%crash-notification-result))
-           (content (gethash "content" result))
-           (text (gethash "text" (aref content 0))))
-      (ok (search "crashed" text)
-          "generic message still present")
-      (ok (not (search "exit_status" text))
-          "no exit_status when not provided")))
-  (testing "empty strings are filtered out"
-    (let* ((result (cl-mcp/src/proxy::%crash-notification-result
-                    :reason "" :exit-status "" :exit-code ""))
-           (content (gethash "content" result))
-           (text (gethash "text" (aref content 0))))
-      (ok (not (search "exit_status=" text))
-          "empty exit_status filtered")
-      (ok (not (search "exit_code=" text))
-          "empty exit_code filtered")
-      (ok (not (search "()" text))
-          "no empty parens in message"))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Integration tests — spawn, RPC, kill (require ros)
@@ -444,8 +396,8 @@ in the cleanup form regardless of success or failure."
         (let* ((eval-params (%make-eval-params "(list 10 20 30)"))
                (eval-result (proxy-to-worker 1 "worker/eval" eval-params))
                (obj-id (gethash "result_object_id" eval-result)))
-          (ok (integerp obj-id)
-              "eval returned an integer result_object_id")
+          (ok (stringp obj-id)
+              "eval returned a string result_object_id")
           ;; Step 2: inspect-object through proxy (same session → same worker)
           (let ((inspect-params (make-hash-table :test 'equal)))
             (setf (gethash "id" inspect-params) obj-id)
@@ -461,6 +413,35 @@ in the cleanup form regardless of success or failure."
                 (ok (vectorp elements) "elements is a vector")
                 (ok (= 3 (length elements))
                     "elements has 3 entries")))))))))
+
+(deftest e2e-a-replaced-workers-object-id-is-stale
+  (testing "an object id from a worker that was replaced is refused, not resolved"
+    ;; The replacement numbers its objects from 1 again, so under integer ids
+    ;; the old id named whatever the new image registered first.
+    (unless (spawn-available-p)
+      (skip "ros not available"))
+    (let ((*use-worker-pool* t)
+          (*current-session-id* "e2e-stale-object-session"))
+      (with-pool ()
+        (let ((old-id (gethash "result_object_id"
+                               (proxy-to-worker 1 "worker/eval"
+                                                (%make-eval-params "(list :old)")))))
+          (ok (stringp old-id) "the first worker hands out an id")
+          (cl-mcp/src/pool:kill-session-worker *current-session-id*)
+          (let ((new-id (gethash "result_object_id"
+                                 (proxy-to-worker 2 "worker/eval"
+                                                  (%make-eval-params "(list :new)"))))
+                (inspect-params (make-hash-table :test 'equal)))
+            (ok (stringp new-id) "the replacement hands out its own")
+            (ok (string/= old-id new-id) "under a different handle")
+            (setf (gethash "id" inspect-params) old-id)
+            (let* ((result (proxy-to-worker 3 "worker/inspect-object"
+                                            inspect-params))
+                   (text (gethash "text" (aref (gethash "content" result) 0))))
+              (ok (gethash "isError" result) "the old id is refused")
+              (ok (search "stale" text) (format nil "as stale: ~A" text))
+              (ok (not (search ":NEW" text))
+                  "and never answered with the new image's object"))))))))
 
 (deftest e2e-locals-preview-through-worker
   (testing "locals_preview_frames survives JSON round-trip through worker"
@@ -537,8 +518,8 @@ in the cleanup form regardless of success or failure."
                   (let ((text (when (hash-table-p (aref content 0))
                                 (gethash "text" (aref content 0)))))
                     (ok (and (stringp text)
-                             (search "crashed" text))
-                        "error message mentions crash"))))
+                             (search "stopped unexpectedly" text))
+                        "error message tells the crash"))))
               ;; Step 5: Subsequent call should work normally
               (let ((result3 (proxy-to-worker 1 "worker/eval" params)))
                 (ok (hash-table-p result3)

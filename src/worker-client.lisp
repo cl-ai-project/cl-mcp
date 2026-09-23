@@ -21,6 +21,8 @@
   (:import-from #:cl-mcp/src/utils/deadline
                 #:*retired-leaked-thread-reason*
                 #:+leaked-thread-exit-code+)
+  (:import-from #:cl-mcp/src/reset-events
+                #:record-termination)
   (:export #:worker
            #:make-worker
            #:spawn-worker
@@ -35,11 +37,9 @@
            #:worker-state
            #:worker-session-id
            #:worker-id
-           #:worker-needs-reset-notification
            #:worker-leaked-threads
            #:worker-stream-lock
-           #:clear-reset-notification
-           #:check-and-clear-reset-notification
+           #:record-worker-termination
            #:worker-process-info
            #:kill-worker
            #:worker-crashed
@@ -57,7 +57,6 @@
            #:worker-last-exit-code
            #:worker-retired-p
            #:worker-retirement-recorded
-           #:worker-owes-reset-p
            #:exit-code-says-retired-p))
 
 (in-package #:cl-mcp/src/worker-client)
@@ -201,7 +200,6 @@ Handles both LF and CRLF line endings."
   (tcp-port nil)
   (swank-port nil)
   (pid nil)
-  (needs-reset-notification nil :type boolean)
   (session-id nil)
   (request-counter 0 :type integer)
   (stderr-thread nil)
@@ -212,13 +210,10 @@ Handles both LF and CRLF line endings."
   (leaked-threads 0 :type integer)
   ;; Whether this worker's *own* death was a deliberate retirement.  Recorded
   ;; by whoever classified it -- the RPC that saw the EOF, or the pool's
-  ;; health monitor -- and deliberately not derived on demand from
-  ;; LAST-CRASH-REASON: a replacement worker inherits those crash details from
-  ;; its predecessor so the user can be told why it was replaced, and a
-  ;; healthy worker carrying an inherited reason would answer this question
-  ;; about a death that was not its own.  That answer disables the session's
-  ;; circuit breaker, so it would stay disabled for as long as the session
-  ;; lived, re-inherited by every later replacement.
+  ;; health monitor -- and kept apart from LAST-CRASH-REASON, which records
+  ;; how the transport failed rather than why the worker ended.  The answer
+  ;; disables the session's circuit breaker for this death, so it must be
+  ;; about this worker's own death and nothing else.
   ;;
   ;; Read through WORKER-RETIRED-P rather than directly: the writer and the
   ;; readers hold different locks, so the pairing that makes this visible is
@@ -700,9 +695,33 @@ message so callers can see what actually went wrong in the child."
 ;;; Public API — RPC
 ;;; ---------------------------------------------------------------------------
 
+(defun %termination-cause-of-reason (reason)
+  "Return the termination cause a transport failure REASON stands for:
+:RETIRED for a deliberate retirement, :TIMEOUT for an abandoned deadline, and
+:CRASHED for anything else."
+  (cond ((equal reason *retired-leaked-thread-reason*) :retired)
+        ((equal reason "timeout") :timeout)
+        (t :crashed)))
+
+(defun record-worker-termination (worker cause &key reason (owed nil owed-p))
+  "Record in the reset ledger (src/reset-events.lisp) that WORKER ended for
+CAUSE, with its session and exit details, and return the event.  The first
+record for a worker is the one kept, so a caller that decides a worker's end
+records it before signalling the process.
+
+OWED defaults to whether WORKER is still bound to a session: only a bound
+worker held a session's state, and only its end is owed to anyone."
+  (record-termination worker cause
+                      :worker-id (worker-id worker)
+                      :session-id (worker-session-id worker)
+                      :owed (if owed-p owed (eq :bound (worker-state worker)))
+                      :reason reason
+                      :exit-status (worker-last-exit-status worker)
+                      :exit-code (worker-last-exit-code worker)))
+
 (defun %mark-worker-crashed (worker reason)
-  "Mark WORKER as crashed, set reset notification flag, close its
-stream to prevent further use, and log the event.
+  "Mark WORKER as crashed, record its end in the reset ledger unless it was
+already decided, close its stream to prevent further use, and log the event.
 Process reaping (waitpid) is deferred to a background thread to
 avoid blocking the caller, which typically holds stream-lock.
 Returns nothing."
@@ -716,11 +735,8 @@ Returns nothing."
   ;; alongside the exit code, inside the branch that needs a process object,
   ;; so a worker without one recorded no reason at all.
   ;; Read before anything is published, so the whole account of this death
-  ;; is written together.  The pool copies these three onto the replacement
-  ;; worker to explain the reset to the user, and it can read them the
-  ;; instant the state below says there was a death -- so a status recorded
-  ;; afterwards is one the message never gets, and "exit_code=70" is the
-  ;; part that says a retirement was deliberate.
+  ;; is written together: the ledger's event copies these, and the user is
+  ;; told the reset from that copy.
   (let ((process (worker-process-info worker))
         (exit-status nil)
         (exit-code nil))
@@ -740,21 +756,24 @@ Returns nothing."
         (worker-retirement-recorded worker) (equal
                                              *retired-leaked-thread-reason*
                                              reason))
-  ;; Everything a reader will want to know about this death is written
-  ;; before the state that tells it there was one -- the reset this death
-  ;; owes the user included.  The pool reads the flag in the same breath as
-  ;; the state, and writing it afterwards left a window in which a
-  ;; replacement was made carrying no debt, so the user's session was reset
-  ;; without their being told.
-  (setf (worker-needs-reset-notification worker) t)
+  ;; The reset this death owes is recorded before the state that tells
+  ;; anyone there was a death, so no reader can see :CRASHED and find no
+  ;; event.  Recording is a no-op when the worker's end was already decided:
+  ;; a worker stopped to cancel a request, by pool-kill-worker, or with its
+  ;; session, meets its EOF here, and that EOF is not a crash.
+  (record-worker-termination worker (%termination-cause-of-reason reason)
+                             :reason reason)
   ;; The state is the flag that publishes all of the above, and the threads
   ;; that read it hold a different lock than this one -- so the ordering has
   ;; to be asked for.  Without it a pool thread can see :CRASHED while still
   ;; seeing what it replaced, and count a retirement against the session's
-  ;; breaker or drop the reset it owes.  WORKER-RETIRED-P and
-  ;; WORKER-OWES-RESET-P pay the reader's half.
+  ;; breaker.  WORKER-RETIRED-P pays the reader's half.
   (sb-thread:barrier (:write))
-  (setf (worker-state worker) :crashed)
+  ;; A worker the pool already let go -- released, or killed -- stays so.
+  ;; Marking it :CRASHED would make it read as a death the pool has yet to
+  ;; handle, and the request that met the EOF as having met a crash.
+  (unless (member (worker-state worker) '(:released :dead))
+    (setf (worker-state worker) :crashed))
   ;; Close the stream/socket to prevent stale-response corruption.
   ;; The next RPC attempt will see :crashed state before trying I/O.
   (ignore-errors
@@ -957,16 +976,6 @@ across the write, and the pool takes its own lock before the stream lock."
   (sb-thread:barrier (:read))
   (worker-retirement-recorded worker))
 
-(defun worker-owes-reset-p (worker)
-  "True when a state-reset notification for WORKER is owed and undelivered.
-
-Behind the same read barrier as WORKER-RETIRED-P, and for the same reason:
-this is published by the writer's state change under a lock the pool does
-not hold, and a pool thread that saw :CRASHED without seeing this would give
-the replacement no debt -- resetting the user's session silently."
-  (sb-thread:barrier (:read))
-  (worker-needs-reset-notification worker))
-
 (defun exit-code-says-retired-p (worker)
   "True when WORKER's recorded exit code and leak count both say it retired.
 
@@ -975,11 +984,8 @@ monitor can reach a dead worker before any RPC has seen the EOF, and there the
 exit code it records on its way past is the only witness there is.
 
 Read only by a caller that is looking at a worker's own death, and never as a
-standing property of the worker: a replacement inherits its predecessor's exit
-code along with the rest of the crash details it shows the user.  The count is
-not inherited, which is what keeps that inherited code from answering here --
-but the caller is what keeps the question from being asked about the wrong
-worker in the first place."
+standing property of the worker: an exit code is only a fact once the
+process has exited."
   (and (eql +leaked-thread-exit-code+ (worker-last-exit-code worker))
        (%reported-a-leak-p worker)))
 
@@ -1027,23 +1033,17 @@ without marking the worker as crashed."
       ;; leaves it :DEAD, and the callers that arrive after that are the ones
       ;; that most need the answer: the init monitor, still polling the
       ;; worker it was watching, disables initialization for every later
-      ;; worker in the pool when it reads a crash.  The slot is recorded per
-      ;; worker and never copied to a replacement, so it is safe to trust
-      ;; here in a way the reason string is not.
+      ;; worker in the pool when it reads a crash.
       ;;
-      ;; The reason string is trusted only while the worker is :CRASHED,
-      ;; because a replacement carries its predecessor's reason so the user
-      ;; can be told why the session was reset.  Reporting that for a worker
-      ;; killed deliberately would describe someone else's death as this
-      ;; one's -- for "timeout", telling the user an operation they never ran
-      ;; took too long.
+      ;; Both slots describe this worker's own end and nothing else: nothing
+      ;; copies them to a replacement.  Why the worker ended -- a crash, or a
+      ;; cancellation, a kill or a release that only looks like one from
+      ;; here -- is the reset ledger's to say (RECORD-WORKER-TERMINATION).
       (error 'worker-crashed
              :worker worker
              :reason (cond ((worker-retired-p worker)
                             *retired-leaked-thread-reason*)
-                           ((eq :crashed (worker-state worker))
-                            (or (worker-last-crash-reason worker)
-                                "already-dead"))
+                           ((worker-last-crash-reason worker))
                            (t "already-dead"))))
     ;; The last moment the request can be withheld: nothing has been sent,
     ;; and with the stream held nothing else can be running on the worker.
@@ -1157,19 +1157,13 @@ Robust against already-dead processes."
           (ignore-errors (usocket:socket-close socket))
           (setf (worker-socket worker) nil
                 (worker-stream worker) nil)))
-      ;; A kill resets the session's Lisp state exactly as a crash does, and
-      ;; the flag is what carries that owed notification to the replacement.
-      ;; It is cleared by whoever actually delivers it.
-      ;;
-      ;; Read in one place: GET-OR-ASSIGN-WORKER, when it finds the killed
-      ;; worker still bound to the session.  That is the cancellation path --
-      ;; RELEASE-SESSION and KILL-SESSION-WORKER unbind before killing, and
-      ;; the pool reads what a crashed worker owed before it gets here.
-      ;;
-      ;; Written before the state, behind the same barrier %MARK-WORKER-CRASHED
-      ;; uses and for the same reason: the pool reads the two together, under
-      ;; a different lock than this one.
-      (setf (worker-needs-reset-notification worker) t)
+      ;; A kill resets the session's Lisp state exactly as a crash does.
+      ;; Every caller that decides to kill a bound worker records why first
+      ;; -- a cancellation, pool-kill-worker, a release, a shutdown -- so this
+      ;; record is a no-op for them; it is here so that a bound worker ended
+      ;; by any other path still owes its session a reset rather than none.
+      ;; Written before the state, as %MARK-WORKER-CRASHED does.
+      (record-worker-termination worker :stopped)
       (sb-thread:barrier (:write))
       (setf (worker-state worker) :dead))
     ;; Terminate the OS process outside the lock (may block up to ~2.2s)
@@ -1221,22 +1215,3 @@ Robust against already-dead processes."
                "id" (worker-id worker)
                "pid" (worker-pid worker))
     worker))
-
-;;; ---------------------------------------------------------------------------
-;;; Public API — utility
-;;; ---------------------------------------------------------------------------
-
-(defun clear-reset-notification (worker)
-  "Clear the needs-reset-notification flag on WORKER."
-  (setf (worker-needs-reset-notification worker) nil))
-
-(defun check-and-clear-reset-notification (worker)
-  "Atomically check and clear the needs-reset-notification flag.
-Returns T if the flag was set (and is now cleared), NIL otherwise.
-Uses stream-lock for mutual exclusion with concurrent callers,
-preventing the TOCTOU race where two threads both see the flag
-as set and both return crash notifications."
-  (bt:with-lock-held ((worker-stream-lock worker))
-    (when (worker-needs-reset-notification worker)
-      (setf (worker-needs-reset-notification worker) nil)
-      t)))
