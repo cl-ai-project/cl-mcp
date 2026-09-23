@@ -76,6 +76,10 @@
                 #:get-or-assign-worker
                 #:release-session
                 #:shutdown-pool)
+  (:import-from #:cl-mcp/src/request-lifecycle
+                #:cancel-request-record
+                #:request-outcome
+                #:find-request)
   ;; Bare: the worker struct is named in full where a wrong implementation
   ;; needs it, and the pool's lock through the BT nickname.
   (:import-from #:cl-mcp/src/worker-client)
@@ -1101,6 +1105,17 @@ decided its usability before the acquire sees there was one to give."
       (when standby (cl-mcp/src/pool::%kill-worker standby))
       (funcall real session-id))))
 
+(defun %find-request-ignoring-the-session (session-id external-id)
+  "A wrong FIND-REQUEST, for the negative control: it finds a request by its
+id alone, whichever session sent it -- so another session's cancellation of
+the same id reaches it."
+  (declare (ignore session-id))
+  (bt:with-lock-held (cl-mcp/src/request-lifecycle:*requests-lock*)
+    (loop for key being the hash-keys of cl-mcp/src/request-lifecycle:*requests*
+            using (hash-value record)
+          when (equal (cdr key) (prin1-to-string external-id))
+            return record)))
+
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
@@ -1154,6 +1169,8 @@ the argument as it is after the call cannot see."
           (%bundle-name :property "POOL-OWNERSHIP-HOLDS-OVER-OPERATION-SEQUENCES"))
         (pool-full
           (%bundle-name :property "POOL-OWNERSHIP-HOLDS-WHEN-THE-POOL-IS-FULL"))
+        (requests
+          (%bundle-name :property "REQUEST-LIFECYCLE-KEEPS-ITS-PROMISES"))
         ;; Taken before any swap, so a wrong implementation can defer to it.
         (real-read (fdefinition 'allowed-read-path))
         (real-write (fdefinition 'ensure-write-path))
@@ -1429,7 +1446,34 @@ the argument as it is after the call cannot see."
            :description "counts nothing, so replenishment spawns past the cap"
            :replacement (lambda () 0)
            :targets (list (list :property pool-sequences) (list :property pool-full))
-           :must-fail (list (list :property pool-full))))))
+           :must-fail (list (list :property pool-full)))
+     (list :function 'cancel-request-record
+           :description "stops the request's worker whatever the request's phase"
+           :replacement (lambda (record stop-worker)
+                          (funcall stop-worker
+                                   (cl-mcp/src/request-lifecycle:request-worker record))
+                          :stopping)
+           :targets (list (list :property requests))
+           :must-fail (list (list :property requests)))
+     (list :function 'request-outcome
+           :description "reports every request as completed"
+           :replacement (lambda (record) (declare (ignore record)) :completed)
+           :targets (list (list :property requests))
+           :must-fail (list (list :property requests)))
+     (list :function 'cl-mcp/src/request-lifecycle:note-response
+           :description "publishes an answer although a cancellation stopped the worker first"
+           :replacement (lambda (record)
+                          (bt:with-lock-held (cl-mcp/src/request-lifecycle:*requests-lock*)
+                            (setf (cl-mcp/src/request-lifecycle:request-phase record)
+                                  :responded))
+                          :publish)
+           :targets (list (list :property requests))
+           :must-fail (list (list :property requests)))
+     (list :function 'find-request
+           :description "finds a request by its id alone, whichever session sent it"
+           :replacement #'%find-request-ignoring-the-session
+           :targets (list (list :property requests))
+           :must-fail (list (list :property requests))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put

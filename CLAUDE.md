@@ -75,6 +75,9 @@ So does the pool's ownership (`get-or-assign-worker`, `release-session`,
 function you change, then `property=` for each of the two `pool-ownership-*` properties, and run
 `pool-ownership-test`; its real-process case and the other pool suites spawn workers, so run them
 in a fresh process (`rove`/`ros`), not the MCP worker you are working in.
+So does a request's lifecycle (`proxy-to-worker`, `cancel-request`, the hooks `worker-rpc` calls,
+and `src/request-lifecycle.lisp`): `property=request-lifecycle-keeps-its-promises`, then run
+`request-lifecycle-test` and `cancel-test` (the latter spawns a worker; fresh process).
 Elsewhere the bundle is not required.
 
 ## Architecture

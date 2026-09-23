@@ -55,7 +55,8 @@ Uses a gensym sentinel to avoid collision with user input of :eof."
                                 (:locals-preview-max-depth (or null (integer 0)))
                                 (:locals-preview-max-elements (or null (integer 0)))
                                 (:locals-preview-skip-internal (member t nil)))
-                           (values string t string string (or null list) &optional))
+                           (values string t string string (or null list)
+                                   &optional (member t nil)))
                  repl-eval))
 
 (defun %sanitize-control-chars (string)
@@ -436,7 +437,9 @@ result is returned -- completed work is never discarded as a timeout."
                         timeout-seconds)
                 (format nil "Evaluation timed out after ~,2F seconds"
                         timeout-seconds))
-            :timeout "" "" nil))))))
+            ;; The sixth value says the evaluation timed out.  The raw value
+            ;; cannot: an expression may return :TIMEOUT itself.
+            :timeout "" "" nil t))))))
 
 (defun repl-eval (input &key (package *default-eval-package*)
                              (print-level nil) (print-length nil)
@@ -454,7 +457,9 @@ returned as a printed string per `prin1-to-string`, rendered relative to
 PACKAGE in lower case and pretty-printed at a 100-column margin. The second return value is
 the raw last value for callers that want it. The third and fourth values capture
 stdout and stderr produced during evaluation. The fifth value is a structured
-error context plist when an error occurred, NIL otherwise.
+error context plist when an error occurred, NIL otherwise.  The sixth is T when
+the evaluation was stopped at TIMEOUT-SECONDS: the raw value :TIMEOUT alone
+cannot say so, since an expression may return it.
 
 Options:
 - TIMEOUT-SECONDS: abort evaluation after this many seconds, returning a timeout string.

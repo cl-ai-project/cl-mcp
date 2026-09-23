@@ -50,9 +50,9 @@
                 #:*retired-leaked-thread-reason*)
   (:import-from #:cl-mcp/src/proxy
                 #:verify-proxy-bindings
-                #:%invalidate-proxy-cache
-                #:*active-requests*
-                #:*active-requests-lock*)
+                #:%invalidate-proxy-cache)
+  (:import-from #:cl-mcp/src/request-lifecycle
+                #:clear-requests)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/log #:log-event)
@@ -1246,9 +1246,8 @@ Serialized by *init-lock* to prevent concurrent initialization."
     ;; Shut down existing pool if running
     (when *pool-running*
       (shutdown-pool))
-    ;; Clear stale active-request entries from previous pool lifecycle
-    (bt:with-lock-held (*active-requests-lock*)
-      (clrhash *active-requests*))
+    ;; Clear stale request records from previous pool lifecycle
+    (clear-requests)
     ;; Reset state under lock
     (bt:with-lock-held (*pool-lock*)
       (setf *affinity-map* (make-hash-table :test 'equal)
@@ -1285,9 +1284,8 @@ monitor and waits for any in-flight replenish thread before
 snapshotting and killing workers."
   (log-event :info "pool.shutting-down")
   (setf *pool-running* nil)
-  ;; Clear stale active-request entries so pool restart starts clean
-  (bt:with-lock-held (*active-requests-lock*)
-    (clrhash *active-requests*))
+  ;; Clear stale request records so pool restart starts clean
+  (clear-requests)
   ;; Wake health monitor immediately instead of waiting up to its poll interval.
   (bt:with-lock-held (*health-monitor-lock*)
     (%condition-broadcast *health-monitor-condvar*))

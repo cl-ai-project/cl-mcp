@@ -24,8 +24,18 @@
                 #:coerce-timeout-seconds)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-error-message)
-  (:import-from #:bordeaux-threads
-                #:make-lock #:with-lock-held)
+  (:import-from #:cl-mcp/src/request-lifecycle
+                #:register-request
+                #:unregister-request
+                #:find-request
+                #:note-request-phase
+                #:note-request-worker
+                #:cancellation-requested-p
+                #:begin-send
+                #:note-response
+                #:cancel-request-record
+                #:request-worker
+                #:request-outcome)
   (:export #:proxy-to-worker
            #:with-proxy-dispatch
            #:*use-worker-pool*
@@ -33,9 +43,7 @@
            #:verify-proxy-bindings
            #:%invalidate-proxy-cache
            #:*current-session-id*
-           #:cancel-request
-           #:*active-requests*
-           #:*active-requests-lock*))
+           #:cancel-request))
 
 (in-package #:cl-mcp/src/proxy)
 
@@ -81,13 +89,6 @@ as a double -- becomes a bignum and a TYPE-ERROR, which WORKER-RPC reports as
 a protocol error and kills the worker for.  A day is far beyond any legitimate
 call.")
 
-(defvar *active-requests* (make-hash-table :test 'equal)
-  "Maps MCP request-id (as string) to session-id for in-flight
-proxied requests.  Used by cancel-request to find which worker to kill.")
-
-(defvar *active-requests-lock* (make-lock "active-requests-lock")
-  "Lock protecting *active-requests*.")
-
 (defmacro with-proxy-dispatch ((id method params-form) &body inline-body)
   "When *use-worker-pool* is non-nil, proxy the tool call to a worker
 process and wrap the result for JSON-RPC.  Otherwise execute INLINE-BODY.
@@ -119,6 +120,9 @@ null an inline call would never have sent."
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-RPC")
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-CRASHED")
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-CRASHED-REASON")
+    ("CL-MCP/SRC/WORKER-CLIENT" . "RPC-NOT-SENT")
+    ("CL-MCP/SRC/WORKER-CLIENT" . "RPC-NOT-SENT-REASON")
+    ("CL-MCP/SRC/WORKER-CLIENT" . "RPC-ANSWER-WITHDRAWN")
     ("CL-MCP/SRC/WORKER-CLIENT" . "KILL-WORKER")
     ("CL-MCP/SRC/WORKER-CLIENT" . "SIGNAL-WORKER-TERMINATE")
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-LAST-CRASH-REASON")
@@ -208,6 +212,16 @@ When crash details are provided, they are included for diagnostics."
   "Cached symbol WORKER-CLIENT:WORKER-CRASHED.")
 (defvar %cached-worker-crashed-reason% nil
   "Cached fdefinition for WORKER-CLIENT:WORKER-CRASHED-REASON.")
+
+(defvar %cached-rpc-not-sent-sym% nil
+  "Cached symbol WORKER-CLIENT:RPC-NOT-SENT.")
+
+(defvar %cached-rpc-not-sent-reason% nil
+  "Cached fdefinition for WORKER-CLIENT:RPC-NOT-SENT-REASON.")
+
+(defvar %cached-rpc-answer-withdrawn-sym% nil
+  "Cached symbol WORKER-CLIENT:RPC-ANSWER-WITHDRAWN.")
+
 (defvar %cached-kill-worker% nil
   "Cached fdefinition for WORKER-CLIENT:KILL-WORKER.")
 (defvar %cached-signal-worker-terminate% nil
@@ -240,6 +254,13 @@ per image after verify-proxy-bindings has validated the symbols."
           %cached-worker-crashed-reason%
           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
                                  "WORKER-CRASHED-REASON"))
+          %cached-rpc-not-sent-sym%
+          (%resolve "CL-MCP/SRC/WORKER-CLIENT" "RPC-NOT-SENT")
+          %cached-rpc-not-sent-reason%
+          (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
+                                 "RPC-NOT-SENT-REASON"))
+          %cached-rpc-answer-withdrawn-sym%
+          (%resolve "CL-MCP/SRC/WORKER-CLIENT" "RPC-ANSWER-WITHDRAWN")
           %cached-kill-worker%
           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT" "KILL-WORKER"))
           %cached-signal-worker-terminate%
@@ -265,6 +286,9 @@ image or pool lifecycle are cleared before re-verification."
         %cached-worker-rpc% nil
         %cached-worker-crashed-sym% nil
         %cached-worker-crashed-reason% nil
+        %cached-rpc-not-sent-sym% nil
+        %cached-rpc-not-sent-reason% nil
+        %cached-rpc-answer-withdrawn-sym% nil
         %cached-kill-worker% nil
         %cached-signal-worker-terminate% nil
         %cached-worker-last-crash-reason% nil
@@ -317,6 +341,187 @@ this request."
       (setf (gethash "timeout_seconds" params) +max-proxy-rpc-timeout+))
     params))
 
+(defun %with-execution-status (result outcome &optional note)
+  "Mark RESULT, an error result the proxy built, with OUTCOME -- :NOT-EXECUTED
+or :EXECUTION-UNKNOWN (see REQUEST-OUTCOME) -- as its execution_status, and
+end its text with what that means for the caller, or with NOTE.
+
+Said in the text as well as the field, because the text is all a client is
+required to show: whether to send the request again depends on it, and a
+request that may have run must not be sent again blindly."
+  (let ((sentence (or note
+                      (ecase outcome
+                        (:not-executed
+                         "This request was not run; send it again if you still need it.")
+                        (:execution-unknown
+                         "The request had reached the worker, so it may have run, partly or wholly; nothing it changed was undone, and it was not retried."))))
+        (content (gethash "content" result)))
+    (setf (gethash "execution_status" result)
+          (string-downcase (symbol-name outcome)))
+    (when (and (vectorp content) (plusp (length content)))
+      (let ((item (aref content 0)))
+        (setf (gethash "text" item)
+              (format nil "~A ~A" (gethash "text" item) sentence))))
+    result))
+
+(defun %cancelled-before-run-result ()
+  "Return the result for a request cancelled before it reached its worker."
+  (%with-execution-status
+   (make-ht "content" (text-content "Request cancelled before it was sent to the worker.")
+            "isError" t)
+   :not-executed
+   "It was not run."))
+
+(defun %proxied-request-failure (record session-id method worker condition)
+  "Return the result for RECORD's call failing with CONDITION, classified by
+how far the request got (REQUEST-OUTCOME), not by what the worker's failure
+was called.
+
+A worker found dead before this request was sent -- a request ahead of it
+timed out, or was cancelled -- did not run this request, and is not reported
+as this request timing out or crashing mid-run."
+  (let ((outcome (request-outcome record)))
+    (cond
+      ((typep condition %cached-rpc-not-sent-sym%)
+       (if (eq :cancelled (funcall %cached-rpc-not-sent-reason% condition))
+           (%cancelled-before-run-result)
+           (%with-execution-status
+            (make-ht "content"
+                     (text-content
+                      "The worker this session was using was stopped to cancel another request before this one was sent to it.")
+                     "isError" t)
+            :not-executed)))
+      ((typep condition %cached-rpc-answer-withdrawn-sym%)
+       ;; The worker answered, but the cancellation reached the registry
+       ;; first and stopped it: the cancellation is what is reported.  Its
+       ;; stop left the session a fresh image, so the answer, delivered now,
+       ;; would describe state that no longer exists.
+       (%with-execution-status
+        (make-ht "content"
+                 (text-content
+                  "Request cancelled while it was running: the worker running it was stopped. All Lisp state (loaded systems, defined functions, package state) has been reset. Please run load-system again to restore your environment.")
+                 "isError" t)
+        :execution-unknown))
+      ((typep condition %cached-worker-crashed-sym%)
+       ;; Delivering the notification here is what settles the reset this
+       ;; death owes the user, so consume the flag that records it.  The pool
+       ;; hands an unconsumed one to the replacement worker instead -- which is
+       ;; how a death nobody reported, during an internal RPC the pool makes
+       ;; on its own behalf, still reaches the user rather than leaving them
+       ;; talking to a fresh image that has lost their session.
+       (ignore-errors (funcall %cached-check-and-clear% worker))
+       (let ((reason (ignore-errors
+                      (funcall %cached-worker-crashed-reason% condition)))
+             (exit-status (ignore-errors
+                           (funcall %cached-worker-last-exit-status% worker)))
+             (exit-code (ignore-errors
+                         (funcall %cached-worker-last-exit-code% worker))))
+         (log-event :warn "proxy.worker-crashed"
+                    "session" session-id "method" method
+                    "reason" reason "outcome" (string-downcase (symbol-name outcome))
+                    "exit_status" exit-status "exit_code" exit-code)
+         (cond
+           ((eq outcome :not-executed)
+            (%with-execution-status
+             (%crash-notification-result :reason (or reason "unknown")
+                                         :exit-status exit-status
+                                         :exit-code exit-code)
+             :not-executed
+             "The worker had stopped before this request was sent to it, so this request was not run; send it again if you still need it."))
+           ((cancellation-requested-p record)
+            (%with-execution-status
+             (make-ht "content"
+                      (text-content
+                       "Request cancelled while it was running: the worker running it was stopped. All Lisp state (loaded systems, defined functions, package state) has been reset. Please run load-system again to restore your environment.")
+                      "isError" t)
+             :execution-unknown))
+           ((equal reason "timeout")
+            (%with-execution-status
+             (make-ht "content"
+                      (text-content
+                       "Worker RPC timed out. The operation took too long and the worker was terminated. All Lisp state has been reset. Please run load-system again to restore your environment.")
+                      "isError" t)
+             :execution-unknown))
+           (t
+            (%with-execution-status
+             (%crash-notification-result :reason (or reason "unknown")
+                                         :exit-status exit-status
+                                         :exit-code exit-code)
+             :execution-unknown)))))
+      (t
+       (log-event :debug "proxy.worker-rpc-error"
+                  "session" session-id "method" method
+                  "error" (princ-to-string condition))
+       (let ((result (make-ht "content"
+                              (text-content
+                               (format nil "Worker error: ~A"
+                                       (sanitize-error-message
+                                        (princ-to-string condition))))
+                              "isError" t)))
+         (if (eq outcome :completed)
+             ;; The worker answered, with an error: the request ran.
+             (progn (setf (gethash "execution_status" result) "completed")
+                    result)
+             (%with-execution-status result outcome)))))))
+
+(defun %run-proxied-request (record session-id method params preserve-json-types)
+  "Run the registered request RECORD: find its worker, and send it -- unless
+it was cancelled first, which is checked at every boundary before the send
+and, at the send itself, by WORKER-RPC's BEFORE-SEND hook."
+  (when (cancellation-requested-p record)
+    (return-from %run-proxied-request (%cancelled-before-run-result)))
+  (note-request-phase record :acquiring)
+  (let ((worker
+          (handler-case (funcall %cached-get-or-assign% session-id)
+            (error (e)
+              (log-event :warn "proxy.pool-error"
+                         "session" session-id
+                         "method" method
+                         "error" (princ-to-string e))
+              (return-from %run-proxied-request
+                (%with-execution-status
+                 (make-ht "content"
+                          (text-content
+                           (format nil "Pool error: ~A"
+                                   (sanitize-error-message (princ-to-string e))))
+                          "isError" t)
+                 :not-executed))))))
+    ;; A cancellation that arrived while the worker was being found or
+    ;; started: the worker stays the session's, the request does not run.
+    (when (cancellation-requested-p record)
+      (return-from %run-proxied-request (%cancelled-before-run-result)))
+    (note-request-worker record worker)
+    (when (funcall %cached-check-and-clear% worker)
+      (let ((reason (ignore-errors
+                     (funcall %cached-worker-last-crash-reason% worker)))
+            (exit-status (ignore-errors
+                          (funcall %cached-worker-last-exit-status% worker)))
+            (exit-code (ignore-errors
+                        (funcall %cached-worker-last-exit-code% worker))))
+        (log-event :info "proxy.crash-notification"
+                   "session" session-id
+                   "method" method "reason" reason
+                   "exit_status" exit-status "exit_code" exit-code)
+        ;; The reset is reported in this request's place; the request itself
+        ;; was never sent.
+        (return-from %run-proxied-request
+          (%with-execution-status
+           (%crash-notification-result :reason reason
+                                       :exit-status exit-status
+                                       :exit-code exit-code)
+           :not-executed))))
+    (log-event :debug "proxy.forward" "session" session-id "method" method)
+    (let ((effective-timeout (%effective-rpc-timeout (%clamp-timeout-param params))))
+      (handler-case
+          (apply %cached-worker-rpc% worker method params
+                 :timeout effective-timeout
+                 :before-send (lambda () (begin-send record))
+                 :after-receive (lambda () (note-response record))
+                 (when preserve-json-types
+                   (list :preserve-json-types t)))
+        (error (e)
+          (%proxied-request-failure record session-id method worker e))))))
+
 (defun proxy-to-worker (id method params &key preserve-json-types)
   "Proxy a tool call to the session's dedicated worker process.
 Returns the worker's JSON-RPC result hash-table directly.
@@ -324,181 +529,60 @@ PRESERVE-JSON-TYPES asks for the result parsed so that it encodes back to the
 JSON the worker wrote -- what a caller relaying it to the client needs.  A
 caller that reads the result itself (clos-describe) leaves it off and gets
 yason's defaults, which it was written against.
-Registers the request in *active-requests* so notifications/cancelled
-can map request-id to session and kill the worker.
+
+The request is registered under its session and ID for its whole life, first
+of all -- before a worker is found for it -- so a cancellation that arrives
+at any point finds it (src/request-lifecycle.lisp).  An error result this
+builds carries execution_status: \"not-executed\" when the request never
+reached the worker, \"execution-unknown\" when it did and no answer came.
+Nothing is retried.
+
 Uses atomic check-and-clear for crash notification to prevent
 TOCTOU race with concurrent requests for the same session."
   (let ((session-id *current-session-id*))
     (unless (and (stringp session-id) (plusp (length session-id)))
       (error "Cannot proxy tool call: no session ID bound."))
     (%ensure-cached-bindings)
-    (let ((request-key (princ-to-string id)))
-      (with-lock-held (*active-requests-lock*)
-        (setf (gethash request-key *active-requests*) session-id))
+    (let ((record (register-request session-id id)))
       (unwind-protect
-          (let ((worker
-                  (handler-case
-                      (funcall %cached-get-or-assign% session-id)
-                    (error (e)
-                      (log-event :warn "proxy.pool-error"
-                                 "session" session-id
-                                 "method" method
-                                 "error" (princ-to-string e))
-                      (return-from proxy-to-worker
-                        (make-ht "content"
-                                 (text-content
-                                  (format nil "Pool error: ~A"
-                                          (sanitize-error-message
-                                           (princ-to-string e))))
-                                 "isError" t)))))
-                 (worker-crashed-sym %cached-worker-crashed-sym%))
-            (cond
-              ((funcall %cached-check-and-clear% worker)
-               (let ((cr-reason (ignore-errors
-                                  (funcall %cached-worker-last-crash-reason% worker)))
-                     (cr-exit-status (ignore-errors
-                                      (funcall %cached-worker-last-exit-status% worker)))
-                     (cr-exit-code (ignore-errors
-                                    (funcall %cached-worker-last-exit-code% worker))))
-                 (log-event :info "proxy.crash-notification"
-                            "session" session-id
-                            "method" method "reason" cr-reason
-                            "exit_status" cr-exit-status "exit_code" cr-exit-code)
-                 (%crash-notification-result :reason cr-reason
-                                             :exit-status cr-exit-status
-                                             :exit-code cr-exit-code)))
-              (t
-               (log-event :debug "proxy.forward"
-                          "session" session-id
-                          "method" method)
-               (let ((effective-timeout
-                       (%effective-rpc-timeout
-                        (%clamp-timeout-param params))))
-                 (handler-case
-                     ;; The keyword only when asked for, so a stand-in RPC
-                     ;; that takes only :TIMEOUT still serves the rest.
-                     (apply %cached-worker-rpc% worker method params
-                            :timeout effective-timeout
-                            (when preserve-json-types
-                              (list :preserve-json-types t)))
-                   (error (e)
-                     (cond
-                       ((typep e worker-crashed-sym)
-                        ;; Delivering the notification here is what settles
-                        ;; the reset this death owes the user, so consume the
-                        ;; flag that records it.  The pool hands an unconsumed
-                        ;; one to the replacement worker instead -- which is
-                        ;; how a death nobody reported, during an internal RPC
-                        ;; the pool makes on its own behalf, still reaches the
-                        ;; user rather than leaving them talking to a fresh
-                        ;; image that has lost their session.
-                        (ignore-errors (funcall %cached-check-and-clear% worker))
-                        (let ((reason
-                               (ignore-errors
-                                 (funcall %cached-worker-crashed-reason% e))))
-                          (cond
-                            ((and reason (string= reason "timeout"))
-                             (log-event :warn "proxy.worker-timeout"
-                                        "session" session-id
-                                        "method" method)
-                             (make-ht "content"
-                                      (text-content
-                                       (concatenate 'string
-                                         "Worker RPC timed out. "
-                                         "The operation took too long and the worker "
-                                         "was terminated. All Lisp state has been reset. "
-                                         "Please run load-system again to restore "
-                                         "your environment."))
-                                      "isError" t))
-                            (t
-                             (let ((cr-exit-status
-                                    (ignore-errors
-                                      (funcall %cached-worker-last-exit-status%
-                                               worker)))
-                                   (cr-exit-code
-                                    (ignore-errors
-                                      (funcall %cached-worker-last-exit-code%
-                                               worker))))
-                               (log-event :warn
-                                          "proxy.worker-crashed-mid-request"
-                                          "session" session-id
-                                          "method" method
-                                          "error" (princ-to-string e)
-                                          "exit_status" cr-exit-status
-                                          "exit_code" cr-exit-code)
-                               (%crash-notification-result
-                                :reason (or reason "unknown")
-                                :exit-status cr-exit-status
-                                :exit-code cr-exit-code))))))
-                       (t
-                        (log-event :debug "proxy.worker-rpc-error"
-                                   "session" session-id
-                                   "method" method
-                                   "error" (princ-to-string e))
-                        (make-ht "content"
-                                 (text-content
-                                  (format nil "Worker error: ~A"
-                                          (sanitize-error-message
-                                           (princ-to-string e))))
-                                 "isError" t)))))))))
-        (with-lock-held (*active-requests-lock*)
-          (remhash request-key *active-requests*))))))
+           (%run-proxied-request record session-id method params
+                                 preserve-json-types)
+        (unregister-request record)))))
 
 (defun cancel-request (request-id &optional caller-session-id)
-  "Cancel a proxied request by killing its worker.
-Looks up REQUEST-ID in the active-requests map, validates the
-caller's session matches (if CALLER-SESSION-ID provided), sends
-SIGTERM to break in-flight RPC, then calls kill-worker for cleanup.
-Returns T if found and cancelled, NIL otherwise."
-  (let ((request-key (princ-to-string request-id))
-        (session-id nil))
-    ;; Look up without removing — validate ownership first.
-    (with-lock-held (*active-requests-lock*)
-      (setf session-id (gethash request-key *active-requests*)))
-    (unless session-id
+  "Cancel the request REQUEST-ID of CALLER-SESSION-ID, and return what that did,
+or NIL when that session has no such request in flight.
+
+The request is looked up under its session: another session's request with
+the same id is a different request.  What happens depends on how far it got
+(CANCEL-REQUEST-RECORD):
+
+  :MARKED    it had not reached its worker; it stops at its next boundary
+             without running, and its worker is left alone;
+  :STOPPING  its worker was running it; the worker is signalled while the
+             registry holds the request in :EXECUTING, then ended here;
+  :TOO-LATE  it had already been answered; nothing is done.
+
+A worker is only ever stopped for the request it is running at that moment,
+never for a session's other requests."
+  (let ((record (and caller-session-id
+                     (find-request caller-session-id request-id))))
+    (unless record
       (log-event :debug "proxy.cancel.not-found"
-                 "request_id" request-key)
+                 "request_id" (princ-to-string request-id))
       (return-from cancel-request nil))
-    ;; Cross-session validation: reject if caller doesn't own this request.
-    (when (and caller-session-id
-               (not (equal caller-session-id session-id)))
-      (log-event :warn "proxy.cancel.session-mismatch"
-                 "request_id" request-key
-                 "caller_session" caller-session-id
-                 "owner_session" (if (> (length session-id) 8)
-                                     (subseq session-id 0 8)
-                                     session-id))
-      (return-from cancel-request nil))
-    ;; Validation passed — remove entry before killing worker.
-    (with-lock-held (*active-requests-lock*)
-      (remhash request-key *active-requests*))
-    (log-event :info "proxy.cancel.killing-worker"
-               "request_id" request-key
-               "session" session-id)
-    (handler-case
-        (progn
-          (%ensure-cached-bindings)
-          ;; M1: Read-only lookup, no spawn
-          (let ((worker (funcall %cached-find-session-worker% session-id)))
-            (unless worker
-              (log-event :debug "proxy.cancel.no-worker"
-                         "request_id" request-key
-                         "session" session-id)
-              (return-from cancel-request t))
-            ;; C1: SIGTERM first to break blocked RPC read.
-            ;; worker-rpc holds stream-lock for send+blocking-read.
-            ;; kill-worker also acquires stream-lock -> deadlock.
-            ;; SIGTERM breaks the TCP pipe, causing the blocked read
-            ;; to fail with stream-error, which releases the lock.
-            (funcall %cached-signal-worker-terminate% worker)
-            ;; Then kill-worker for full cleanup (socket close, state, reap)
-            (funcall %cached-kill-worker% worker)
-            (log-event :info "proxy.cancel.worker-killed"
-                       "request_id" request-key
-                       "session" session-id)))
-      (error (e)
-        (log-event :warn "proxy.cancel.error"
-                   "request_id" request-key
-                   "session" session-id
-                   "error" (princ-to-string e))))
-    t))
+    (%ensure-cached-bindings)
+    (let ((verdict (cancel-request-record
+                    record
+                    (lambda (worker)
+                      ;; SIGTERM first to break the RPC blocked in its read:
+                      ;; it holds the stream lock KILL-WORKER needs.
+                      (ignore-errors
+                       (funcall %cached-signal-worker-terminate% worker))))))
+      (log-event :info "proxy.cancel"
+                 "request_id" (princ-to-string request-id)
+                 "session" caller-session-id
+                 "verdict" (string-downcase (symbol-name verdict)))
+      (when (eq :stopping verdict)
+        (ignore-errors (funcall %cached-kill-worker% (request-worker record))))
+      verdict)))

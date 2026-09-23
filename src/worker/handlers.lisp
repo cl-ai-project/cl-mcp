@@ -118,7 +118,7 @@ result_preview, and error_context."
                (not (and (integerp max-output-length)
                          (not (minusp max-output-length)))))
       (error "max_output_length must be a non-negative integer"))
-    (multiple-value-bind (printed raw-value stdout stderr error-context)
+    (multiple-value-bind (printed raw-value stdout stderr error-context timed-out)
         (repl-eval code
                    :package (or package *package*)
                    :print-level print-level
@@ -140,7 +140,8 @@ result_preview, and error_context."
                            :include-result-preview include-result-preview
                            :preview-max-depth (or preview-max-depth 1)
                            :preview-max-elements (or preview-max-elements 8)
-                           :max-output-length max-output-length))))
+                           :max-output-length max-output-length
+                           :timed-out timed-out))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/load-system

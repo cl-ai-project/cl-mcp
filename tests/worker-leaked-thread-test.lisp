@@ -1524,8 +1524,12 @@ next call learns why the session was reset")
                     (cl-mcp/src/proxy::%cached-check-and-clear%
                       (lambda (w) (declare (ignore w)) nil))
                     (cl-mcp/src/proxy::%cached-worker-rpc%
-                      (lambda (w method params &key timeout)
-                        (declare (ignore method params timeout))
+                      (lambda (w method params &key timeout before-send
+                                                   after-receive)
+                        (declare (ignore method params timeout after-receive))
+                        ;; Sent, then the worker died: the order the real
+                        ;; WORKER-RPC keeps.
+                        (when before-send (funcall before-send))
                         (error 'cl-mcp/src/worker-client:worker-crashed
                                :worker w :reason reason)))
                     (cl-mcp/src/proxy::%cached-worker-crashed-sym%
@@ -1593,8 +1597,11 @@ next call learns why the session was reset")
            (cl-mcp/src/proxy::%cached-check-and-clear%
              #'cl-mcp/src/worker-client:check-and-clear-reset-notification)
            (cl-mcp/src/proxy::%cached-worker-rpc%
-             (lambda (w method params &key timeout)
-               (declare (ignore method params timeout))
+             (lambda (w method params &key timeout before-send after-receive)
+               (declare (ignore method params timeout after-receive))
+               ;; Sent, then the worker died: the order the real WORKER-RPC
+               ;; keeps.
+               (when before-send (funcall before-send))
                ;; What %MARK-WORKER-CRASHED does on its way out.
                (setf (cl-mcp/src/worker-client:worker-needs-reset-notification
                       w)
