@@ -1264,7 +1264,12 @@ by the spawned thread."
 ;;; ---------------------------------------------------------------------------
 
 (defvar *init-lock* (bt:make-lock "pool-init-lock")
-  "Serializes concurrent calls to initialize-pool.")
+  "Serializes the pool's lifecycle: INITIALIZE-POOL and SHUTDOWN-POOL each
+hold it throughout.  The state they reset or tear down -- the lists, the
+affinity map, the health thread -- is the image's, not a generation's, so a
+shutdown overtaken by an initialize would snapshot, clear and join the new
+pool's.  Not recursive: INITIALIZE-POOL shuts a running pool down through
+%SHUTDOWN-POOL-UNLOCKED.")
 
 (defun initialize-pool ()
   "Initialize the worker pool and start the health monitor.  Safe to
@@ -1298,7 +1303,7 @@ Serialized by *init-lock* to prevent concurrent initialization."
     (verify-proxy-bindings)
     ;; Shut down existing pool if running
     (when *pool-running*
-      (shutdown-pool))
+      (%shutdown-pool-unlocked))
     ;; Clear stale request records from previous pool lifecycle
     (clear-requests)
     ;; Reset state under lock
@@ -1364,7 +1369,15 @@ deadline is the exception below.  In order:
 A spawn or a thread that does not finish within %SHUTDOWN-WAIT-SECONDS is
 logged and left to end its own worker, which it does on seeing the pool
 stopped.  It stays on the stopped generation's account: a pool initialized
-afterwards is a new generation, whose cap and flags it does not touch."
+afterwards is a new generation, whose cap and flags it does not touch.
+
+Holds *INIT-LOCK* throughout, so an INITIALIZE-POOL called meanwhile waits
+for it to finish rather than starting a pool it would then tear down."
+  (bt:with-lock-held (*init-lock*)
+    (%shutdown-pool-unlocked)))
+
+(defun %shutdown-pool-unlocked ()
+  "SHUTDOWN-POOL's work, with *INIT-LOCK* already held by the caller."
   (log-event :info "pool.shutting-down")
   (let ((generation (bt:with-lock-held (*pool-lock*)
                       (setf *pool-running* nil)

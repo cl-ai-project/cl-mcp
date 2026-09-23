@@ -1815,6 +1815,13 @@ which processes died, every thread the pool started.
   shutdown claimed it left nothing behind unconditionally; it now says so
   only of work that finishes within the deadline, and the late work has a
   property of its own.
+- **Found in review: a shutdown could be overtaken by an initialize.**
+  `initialize-pool` held the lifecycle lock (`*init-lock*`) and
+  `shutdown-pool` did not, so a pool started in the middle of a shutdown
+  had its health thread joined by it -- the shutdown then never returned --
+  or its lists snapshotted and cleared, since those are the image's, not a
+  generation's. Both now hold the lock throughout; `initialize-pool` shuts a
+  running pool down through `%shutdown-pool-unlocked`.
 - **A queued request waited without a deadline**, and a cancelled one went on
   waiting until the request ahead of it finished.
 

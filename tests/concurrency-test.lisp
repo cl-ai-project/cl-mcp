@@ -394,6 +394,46 @@
                                           (list :late :acquire-spawn :max-size 1
                                                 :warmup 0)))))))))
 
+(deftest an-initialize-waits-for-the-shutdown-it-follows
+  ;; Found in review: SHUTDOWN-POOL did not hold the lifecycle lock that
+  ;; INITIALIZE-POOL does, so an initialize could start a pool in the middle
+  ;; of a shutdown -- which then joined the new pool's health thread, never
+  ;; to return, or snapshotted and cleared its lists.  The shutdown is held
+  ;; here, waiting for a spawn in flight, while the initialize is called.
+  (with-concurrent-pool (ledger :warmup 0 :max-size 4)
+    (let ((base (%spawns-begun ledger))
+          (gate (%gate-spawns ledger))
+          (acquire (bt:make-thread (lambda () (ignore-errors (get-or-assign-worker "s0")))
+                                   :name "lifecycle-acquire"))
+          (shut-down nil)
+          (initialized nil))
+      (%await (lambda () (> (%spawns-begun ledger) base)))
+      (let ((shutdown (bt:make-thread (lambda () (shutdown-pool) (setf shut-down t))
+                                      :name "lifecycle-shutdown")))
+        (%await (lambda () (not cl-mcp/src/pool::*pool-running*)))
+        (let ((initialize (bt:make-thread (lambda () (initialize-pool) (setf initialized t))
+                                          :name "lifecycle-initialize")))
+          (sleep 0.3)
+          (ok (and (not shut-down) (not initialized))
+              "the initialize waits while the shutdown is under way")
+          (ok (not cl-mcp/src/pool::*pool-running*) "no pool is started meanwhile")
+          ;; New spawns are not gated; the held one returns.
+          (bt:with-lock-held ((cl-mcp/specs/concurrency-fixtures::ledger-lock ledger))
+            (setf (cl-mcp/specs/concurrency-fixtures::ledger-spawn-gate ledger) nil))
+          (sb-thread:signal-semaphore gate 10)
+          (bt:join-thread shutdown)
+          (bt:join-thread initialize)
+          (bt:join-thread acquire)
+          (ok (and shut-down initialized) "both finish, the shutdown first")
+          (ok cl-mcp/src/pool::*pool-running* "the new pool is running")
+          (let ((health cl-mcp/src/pool::*health-thread*))
+            (ok (and health (bt:thread-alive-p health))
+                "with its health monitor, which the shutdown did not join"))
+          (let ((worker (get-or-assign-worker "n1")))
+            (ok (member worker (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                                 (copy-list cl-mcp/src/pool::*all-workers*)))
+                "and it lends and keeps its workers")))))))
+
 ;;; ------------------------------------------------------------------------
 ;;; Waiting for a worker
 
