@@ -72,6 +72,14 @@
   (:import-from #:cl-mcp/src/spec-adapter-core
                 #:api-fn
                 #:definition-digest)
+  (:import-from #:cl-mcp/src/pool
+                #:get-or-assign-worker
+                #:release-session
+                #:shutdown-pool)
+  ;; Bare: the worker struct is named in full where a wrong implementation
+  ;; needs it, and the pool's lock through the BT nickname.
+  (:import-from #:cl-mcp/src/worker-client)
+  (:import-from #:bordeaux-threads)
   (:import-from #:cl-mcp/specs
                 #:register-specifications
                 #:contract-names
@@ -1053,6 +1061,46 @@ definition as unchanged on the strength of a record that was refused."
                 (funcall real api name registry :property stripped :data-key key)
                 (values nil nil)))))))
 
+(defun %without-ending-workers (real)
+  "Return a wrong version of REAL, a pool operation, for the negative control:
+it does everything REAL does except end the workers it lets go of -- the pool's
+kill is bound to do nothing around the call.  The pool's lists look exactly as
+they should afterwards; only a record kept outside the pool shows the
+processes nobody owns."
+  (lambda (&rest arguments)
+    (let ((cl-mcp/src/pool::*kill-worker-function*
+            (lambda (worker) (declare (ignore worker)) nil)))
+      (apply real arguments))))
+
+(defun %release-back-to-standby (session-id)
+  "A wrong RELEASE-SESSION, for the negative control: it takes the session's
+worker out of the map and puts it back on the standby list, unended.  Every
+list stays consistent -- the worker is tracked, held once, in a state that
+matches where it is -- so only a check that names the worker a release must
+end, before the release, sees that it was not."
+  (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+    (let ((worker (gethash session-id cl-mcp/src/pool::*affinity-map*)))
+      (when (typep worker 'cl-mcp/src/worker-client:worker)
+        (remhash session-id cl-mcp/src/pool::*affinity-map*)
+        (setf (cl-mcp/src/worker-client:worker-state worker) :standby
+              (cl-mcp/src/worker-client:worker-session-id worker) nil)
+        (push worker cl-mcp/src/pool::*standby-workers*)))))
+
+(defun %acquire-discarding-a-standby (real)
+  "Return a wrong GET-OR-ASSIGN-WORKER, for the negative control: it takes a
+standby off the lists and ends it, properly, and then does what REAL does --
+so with a spawn failure owed, a pool that had a worker to hand over refuses.
+After the call the standby is ended and looks unusable; only a check that
+decided its usability before the acquire sees there was one to give."
+  (lambda (session-id)
+    (let ((standby (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                     (let ((worker (pop cl-mcp/src/pool::*standby-workers*)))
+                       (setf cl-mcp/src/pool::*all-workers*
+                             (remove worker cl-mcp/src/pool::*all-workers*))
+                       worker))))
+      (when standby (cl-mcp/src/pool::%kill-worker standby))
+      (funcall real session-id))))
+
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
@@ -1102,6 +1150,10 @@ the argument as it is after the call cannot see."
                         "SPEC-CHECK-RESPONSE-CARRIES-THE-VERDICT-AND-ITS-RESERVATIONS"))
         (response-replay
           (%bundle-name :property "SPEC-CHECK-REPLAY-LINE-ASKS-FOR-THE-RUN-IT-REPORTS"))
+        (pool-sequences
+          (%bundle-name :property "POOL-OWNERSHIP-HOLDS-OVER-OPERATION-SEQUENCES"))
+        (pool-full
+          (%bundle-name :property "POOL-OWNERSHIP-HOLDS-WHEN-THE-POOL-IS-FULL"))
         ;; Taken before any swap, so a wrong implementation can defer to it.
         (real-read (fdefinition 'allowed-read-path))
         (real-write (fdefinition 'ensure-write-path))
@@ -1121,7 +1173,10 @@ the argument as it is after the call cannot see."
         (real-list-response (fdefinition 'build-spec-list-response))
         (real-check-response (fdefinition 'build-spec-check-response))
         (real-declaration (fdefinition '%describe-function-spec))
-        (real-digest (fdefinition 'definition-digest)))
+        (real-digest (fdefinition 'definition-digest))
+        (real-release (fdefinition 'release-session))
+        (real-acquire (fdefinition 'get-or-assign-worker))
+        (real-shutdown (fdefinition 'shutdown-pool)))
     (list
      (list :function newline
            :description "returns its argument, never adding a newline"
@@ -1333,7 +1388,48 @@ the argument as it is after the call cannot see."
            :description "digests from the readers when the record's own digest was refused"
            :replacement (%digest-falling-back-from-a-refused-record real-digest)
            :targets (list (list :property digest-source))
-           :must-fail (list (list :property digest-source))))))
+           :must-fail (list (list :property digest-source)))
+     (list :function 'release-session
+           :description "lets a released session's worker go without ending it"
+           :replacement (%without-ending-workers real-release)
+           :targets (list (list :property pool-sequences) (list :property pool-full))
+           :must-fail (list (list :property pool-sequences)))
+     (list :function 'shutdown-pool
+           :description "empties its lists without ending the workers in them"
+           :replacement (%without-ending-workers real-shutdown)
+           :targets (list (list :property pool-sequences) (list :property pool-full))
+           :must-fail (list (list :property pool-sequences)
+                            (list :property pool-full)))
+     (list :function 'get-or-assign-worker
+           :description "refuses every session, so the pool never lends and never leaks"
+           :replacement (lambda (session-id)
+                          (error "Refusing ~A." session-id))
+           :targets (list (list :property pool-sequences) (list :property pool-full))
+           :must-fail (list (list :property pool-sequences)
+                            (list :property pool-full)))
+     (list :function 'get-or-assign-worker
+           :description "ends the session's healthy worker and binds another on every call"
+           :replacement (lambda (session-id)
+                          (cl-mcp/src/pool:kill-session-worker session-id)
+                          (funcall real-acquire session-id))
+           :targets (list (list :property pool-sequences) (list :property pool-full))
+           :must-fail (list (list :property pool-sequences)
+                            (list :property pool-full)))
+     (list :function 'get-or-assign-worker
+           :description "ends a usable standby before acquiring, so a failed spawn refuses a pool that had one"
+           :replacement (%acquire-discarding-a-standby real-acquire)
+           :targets (list (list :property pool-sequences) (list :property pool-full))
+           :must-fail (list (list :property pool-sequences)))
+     (list :function 'release-session
+           :description "puts a released session's worker back on the standby list, unended"
+           :replacement #'%release-back-to-standby
+           :targets (list (list :property pool-sequences) (list :property pool-full))
+           :must-fail (list (list :property pool-sequences)))
+     (list :function 'cl-mcp/src/pool::%effective-pool-size
+           :description "counts nothing, so replenishment spawns past the cap"
+           :replacement (lambda () 0)
+           :targets (list (list :property pool-sequences) (list :property pool-full))
+           :must-fail (list (list :property pool-full))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put
