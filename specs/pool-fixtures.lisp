@@ -365,8 +365,22 @@ keeps its lists."
   "Forget every session's holding: after a shutdown nothing is held."
   (clrhash (model-holding model)))
 
-(defun %check-acquire (ledger model session worker)
-  "Return the violations of lending WORKER to SESSION."
+(defun %worker-to-keep (ledger model before session)
+  "Return the worker SESSION must get back from its next acquire, decided
+from BEFORE, the pool as it was before the acquire: the worker bound to it
+then, when that worker was :BOUND, not ended and not known unusable.  NIL
+when there is none, and the acquire may bind another."
+  (let ((bound (%bound-worker before session)))
+    (and bound
+         (eq :bound (worker-state bound))
+         (not (killed-p ledger bound))
+         (not (gethash bound (model-unusable model)))
+         bound)))
+
+(defun %check-acquire (ledger model session worker keep)
+  "Return the violations of lending WORKER to SESSION.  KEEP is the worker the
+session must get back, decided before the acquire ran (%WORKER-TO-KEEP), or
+NIL."
   (let* ((previous (gethash session (model-holding model)))
          (fresh (not (eq worker previous)))
          (violations '()))
@@ -388,11 +402,12 @@ keeps its lists."
         (let ((owner (gethash worker (model-lent model))))
           (when (and owner (not (equal owner session)))
             (add :lent-to-two-sessions :first owner))))
-      ;; The same session gets the same worker while that worker is usable.
-      (when (and previous fresh
-                 (not (gethash previous (model-unusable model)))
-                 (not (killed-p ledger previous)))
-        (add :affinity-broken :previous (worker-id previous))))
+      ;; The same session gets the same worker while that worker is usable --
+      ;; judged before the acquire.  After it, an acquire that ended the
+      ;; worker itself would have excused its own replacement.
+      (when (and keep (not (eq worker keep)))
+        (add :affinity-broken :previous (worker-id keep)
+             :previous-ended-by-acquire (killed-p ledger keep))))
     (setf (gethash session (model-holding model)) worker)
     (unless (gethash worker (model-lent model))
       (setf (gethash worker (model-lent model)) session))
@@ -427,13 +442,16 @@ session was lent."
                       (add :lent-to-two-sessions :first owner))))))
     (nreverse violations)))
 
-(defun %check-refusal (ledger session condition before failures-before)
+(defun %check-refusal (ledger session condition before failures-before keep)
   "Return the violations of refusing SESSION with CONDITION, given the pool
-BEFORE the acquire (a snapshot) and the injected spawn failures still owed
-then.
+BEFORE the acquire (a snapshot), the injected spawn failures still owed
+then, and KEEP, the worker the session had to get back (%WORKER-TO-KEEP).
 
-A refusal is only a refusal when the pool had a reason, judged from outside
-it:
+A session with a worker to get back has nothing to be refused: no spawn, and
+no room, is needed to return it.  A spent spawn failure or a full pool does
+not excuse an acquire that threw that worker away and then tried to spawn.
+Otherwise a refusal is only a refusal when the pool had a reason, judged from
+outside it:
 - it was not running;
 - a spawn failure injected for this acquire was spent on it;
 - it was full: it had no usable standby to hand over and no worker already
@@ -455,7 +473,7 @@ Anything else is a caller turned away from a pool that could serve it."
                      (let ((bound (%bound-worker before session)))
                        (not (and bound (eq :bound (worker-state bound)))))
                      (>= (%usage ledger after) *max-pool-size*))))
-      (unless (or stopped spent full)
+      (when (or keep (not (or stopped spent full)))
         (push (%violation :unexpected-refusal :session session
                           :condition (type-of condition)
                           :usage (%usage ledger after) :cap *max-pool-size*)
@@ -504,17 +522,20 @@ Operations:
   (destructuring-bind (kind &optional argument) operation
     (ecase kind
       (:acquire
-       (let ((before (pool-snapshot))
-             (failures-before (ledger-spawn-failures ledger)))
+       (let* ((before (pool-snapshot))
+              (failures-before (ledger-spawn-failures ledger))
+              ;; Decided now: after the acquire, a worker it ended itself
+              ;; would look like one there was no need to keep.
+              (keep (%worker-to-keep ledger model before argument)))
          (handler-case
              (let ((worker (get-or-assign-worker argument)))
                (values (list :lent (worker-id worker))
-                       (%check-acquire ledger model argument worker)))
+                       (%check-acquire ledger model argument worker keep)))
            (error (condition)
              (remhash argument (model-holding model))
              (values (list :refused (type-of condition))
                      (%check-refusal ledger argument condition
-                                     before failures-before))))))
+                                     before failures-before keep))))))
       ((:release :kill-session)
        ;; Named before the operation: what it must end is the worker the
        ;; session held, wherever the operation leaves it.

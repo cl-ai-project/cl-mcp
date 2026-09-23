@@ -9,12 +9,14 @@
 ;;;; (specs/pool-fixtures.lisp), checked against a ledger the fake lifecycle
 ;;;; keeps.  Three things are pinned:
 ;;;; - the checks themselves find what they claim to, including a leak the
-;;;;   fixture's own cleanup would otherwise hide;
-;;;; - the three ownership faults fixed in 4A stay fixed: a standby an RPC
+;;;;   fixture's own cleanup would otherwise hide, and wrong pools whose
+;;;;   lists stay consistent;
+;;;; - the four ownership faults fixed in 4A stay fixed: a standby an RPC
 ;;;;   marked crashed is not lent, a dead standby is ended rather than dropped,
-;;;;   and a spawn that completes after a shutdown is not registered.  The
-;;;;   last needs two threads in a fixed order -- the one ordering test in 4A;
-;;;;   the rest of concurrency is 4D;
+;;;;   recovery takes a crashed standby off the standby list, and a spawn that
+;;;;   completes after a shutdown is not registered.  The last needs two
+;;;;   threads in a fixed order -- the one ordering test in 4A; the rest of
+;;;;   concurrency is 4D;
 ;;;; - with real processes, what was ended is reaped.
 
 (defpackage #:cl-mcp/tests/pool-ownership-test
@@ -105,7 +107,7 @@
         (remhash "s9" cl-mcp/src/pool::*affinity-map*)))))
 
 (deftest the-checks-catch-a-pool-that-agrees-with-itself
-  ;; Three wrong pools whose lists stay consistent, so only a check made from
+  ;; Wrong pools whose lists stay consistent, so only a check made from
   ;; outside them -- the model's promises, the ledger's count -- finds them.
   (flet ((swapped (symbol replacement operations &rest options)
            (let ((original (fdefinition symbol)))
@@ -118,6 +120,24 @@
                   (swapped 'get-or-assign-worker
                            (lambda (session) (error "Refusing ~A." session))
                            '((:acquire "s0")) :warmup 0))))
+    (let ((real (fdefinition 'get-or-assign-worker)))
+      (testing "an acquire that ends the session's healthy worker broke affinity"
+        ;; The acquire ended the worker itself, so afterwards it looks like
+        ;; one there was no need to keep; the decision is made before.
+        (ok (member :affinity-broken
+                    (swapped 'get-or-assign-worker
+                             (lambda (session)
+                               (cl-mcp/src/pool:kill-session-worker session)
+                               (funcall real session))
+                             '((:acquire "s0") (:acquire "s0"))))))
+      (testing "and one that then fails to spawn had nothing to refuse"
+        (ok (member :unexpected-refusal
+                    (swapped 'get-or-assign-worker
+                             (lambda (session)
+                               (cl-mcp/src/pool:kill-session-worker session)
+                               (funcall real session))
+                             '((:acquire "s0") (:fail-next-spawn) (:acquire "s0"))
+                             :warmup 0)))))
     (testing "a release that keeps the worker as a standby did not end it"
       (ok (member :released-but-live
                   (swapped 'release-session
@@ -146,7 +166,7 @@
                                         :warmup 2 :max-size 2))))))
 
 ;;; ------------------------------------------------------------------------
-;;; The three faults fixed in 4A
+;;; The four faults fixed in 4A
 
 (deftest a-standby-an-rpc-marked-crashed-is-not-lent
   ;; The project-root broadcast is an RPC to every standby; a timeout there

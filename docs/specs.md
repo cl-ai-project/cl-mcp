@@ -1307,7 +1307,10 @@ between states.
 - *Model:*
   - a newly lent worker is `:bound` to its session and not known unusable;
   - a worker is lent to one session only;
-  - a session gets its worker back while that worker is usable;
+  - a session gets its worker back while that worker is usable, judged
+    **before** the acquire: the worker bound to it then, `:bound`, not ended
+    and not known unusable, is the one it must get. Judged after, an acquire
+    that ended that worker itself would excuse its own replacement;
   - a binding the pool made on its own (crash recovery binding a
     replacement) is a lending too, checked the same way when it appears;
   - the worker a session held **before** a release or kill must be ended
@@ -1317,7 +1320,9 @@ between states.
     it was stopped, a spawn failure injected for this acquire was spent on
     it, or it was full (no usable standby, nothing bound to the session, and
     the ledger's count leaves no room); anything else is an unexpected
-    refusal;
+    refusal. A session with a worker to get back has nothing to be refused
+    for, so a spent spawn failure does not excuse an acquire that threw that
+    worker away first;
   - a refused acquire leaves nothing mapped for the session.
 
 **The fixture's own cleanup.** After a run the fixture shuts the pool down and
@@ -1344,10 +1349,12 @@ sessions:
 The generator does not shrink. A counterexample is the whole sequence, and
 each violation names the operation index it followed.
 
-The negative control swaps in five wrong pools, and each must fail:
+The negative control swaps in six wrong pools, and each must fail:
 - a `release-session` that ends nothing;
 - a `shutdown-pool` that ends nothing;
 - a `get-or-assign-worker` that refuses every session;
+- a `get-or-assign-worker` that ends the session's healthy worker and binds
+  another on every call;
 - a `release-session` that keeps the worker as a standby;
 - a `%effective-pool-size` that counts nothing.
 
@@ -1394,6 +1401,11 @@ case:
   release must end is named before it runs);
 - a pool size that counts nothing, so replenishment spawns past the cap
   (the cap is checked against the ledger's count).
+
+A second review found a fourth: affinity was judged after the acquire, so an
+acquire that ended the session's healthy worker and bound another excused
+itself. The worker to keep is now decided before the acquire runs, and that
+wrong acquire is a negative control and a fixed case too.
 
 Making the model check recovery's own bindings removed one false positive:
 a replacement that died after recovery bound it was read as an unusable

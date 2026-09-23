@@ -1160,6 +1160,7 @@ the argument as it is after the call cannot see."
         (real-declaration (fdefinition '%describe-function-spec))
         (real-digest (fdefinition 'definition-digest))
         (real-release (fdefinition 'release-session))
+        (real-acquire (fdefinition 'get-or-assign-worker))
         (real-shutdown (fdefinition 'shutdown-pool)))
     (list
      (list :function newline
@@ -1388,6 +1389,14 @@ the argument as it is after the call cannot see."
            :description "refuses every session, so the pool never lends and never leaks"
            :replacement (lambda (session-id)
                           (error "Refusing ~A." session-id))
+           :targets (list (list :property pool-sequences) (list :property pool-full))
+           :must-fail (list (list :property pool-sequences)
+                            (list :property pool-full)))
+     (list :function 'get-or-assign-worker
+           :description "ends the session's healthy worker and binds another on every call"
+           :replacement (lambda (session-id)
+                          (cl-mcp/src/pool:kill-session-worker session-id)
+                          (funcall real-acquire session-id))
            :targets (list (list :property pool-sequences) (list :property pool-full))
            :must-fail (list (list :property pool-sequences)
                             (list :property pool-full)))
