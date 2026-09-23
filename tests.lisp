@@ -4,6 +4,7 @@
   (:import-from #:cl-mcp/tests/bridge-test)
   (:import-from #:cl-mcp/tests/cancel-test)
   (:import-from #:cl-mcp/tests/request-lifecycle-test)
+  (:import-from #:cl-mcp/tests/reset-events-test)
   (:import-from #:cl-mcp/tests/asdf-tools-test)
   (:import-from #:cl-mcp/tests/clhs-test)
   (:import-from #:cl-mcp/tests/code-test)

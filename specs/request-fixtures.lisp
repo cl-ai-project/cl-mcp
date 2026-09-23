@@ -34,6 +34,9 @@
                 #:cancellation-requested-p
                 #:*requests*
                 #:*requests-lock*)
+  (:import-from #:cl-mcp/src/reset-events
+                #:discard-session-resets
+                #:reset-event-cause)
   (:import-from #:cl-mcp/src/log
                 #:*log-level*)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -425,23 +428,44 @@ observed scenario records the behavior that ran."
                  ;; cancellation already dropped the connection under it.
                  (when (and held (not (eq cancel :executing)))
                    (release server "worker/r" (if (eq behavior :hold) :answer behavior)))
-                 (let ((r-result (request-result r)))
-                   (when (eq cancel :answered)
-                     (setf verdict (cancel-request 7 "owner")))
-                   (when (and queued (null q))
-                     (setf q (start-request "owner" 8 "worker/q")))
+                 (let ((r-result (request-result r))
+                       (verdict (if (eq cancel :answered)
+                                    (cancel-request 7 "owner")
+                                    verdict))
+                       (q-result (progn
+                                   (when (and queued (null q))
+                                     (setf q (start-request "owner" 8 "worker/q")))
+                                   (and q (request-result q))))
+                       (p-result (and blocker (request-result blocker))))
                    (list :scenario (list :behavior behavior :cancel cancel :queued queued)
                          :verdict verdict
                          :r r-result
-                         :q (and q (request-result q))
-                         :p (and blocker (request-result blocker))
+                         :q q-result
+                         :p p-result
                          :received (bt:with-lock-held ((fake-server-lock server))
                                      (copy-list (fake-server-received server)))
                          :dropped (fake-server-dropped-p server)
+                         ;; How many responses told the session it lost this
+                         ;; worker, and what the ledger still holds untold --
+                         ;; taken out, so the next scenario starts owing
+                         ;; nothing, but kept here to be judged.
+                         :resets-told (loop for result in (list r-result q-result p-result)
+                                            sum (%count-matches "Worker 990001"
+                                                                (result-text result)))
+                         :resets-left (mapcar #'reset-event-cause
+                                              (discard-session-resets "owner"))
                          :registry-empty (registry-empty-p)))))))
       (if (eq cancel :answer-read)
           (%call-with-answer-paused #'run)
           (run nil nil)))))
+
+(defun %count-matches (needle haystack)
+  "Count the occurrences of NEEDLE in HAYSTACK."
+  (loop with start = 0
+        for pos = (search needle haystack :start2 start)
+        while pos
+        count t
+        do (setf start (1+ pos))))
 
 (defun %received (observed method)
   (and (member method (getf observed :received) :test #'equal) t))
@@ -464,6 +488,8 @@ the fake worker received rather than what the proxy says.
   stopped worker and a success.
 - Q, queued behind R, is never reported as having run when it was not sent,
   and a cancellation of R that did not stop the worker leaves Q to run.
+- The session is told it lost its worker exactly once when the worker was
+  stopped or dropped, and never otherwise; nothing is left owed.
 - Nothing is left registered."
   (destructuring-bind (&key behavior cancel queued) (getf observed :scenario)
     (let ((violations '())
@@ -534,5 +560,12 @@ the fake worker received rather than what the proxy says.
                    (not (member cancel '(:executing :answer-read)))
                    (not (eq behavior :drop)))
           (when (error-result-p q) (add :queued-request-harmed :text (result-text q))))
+        ;; What the session was told about losing its worker.
+        (let ((told (getf observed :resets-told))
+              (left (getf observed :resets-left)))
+          (when left (add :reset-left-untold :causes left))
+          (if (getf observed :dropped)
+              (unless (eql 1 told) (add :worker-end-not-told-once :told told))
+              (unless (eql 0 told) (add :reset-told-without-a-reset :told told))))
         (unless (getf observed :registry-empty) (add :left-registered)))
       (nreverse violations))))

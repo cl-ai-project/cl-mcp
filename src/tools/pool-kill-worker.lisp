@@ -11,7 +11,11 @@
   (:import-from #:cl-mcp/src/state
                 #:*current-session-id*)
   (:import-from #:cl-mcp/src/proxy
-                #:*use-worker-pool*)
+                #:*use-worker-pool*
+                #:termination-phrase)
+  (:import-from #:cl-mcp/src/reset-events
+                #:reset-event-worker-id
+                #:reset-event-cause)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/pool
@@ -20,6 +24,22 @@
   (:export #:pool-kill-worker))
 
 (in-package #:cl-mcp/src/tools/pool-kill-worker)
+
+(defun %with-earlier-resets (text events)
+  "Return TEXT followed by the resets among EVENTS other than this kill's own:
+workers the session lost earlier and had not been told about (see
+KILL-SESSION-WORKER).  This response is the one that tells them.  Each is
+named \"Worker <id>\", as every other reset notice names it."
+  (let ((earlier (remove :killed events :key #'reset-event-cause)))
+    (if (null earlier)
+        text
+        (format nil "~A Before this, ~{Worker ~A ~A.~^ ~} This session's Lisp ~
+                     state was lost with ~:[it~;them~] too."
+                text
+                (loop for event in earlier
+                      collect (reset-event-worker-id event)
+                      collect (termination-phrase event))
+                (cdr earlier)))))
 
 (define-tool "pool-kill-worker"
   :description "Kill the worker process bound to the current session.
@@ -57,19 +77,24 @@ the next tool call that needs a worker."))
                          "Cannot identify session. No worker to kill.")
                         "killed" nil)))
       (t
-       (let ((kill-result (kill-session-worker session-id)))
+       (multiple-value-bind (kill-result events)
+           (kill-session-worker session-id)
          (case kill-result
            (:no-worker
             (result id
                     (make-ht "content"
                              (text-content
-                              "No worker is bound to this session.")
+                              (%with-earlier-resets
+                               "No worker is bound to this session."
+                               events))
                              "killed" nil)))
            (:placeholder
             (result id
                     (make-ht "content"
                              (text-content
-                              "Worker spawn was in progress and has been cancelled.")
+                              (%with-earlier-resets
+                               "Worker spawn was in progress and has been cancelled."
+                               events))
                              "killed" nil
                              "cancelled_spawn" t)))
            (:killed
@@ -82,7 +107,9 @@ the next tool call that needs a worker."))
                              (make-ht
                               "content"
                               (text-content
-                               "Worker killed and replaced with a fresh one. Run load-system to restore your environment.")
+                               (%with-earlier-resets
+                                "Worker killed and replaced with a fresh one. Run load-system to restore your environment."
+                                events))
                               "killed" t
                               "reset" t)))
                  (error (e)
@@ -93,9 +120,11 @@ the next tool call that needs a worker."))
                            (make-ht
                             "content"
                             (text-content
-                             (format nil
-                                     "Worker killed but replacement spawn failed: ~A. The next tool call will retry automatically."
-                                     (princ-to-string e)))
+                             (%with-earlier-resets
+                              (format nil
+                                      "Worker killed but replacement spawn failed: ~A. The next tool call will retry automatically."
+                                      (princ-to-string e))
+                              events))
                             "killed" t
                             "reset" nil
                             "isError" t)))))
@@ -104,6 +133,8 @@ the next tool call that needs a worker."))
                        (make-ht
                         "content"
                         (text-content
-                         "Worker killed. A fresh one will spawn on the next tool call. Run load-system to restore your environment.")
+                         (%with-earlier-resets
+                          "Worker killed. A fresh one will spawn on the next tool call. Run load-system to restore your environment."
+                          events))
                         "killed" t
                         "reset" nil)))))))))))

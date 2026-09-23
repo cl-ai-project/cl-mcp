@@ -152,14 +152,14 @@
             (ok (gethash "truncated" (gethash "meta" items)))
             (ok (equal "object-ref" (gethash "kind" (first elements)))
                 "nested objects at the depth limit keep an inspection handle")
-            (ok (integerp (gethash "id" (first elements))))
+            (ok (stringp (gethash "id" (first elements))))
             (ok (equal "CHARACTER" (gethash "type" (third elements))))
             (ok (equal "A" (gethash "value" (third elements))))
             (ok (equal "structure" (gethash "kind" record)))
             (ok (eql 73 (gethash "value" (gethash "value"
                                                  (first (gethash "slots" record))))))
             (ok (equal "circular-ref" (gethash "kind" self)))
-            (ok (eql (gethash "id" preview) (gethash "ref_id" self)))))))))
+            (ok (equal (gethash "id" preview) (gethash "ref_id" self)))))))))
 
 (deftest capture-error-context-basic
   (testing "captures condition type and message"

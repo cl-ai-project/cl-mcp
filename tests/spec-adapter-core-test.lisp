@@ -158,7 +158,7 @@ Same name, different home package: the pair a resolver must not confuse."
       (ok (plusp (getf data :omitted-chars)))
       (ok (string= "cons" (getf data :type)))
       (testing "a compound value gets an object id for inspect-object"
-        (ok (integerp (getf data :object-id)))))))
+        (ok (stringp (getf data :object-id)))))))
 
 (deftest externalize-value-handles-circularity
   (testing "a circular structure prints rather than hanging"

@@ -332,13 +332,15 @@ Use pool-kill-worker to get a fresh worker, then re-run load-system.")))))))
                                      co)))
                       (format s "~%~%Compiler output:~%~A"
                               (string-right-trim '(#\Newline) body)))))
-                ;; Withheld when the failure left the image intact -- a
-                ;; concurrent load still holding the ASDF lock, say.  There
-                ;; the advice is actively harmful: following it aborts work
-                ;; that was about to finish.
-                (unless (gethash "worker_healthy" ht)
+                ;; Withheld when this load never started -- a concurrent
+                ;; load still holding the ASDF lock, say.  There the advice
+                ;; is actively harmful: following it aborts work that was
+                ;; about to finish.
+                (unless (gethash "load_not_started" ht)
                   (format s "~%~%Hint: the worker process may now have a broken package state. ~
 Use pool-kill-worker to get a fresh worker, then retry load-system.")))))))
+    ;; An internal classification for the hint above, not a field.
+    (remhash "load_not_started" ht)
     (setf (gethash "content" ht) (text-content summary))
     ht))
 

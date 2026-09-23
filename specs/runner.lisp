@@ -83,6 +83,10 @@
   ;; Bare: the worker struct is named in full where a wrong implementation
   ;; needs it, and the pool's lock through the BT nickname.
   (:import-from #:cl-mcp/src/worker-client)
+  ;; Bare: the reset ledger and the object registry are named in full by the
+  ;; wrong implementations that replace their functions.
+  (:import-from #:cl-mcp/src/reset-events)
+  (:import-from #:cl-mcp/src/object-registry)
   (:import-from #:bordeaux-threads)
   (:import-from #:cl-mcp/specs
                 #:register-specifications
@@ -1116,6 +1120,34 @@ the same id reaches it."
           when (equal (cdr key) (prin1-to-string external-id))
             return record)))
 
+;;; Wrong implementations of the reset ledger and the object registry, for the
+;;; negative control.
+
+(defun %claim-leaving-resets-pending (session-id)
+  "Return SESSION-ID's pending resets without claiming them: each is then
+told again by the next response."
+  (bt:with-lock-held (cl-mcp/src/reset-events::*reset-events-lock*)
+    (copy-list (gethash session-id cl-mcp/src/reset-events::*pending*))))
+
+(defun %record-replacing-the-first-cause (real-record)
+  "Return a RECORD-TERMINATION that forgets any earlier record of the worker
+first, so the last account of an end wins -- a kill's EOF told as a crash."
+  (lambda (worker &rest arguments)
+    (bt:with-lock-held (cl-mcp/src/reset-events::*reset-events-lock*)
+      (remhash worker cl-mcp/src/reset-events::*terminations*))
+    (apply real-record worker arguments)))
+
+(defun %lookup-ignoring-the-generation
+    (handle &optional (registry cl-mcp/src/object-registry:*object-registry*))
+  "Look HANDLE up by its number alone, as integer ids did."
+  (multiple-value-bind (generation number)
+      (cl-mcp/src/object-registry::%parse-handle handle)
+    (if generation
+        (multiple-value-bind (object found-p)
+            (gethash number (cl-mcp/src/object-registry::object-registry-storage registry))
+          (values object found-p (unless found-p :evicted)))
+        (values nil nil :invalid))))
+
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
@@ -1171,6 +1203,12 @@ the argument as it is after the call cannot see."
           (%bundle-name :property "POOL-OWNERSHIP-HOLDS-WHEN-THE-POOL-IS-FULL"))
         (requests
           (%bundle-name :property "REQUEST-LIFECYCLE-KEEPS-ITS-PROMISES"))
+        (resets
+          (%bundle-name :property "RESETS-ARE-TOLD-EXACTLY-ONCE"))
+        (resets-full
+          (%bundle-name :property "RESETS-ARE-TOLD-EXACTLY-ONCE-WHEN-THE-POOL-IS-FULL"))
+        (handles
+          (%bundle-name :property "OBJECT-IDS-NEVER-OUTLIVE-THEIR-IMAGE"))
         ;; Taken before any swap, so a wrong implementation can defer to it.
         (real-read (fdefinition 'allowed-read-path))
         (real-write (fdefinition 'ensure-write-path))
@@ -1193,7 +1231,8 @@ the argument as it is after the call cannot see."
         (real-digest (fdefinition 'definition-digest))
         (real-release (fdefinition 'release-session))
         (real-acquire (fdefinition 'get-or-assign-worker))
-        (real-shutdown (fdefinition 'shutdown-pool)))
+        (real-shutdown (fdefinition 'shutdown-pool))
+        (real-record (fdefinition 'cl-mcp/src/reset-events:record-termination)))
     (list
      (list :function newline
            :description "returns its argument, never adding a newline"
@@ -1473,7 +1512,30 @@ the argument as it is after the call cannot see."
            :description "finds a request by its id alone, whichever session sent it"
            :replacement #'%find-request-ignoring-the-session
            :targets (list (list :property requests))
-           :must-fail (list (list :property requests))))))
+           :must-fail (list (list :property requests)))
+     ;; Resets.  Each fault is a session told a loss twice, never, or as
+     ;; something it was not; and an object id answered with another image's
+     ;; object.
+     (list :function 'cl-mcp/src/reset-events:claim-session-resets
+           :description "hands out a session's resets and leaves them pending"
+           :replacement #'%claim-leaving-resets-pending
+           :targets (list (list :property resets) (list :property resets-full))
+           :must-fail (list (list :property resets)))
+     (list :function 'cl-mcp/src/reset-events:claim-session-resets
+           :description "claims nothing, so no loss is ever told"
+           :replacement (lambda (session-id) (declare (ignore session-id)) '())
+           :targets (list (list :property resets) (list :property resets-full))
+           :must-fail (list (list :property resets)))
+     (list :function 'cl-mcp/src/reset-events:record-termination
+           :description "lets a later record replace the cause decided first"
+           :replacement (%record-replacing-the-first-cause real-record)
+           :targets (list (list :property resets) (list :property resets-full))
+           :must-fail (list (list :property resets)))
+     (list :function 'cl-mcp/src/object-registry:lookup-object
+           :description "resolves an id by its number alone, whatever image issued it"
+           :replacement #'%lookup-ignoring-the-generation
+           :targets (list (list :property handles))
+           :must-fail (list (list :property handles))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put

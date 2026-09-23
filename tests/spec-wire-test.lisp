@@ -254,7 +254,7 @@ seconds."
 (defun %run-dependent-p (path)
   "True for a field whose value belongs to one run in one image: how long it
 took, which object id the image handed out, and which registry object it
-printed.  Only their JSON kind is compared -- a null where a number was is
+printed.  Only their JSON kind is compared -- a null where a string was is
 still a difference."
   (or (search "elapsed" path)
       (search "object_id" path)
@@ -328,11 +328,11 @@ even there a number against a null is a difference."
                  ("elapsed times that differ only in value"
                   "{\"results\":[{\"elapsed\":0.5}]}" "{\"results\":[{\"elapsed\":0.25}]}" nil)
                  ("object ids that differ only in value"
-                  "{\"value\":{\"object_id\":3}}" "{\"value\":{\"object_id\":91}}" nil)
+                  "{\"value\":{\"object_id\":\"o-a-3\"}}" "{\"value\":{\"object_id\":\"o-b-91\"}}" nil)
                  ("an elapsed time against null"
                   "{\"results\":[{\"elapsed\":0.5}]}" "{\"results\":[{\"elapsed\":null}]}" t)
                  ("an object id against null"
-                  "{\"value\":{\"object_id\":3}}" "{\"value\":{\"object_id\":null}}" t))
+                  "{\"value\":{\"object_id\":\"o-a-3\"}}" "{\"value\":{\"object_id\":null}}" t))
           do (ok (eq expected (differ-p one other))
                  (format nil "~A: ~:[the same~;a difference~]" label expected)))))
 
@@ -406,15 +406,17 @@ even there a number against a null is a difference."
         (let* ((checked (%tool owner "spec-check" "property" (%fixture "WIRE-LISTS-ARE-EMPTY")))
                (entry (aref (json-at (%first-result checked) "counterexample") 0))
                (id (json-at entry "value" "object_id")))
-          (ok (integerp id) "a list earns an object id")
+          (ok (stringp id) "a list earns an object id")
           (testing "the session that ran the check can inspect it"
             (multiple-value-bind (inspected text) (%tool owner "inspect-object" "id" id)
               (ok (not (json-true-p (json-at inspected "isError"))))
               (ok (claims-p text (json-at entry "value" "printed")))))
           (testing "another session cannot: the object lives in the other worker"
+            ;; Its id names the owner's image, so the other worker refuses it
+            ;; as stale rather than looking the number up in its own registry.
             (multiple-value-bind (inspected text) (%tool other "inspect-object" "id" id)
-              (declare (ignore inspected))
-              (ok (claims-p text "not found")))))))))
+              (ok (json-true-p (json-at inspected "isError")))
+              (ok (claims-p text "stale")))))))))
 
 (deftest sessions-keep-their-own-registries-and-run-in-their-workers
   (let ((parent-had-fixture (and (find-package +fixture-package+) t)))

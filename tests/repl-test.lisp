@@ -373,7 +373,7 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
            (second (second elements)))
       (ok (string= "object-ref" (gethash "kind" first)))
       (ok (string= "object-ref" (gethash "kind" second)))
-      (ok (= (gethash "id" first) (gethash "id" second)))
+      (ok (equal (gethash "id" first) (gethash "id" second)))
       (ok (null (gethash "ref_id" second))))))
 
 (deftest generate-result-preview-vector

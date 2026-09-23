@@ -1,8 +1,8 @@
 ;;;; tests/proxy-test.lisp
 ;;;;
 ;;;; Direct unit tests for cl-mcp/src/proxy.
-;;;; The proxy verifies its late-bound symbol table and formats crash
-;;;; notifications when a worker dies.  Both are critical to fail loudly
+;;;; The proxy verifies its late-bound symbol table and tells a session
+;;;; each worker it lost (src/reset-events.lisp).  Both are critical to fail loudly
 ;;;; rather than silently dispatch into the void, so this suite covers
 ;;;; the success and failure shapes of each.
 
@@ -11,7 +11,8 @@
   (:import-from #:rove
                 #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/proxy
-                #:verify-proxy-bindings))
+                #:verify-proxy-bindings)
+  (:import-from #:cl-mcp/src/reset-events))
 
 (in-package #:cl-mcp/tests/proxy-test)
 
@@ -52,38 +53,65 @@
       (ok msg)
       (ok (search "NO-SUCH-PROXY-PKG-XYZQ" msg))))))
 
-(deftest crash-notification-includes-reason-when-given
- (testing "%crash-notification-result includes the reason in content text"
-  (let* ((r (cl-mcp/src/proxy::%crash-notification-result
-             :reason "OOM killed"
-             :exit-status :exited
-             :exit-code 137))
-         (text (first-text r)))
-    (ok (eq t (gethash "isError" r)) "isError flag is set")
-    (ok (search "crashed" text) "text mentions crash")
-    (ok (search "OOM killed" text) "reason is included")
-    (ok (search "exit_status=EXITED" text) "exit-status is included")
-    (ok (search "exit_code=137" text) "exit-code is included"))))
+(defun make-event (&rest args &key (cause :crashed) &allow-other-keys)
+  "A reset event, as the ledger records one, for the text builders."
+  ;; ARGS first: of two occurrences of a keyword, the first is the one used.
+  (apply #'cl-mcp/src/reset-events::make-reset-event
+         (append (let ((rest (copy-list args)))
+                   (remf rest :cause)
+                   rest)
+                 (list :worker-id 7 :session-id "s" :cause cause))))
 
-(deftest crash-notification-omits-unknown-fields
- (testing "fields equal to \"unknown\" or empty are excluded from the message"
-  (let* ((r (cl-mcp/src/proxy::%crash-notification-result
-             :reason "unknown"
-             :exit-status ""
-             :exit-code nil))
-         (text (first-text r)))
-    (ok (search "crashed" text))
-    (ok (not (search "unknown" text)))
-    (ok (not (search "exit_status=" text)))
-    (ok (not (search "exit_code=" text))))))
-
-(deftest crash-notification-no-details-when-all-empty
- (testing "no parenthetical detail when no fields are provided"
-  (let* ((r (cl-mcp/src/proxy::%crash-notification-result))
-         (text (first-text r)))
-    (ok (search "crashed" text))
+(deftest reset-notice-names-each-worker-and-its-cause
+ (testing "a crash is told with its reason and how the process ended"
+  (let ((text (cl-mcp/src/proxy::%reset-notice
+               (list (make-event :reason "eof" :exit-status "exited"
+                                 :exit-code 137)))))
+    (ok (search "Worker 7 stopped unexpectedly (eof, exit code 137)." text))
+    (ok (search "was lost with it" text))
     (ok (search "load-system again" text)
-     "guidance about reloading is always present"))))
+        "guidance about reloading is always present")))
+ (testing "a process that had not exited reports no exit status"
+  ;; "exit_status=running" described a process that was still alive when
+  ;; its connection failed: it said nothing about how it ended.
+  (let ((text (cl-mcp/src/proxy::%reset-notice
+               (list (make-event :reason "stream-error" :exit-status "running"
+                                 :exit-code "unknown")))))
+    (ok (search "stopped unexpectedly (stream-error)." text))
+    (ok (not (search "running" text)))
+    (ok (not (search "unknown" text)))))
+ (testing "with nothing known, no empty parenthetical"
+  (let ((text (cl-mcp/src/proxy::%reset-notice (list (make-event)))))
+    (ok (search "Worker 7 stopped unexpectedly." text))
+    (ok (not (search "()" text)))))
+ (testing "a decision is told as the decision, not as a crash"
+  (dolist (case '((:cancelled "was stopped to cancel the request it was running")
+                  (:killed "was stopped by pool-kill-worker")
+                  (:timeout "did not answer within its deadline")
+                  (:retired "left a thread that could not be stopped")))
+    (let ((text (cl-mcp/src/proxy::%reset-notice
+                 (list (make-event :cause (first case) :reason "eof")))))
+      (ok (search (second case) text) (format nil "~(~A~) is told" (first case)))
+      (ok (not (search "unexpectedly" text))
+          (format nil "~(~A~) is not called a crash" (first case))))))
+ (testing "several resets are told together, oldest first, in one notice"
+  (let ((text (cl-mcp/src/proxy::%reset-notice
+               (list (make-event :worker-id 3 :reason "eof")
+                     (make-event :worker-id 4 :cause :killed))
+               :replaced t)))
+    (ok (< (search "Worker 3" text) (search "Worker 4" text)))
+    (ok (search "was lost with them" text))
+    (ok (search "now runs on a new worker" text))
+    (ok (= 1 (count-matches "load-system again" text))
+        "the advice is given once"))))
+
+(defun count-matches (needle haystack)
+  "Count the occurrences of NEEDLE in HAYSTACK."
+  (loop with start = 0
+        for pos = (search needle haystack :start2 start)
+        while pos
+        count t
+        do (setf start (1+ pos))))
 
 (defun effective-timeout-for (&optional timeout-seconds)
   "Run the proxy's RPC budget calculation for a call carrying TIMEOUT-SECONDS."

@@ -162,8 +162,15 @@ fixture did not create, so the cleanup fails while the body unwinds."
                          cl-mcp/src/utils/sanitize:sanitize-for-json
                          cl-mcp/src/utils/sanitize:sanitize-error-message)))
     (ok (= 3 (length (contract-names))))
-    (ok (= 47 (length (property-names))))
-    (ok (= 47 (length (remove-duplicates (property-names)))))
+    (ok (= 50 (length (property-names))))
+    (ok (= 50 (length (remove-duplicates (property-names)))))
+    (ok (%same-names-p (remove-if-not (lambda (name)
+                                        (string= "CL-MCP/SPECS/RESET-EVENTS"
+                                                 (package-name (symbol-package name))))
+                                      (property-names))
+                       (cl-mcp/specs/reset-events:property-names))
+        "the reset properties are the three of specs/reset-events.lisp")
+    (ok (= 3 (length (cl-mcp/specs/reset-events:property-names))))
     (ok (%same-names-p (remove-if-not (lambda (name)
                                         (string= "CL-MCP/SPECS/POOL-OWNERSHIP"
                                                  (package-name (symbol-package name))))
@@ -278,7 +285,8 @@ fixture did not create, so the cleanup fails while the body unwinds."
                            cl-mcp/src/pool:kill-session-worker
                            cl-mcp/src/pool:shutdown-pool
                            cl-mcp/src/proxy:proxy-to-worker
-                           cl-mcp/src/proxy:cancel-request)))))
+                           cl-mcp/src/proxy:cancel-request
+                           cl-mcp/src/object-registry:lookup-object)))))
   (testing "a definition missing from the listing is reported"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)

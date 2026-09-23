@@ -73,7 +73,8 @@
      (lambda ()
        (let ((result (inspect-object-by-id 99999)))
          (ok (ht-get result "error"))
-         (ok (string= "OBJECT_NOT_FOUND" (ht-get result "code"))))))))
+         (ok (string= "INVALID_OBJECT_ID" (ht-get result "code"))
+             "an integer is not an id at all"))))))
 
 (deftest inspect-serious-condition-returns-error
   (testing "inspect-object-by-id returns error on serious-condition instead of crashing"
@@ -111,7 +112,7 @@
               (id (register-object obj))
               (result (inspect-object-by-id id)))
          (ok (string= "list" (ht-get result "kind")))
-         (ok (= id (ht-get result "id")))
+         (ok (equal id (ht-get result "id")))
          (ok (= 3 (length (ht-get result "elements")))))))))
 
 (deftest inspect-list-with-nested-objects
@@ -148,8 +149,8 @@
              (ok (ht-get first-element "id")
                  (format nil "the nested value carries an id at max-depth ~D"
                          depth))
-             (ok (integerp (ht-get first-element "id"))
-                 "and it is an integer usable as an inspect-object argument"))))))))
+             (ok (stringp (ht-get first-element "id"))
+                 "and it is a handle usable as an inspect-object argument"))))))))
 
 (deftest inspect-renders-a-handle-for-a-circular-reference
   (testing "a circular element still shows an id in the rendered text"
@@ -316,7 +317,7 @@
               (second (second elements)))
          (ok (string= "object-ref" (ht-get first "kind")))
          (ok (string= "object-ref" (ht-get second "kind")))
-         (ok (= (ht-get first "id") (ht-get second "id")))
+         (ok (equal (ht-get first "id") (ht-get second "id")))
          (ok (null (ht-get second "ref_id"))))))))
 
 (deftest inspect-depth-expands-nested
@@ -404,7 +405,7 @@
              (ok self-slot)
              (let ((self-value (ht-get self-slot "value")))
                (ok (string= "circular-ref" (ht-get self-value "kind")))
-               (ok (= id (ht-get self-value "ref_id")))))))))))
+               (ok (equal id (ht-get self-value "ref_id")))))))))))
 
 
 (deftest inspect-hash-table-complex-keys

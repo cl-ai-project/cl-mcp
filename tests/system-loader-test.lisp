@@ -45,7 +45,7 @@
       (ok (equal "error" (gethash "status" response)))
       (ok (search "LOADER-BOUNDARY-CONDITION" (gethash "message" response)))
       (ok (search "loader debugger snapshot" (gethash "message" response)))
-      (ok (null (gethash "worker_healthy" response))))))
+      (ok (null (gethash "load_not_started" response))))))
 
 (deftest load-system-basic
   (testing "loads an already-available system and returns structured result"

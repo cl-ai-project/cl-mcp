@@ -533,7 +533,7 @@ Cleans up server and socket on exit. AUTHENTICATED selects post-auth tests."
   (testing "worker/inspect-object returns isError for invalid ID"
     (with-handler-server (stream :authenticated t)
       (let ((params (make-hash-table :test 'equal)))
-        (setf (gethash "id" params) 999999)
+        (setf (gethash "id" params) "o-000000000000-999999")
         (let* ((response (%send-and-receive stream 400 "worker/inspect-object" params))
                (result (%result-of response)))
           (ok result "response has result")
@@ -579,7 +579,7 @@ Cleans up server and socket on exit. AUTHENTICATED selects post-auth tests."
         (let* ((eval-resp (%send-and-receive stream 510 "worker/eval" eval-params))
                (eval-result (%result-of eval-resp))
                (obj-id (gethash "result_object_id" eval-result)))
-          (ok (integerp obj-id) "eval returned an integer result_object_id")
+          (ok (stringp obj-id) "eval returned a string result_object_id")
           ;; Step 2: inspect the object by ID on the same connection
           (let ((inspect-params (make-hash-table :test 'equal)))
             (setf (gethash "id" inspect-params) obj-id)
@@ -646,7 +646,7 @@ Cleans up server and socket on exit. AUTHENTICATED selects post-auth tests."
         (let* ((eval-resp (%send-and-receive stream 530 "worker/eval" eval-params))
                (eval-result (%result-of eval-resp))
                (obj-id (gethash "result_object_id" eval-result)))
-          (ok (integerp obj-id) "eval returned an integer result_object_id")
+          (ok (stringp obj-id) "eval returned a string result_object_id")
           ;; Step 2: inspect the hash-table
           (let ((inspect-params (make-hash-table :test 'equal)))
             (setf (gethash "id" inspect-params) obj-id)

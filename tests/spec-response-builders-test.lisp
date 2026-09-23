@@ -1160,7 +1160,7 @@ structure intact -- a circular value included."
                                                                  :print-level 12
                                                                  :print-length 200
                                                                  :type "thing"
-                                                                 :object-id 7)))
+                                                                 :object-id "o-abc-7")))
                                         :shrink-status :none
                                         :definition-match :not-checked))
                             :counts (list :selected 1 :passed 0 :failed 1
@@ -1173,7 +1173,7 @@ structure intact -- a circular value included."
       (ok (eq t (gethash "printed_complete" value)))
       (ok (eq yason:false (gethash "restorable" value)))
       (ok (= 12 (gethash "print_level" value)))
-      (ok (= 7 (gethash "object_id" value))))))
+      (ok (equal "o-abc-7" (gethash "object_id" value))))))
 
 (deftest check-response-renders-every-status-in-the-tally
   (testing "a status with no field of its own still reaches the summary line"
@@ -1256,7 +1256,7 @@ structure intact -- a circular value included."
                                                                  :print-level 12
                                                                  :print-length 200
                                                                  :type "cons"
-                                                                 :object-id 3)))
+                                                                 :object-id "o-abc-3")))
                                         :shrink-status :none
                                         :definition-match :not-checked))
                             :counts (list :selected 1 :passed 0 :failed 1
@@ -1880,7 +1880,7 @@ make core_result.data shorter than the text preview beside it."
       (ok (search "UNAVAILABLE" (gethash "printed" value)))
       (ok (equal "cons" (gethash "type" value)))
       (testing "and it keeps its inspectable object id"
-        (ok (integerp (gethash "object_id" value)))))))
+        (ok (stringp (gethash "object_id" value)))))))
 
 (deftest an-unavailable-capture-value-claims-no-value-and-no-object-id
   (let* ((entry (%single-capture-entry
