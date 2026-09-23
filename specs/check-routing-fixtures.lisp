@@ -66,6 +66,7 @@
            #:expected-match
            #:draw-digest-case
            #:spy-api
+           #:spy-generator-unavailable
            #:spy-calls
            #:spy-run-calls
            #:contract-definition))
@@ -229,11 +230,13 @@ itself when a property of that name exists, and the unrelated one."
         :name name :arguments nil :preconditions preconditions
         :case-selection case-selection :cases nil))
 
-(defun %property-definition (name &key (trials (list :smoke 5 :normal 25)))
-  "Return a property's definition as cl-spec's PROPERTY-DATA projects it."
+(defun %property-definition (name &key (trials (list :smoke 5 :normal 25)) arguments)
+  "Return a property's definition as cl-spec's PROPERTY-DATA projects it.
+ARGUMENTS is the property's argument list; only its length is read."
   (list :name name :kind :invariant :targets (list (target-symbol :f)) :tags nil
         :documentation "A fixture property." :trials (copy-list trials)
-        :arguments nil :body (list t) :source-form (list 'defproperty name)
+        :arguments (copy-list arguments) :body (list t)
+        :source-form (list 'defproperty name)
         :source-location nil :metadata (list :shrink t)))
 
 (defun registry-api (registry)
@@ -462,6 +465,13 @@ hex digit (never only in case), and the position changed."
 ;;; ------------------------------------------------------------------------
 ;;; The recording spy for CHECK-REPORT
 
+(define-condition spy-generator-unavailable (error)
+  ()
+  (:report "no generator backend")
+  (:documentation "What SPY-API's runner signals for an entry whose :SIGNAL
+names it: the stand-in for cl-spec's generator-unavailable, registered under
+that key so the adapter classifies it as :GENERATOR-ERROR."))
+
 (defun %check-keywords (arguments allowed who)
   "Signal unless ARGUMENTS is a keyword plist whose keys are all in ALLOWED."
   (unless (and (evenp (length arguments))
@@ -477,8 +487,11 @@ a property (:about ROUTING-F)), :TRIALS (a property's table), :STATUS,
 :EXECUTED, :BUDGET (the budget the result records, or NIL for the one the run
 was given), :DIGEST and :COMPLETE (the digest the result records), :SEED (the
 seed the result reports when the run was given none), :DEFINITION-DIGEST (a
-contract definition's own digest) and :SIGNAL (a condition the run signals
-instead of answering).
+contract definition's own digest), :SIGNAL (a condition the run signals
+instead of answering -- SPY-GENERATOR-UNAVAILABLE is registered as cl-spec's
+generator-unavailable class), :SLEEP (seconds the run takes before it
+answers), :ARGUMENTS (a property's argument list) and :COUNTEREXAMPLE (the
+{variable value} plist the result records).
 
 BACKEND-DEFAULT is what the backend-default reader answers, or :UNREADABLE for
 a reader that signals.  CALLS is a cons whose CAR collects, most recent first,
@@ -497,6 +510,7 @@ runner, the registry and backend it saw on its own thread."
                  (%check-keywords arguments allowed key)
                  (let ((entry (entry name kind)))
                    (when (getf entry :signal) (error (getf entry :signal)))
+                   (when (getf entry :sleep) (sleep (getf entry :sleep)))
                    (list :spy-result name kind arguments))))
              (record (result)
                (destructuring-bind (name kind arguments) (rest result)
@@ -517,13 +531,16 @@ runner, the registry and backend it saw on its own thread."
                                                    "fnv1a64-v1:00000000000000aa")))
                    (setf record (record-with record :definition-digest-complete
                                              (getf entry :complete t)))
+                   (setf record (record-with record :counterexample
+                                             (copy-list (getf entry :counterexample))))
                    record))))
       (values
        (make-cl-spec-api
         :version "0.1.0"
         :system-directory "/tmp/cl-spec/"
         :classes (list :unknown-spec 'routing-unknown-name
-                       :unknown-property 'routing-unknown-name)
+                       :unknown-property 'routing-unknown-name
+                       :generator-unavailable 'spy-generator-unavailable)
         :specials (list :generator-backend '*spy-backend* :registry '*spy-registry*)
         :functions
         (list :registry (lambda () registry)
@@ -553,7 +570,8 @@ runner, the registry and backend it saw on its own thread."
                 (let ((entry (entry name :property)))
                   (unless entry (error 'routing-unknown-name))
                   (%property-definition name :trials (getf entry :trials
-                                                           (list :smoke 5 :normal 25)))))
+                                                           (list :smoke 5 :normal 25))
+                                             :arguments (getf entry :arguments))))
               :function-spec-data
               (lambda (name &key registry)
                 (note :key :function-spec-data :name name :arguments (list :registry registry))

@@ -24,6 +24,16 @@
   ;; this file names yason's functions in full, and a package-inferred system
   ;; reads its dependencies from here, not from the body.
   (:import-from #:yason)
+  ;; The evidence a failure carries is built as cl-spec hands it over and put
+  ;; through the record layer's own projection (checked in
+  ;; specs/core-records.lisp), so the payload these fixtures feed the builder
+  ;; has the shape a real report has -- not one written here to match the
+  ;; checks that read it.
+  (:import-from #:cl-mcp/src/spec-core-record
+                #:project-core-record)
+  (:import-from #:cl-mcp/specs/core-record-fixtures
+                #:make-result-record
+                #:record-with)
   (:export #:+listing-states+
            #:+symbol-states+
            #:+describe-entities+
@@ -692,17 +702,19 @@ robustness case cannot be mistaken for a state the report layer builds.")
 (defun %result (&key (name :property) (kind :property) (status :passed)
                   (seed "3963993791726803706") (seed-p t) (profile :normal)
                   (executed 25) (budget 25) contract counterexample
-                  (counterexample-status :none) counterexample-unavailable-reason
-                  shrunk (shrink-status :none) shrink-note
+                  (counterexample-status :not-applicable) counterexample-unavailable-reason
+                  shrunk (shrink-status :not-applicable) shrink-note
                   (digest "fnv1a64-v1:00000000000000dd") (match :not-checked)
                   core-record message condition)
-  "Return one per-property result, as a check report carries it.
+  "Return one per-property result, as %RESULT-PLIST builds it for a run that
+returned.
 
-The defaults are a passing property run as CHECK-REPORT builds one: a verdict
-was reached, so the counterexample and the shrink search each answer :NONE
-rather than :ABSENT or :UNAVAILABLE, which are the answers for a run that
-reached no verdict at all.  SEED-P false leaves the key out, which is what a
-result that never started carries."
+The defaults are a passing run.  Only :FAILED and :ERROR are verdicts a
+counterexample belongs to, so a pass answers :NOT-APPLICABLE for the
+counterexample and for the shrink search alike; a failure states its own
+pair.  SEED-P false leaves the key out.  A run that never returned -- a
+timeout, a condition before any result -- is not built here but by
+%UNFINISHED-RESULT, whose shape is %RUN-ONE's and not this one."
   (append
    (list :property (symbol-data name)
          :kind kind
@@ -726,23 +738,55 @@ result that never started carries."
          :elapsed 0.02
          :message message)))
 
-(defun %capture-node (record)
-  "Return one capture RECORD as a projection node.
+(defun %unfinished-result (status &key condition (timeout-seconds 60) thread-leaked
+                                       message)
+  "Return one per-property result for a run that returned nothing, as
+%RUN-ONE builds it.
 
-The nodes are written here rather than taken from the record layer, whose own
-projection is checked in specs/core-records.lisp.  What matters at this layer
-is that the response carries them: a capture that was collected and one that
-could not be read must stay two answers in the JSON, not only in the text."
-  (list :object
-        (if (eq :collected (getf record :availability))
-            (list (cons "name" (list :scalar (getf record :name)))
-                  (cons "availability" (list :scalar "collected"))
-                  (cons "value" (list :value (%value (getf record :printed)
-                                                     :type (getf record :type)))))
-            (list (cons "name" (list :scalar (getf record :name)))
-                  (cons "availability" (list :scalar "unavailable"))
-                  (cons "reason" (list :scalar (getf record :reason)))
-                  (cons "type" (list :scalar (getf record :type)))))))
+STATUS is :TIMEOUT, or the status a condition signalled before any result was
+classified as.  Neither reached a verdict, so neither has a seed, a profile
+or an executed count to report, and the counterexample and the shrink search
+answer :UNAVAILABLE with the reason %RUN-ONE gives.  A timeout says whether
+its thread was left running; a condition is carried as the condition."
+  (append
+   (list :property (symbol-data :property)
+         :kind :property
+         :status status
+         :trials (list :budget 25 :budget-source "backend-default")
+         :definition-digest "fnv1a64-v1:00000000000000dd"
+         :definition-digest-covers :property
+         :definition-digest-complete t
+         :definition-match :not-checked
+         :counterexample-status :unavailable
+         :counterexample-unavailable-reason
+         (if (eq :timeout status)
+             "the run did not reach a verdict within its deadline"
+             "the run signalled before producing a result")
+         :shrink-status :unavailable)
+   (if (eq :timeout status)
+       (list :timeout-seconds timeout-seconds
+             :thread-leaked thread-leaked
+             :message message)
+       (list :condition condition))))
+
+(defun %projected-record (status &rest fields)
+  "Return the core record the report layer publishes for a cl-spec v1 result
+record of STATUS whose FIELDS (a plist) replace the defaults.
+
+The record is a valid one from specs/core-record-fixtures.lisp, and the core
+record is what PROJECT-CORE-RECORD makes of it -- the call %RESULT-PLIST
+makes.  Its :SOURCE is what the text is written from and its :DATA is what the
+JSON carries, so both have the shape a real report has.  The values under
+FIELDS are the ones the checks expect to find; nothing here recomputes them
+from the projection."
+  (let ((record (make-result-record :status status)))
+    (loop for (key value) on fields by #'cddr
+          do (setf record (record-with record key value)))
+    (multiple-value-bind (core state reason)
+        (project-core-record record :result-data :expected-record-kind :result)
+      (unless (eq :ok state)
+        (error "The fixture record did not project: ~S ~S." state reason))
+      core)))
 
 (defun %capture-record (record)
   "Return one capture RECORD as cl-spec's raw source carries it."
@@ -760,45 +804,22 @@ could not be read must stay two answers in the JSON, not only in the text."
 (defun %capture-evidence (records)
   "Return the core record of a failure that captured RECORDS.
 
-:SOURCE is what the text is written from and :DATA is what the JSON carries.
-A record with one and not the other publishes the evidence to a reader of the
-text and withholds it from a reader of the payload -- the same finding told to
-one caller and not another."
-  (list :availability :available
-        :schema-supported t
-        :schema-version 1
-        :field-availability (list :capture :available)
-        :projection (list :complete t :issues '())
-        :source (list :failure
-                      (list :state
-                            (list :capture
-                                  (list :values (mapcar #'%capture-record records)))))
-        :data (list :object
-                    (list (cons "capture"
-                                (list :array (mapcar #'%capture-node records)))))))
+The capture sits where cl-spec puts it, under the failure's state, so the
+payload carries it at core_result.data.failure.state.capture.values."
+  (%projected-record :failed
+                     :failure
+                     (list :state
+                           (list :capture
+                                 (list :status :collected
+                                       :values (mapcar #'%capture-record records))))))
 
 (defun %case-report (never-called)
-  "Return the core record of a run that declared cases and missed some.
+  "Return the core record of a passing run that declared cases and missed some.
 
 The names under :NEVER-CALLED are the declared cases no trial reached, which
-is the gap a bare verdict hides.  Carried in :SOURCE, which the text is
-written from, and in :DATA, which is what the payload carries: a record with
-one and not the other tells a reader of the text something it withholds from a
-reader of the payload."
-  (list :availability :available
-        :schema-supported t
-        :schema-version 1
-        :field-availability (list :case-report :available)
-        :projection (list :complete t :issues '())
-        :source (list :case-report (list :never-called never-called))
-        :data (list :object
-                    (list (cons "never_called"
-                                (list :array
-                                      (mapcar (lambda (name)
-                                                (list :scalar
-                                                      (string-downcase
-                                                       (princ-to-string name))))
-                                              never-called)))))))
+is the gap a bare verdict hides.  The payload carries them at
+core_result.data.case_report.never_called."
+  (%projected-record :passed :case-report (list :never-called never-called)))
 
 (defun check-scenario (case)
   "Return (values REPORT FACTS) for the spec-check answer CASE.
@@ -859,6 +880,7 @@ claim.  It is written here; nothing recomputes it from the report."
                      :profile :normal
                      :timeout-seconds 60
                      :thread-leaked nil
+                     :worker-reuse :safe
                      :verification-gaps '(:rejection-counts-unmeasured
                                           :input-coverage-unmeasured)
                      :elapsed 0.5
@@ -874,7 +896,8 @@ claim.  It is written here; nothing recomputes it from the report."
                       :gap-line t
                       :text-must '()
                       :text-must-not '()
-                      :counterexample :none
+                      ;; A pass is not a verdict a counterexample belongs to.
+                      :counterexample :not-applicable
                       :replay (list :target :property
                                     :name (qualified :property)
                                     :seed "3963993791726803706"
@@ -913,7 +936,10 @@ claim.  It is written here; nothing recomputes it from the report."
                                                  :digest other-digest
                                                  :counterexample
                                                  (%counterexample "68" "0")
-                                                 :counterexample-status :present))
+                                                 :counterexample-status :present
+                                                 ;; Shrinking ran and found
+                                                 ;; nothing smaller.
+                                                 :shrink-status :none))
                          :counts (list :selected 2 :passed 1 :failed 1 :errored 0
                                        :timed-out 0 :not-run 0 :other 0
                                        :by-status '((:passed . 1) (:failed . 1))))
@@ -1025,25 +1051,31 @@ claim.  It is written here; nothing recomputes it from the report."
                                        :seed "3963993791726803706"
                                        :digest "fnv1a64-v1:00000000000000dd"))))
         (:generation-failed
-         ;; Nothing was falsified, because nothing ran: the generator broke
-         ;; before the first trial.  An error is a verdict about the run, so
-         ;; the call completed; what it did not produce is a counterexample,
-         ;; and the status says so rather than an empty one standing in.
-         (values (report :verified nil
-                         :results (list (%result :status :error
-                                                 :executed 0
-                                                 :counterexample-status :not-applicable
-                                                 :shrink-status :not-applicable
-                                                 :condition (list :type "GENERATOR-ERROR"
-                                                                  :message "the generator signalled")
-                                                 :message "The generator signalled."))
-                         :counts (list :selected 1 :passed 0 :failed 0 :errored 1
-                                       :timed-out 0 :not-run 0 :other 0
-                                       :by-status '((:error . 1))))
+         ;; Nothing was falsified, because nothing ran: the backend could not
+         ;; generate, and the run signalled before it returned a result.  That
+         ;; is %RUN-ONE's error path: the condition is classified, it is not a
+         ;; verdict, so the call is incomplete, and the evidence the run never
+         ;; produced is unavailable rather than empty.
+         (values (report :status :incomplete
+                         :verified nil
+                         :results (list (%unfinished-result
+                                         :generator-error
+                                         :condition (list :type "GENERATOR-UNAVAILABLE"
+                                                          :message "no generator backend")))
+                         :counts (list :selected 1 :passed 0 :failed 0 :errored 0
+                                       :timed-out 0 :not-run 0 :other 1
+                                       :by-status '((:generator-error . 1)))
+                         :verification-gaps (list* :generator-error
+                                                   '(:rejection-counts-unmeasured
+                                                     :input-coverage-unmeasured)))
                  (expect :verdict :not-verified
                          :verified :false
-                         :counterexample :not-applicable
-                         :text-must '("error"))))
+                         :status "incomplete"
+                         :gaps (cons "generator-error" property-gaps)
+                         :counterexample :unavailable
+                         :text-must '("generator-error" "no generator backend")
+                         :text-must-not '("✗ FAILED")
+                         :replay nil)))
         (:timeout
          ;; The call itself ran out of time, so there is no run to report on.
          ;; This answer carries a message and no selection, and its text is
@@ -1062,24 +1094,22 @@ claim.  It is written here; nothing recomputes it from the report."
          ;; The call finished; one selected property did not.  A timeout is
          ;; not a verdict, so the call is incomplete, the result carries no
          ;; seed to replay from, and the evidence it has none of says
-         ;; "unavailable" rather than "none".
+         ;; "unavailable" rather than "none".  Its thread was stopped, not
+         ;; left running, so reuse is :UNKNOWN -- a leaked thread would make
+         ;; it :UNSAFE.
          (values (report :status :incomplete
                          :verified nil
-                         :results (list (%result :status :timeout
-                                                 :seed-p nil
-                                                 :executed 3
-                                                 :counterexample-status :unavailable
-                                                 :counterexample-unavailable-reason
-                                                 "the run did not reach a verdict within its deadline"
-                                                 :shrink-status :unavailable
-                                                 :message "The deadline passed."))
+                         :results (list (%unfinished-result
+                                         :timeout
+                                         :thread-leaked nil
+                                         :message "The run thread was stopped."))
                          :counts (list :selected 1 :passed 0 :failed 0 :errored 0
                                        :timed-out 1 :not-run 0 :other 0
                                        :by-status '((:timeout . 1)))
                          :worker-reuse :unknown
                          :worker-reuse-message
-                         "The thread was still running when the deadline passed."
-                         :thread-leaked t
+                         "Nothing here can show that the state it was changing was restored."
+                         :thread-leaked nil
                          :verification-gaps (list* :timeout
                                                    '(:rejection-counts-unmeasured
                                                      :input-coverage-unmeasured)))
@@ -1089,7 +1119,7 @@ claim.  It is written here; nothing recomputes it from the report."
                          :gaps (cons "timeout" property-gaps)
                          :counterexample :unavailable
                          :text-must '("worker_reuse: unknown" "timeout"
-                                      "still running")
+                                      "state it was changing was restored")
                          ;; A timeout is not a counterexample, and a result
                          ;; with no seed has nothing to replay.
                          :text-must-not '("✗ FAILED")
@@ -1120,7 +1150,8 @@ claim.  It is written here; nothing recomputes it from the report."
          ;; whose argument list was read.  "None reported" is what that is.
          (values (report :verified nil
                          :results (list (%result :status :failed
-                                                 :counterexample-status :none))
+                                                 :counterexample-status :none
+                                                 :shrink-status :none))
                          :counts (failed-counts))
                  (expect :verdict :failed
                          :verified :false
@@ -1171,8 +1202,8 @@ claim.  It is written here; nothing recomputes it from the report."
                                                  (%capture-evidence
                                                   (list (list :name "BALANCE"
                                                               :availability :unavailable
-                                                              :reason "not-restorable"
-                                                              :type "INTEGER")))))
+                                                              :reason :not-restorable
+                                                              :type 'integer)))))
                          :counts (failed-counts))
                  (expect :verdict :failed
                          :verified :false
@@ -1193,24 +1224,15 @@ claim.  It is written here; nothing recomputes it from the report."
                                                  :counterexample-status :present
                                                  :shrink-status :none
                                                  :core-record
-                                                 (list :availability :available
-                                                       :schema-supported t
-                                                       :schema-version 1
-                                                       :projection (list :complete t
-                                                                         :issues '())
-                                                       :source
-                                                       (list :shrink-report
-                                                             (list :termination
-                                                                   :budget-exhausted))
-                                                       :data
-                                                       (list :object
-                                                             (list (cons "shrink_termination"
-                                                                         (list :scalar
-                                                                               "budget-exhausted")))))))
+                                                 (%projected-record
+                                                  :failed
+                                                  :shrink-report
+                                                  (list :termination :budget-exhausted))))
                          :counts (failed-counts))
                  (expect :verdict :failed
                          :verified :false
                          :counterexample :present
+                         :shrink-termination "budget-exhausted"
                          :text-must '("AMOUNT = 68" "shrinking: budget-exhausted"
                                       "the shrink budget ran out")
                          ;; The reduction is unfinished; the finding is not.

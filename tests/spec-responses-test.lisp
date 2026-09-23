@@ -19,10 +19,17 @@
                 #:build-spec-symbol-response
                 #:build-spec-describe-response
                 #:build-spec-check-response)
-  ;; A bare :import-from declares the dependency without importing a symbol.
+  ;; CHECK-REPORT runs the production paths the scenarios claim to describe.
   ;; The documented status and gap sets are internal parameters, named in full
   ;; where they are read.
-  (:import-from #:cl-mcp/src/spec-adapter-report)
+  (:import-from #:cl-mcp/src/spec-adapter-report
+                #:check-report)
+  ;; A stand-in cl-spec, so those paths run without one.
+  (:import-from #:cl-mcp/specs/check-routing-fixtures
+                #:routing-p1
+                #:designator
+                #:spy-api
+                #:spy-generator-unavailable)
   (:import-from #:cl-mcp/specs/spec-response-fixtures
                 #:response-json
                 #:parse-response
@@ -328,7 +335,10 @@
   (dolist (row '((:empty-counterexample "present" 0)
                  (:no-counterexample "none" 0)
                  (:counterexample-not-collected "unavailable" 0)
-                 (:generation-failed "not-applicable" 0)
+                 ;; A pass is not a verdict a counterexample belongs to.
+                 (:passed-with-gaps "not-applicable" 0)
+                 ;; A run that signalled before returning has none to show.
+                 (:generation-failed "unavailable" 0)
                  (:has-failure "present" 2)))
     (destructuring-bind (case status count) row
       (multiple-value-bind (document text) (%check case)
@@ -366,14 +376,18 @@
     (multiple-value-bind (document text) (%check :capture-collected-nil)
       (declare (ignore text))
       (let* ((result (aref (json-at document "results") 0))
-             (entry (aref (json-at result "core_result" "data" "capture") 0)))
+             (entry (aref (json-at result "core_result" "data"
+                                   "failure" "state" "capture" "values")
+                          0)))
         (ok (equal "BALANCE" (json-at entry "name")))
         (ok (equal "collected" (json-at entry "availability")))
         (ok (equal "NIL" (json-at entry "value" "printed")))))
     (multiple-value-bind (document text) (%check :capture-unavailable)
       (declare (ignore text))
       (let* ((result (aref (json-at document "results") 0))
-             (entry (aref (json-at result "core_result" "data" "capture") 0)))
+             (entry (aref (json-at result "core_result" "data"
+                                   "failure" "state" "capture" "values")
+                          0)))
         (ok (equal "unavailable" (json-at entry "availability")))
         (ok (equal "not-restorable" (json-at entry "reason")))
         (ok (not (nth-value 1 (json-at entry "value")))
@@ -415,8 +429,18 @@
       ;; Behind the projection, not withheld: what the text says about the
       ;; case nobody reached is in the payload as well.
       (ok (equal '("insufficient")
-                 (coerce (json-at result "core_result" "data" "never_called")
+                 (coerce (json-at result "core_result" "data"
+                                  "case_report" "never_called")
                          'list))))))
+
+(deftest why-shrinking-stopped-reaches-the-payload
+  (multiple-value-bind (document text) (%check :shrink-limited)
+    (ok (claims-p text "shrinking: budget-exhausted"))
+    (let ((result (aref (json-at document "results") 0)))
+      (ok (equal "collected" (json-at result "core_result" "availability")))
+      (ok (equal "budget-exhausted"
+                 (json-at result "core_result" "data" "shrink_report" "termination"))
+          "under the shrink report, where the result-data schema puts it"))))
 
 (deftest every-scenario-speaks-the-report-layers-own-vocabulary
   ;; The descriptors claim to be states the report layer builds.  A value it
@@ -448,6 +472,48 @@
           (dolist (key '(:passed :failed :errored :timed-out :not-run))
             (ok (or (null (getf report :counts)) (member key counts))
                 (format nil "count field ~S has a status of its own" key))))))))
+
+(defun %state-combination (report)
+  "Return the combination of states REPORT's last result and the call carry:
+the fields that only mean something together."
+  (let ((result (car (last (getf report :results)))))
+    (list :call-status (getf report :status)
+          :status (getf result :status)
+          :counterexample-status (getf result :counterexample-status)
+          :shrink-status (getf result :shrink-status)
+          :seed (and (getf result :seed) t)
+          :executed (and (getf (getf result :trials) :executed) t)
+          :thread-leaked (getf report :thread-leaked)
+          :worker-reuse (getf report :worker-reuse)
+          :verification-gaps (getf report :verification-gaps))))
+
+(defun %produced-report (entry &rest arguments)
+  "Return what CHECK-REPORT builds for one property whose stand-in run behaves
+as the SPY-API ENTRY says, with ARGUMENTS ahead of the defaults."
+  (let ((api (spy-api (list (list* :name 'routing-p1 :kind :property entry)))))
+    (apply #'check-report api :ok
+           (append arguments
+                   (list :property (values (designator :p1 :qualified))
+                         :timeout-seconds 30)))))
+
+(deftest each-scenario-is-a-combination-the-report-layer-builds
+  ;; A vocabulary check passes a scenario whose every value occurs somewhere.
+  ;; Whether the values occur together is a question for the code that builds
+  ;; them: %RESULT-PLIST for a run that returned, %RUN-ONE's error and
+  ;; timeout branches for one that did not, and CHECK-REPORT for the call.
+  ;; Each row runs one of those paths through a stand-in cl-spec and compares
+  ;; the fields that depend on one another.
+  (loop for (case entry . arguments)
+          in `((:passed-with-gaps (:status :passed))
+               (:has-failure (:status :failed
+                              :arguments (amount subject)
+                              :counterexample (amount 68 subject 0)))
+               (:generation-failed (:signal ,'spy-generator-unavailable))
+               ;; Interruptible, so its thread is stopped and not leaked.
+               (:timed-out-result (:sleep 5) :timeout-seconds 0.5))
+        do (testing (format nil "~(~A~)" case)
+             (ok (equal (%state-combination (apply #'%produced-report entry arguments))
+                        (%state-combination (check-scenario case)))))))
 
 ;;; ------------------------------------------------------------------------
 ;;; F. The replay line

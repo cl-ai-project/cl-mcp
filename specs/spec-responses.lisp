@@ -439,33 +439,41 @@ says exactly what it lists."
 The text is written from the record's raw source and the payload from its
 projection, so a projection that dropped the evidence publishes a finding to a
 reader of the text and withholds it from a reader of the JSON.  Only reading
-both says whether that happened."
+both says whether that happened.  Each piece is read where the result-data
+schema puts it -- a capture under the failure's state, the unreached cases
+under the case report, the shrink search's end under the shrink report --
+and not at a flattened path a fixture could share with this check."
   (let* ((results (json-at document "results"))
          (result (when (plusp (length results)) (aref results (1- (length results)))))
-         (data (when result (json-at result "core_result" "data")))
-         (capture (getf facts :capture)))
-    (cond
-      (capture
-       (let* ((entries (json-at data "capture"))
-              (entry (when (and (json-array-p entries) (plusp (length entries)))
-                       (aref entries 0))))
-         (and (json-object-p entry)
-              (equal "BALANCE" (json-at entry "name"))
-              (equal (getf capture :availability) (json-at entry "availability"))
-              (if (getf capture :printed)
-                  ;; Collected: the application's own value crossed, printed.
-                  (and (json-object-p (json-at entry "value"))
-                       (equal (getf capture :printed)
-                              (json-at entry "value" "printed")))
-                  ;; Unavailable: a reason, and no value to mistake for one.
-                  (and (not (nth-value 1 (json-at entry "value")))
-                       (equal (getf capture :reason) (json-at entry "reason")))))))
-      ((getf facts :case-never-called)
-       (let ((never (json-at data "never_called")))
-         (and (json-array-p never)
-              (equal (list (getf facts :case-never-called))
-                     (coerce never 'list)))))
-      (t t))))
+         (core (when result (json-at result "core_result")))
+         (data (when core (json-at core "data")))
+         (capture (getf facts :capture))
+         (never-called (getf facts :case-never-called))
+         (termination (getf facts :shrink-termination)))
+    (and
+     (or (not (or capture never-called termination))
+         (equal "collected" (json-at core "availability")))
+     (or (null capture)
+         (let* ((entries (json-at data "failure" "state" "capture" "values"))
+                (entry (when (and (json-array-p entries) (plusp (length entries)))
+                         (aref entries 0))))
+           (and (json-object-p entry)
+                (equal "BALANCE" (json-at entry "name"))
+                (equal (getf capture :availability) (json-at entry "availability"))
+                (if (getf capture :printed)
+                    ;; Collected: the application's own value crossed, printed.
+                    (and (json-object-p (json-at entry "value"))
+                         (equal (getf capture :printed)
+                                (json-at entry "value" "printed")))
+                    ;; Unavailable: a reason, and no value to mistake for one.
+                    (and (not (nth-value 1 (json-at entry "value")))
+                         (equal (getf capture :reason) (json-at entry "reason")))))))
+     (or (null never-called)
+         (let ((never (json-at data "case_report" "never_called")))
+           (and (json-array-p never)
+                (equal (list never-called) (coerce never 'list)))))
+     (or (null termination)
+         (equal termination (json-at data "shrink_report" "termination"))))))
 
 (defun %check-holds-p (case)
   "Return true when a spec-check answer carries its verdict, its evidence and
