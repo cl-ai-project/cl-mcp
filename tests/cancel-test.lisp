@@ -95,32 +95,43 @@
                                                  (make-ht "code" "(sleep 30)"
                                                           "timeout_seconds" 60)))))
                       :name "cancel-e2e-request")))
-        ;; Running, not merely registered: the eval has been sent.
-        (loop repeat 200
-              until (let ((record (find-request session-id "e2e-req-1")))
-                      (and record (eq :executing (request-phase record))))
-              do (sleep 0.05))
-        (ok (eq :stopping (cancel-request "e2e-req-1" session-id)))
-        (bt:join-thread thread)
-        (ok (eq t (gethash "isError" result)))
-        (ok (equal "execution-unknown" (gethash "execution_status" result)))
-        (ok (member (worker-state worker) '(:dead :crashed))
-            "the worker that ran it was stopped")
-        (ok (null (find-request session-id "e2e-req-1"))
-            "and the request is no longer registered")
-        (testing "the session goes on, on a fresh worker"
-          ;; The first request after may be told of the reset instead of
-          ;; running -- and then it must say it did not run.  Whether it is
-          ;; told once or twice is 4C's; the one after runs.
-          (let ((*current-session-id* session-id))
-            (let ((answers (loop for id in '("e2e-req-2" "e2e-req-3" "e2e-req-4")
-                                 collect (proxy-to-worker id "worker/eval"
-                                                          (make-ht "code" "(+ 1 2)")))))
-              (ok (some (lambda (answer) (not (eq t (gethash "isError" answer)))) answers)
-                  "a request runs")
-              (ok (every (lambda (answer)
-                           (or (not (eq t (gethash "isError" answer)))
-                               (equal "not-executed" (gethash "execution_status" answer))))
-                         answers)
-                  "and a reset notice in its place says it did not run")
-              (ok (not (eq worker (get-or-assign-worker session-id)))))))))))
+        ;; Whatever happens below, the request thread is not left running: it
+        ;; is cancelled if it still runs, and waited for, a bounded time.
+        (unwind-protect
+             (progn
+               ;; Running, not merely registered: the eval has been sent.
+               (loop repeat 200
+                     until (let ((record (find-request session-id "e2e-req-1")))
+                             (and record (eq :executing (request-phase record))))
+                     do (sleep 0.05))
+               (ok (eq :stopping (cancel-request "e2e-req-1" session-id)))
+               (sb-thread:join-thread thread :timeout 60 :default nil)
+               (ok (eq t (gethash "isError" result)))
+               (ok (equal "execution-unknown" (gethash "execution_status" result)))
+               (ok (member (worker-state worker) '(:dead :crashed))
+                   "the worker that ran it was stopped")
+               (ok (null (find-request session-id "e2e-req-1"))
+                   "and the request is no longer registered")
+               (testing "the session goes on, on a fresh worker"
+                 ;; The first request after may be told of the reset instead
+                 ;; of running -- and then it must say it did not run.
+                 ;; Whether it is told once or twice is 4C's; the one after
+                 ;; runs.
+                 (let ((*current-session-id* session-id))
+                   (let ((answers (loop for id in '("e2e-req-2" "e2e-req-3" "e2e-req-4")
+                                        collect (proxy-to-worker
+                                                 id "worker/eval"
+                                                 (make-ht "code" "(+ 1 2)")))))
+                     (ok (some (lambda (answer) (not (eq t (gethash "isError" answer))))
+                               answers)
+                         "a request runs")
+                     (ok (every (lambda (answer)
+                                  (or (not (eq t (gethash "isError" answer)))
+                                      (equal "not-executed"
+                                             (gethash "execution_status" answer))))
+                                answers)
+                         "and a reset notice in its place says it did not run")
+                     (ok (not (eq worker (get-or-assign-worker session-id))))))))
+          (when (bt:thread-alive-p thread)
+            (ignore-errors (cancel-request "e2e-req-1" session-id))
+            (sb-thread:join-thread thread :timeout 30 :default nil)))))))
