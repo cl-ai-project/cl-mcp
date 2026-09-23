@@ -66,6 +66,25 @@ got, the worker it was handed to, and whether its cancellation was asked for."
   (worker nil)
   (cancel-requested nil))
 
+;;; A DEFSTRUCT slot takes no documentation, so the exported readers get theirs
+;;; here.
+(progn
+  (setf (documentation 'request-session-id 'function)
+        "The session RECORD's request came from; part of its identity."
+        (documentation 'request-external-id 'function)
+        "The JSON-RPC id the client gave RECORD's request; the other part of its
+identity."
+        (documentation 'request-phase 'function)
+        "How far RECORD's request got: :REGISTERED, :ACQUIRING,
+:WAITING-TO-SEND, :EXECUTING or :RESPONDED.  Read and written under
+*REQUESTS-LOCK*."
+        (documentation 'request-worker 'function)
+        "The worker RECORD's request was handed, or NIL before one was found."
+        (documentation 'request-cancel-requested 'function)
+        "True once RECORD's cancellation was asked for.  Read and written under
+*REQUESTS-LOCK*.")
+  'request-record)
+
 (defvar *requests* (make-hash-table :test 'equal)
   "In-flight requests, keyed by REQUEST-KEY: the session and the id together.
 An id alone is not an identity -- every session numbers its requests from
