@@ -951,7 +951,11 @@ to prevent recovery threads from spawning orphan workers."
          ;; A crashed standby too: an RPC timeout marks a standby :CRASHED
          ;; before the monitor finds its process dead, and left on this list
          ;; it is a worker the pool has ended, still offered as a standby and
-         ;; still counted as one when replenishing.
+         ;; still counted as one when replenishing.  Noted as a standby, so
+         ;; the replenishment below runs for it as it does for a standby the
+         ;; monitor found dead.
+         (when (member crashed-worker *standby-workers*)
+           (setf was-standby t))
          (setf *standby-workers* (remove crashed-worker *standby-workers*))
          (setf *all-workers* (remove crashed-worker *all-workers*)))
         (otherwise (return-from %handle-worker-crash))))
@@ -965,7 +969,7 @@ to prevent recovery threads from spawning orphan workers."
     ;; Already-crashed workers were cleaned up from tracking above.
     ;; Just schedule replenishment if needed and return.
     (when was-already-crashed
-      (when was-bound (%schedule-replenish))
+      (when (or was-bound was-standby) (%schedule-replenish))
       (return-from %handle-worker-crash))
     (cond
       (was-bound
