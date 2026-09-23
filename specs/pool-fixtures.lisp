@@ -247,6 +247,21 @@ would take it over.  Run it in a process with no pool."))
   (remove-duplicates
    (loop for (item . rest) on list when (member item rest) collect item)))
 
+(defun %placeholder-sessions (snapshot)
+  "Return the sessions SNAPSHOT's map holds a spawn in flight for."
+  (loop for (session . entry) in (getf snapshot :map)
+        unless (typep entry 'worker) collect session))
+
+(defun %usage (ledger snapshot)
+  "Return how many workers the pool is answerable for, counted without the
+pool's own arithmetic: every worker LEDGER says it was handed and has not
+ended -- a live process whether or not a list still holds it -- plus every
+spawn in flight in SNAPSHOT.  This is what the cap limits, and a pool whose
+own count disagrees with it is counting wrong."
+  (+ (count-if-not (lambda (worker) (killed-p ledger worker))
+                   (ledger-spawned ledger))
+     (length (%placeholder-sessions snapshot))))
+
 ;;; ------------------------------------------------------------------------
 ;;; D. Invariants
 
@@ -264,7 +279,8 @@ At every point between operations:
 - every worker the pool was handed and has not ended is tracked -- a live
   worker the pool does not know is a process nobody will end;
 - a worker the map holds names the session it is held for;
-- the pool counts no more than its cap.
+- the pool is answerable for no more workers than its cap, counted from the
+  ledger and the spawns in flight (%USAGE), and its own count agrees.
 
 STABLE -- nothing queued -- adds what holds only at rest: no spawn is in
 flight, so no placeholder is left in the map, and the tracked list is
@@ -300,8 +316,13 @@ the pool left live."
                       (not (equal session (worker-session-id entry))))
               do (add :map-names-another-session :session session
                       :worker (worker-id entry)))
-      (when (> (getf snapshot :size) *max-pool-size*)
-        (add :over-capacity :size (getf snapshot :size) :cap *max-pool-size*))
+      (let ((usage (%usage ledger snapshot)))
+        (when (> usage *max-pool-size*)
+          (add :over-capacity :usage usage :cap *max-pool-size*))
+        ;; The pool decides every spawn by its own count; one that
+        ;; undercounts spawns past the cap while agreeing with itself.
+        (unless (= usage (getf snapshot :size))
+          (add :size-miscounted :usage usage :pool-counts (getf snapshot :size))))
       (when stable
         (let ((placeholders (loop for (session . entry) in (getf snapshot :map)
                                   unless (typep entry 'worker) collect session)))
@@ -377,21 +398,91 @@ keeps its lists."
       (setf (gethash worker (model-lent model)) session))
     (nreverse violations)))
 
-(defun %check-after-release (ledger model session)
-  "Return the violations of a release of SESSION: the worker it held, if the
-pool still bound it to SESSION, must have been ended."
-  (let ((worker (gethash session (model-holding model))))
-    (remhash session (model-holding model))
-    (let ((violations '()))
-      (when (and worker (not (killed-p ledger worker))
-                 (eq (gethash worker (model-lent model)) session)
-                 (not (member worker (getf (pool-snapshot) :all))))
-        (push (%violation :released-but-live :session session
-                          :worker (worker-id worker))
-              violations))
-      (when (assoc session (getf (pool-snapshot) :map) :test #'equal)
-        (push (%violation :released-but-mapped :session session) violations))
-      violations)))
+(defun %check-new-bindings (ledger model)
+  "Return the violations of bindings the pool made without an acquire, and
+record them in MODEL.
+
+Crash recovery binds a replacement to a session on its own, and the
+session's next acquire is then entitled to get it back without a check.  So
+a binding appearing between operations is a lending like any other: the
+worker must not be known unusable or ended, and must not be one another
+session was lent."
+  (let ((violations '()))
+    (loop for (session . entry) in (getf (pool-snapshot) :map)
+          when (and (typep entry 'worker) (eq :bound (worker-state entry)))
+            do (let ((owner (gethash entry (model-lent model))))
+                 (flet ((add (kind &rest detail)
+                          (push (apply #'%violation kind :session session
+                                       :worker (worker-id entry) detail)
+                                violations)))
+                   (cond
+                     ((null owner)
+                      (when (gethash entry (model-unusable model))
+                        (add :bound-unusable))
+                      (when (killed-p ledger entry)
+                        (add :bound-ended))
+                      (setf (gethash entry (model-lent model)) session
+                            (gethash session (model-holding model)) entry))
+                     ((not (equal owner session))
+                      (add :lent-to-two-sessions :first owner))))))
+    (nreverse violations)))
+
+(defun %check-refusal (ledger session condition before failures-before)
+  "Return the violations of refusing SESSION with CONDITION, given the pool
+BEFORE the acquire (a snapshot) and the injected spawn failures still owed
+then.
+
+A refusal is only a refusal when the pool had a reason, judged from outside
+it:
+- it was not running;
+- a spawn failure injected for this acquire was spent on it;
+- it was full: it had no usable standby to hand over and no worker already
+  bound to the session, and the workers it answers for plus the spawns in
+  flight (%USAGE, from the ledger) leave no room -- and it said so with
+  POOL-CAPACITY-EXCEEDED.
+Anything else is a caller turned away from a pool that could serve it."
+  (let ((after (pool-snapshot))
+        (violations '()))
+    (when (assoc session (getf after :map) :test #'equal)
+      (push (%violation :refused-but-mapped :session session) violations))
+    (let ((stopped (not (getf before :running)))
+          (spent (< (ledger-spawn-failures ledger) failures-before))
+          (full (and (typep condition 'cl-mcp/src/pool:pool-capacity-exceeded)
+                     (not (some (lambda (worker)
+                                  (and (eq :standby (worker-state worker))
+                                       (%fake-alive-p ledger worker)))
+                                (getf before :standby)))
+                     (let ((bound (%bound-worker before session)))
+                       (not (and bound (eq :bound (worker-state bound)))))
+                     (>= (%usage ledger after) *max-pool-size*))))
+      (unless (or stopped spent full)
+        (push (%violation :unexpected-refusal :session session
+                          :condition (type-of condition)
+                          :usage (%usage ledger after) :cap *max-pool-size*)
+              violations)))
+    violations))
+
+(defun %bound-worker (snapshot session)
+  "Return the worker SNAPSHOT's map holds for SESSION, or NIL."
+  (let ((entry (cdr (assoc session (getf snapshot :map) :test #'equal))))
+    (and (typep entry 'worker) entry)))
+
+(defun %check-after-release (ledger model session target)
+  "Return the violations of a release or kill of SESSION, whose worker before
+the operation was TARGET (or NIL).
+
+TARGET must have been ended -- whatever became of it in the pool's lists.
+A worker taken from its session and kept, as a standby or anywhere else,
+leaves the lists consistent and is exactly what a release must not do."
+  (remhash session (model-holding model))
+  (let ((violations '()))
+    (when (and target (not (killed-p ledger target)))
+      (push (%violation :released-but-live :session session
+                        :worker (worker-id target))
+            violations))
+    (when (assoc session (getf (pool-snapshot) :map) :test #'equal)
+      (push (%violation :released-but-mapped :session session) violations))
+    violations))
 
 (defun run-operation (ledger model operation)
   "Apply OPERATION to the pool and return (values OUTCOME VIOLATIONS), the
@@ -413,21 +504,26 @@ Operations:
   (destructuring-bind (kind &optional argument) operation
     (ecase kind
       (:acquire
-       (handler-case
-           (let ((worker (get-or-assign-worker argument)))
-             (values (list :lent (worker-id worker))
-                     (%check-acquire ledger model argument worker)))
-         (error (condition)
-           (remhash argument (model-holding model))
-           (values (list :refused (type-of condition))
-                   (when (assoc argument (getf (pool-snapshot) :map) :test #'equal)
-                     (list (%violation :refused-but-mapped :session argument)))))))
+       (let ((before (pool-snapshot))
+             (failures-before (ledger-spawn-failures ledger)))
+         (handler-case
+             (let ((worker (get-or-assign-worker argument)))
+               (values (list :lent (worker-id worker))
+                       (%check-acquire ledger model argument worker)))
+           (error (condition)
+             (remhash argument (model-holding model))
+             (values (list :refused (type-of condition))
+                     (%check-refusal ledger argument condition
+                                     before failures-before))))))
       ((:release :kill-session)
-       (if (eq kind :release)
-           (release-session argument)
-           (kill-session-worker argument))
-       (values (list kind argument)
-               (%check-after-release ledger model argument)))
+       ;; Named before the operation: what it must end is the worker the
+       ;; session held, wherever the operation leaves it.
+       (let ((target (%bound-worker (pool-snapshot) argument)))
+         (if (eq kind :release)
+             (release-session argument)
+             (kill-session-worker argument))
+         (values (list kind argument)
+                 (%check-after-release ledger model argument target))))
       (:die
        (let ((worker (%worker-at ledger argument)))
          (when worker
@@ -495,6 +591,7 @@ then the fixture's teardown, whose reaping is itself a violation."
                      (run-operation ledger model operation)
                    (declare (ignore outcome))
                    (note index operation found))
+                 (note index operation (%check-new-bindings ledger model))
                  (note index operation
                        (ownership-violations
                         ledger

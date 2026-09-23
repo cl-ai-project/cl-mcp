@@ -73,8 +73,13 @@
                 #:api-fn
                 #:definition-digest)
   (:import-from #:cl-mcp/src/pool
+                #:get-or-assign-worker
                 #:release-session
                 #:shutdown-pool)
+  ;; Bare: the worker struct is named in full where a wrong implementation
+  ;; needs it, and the pool's lock through the BT nickname.
+  (:import-from #:cl-mcp/src/worker-client)
+  (:import-from #:bordeaux-threads)
   (:import-from #:cl-mcp/specs
                 #:register-specifications
                 #:contract-names
@@ -1067,6 +1072,20 @@ processes nobody owns."
             (lambda (worker) (declare (ignore worker)) nil)))
       (apply real arguments))))
 
+(defun %release-back-to-standby (session-id)
+  "A wrong RELEASE-SESSION, for the negative control: it takes the session's
+worker out of the map and puts it back on the standby list, unended.  Every
+list stays consistent -- the worker is tracked, held once, in a state that
+matches where it is -- so only a check that names the worker a release must
+end, before the release, sees that it was not."
+  (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+    (let ((worker (gethash session-id cl-mcp/src/pool::*affinity-map*)))
+      (when (typep worker 'cl-mcp/src/worker-client:worker)
+        (remhash session-id cl-mcp/src/pool::*affinity-map*)
+        (setf (cl-mcp/src/worker-client:worker-state worker) :standby
+              (cl-mcp/src/worker-client:worker-session-id worker) nil)
+        (push worker cl-mcp/src/pool::*standby-workers*)))))
+
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
@@ -1364,7 +1383,24 @@ the argument as it is after the call cannot see."
            :replacement (%without-ending-workers real-shutdown)
            :targets (list (list :property pool-sequences) (list :property pool-full))
            :must-fail (list (list :property pool-sequences)
-                            (list :property pool-full))))))
+                            (list :property pool-full)))
+     (list :function 'get-or-assign-worker
+           :description "refuses every session, so the pool never lends and never leaks"
+           :replacement (lambda (session-id)
+                          (error "Refusing ~A." session-id))
+           :targets (list (list :property pool-sequences) (list :property pool-full))
+           :must-fail (list (list :property pool-sequences)
+                            (list :property pool-full)))
+     (list :function 'release-session
+           :description "puts a released session's worker back on the standby list, unended"
+           :replacement #'%release-back-to-standby
+           :targets (list (list :property pool-sequences) (list :property pool-full))
+           :must-fail (list (list :property pool-sequences)))
+     (list :function 'cl-mcp/src/pool::%effective-pool-size
+           :description "counts nothing, so replenishment spawns past the cap"
+           :replacement (lambda () 0)
+           :targets (list (list :property pool-sequences) (list :property pool-full))
+           :must-fail (list (list :property pool-full))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put

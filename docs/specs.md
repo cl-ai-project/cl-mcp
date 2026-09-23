@@ -1294,7 +1294,12 @@ between states.
   - every worker the ledger says the pool was handed and did not end is
     tracked (a worker in no list and never ended is an orphan);
   - a mapped worker names its own session;
-  - the pool counts no more than its cap.
+  - the pool answers for no more workers than its cap, counted from the
+    ledger rather than by the pool's own arithmetic: every worker it was
+    handed and has not ended, plus every spawn in flight. The pool's own
+    count (`%effective-pool-size`) must agree with that; the pool decides
+    every spawn by it, so an undercount spawns past the cap while agreeing
+    with itself.
 - *At rest:* no placeholder is left in the map, and the tracked list is
   exactly the mapped workers and the standbys.
 - *After a shutdown:* the pool holds nothing, and every worker it was handed
@@ -1303,7 +1308,16 @@ between states.
   - a newly lent worker is `:bound` to its session and not known unusable;
   - a worker is lent to one session only;
   - a session gets its worker back while that worker is usable;
-  - a released or killed session's worker is ended;
+  - a binding the pool made on its own (crash recovery binding a
+    replacement) is a lending too, checked the same way when it appears;
+  - the worker a session held **before** a release or kill must be ended
+    afterwards, whatever became of it in the lists: a release that kept it
+    as a standby leaves every list consistent;
+  - an acquire may be refused only for a reason judged from outside the pool:
+    it was stopped, a spawn failure injected for this acquire was spent on
+    it, or it was full (no usable standby, nothing bound to the session, and
+    the ledger's count leaves no room); anything else is an unexpected
+    refusal;
   - a refused acquire leaves nothing mapped for the session.
 
 **The fixture's own cleanup.** After a run the fixture shuts the pool down and
@@ -1330,6 +1344,13 @@ sessions:
 The generator does not shrink. A counterexample is the whole sequence, and
 each violation names the operation index it followed.
 
+The negative control swaps in five wrong pools, and each must fail:
+- a `release-session` that ends nothing;
+- a `shutdown-pool` that ends nothing;
+- a `get-or-assign-worker` that refuses every session;
+- a `release-session` that keeps the worker as a standby;
+- a `%effective-pool-size` that counts nothing.
+
 **Fixed** (`tests/pool-ownership-test.lisp`, in the default suite): the checks
 catch a leak, and tell at-rest from in-between. Regression cases pin the
 three faults below. With real processes, a released session's process, a
@@ -1337,10 +1358,10 @@ crashed standby's, a dead standby's and every process left at a shutdown are
 all gone afterwards (reaped, not zombies).
 
 **What was found, and what changed.** Mapping the pool turned up three ways
-it lost track of a worker it owned. The fixed case for each fails against the
-old code. The generated sequences catch the first two (18 of 200 random
-sequences failed against the old code); the third needs an ordering no
-sequential run produces.
+it lost track of a worker it owned, and the generated sequences a fourth. The
+fixed case for each fails against the old code. The generated sequences catch
+the first two (18 of 200 random sequences failed against the old code) and
+found the fourth; the third needs an ordering no sequential run produces.
 - **A standby an RPC marked crashed was lent.** A timed-out RPC (the
   project-root broadcast reaches every standby) marks the standby `:crashed`
   and closes its connection, while the process lives on until the reaper gets
@@ -1358,6 +1379,25 @@ sequential run produces.
   and signals `pool-shutting-down`. This one needs two threads in a fixed
   order (a spawn that has started, a shutdown, then the spawn finishing),
   pinned with semaphores. It is the one ordering test in 4A.
+- **Recovery left a crashed standby on the standby list.** A standby whose
+  process died and which an RPC then marked `:crashed` reaches recovery's
+  `:crashed` arm. That arm removed it from `*all-workers*` and ended it, but
+  left it on `*standby-workers*`: an ended worker, still offered as a
+  standby and still counted when replenishing. It now leaves both lists.
+
+The review of the first version of these checks found three ways they could
+pass a wrong pool, and each is now a negative control as well as a fixed
+case:
+- an acquire that refuses everything, which keeps the lists empty and
+  consistent (every refusal now needs a reason);
+- a release that puts the worker back as a standby, unended (the worker a
+  release must end is named before it runs);
+- a pool size that counts nothing, so replenishment spawns past the cap
+  (the cap is checked against the ledger's count).
+
+Making the model check recovery's own bindings removed one false positive:
+a replacement that died after recovery bound it was read as an unusable
+worker newly lent.
 
 Found and left for later phases (see *Known issues*): one crash counted twice
 by the circuit breaker, and the pool briefly over its cap during recovery

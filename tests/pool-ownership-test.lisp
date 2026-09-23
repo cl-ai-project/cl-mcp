@@ -52,6 +52,10 @@
   "Return the violation kinds an operation sequence produces."
   (violation-kinds (apply #'run-operation-sequence operations options)))
 
+(defun %kinds* (operations options)
+  "Return the violation kinds of OPERATIONS run with the plist OPTIONS."
+  (violation-kinds (apply #'run-operation-sequence operations options)))
+
 ;;; ------------------------------------------------------------------------
 ;;; The checks find what they claim to
 
@@ -100,6 +104,47 @@
       (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
         (remhash "s9" cl-mcp/src/pool::*affinity-map*)))))
 
+(deftest the-checks-catch-a-pool-that-agrees-with-itself
+  ;; Three wrong pools whose lists stay consistent, so only a check made from
+  ;; outside them -- the model's promises, the ledger's count -- finds them.
+  (flet ((swapped (symbol replacement operations &rest options)
+           (let ((original (fdefinition symbol)))
+             (unwind-protect
+                  (progn (setf (fdefinition symbol) replacement)
+                         (%kinds* operations options))
+               (setf (fdefinition symbol) original)))))
+    (testing "an acquire that refuses a pool with room is not a refusal"
+      (ok (member :unexpected-refusal
+                  (swapped 'get-or-assign-worker
+                           (lambda (session) (error "Refusing ~A." session))
+                           '((:acquire "s0")) :warmup 0))))
+    (testing "a release that keeps the worker as a standby did not end it"
+      (ok (member :released-but-live
+                  (swapped 'release-session
+                           (lambda (session)
+                             (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                               (let ((worker (gethash session
+                                                      cl-mcp/src/pool::*affinity-map*)))
+                                 (when (typep worker 'worker)
+                                   (remhash session cl-mcp/src/pool::*affinity-map*)
+                                   (setf (worker-state worker) :standby
+                                         (cl-mcp/src/worker-client:worker-session-id
+                                          worker)
+                                         nil)
+                                   (push worker cl-mcp/src/pool::*standby-workers*)))))
+                           '((:acquire "s0") (:release "s0"))))))
+    (testing "a pool that undercounts itself is over its cap by the ledger's count"
+      (let ((kinds (swapped 'cl-mcp/src/pool::%effective-pool-size (lambda () 0)
+                            '((:run-work) (:acquire "s0") (:run-work))
+                            :warmup 2 :max-size 2)))
+        (ok (member :over-capacity kinds))
+        (ok (member :size-miscounted kinds))))
+    (testing "and the real pool passes all three sequences"
+      (ok (null (run-operation-sequence '((:acquire "s0")) :warmup 0)))
+      (ok (null (run-operation-sequence '((:acquire "s0") (:release "s0")))))
+      (ok (null (run-operation-sequence '((:run-work) (:acquire "s0") (:run-work))
+                                        :warmup 2 :max-size 2))))))
+
 ;;; ------------------------------------------------------------------------
 ;;; The three faults fixed in 4A
 
@@ -146,6 +191,36 @@
       (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
         (remhash "s9" cl-mcp/src/pool::*affinity-map*))
       (ok (null (ownership-violations ledger))))))
+
+(deftest a-crashed-standby-recovery-ends-leaves-the-standby-list
+  ;; Found by the generated sequences: a standby whose process died, then
+  ;; marked crashed by an RPC before recovery ran.  Recovery's :CRASHED arm
+  ;; took it out of the tracked list and ended it, and left it on the standby
+  ;; list -- ended, still offered, and counted when replenishing.
+  (ok (null (run-operation-sequence
+             '((:run-work) (:die 4) (:health-check) (:rpc-crash 2) (:run-work))
+             :warmup 2 :max-size 2)))
+  (with-fake-pool (ledger :warmup 1)
+    (run-pending-work ledger)
+    (let ((standby (first (getf (pool-snapshot) :standby))))
+      (setf (gethash standby (cl-mcp/specs/pool-fixtures::ledger-dead ledger)) t)
+      (cl-mcp/src/pool::%check-worker-health)
+      (cl-mcp/src/worker-client::%mark-worker-crashed standby "timeout")
+      (run-pending-work ledger)
+      (ok (killed-p ledger standby))
+      (ok (not (member standby (getf (pool-snapshot) :standby)))
+          "and it is no longer offered as a standby"))))
+
+(deftest a-worker-recovery-bound-comes-back-without-a-check
+  ;; The other finding was the model's: recovery binds a replacement to the
+  ;; session on its own, and the session's next acquire may return it without
+  ;; a liveness check, as it returns any existing binding.  Counted as a new
+  ;; lending, a replacement that died afterwards read as an unusable worker
+  ;; newly lent.
+  (ok (null (run-operation-sequence
+             '((:acquire "s2") (:die 6) (:health-check) (:run-work) (:die 5)
+               (:acquire "s2"))
+             :warmup 2 :max-size 2))))
 
 (defun %spawn-racing-shutdown (&key restart)
   "Run an on-demand spawn that completes after a shutdown -- and, with
