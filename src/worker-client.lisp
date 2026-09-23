@@ -28,6 +28,7 @@
            #:worker-rpc-error
            #:rpc-not-sent
            #:rpc-not-sent-reason
+           #:rpc-answer-withdrawn
            #:worker-tcp-port
            #:worker-swank-port
            #:worker-pid
@@ -134,6 +135,17 @@ indicate stream corruption and require marking the worker crashed."))
   (:documentation "Signalled by WORKER-RPC when its BEFORE-SEND hook withheld
 the request.  Nothing reached the worker, whose stream and state are as they
 were: the request did not run."))
+
+(define-condition rpc-answer-withdrawn (error)
+  ((worker :initarg :worker :reader rpc-answer-withdrawn-worker))
+  (:report (lambda (condition stream)
+             (format stream "Worker ~A answered, and the answer was withdrawn."
+                     (ignore-errors
+                      (worker-id (rpc-answer-withdrawn-worker condition))))))
+  (:documentation "Signalled by WORKER-RPC when its AFTER-RECEIVE hook declined
+to publish an answer the worker gave -- because a cancellation stopped the
+worker first.  The request reached the worker; the answer is not delivered,
+and the cancellation stands."))
 
 (define-condition line-too-long (error)
   ((limit :initarg :limit :reader line-too-long-limit))
@@ -983,8 +995,10 @@ BEFORE-SEND, when given, is called with the stream held, just before the
 request is sent: it returns :SEND to let it go, or a keyword saying why not,
 and RPC-NOT-SENT is signalled with that keyword -- the worker untouched.
 AFTER-RECEIVE, when given, is called with the stream still held once the
-worker's answer has been read, a JSON-RPC error answer included.  Between the
-two the worker is running this request and nothing else.
+worker's answer has been read, a JSON-RPC error answer included: it returns
+:PUBLISH to deliver the answer, or anything else to withhold it, and then
+RPC-ANSWER-WITHDRAWN is signalled instead of either the result or the error.
+Between the two the worker is running this request and nothing else.
 
 Signals WORKER-CRASHED if the worker process has died (EOF on stream),
 timed out (sb-ext:timeout), encountered a stream/socket error, or if
@@ -1038,58 +1052,72 @@ without marking the worker as crashed."
       (let ((verdict (funcall before-send)))
         (unless (eq :send verdict)
           (error 'rpc-not-sent :worker worker :reason verdict))))
-    (let ((id (incf (worker-request-counter worker))))
-      (handler-case
-          (progn
-            (%send-json-rpc (worker-stream worker) id method params)
-            (multiple-value-bind (result leaked)
-                (%read-json-rpc-response (worker-stream worker) id timeout
-                                         :preserve-json-types preserve-json-types)
-              ;; Recorded for pool-status.  Nothing here acts on it: the
-              ;; worker retires itself rather than waiting to be told, since
-              ;; only it can see whether the thread is still running now.
-              (setf (worker-leaked-threads worker)
-                    (if (integerp leaked) leaked 0))
-              (when after-receive (funcall after-receive))
-              result))
-        (end-of-file ()
-          ;; A worker that retired for carrying a leaked thread exits without
-          ;; answering, which arrives here as EOF like any other death.  The
-          ;; count it reported on its last answer is what tells the two apart,
-          ;; and the distinction matters: %MONITOR-INIT treats a crash by the
-          ;; runtime-init owner as init-attributable and disables
-          ;; initialization for every later worker.  A deliberate retirement
-          ;; is not an init failure.
-          (let ((reason (if (%retired-for-leaked-thread-p worker)
-                            *retired-leaked-thread-reason*
-                            "eof")))
-            (%mark-worker-crashed worker reason)
-            (error 'worker-crashed :worker worker :reason reason)))
-        (sb-ext:timeout ()
-          (%mark-worker-crashed worker "timeout")
-          (error 'worker-crashed :worker worker :reason "timeout"))
-        (stream-error ()
-          (%mark-worker-crashed worker "stream-error")
-          (error 'worker-crashed :worker worker :reason "stream-error"))
-        (worker-rpc-error (e)
-          ;; Legitimate worker-side error (e.g. "symbol not found").
-          ;; Re-signal without marking the worker as crashed -- but record the
-          ;; count first: a handler can leak its deadline's thread and then
-          ;; return an error, and updating only on success leaves the parent
-          ;; reporting whatever it last saw, stale in both directions.
-          (let ((leaked (worker-rpc-error-leaked-threads e)))
-            (setf (worker-leaked-threads worker)
-                  (if (integerp leaked) leaked 0)))
-          ;; An error the worker returned is still an answer: the request ran.
-          (when after-receive (funcall after-receive))
-          (error e))
-        (error (e)
-          ;; Protocol error (parse failure, ID mismatch, etc.).
-          ;; Mark worker as crashed since the stream is desynchronized.
-          (%mark-worker-crashed worker
-                                (format nil "protocol-error: ~A" e))
-          (error 'worker-crashed :worker worker
-                 :reason (format nil "protocol-error: ~A" e)))))))
+    (let* ((id (incf (worker-request-counter worker)))
+           ;; An error the worker returned: an answer, published below like
+           ;; a result, and only then re-signalled.
+           (answered-error nil)
+           (result
+             (handler-case
+                 (progn
+                   (%send-json-rpc (worker-stream worker) id method params)
+                   (multiple-value-bind (result leaked)
+                       (%read-json-rpc-response (worker-stream worker) id timeout
+                                                :preserve-json-types preserve-json-types)
+                     ;; Recorded for pool-status.  Nothing here acts on it: the
+                     ;; worker retires itself rather than waiting to be told,
+                     ;; since only it can see whether the thread is still
+                     ;; running now.
+                     (setf (worker-leaked-threads worker)
+                           (if (integerp leaked) leaked 0))
+                     result))
+               (end-of-file ()
+                 ;; A worker that retired for carrying a leaked thread exits
+                 ;; without answering, which arrives here as EOF like any
+                 ;; other death.  The count it reported on its last answer is
+                 ;; what tells the two apart, and the distinction matters:
+                 ;; %MONITOR-INIT treats a crash by the runtime-init owner as
+                 ;; init-attributable and disables initialization for every
+                 ;; later worker.  A deliberate retirement is not an init
+                 ;; failure.
+                 (let ((reason (if (%retired-for-leaked-thread-p worker)
+                                   *retired-leaked-thread-reason*
+                                   "eof")))
+                   (%mark-worker-crashed worker reason)
+                   (error 'worker-crashed :worker worker :reason reason)))
+               (sb-ext:timeout ()
+                 (%mark-worker-crashed worker "timeout")
+                 (error 'worker-crashed :worker worker :reason "timeout"))
+               (stream-error ()
+                 (%mark-worker-crashed worker "stream-error")
+                 (error 'worker-crashed :worker worker :reason "stream-error"))
+               (worker-rpc-error (e)
+                 ;; Legitimate worker-side error (e.g. "symbol not found").
+                 ;; Not a crash -- but record the count first: a handler can
+                 ;; leak its deadline's thread and then return an error, and
+                 ;; updating only on success leaves the parent reporting
+                 ;; whatever it last saw, stale in both directions.
+                 (let ((leaked (worker-rpc-error-leaked-threads e)))
+                   (setf (worker-leaked-threads worker)
+                         (if (integerp leaked) leaked 0)))
+                 (setf answered-error e)
+                 nil)
+               (error (e)
+                 ;; Protocol error (parse failure, ID mismatch, etc.).
+                 ;; Mark worker as crashed since the stream is desynchronized.
+                 (%mark-worker-crashed worker
+                                       (format nil "protocol-error: ~A" e))
+                 (error 'worker-crashed :worker worker
+                        :reason (format nil "protocol-error: ~A" e))))))
+      ;; The worker answered.  Whether that answer is published is the
+      ;; caller's to decide, with the stream still held, and outside the
+      ;; HANDLER-CASE above, which would take a refusal for a protocol
+      ;; error: a cancellation can have stopped this worker between the read
+      ;; and here, and then neither the answer nor the cancellation may be
+      ;; reported as having happened alone.
+      (when (and after-receive (not (eq :publish (funcall after-receive))))
+        (error 'rpc-answer-withdrawn :worker worker))
+      (when answered-error (error answered-error))
+      result)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Public API — kill

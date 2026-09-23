@@ -122,6 +122,7 @@ null an inline call would never have sent."
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-CRASHED-REASON")
     ("CL-MCP/SRC/WORKER-CLIENT" . "RPC-NOT-SENT")
     ("CL-MCP/SRC/WORKER-CLIENT" . "RPC-NOT-SENT-REASON")
+    ("CL-MCP/SRC/WORKER-CLIENT" . "RPC-ANSWER-WITHDRAWN")
     ("CL-MCP/SRC/WORKER-CLIENT" . "KILL-WORKER")
     ("CL-MCP/SRC/WORKER-CLIENT" . "SIGNAL-WORKER-TERMINATE")
     ("CL-MCP/SRC/WORKER-CLIENT" . "WORKER-LAST-CRASH-REASON")
@@ -218,6 +219,9 @@ When crash details are provided, they are included for diagnostics."
 (defvar %cached-rpc-not-sent-reason% nil
   "Cached fdefinition for WORKER-CLIENT:RPC-NOT-SENT-REASON.")
 
+(defvar %cached-rpc-answer-withdrawn-sym% nil
+  "Cached symbol WORKER-CLIENT:RPC-ANSWER-WITHDRAWN.")
+
 (defvar %cached-kill-worker% nil
   "Cached fdefinition for WORKER-CLIENT:KILL-WORKER.")
 (defvar %cached-signal-worker-terminate% nil
@@ -255,6 +259,8 @@ per image after verify-proxy-bindings has validated the symbols."
           %cached-rpc-not-sent-reason%
           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT"
                                  "RPC-NOT-SENT-REASON"))
+          %cached-rpc-answer-withdrawn-sym%
+          (%resolve "CL-MCP/SRC/WORKER-CLIENT" "RPC-ANSWER-WITHDRAWN")
           %cached-kill-worker%
           (fdefinition (%resolve "CL-MCP/SRC/WORKER-CLIENT" "KILL-WORKER"))
           %cached-signal-worker-terminate%
@@ -282,6 +288,7 @@ image or pool lifecycle are cleared before re-verification."
         %cached-worker-crashed-reason% nil
         %cached-rpc-not-sent-sym% nil
         %cached-rpc-not-sent-reason% nil
+        %cached-rpc-answer-withdrawn-sym% nil
         %cached-kill-worker% nil
         %cached-signal-worker-terminate% nil
         %cached-worker-last-crash-reason% nil
@@ -384,6 +391,17 @@ as this request timing out or crashing mid-run."
                       "The worker this session was using was stopped to cancel another request before this one was sent to it.")
                      "isError" t)
             :not-executed)))
+      ((typep condition %cached-rpc-answer-withdrawn-sym%)
+       ;; The worker answered, but the cancellation reached the registry
+       ;; first and stopped it: the cancellation is what is reported.  Its
+       ;; stop left the session a fresh image, so the answer, delivered now,
+       ;; would describe state that no longer exists.
+       (%with-execution-status
+        (make-ht "content"
+                 (text-content
+                  "Request cancelled while it was running: the worker running it was stopped. All Lisp state (loaded systems, defined functions, package state) has been reset. Please run load-system again to restore your environment.")
+                 "isError" t)
+        :execution-unknown))
       ((typep condition %cached-worker-crashed-sym%)
        ;; Delivering the notification here is what settles the reset this
        ;; death owes the user, so consume the flag that records it.  The pool

@@ -165,10 +165,20 @@ another request's cancellation.  Only :SEND lets the request run."
              :send))))
 
 (defun note-response (record)
-  "Record that the worker's answer to RECORD has been read: it is done, and a
-cancellation from here on changes nothing."
+  "Decide, once the worker's answer to RECORD has been read, whether it is
+delivered -- the one point at which an answer and a cancellation are ordered.
+
+Under the registry lock, as CANCEL-REQUEST-RECORD is: if RECORD's
+cancellation got there first, its worker has been signalled to stop, so the
+answer is withheld (:WITHDRAWN) and RECORD stays :EXECUTING -- the request
+reached the worker, and it is reported cancelled, not answered.  Otherwise
+RECORD becomes :RESPONDED (:PUBLISH), and a cancellation from here on is too
+late.  Never both: an answer delivered from a worker a cancellation stopped
+would report a success in a session whose state was just lost."
   (with-lock-held (*requests-lock*)
-    (setf (request-phase record) :responded)))
+    (cond ((request-cancel-requested record) :withdrawn)
+          (t (setf (request-phase record) :responded)
+             :publish))))
 
 (defun cancel-request-record (record stop-worker)
   "Ask for RECORD's cancellation and return what that did:
