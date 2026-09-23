@@ -14,6 +14,8 @@
                 #:+in-flight-kinds+
                 #:run-shutdown-scenario
                 #:shutdown-scenario-violations
+                #:run-late-scenario
+                #:+late-kinds+
                 #:run-concurrent-plan
                 #:concurrency-violation-kinds
                 #:with-concurrent-pool
@@ -368,6 +370,29 @@
                         (zerop (cl-mcp/src/pool::generation-spawns
                                 cl-mcp/src/pool::*generation*)))))
             "and the new pool's account never held the old spawn")))))
+
+(deftest late-work-stays-with-its-generation
+  ;; What a shutdown that gave up on its deadline leaves behind is the
+  ;; stopped generation's: a new pool of one worker neither refuses for it
+  ;; nor takes its worker in.
+  (dolist (kind +late-kinds+)
+    (dolist (warmup '(0 1))
+      (let ((violations (run-late-scenario
+                         (list :late kind :max-size 1 :warmup warmup))))
+        (ok (null violations)
+            (format nil "~(~A~), warmup ~D~@[: ~S~]" kind warmup violations)))))
+  (testing "and the check catches one account carried across pools"
+    (ok (intersection '(:new-pool-refused :late-worker-joined-new-pool
+                        :new-account-holds-old-work)
+                      (concurrency-violation-kinds
+                       (%with-replaced 'cl-mcp/src/pool::%make-generation
+                                       (lambda (id)
+                                         (declare (ignore id))
+                                         cl-mcp/src/pool::*generation*)
+                                       (lambda ()
+                                         (run-late-scenario
+                                          (list :late :acquire-spawn :max-size 1
+                                                :warmup 0)))))))))
 
 ;;; ------------------------------------------------------------------------
 ;;; Waiting for a worker

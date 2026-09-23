@@ -162,14 +162,14 @@ fixture did not create, so the cleanup fails while the body unwinds."
                          cl-mcp/src/utils/sanitize:sanitize-for-json
                          cl-mcp/src/utils/sanitize:sanitize-error-message)))
     (ok (= 3 (length (contract-names))))
-    (ok (= 52 (length (property-names))))
-    (ok (= 52 (length (remove-duplicates (property-names)))))
+    (ok (= 53 (length (property-names))))
+    (ok (= 53 (length (remove-duplicates (property-names)))))
     (ok (%same-names-p (remove-if-not (lambda (name)
                                         (string= "CL-MCP/SPECS/CONCURRENCY"
                                                  (package-name (symbol-package name))))
                                       (property-names))
                        (cl-mcp/specs/concurrency:property-names))
-        "the concurrency properties are the two of specs/concurrency.lisp")
+        "the concurrency properties are the three of specs/concurrency.lisp")
     (ok (%same-names-p (remove-if-not (lambda (name)
                                         (string= "CL-MCP/SPECS/RESET-EVENTS"
                                                  (package-name (symbol-package name))))
@@ -310,7 +310,10 @@ fixture did not create, so the cleanup fails while the body unwinds."
                            cl-mcp/src/pool::%begin-ending
                            cl-mcp/src/pool::%end-worker
                            cl-mcp/src/pool::%check-worker-health
-                           cl-mcp/src/pool::%effective-pool-size)))))
+                           cl-mcp/src/pool::%effective-pool-size
+                           cl-mcp/src/pool::%schedule-replenish
+                           cl-mcp/src/pool:initialize-pool
+                           cl-mcp/src/pool::%make-generation)))))
   (testing "a definition missing from the listing is reported"
     (let ((registry (make-hash-table-registry)))
       (register-specifications registry)
@@ -341,7 +344,7 @@ fixture did not create, so the cleanup fails while the body unwinds."
                           (cl-mcp/specs/runner::property-targets
                            (find-property name registry)))
                   (format nil "~S is an :about target of ~S" function name)))))))
-    (ok (<= 8 checked) "every reset and shutdown control was looked at")))
+    (ok (<= 9 checked) "every reset and shutdown control was looked at")))
 
 (deftest bundle-reregistration-is-stable
   (let ((registry (make-hash-table-registry)))

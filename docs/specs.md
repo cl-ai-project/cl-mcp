@@ -59,8 +59,9 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/proxy:reset-notice` | none | the same two |
 | `cl-mcp/src/reset-events:record-termination`, `claim-session-resets`, `discard-session-resets`, `discard-all-resets` | none | the same two |
 | `cl-mcp/src/object-registry:register-object`, `lookup-object`, `clear-registry` | none (see *Reset events*) | `object-ids-never-outlive-their-image` |
-| `cl-mcp/src/pool:shutdown-pool`, `get-or-assign-worker`, `release-session` (concurrency) | none (see *Concurrency and shutdown*) | `pool-shutdown-leaves-nothing-behind`, `pool-holds-while-operations-overlap` |
-| `cl-mcp/src/pool::%spawn-and-bind`, `%replenish-standbys`, `%handle-worker-crash`, `%signal-worker`, `%wait-for-work-in-flight`, `%begin-ending`, `%end-worker` (internal) | none | `pool-shutdown-leaves-nothing-behind` |
+| `cl-mcp/src/pool:shutdown-pool`, `get-or-assign-worker`, `release-session` (concurrency) | none (see *Concurrency and shutdown*) | `pool-shutdown-leaves-nothing-behind`, `pool-late-work-stays-with-its-generation`, `pool-holds-while-operations-overlap` |
+| `cl-mcp/src/pool::%spawn-and-bind`, `%schedule-replenish`, `%replenish-standbys`, `%handle-worker-crash`, `%signal-worker`, `%wait-for-work-in-flight`, `%begin-ending`, `%end-worker` (internal) | none | `pool-shutdown-leaves-nothing-behind` |
+| `cl-mcp/src/pool:initialize-pool`, `cl-mcp/src/pool::%make-generation`, `%effective-pool-size` (internal) | none | `pool-late-work-stays-with-its-generation` |
 | `cl-mcp/src/pool:kill-session-worker`, `cl-mcp/src/pool::%check-worker-health`, `%handle-worker-crash`, `%effective-pool-size` (internal) | none | `pool-holds-while-operations-overlap` |
 
 Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize`,
@@ -1767,7 +1768,18 @@ which processes died, every thread the pool started.
   shutdown. The interleaving is the scheduler's: a seed replays the
   operations, not the run.
 
-- Generated: `pool-shutdown-leaves-nothing-behind` draws scenarios;
+- *Late-work scenarios* hold one spawn -- an acquire's, a replenishment's or
+  a recovery's -- past the shutdown's deadline, initialize a new pool with a
+  cap of one or two, with or without a standby, and only then let the old
+  spawn return. The checks: the shutdown did not wait past its deadline; the
+  new pool lends a session a worker at once and keeps its standby; its
+  account never holds the old spawn; the late worker never enters it and is
+  ended by the work that spawned it; and the new pool, shut down in turn,
+  owes nothing. Deterministic.
+
+- Generated: `pool-shutdown-leaves-nothing-behind` draws scenarios whose
+  work finishes within the deadline -- its claim is conditional on that;
+  `pool-late-work-stays-with-its-generation` draws work that does not; and
   `pool-holds-while-operations-overlap` draws plans.
 - Fixed (`tests/concurrency-test.lisp`, default suite): each in-flight kind
   alone and all together; the checks catching four wrong implementations;
@@ -1775,8 +1787,9 @@ which processes died, every thread the pool started.
   (`pool-test`): a shutdown behind a running `(sleep 60)` returns at once
   and the worker's process is gone.
 - Negative control: a shutdown that does not signal its workers, one that
-  does not wait for work in flight, and a pool that takes a worker out to
-  end it without accounting for it.
+  does not wait for work in flight, a pool that takes a worker out to end it
+  without accounting for it, and a new pool that carries the stopped one's
+  generation on, so one account spans both.
 
 **What was found, and what changed.**
 - **Shutdown waited behind a running request**: it ended workers without
@@ -1797,7 +1810,10 @@ which processes died, every thread the pool started.
   count, the replenishment flag and its handle were image-wide, so a spawn
   an old pool's shutdown gave up on filled the next pool's cap -- with a cap
   of one, every session refused. All three are fixed by charging the work to
-  its generation; each has a fixed case.
+  its generation; each has a fixed case. The property first written for the
+  shutdown claimed it left nothing behind unconditionally; it now says so
+  only of work that finishes within the deadline, and the late work has a
+  property of its own.
 - **A queued request waited without a deadline**, and a cancelled one went on
   waiting until the request ahead of it finished.
 

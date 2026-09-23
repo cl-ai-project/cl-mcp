@@ -1212,6 +1212,8 @@ the argument as it is after the call cannot see."
           (%bundle-name :property "OBJECT-IDS-NEVER-OUTLIVE-THEIR-IMAGE"))
         (shutdowns
           (%bundle-name :property "POOL-SHUTDOWN-LEAVES-NOTHING-BEHIND"))
+        (late-work
+          (%bundle-name :property "POOL-LATE-WORK-STAYS-WITH-ITS-GENERATION"))
         ;; Taken before any swap, so a wrong implementation can defer to it.
         (real-read (fdefinition 'allowed-read-path))
         (real-write (fdefinition 'ensure-write-path))
@@ -1567,7 +1569,17 @@ the argument as it is after the call cannot see."
            :description "takes a worker out to end it without accounting for it"
            :replacement #'identity
            :targets (list (list :property shutdowns))
-           :must-fail (list (list :property shutdowns))))))
+           :must-fail (list (list :property shutdowns)))
+     ;; Work past the deadline.  The fault is one account spanning pools: a
+     ;; new pool that is the old generation carried on, so the late spawn
+     ;; fills its cap and its worker is taken in.
+     (list :function 'cl-mcp/src/pool::%make-generation
+           :description "carries the stopped pool's generation on into the next pool"
+           :replacement (lambda (id)
+                          (declare (ignore id))
+                          cl-mcp/src/pool::*generation*)
+           :targets (list (list :property late-work))
+           :must-fail (list (list :property late-work))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put

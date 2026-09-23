@@ -1,7 +1,8 @@
 ;;;; specs/concurrency.lisp
 ;;;;
 ;;;; Properties of the worker pool when operations overlap in time (Phase 4D):
-;;;; what a shutdown leaves behind, whatever was in flight when it began, and
+;;;; what a shutdown leaves behind when the work in flight finishes within its
+;;;; deadline, what work that outlives the deadline may and may not touch, and
 ;;;; what must hold at every moment while clients act at once.  Both run the
 ;;;; real pool with fake workers and real threads
 ;;;; (specs/concurrency-fixtures.lisp); both judge by the fake lifecycle's own
@@ -18,8 +19,8 @@
 ;;;; through the proxy (tests/concurrency-test.lisp has the waits), and the
 ;;;; runtime-init owner.
 ;;;;
-;;;; The first property is deterministic: a seed replays the scenario and
-;;;; the run.  The second is not: a seed replays the operations each client
+;;;; The first two properties are deterministic: a seed replays the scenario
+;;;; and the run.  The third is not: a seed replays the operations each client
 ;;;; applies, and the scheduler decides how they interleave, so a failure
 ;;;; found once may not recur on replay.  Its fixed cases are what pin the
 ;;;; orderings down.
@@ -31,6 +32,7 @@
                 #:defproperty
                 #:defgenerator)
   (:import-from #:cl-mcp/src/pool
+                #:initialize-pool
                 #:shutdown-pool
                 #:get-or-assign-worker
                 #:release-session
@@ -39,6 +41,8 @@
                 #:draw-shutdown-scenario
                 #:run-shutdown-scenario
                 #:shutdown-scenario-violations
+                #:draw-late-scenario
+                #:run-late-scenario
                 #:random-concurrent-plan
                 #:run-concurrent-plan)
   (:export #:register-specifications
@@ -58,15 +62,16 @@ properties are about runs, not calls."
 (defun property-names ()
   "Return the properties this file defines."
   '(pool-shutdown-leaves-nothing-behind
+    pool-late-work-stays-with-its-generation
     pool-holds-while-operations-overlap))
 
 (defun spec-names ()
   "Return the named data specs this file defines."
-  '(shutdown-scenario concurrent-plan))
+  '(shutdown-scenario late-scenario concurrent-plan))
 
 (defun generator-names ()
   "Return the custom generators this file defines."
-  '(shutdown-scenario-generator concurrent-plan-generator))
+  '(shutdown-scenario-generator late-scenario-generator concurrent-plan-generator))
 
 (defun call-examples ()
   "Return the concrete CHECK-CALL examples of this file: none.  Its fixed cases
@@ -80,6 +85,10 @@ Registering again replaces each definition by name.  Registering runs nothing."
     "Draw what is in flight when a shutdown begins (DRAW-SHUTDOWN-SCENARIO)."
     (draw-shutdown-scenario))
   (defspec shutdown-scenario list (:generator shutdown-scenario-generator))
+  (defgenerator late-scenario-generator ()
+    "Draw a spawn that outlives a shutdown's deadline (DRAW-LATE-SCENARIO)."
+    (draw-late-scenario))
+  (defspec late-scenario list (:generator late-scenario-generator))
   (defgenerator concurrent-plan-generator ()
     "Draw clients' operations and a pool sizing (RANDOM-CONCURRENT-PLAN)."
     (random-concurrent-plan))
@@ -87,18 +96,21 @@ Registering again replaces each definition by name.  Registering runs nothing."
 
   (defproperty pool-shutdown-leaves-nothing-behind
       ((scenario shutdown-scenario))
-    "A shutdown returns promptly whatever is in flight when it begins -- an RPC
-holding a worker's stream included, which its signal lets go -- and once it
-has returned the pool owes nothing: every worker it was handed is ended, no
-spawn or ending of its completes afterwards, its lists and counts are empty,
-and no thread it started runs on.  An acquire it overtook, or one made after
-it began, is refused, never lent a worker."
+    "When the work in flight at a shutdown finishes within the shutdown's
+deadline, the shutdown returns promptly -- an RPC holding a worker's stream
+included, which its signal lets go -- and once it has returned the pool owes
+nothing: every worker it was handed is ended, no spawn or ending of its
+completes afterwards, its lists and counts are empty, and no thread it
+started runs on.  An acquire it overtook, or one made after it began, is
+refused, never lent a worker.  Work that outlives the deadline is another
+matter: see POOL-LATE-WORK-STAYS-WITH-ITS-GENERATION."
     ;; The surfaces the scenarios drive, and every function a negative
     ;; control breaks for this property.
     (:about shutdown-pool
             get-or-assign-worker
             release-session
             cl-mcp/src/pool::%spawn-and-bind
+            cl-mcp/src/pool::%schedule-replenish
             cl-mcp/src/pool::%replenish-standbys
             cl-mcp/src/pool::%handle-worker-crash
             cl-mcp/src/pool::%signal-worker
@@ -108,6 +120,27 @@ it began, is refused, never lent a worker."
     (:kind :invariant)
     (:trials (:smoke 10 :normal 40))
     (null (shutdown-scenario-violations (run-shutdown-scenario scenario))))
+
+  (defproperty pool-late-work-stays-with-its-generation
+      ((scenario late-scenario))
+    "A spawn -- an acquire's, a replenishment's or a recovery's -- that outlives
+a shutdown's deadline does not hold the shutdown past it, and stays on the
+stopped pool generation's account: a pool initialized after it lends a
+session a worker at once whatever its cap, keeps its standby, and never
+counts or receives the late spawn's worker, which the work that spawned it
+ends once it returns.  The new pool, shut down in turn, owes nothing."
+    (:about initialize-pool
+            shutdown-pool
+            get-or-assign-worker
+            cl-mcp/src/pool::%make-generation
+            cl-mcp/src/pool::%effective-pool-size
+            cl-mcp/src/pool::%spawn-and-bind
+            cl-mcp/src/pool::%schedule-replenish
+            cl-mcp/src/pool::%replenish-standbys
+            cl-mcp/src/pool::%handle-worker-crash)
+    (:kind :invariant)
+    (:trials (:smoke 3 :normal 10))
+    (null (run-late-scenario scenario)))
 
   (defproperty pool-holds-while-operations-overlap
       ((plan concurrent-plan))

@@ -57,6 +57,9 @@
            #:draw-shutdown-scenario
            #:run-shutdown-scenario
            #:shutdown-scenario-violations
+           #:+late-kinds+
+           #:draw-late-scenario
+           #:run-late-scenario
            #:random-concurrent-plan
            #:run-concurrent-plan
            #:concurrency-violation-kinds))
@@ -69,9 +72,11 @@
 (defstruct (ledger (:conc-name ledger-))
   "What the fake lifecycle saw, written by it and by nothing in the pool."
   (lock (bt:make-lock "concurrency-ledger"))
-  ;; Every worker spawned, oldest first, and when its spawn completed.
+  ;; Every worker spawned, oldest first, when its spawn completed, and the
+  ;; pool generation that was running when it began.
   (spawned '())
   (spawned-at (make-hash-table :test 'eq))
+  (spawned-in (make-hash-table :test 'eq))
   ;; Worker -> when the pool ended it.
   (ended-at (make-hash-table :test 'eq))
   ;; Workers whose fake process has died.
@@ -108,7 +113,9 @@
 
 (defun %fake-spawn (ledger)
   "Return a new standby worker with no process, once the spawn gate lets it."
-  (let ((gate (with-ledger (ledger)
+  (let ((generation (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                      (cl-mcp/src/pool::generation-id cl-mcp/src/pool::*generation*)))
+        (gate (with-ledger (ledger)
                 (incf (ledger-spawns-begun ledger))
                 (ledger-spawn-gate ledger))))
     (when gate (sb-thread:wait-on-semaphore gate :timeout 30))
@@ -116,7 +123,8 @@
     (with-ledger (ledger)
       (let ((worker (make-worker :id (incf (ledger-next-id ledger)) :state :standby)))
         (setf (ledger-spawned ledger) (append (ledger-spawned ledger) (list worker))
-              (gethash worker (ledger-spawned-at ledger)) (%now))
+              (gethash worker (ledger-spawned-at ledger)) (%now)
+              (gethash worker (ledger-spawned-in ledger)) generation)
         worker))))
 
 (defun %fake-end (ledger worker)
@@ -691,3 +699,112 @@ was lent after the shutdown returned."
 (defun concurrency-violation-kinds (violations)
   "Return the distinct kinds of VIOLATIONS."
   (remove-duplicates (mapcar (lambda (v) (getf v :kind)) violations)))
+
+;;; ------------------------------------------------------------------------
+;;; F. Work that outlives a shutdown's deadline
+
+(defparameter +late-kinds+ '(:acquire-spawn :replenish-spawn :recovery-spawn)
+  "Work that can still be spawning when a shutdown gives up waiting for it.")
+
+(defun draw-late-scenario ()
+  "Draw a late-work scenario with CL:RANDOM: which spawn outlives the
+shutdown's deadline, the next pool's cap, and whether it keeps a standby."
+  (list :late (nth (random (length +late-kinds+)) +late-kinds+)
+        :max-size (1+ (random 2))
+        :warmup (random 2)))
+
+(defun %generation-spawns ()
+  "The running generation's spawns in flight."
+  (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+    (cl-mcp/src/pool::generation-spawns cl-mcp/src/pool::*generation*)))
+
+(defun run-late-scenario (scenario)
+  "Run SCENARIO and return its violations.
+
+A spawn of kind :LATE is started and held on a gate that stays shut past the
+shutdown's deadline, made one second here.  The shutdown returns, a new pool
+is initialized with :MAX-SIZE and :WARMUP, and only then is the old spawn
+let go.  What the new pool must not feel:
+
+- it lends a session a worker at once, the old spawn notwithstanding, and
+  keeps its standby when asked to;
+- its account never holds the old spawn;
+- the old spawn's worker never enters it, and is ended by the work that
+  spawned it once it returns.
+
+The new pool is then shut down, and owes nothing (AFTER-SHUTDOWN-VIOLATIONS)."
+  (destructuring-bind (&key late max-size warmup) scenario
+    (with-concurrent-pool (ledger :warmup 0 :max-size 4)
+      (let ((violations '())
+            (bound (and (eq late :recovery-spawn) (get-or-assign-worker "s2")))
+            (stuck nil)
+            (gate (%gate-spawns ledger))
+            (base (%spawns-begun ledger)))
+        (flet ((add (kind &rest detail) (push (list* :kind kind detail) violations)))
+          (ecase late
+            (:acquire-spawn
+             (setf stuck (bt:make-thread
+                          (lambda () (%outcome (lambda () (get-or-assign-worker "s1"))))
+                          :name "late-acquire")))
+            (:replenish-spawn
+             (setf *worker-pool-warmup* 1)
+             (cl-mcp/src/pool::%schedule-replenish))
+            (:recovery-spawn
+             (with-ledger (ledger) (setf (gethash bound (ledger-dead ledger)) t))
+             (cl-mcp/src/pool::%check-worker-health)))
+          (%await (lambda () (> (%spawns-begun ledger) base)))
+          ;; A one-second deadline: the worker startup timeout plus 15.
+          (setf cl-mcp/src/worker-client::*worker-startup-timeout* -14)
+          (let ((start (%now)))
+            (shutdown-pool)
+            (when (> (- (%now) start) (* 5 internal-time-units-per-second))
+              (add :shutdown-overran-its-deadline)))
+          (let ((old (with-ledger (ledger)
+                       (setf (ledger-spawn-gate ledger) nil)
+                       (copy-list (ledger-spawned ledger))))
+                (old-generation (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                                  (cl-mcp/src/pool::generation-id
+                                   cl-mcp/src/pool::*generation*))))
+            (setf *worker-pool-warmup* warmup
+                  *max-pool-size* max-size
+                  cl-mcp/src/worker-client::*worker-startup-timeout* 2)
+            (initialize-pool)
+            (unless (%outcome-lent-p (%outcome (lambda () (get-or-assign-worker "n1"))))
+              (add :new-pool-refused))
+            (when (and (plusp warmup) (< 1 max-size))
+              (unless (%await (lambda () (getf (pool-state) :standby)) :within 3)
+                (add :new-pool-not-replenished)))
+            (%await (lambda () (zerop (%generation-spawns))) :within 3)
+            (unless (zerop (%generation-spawns))
+              (add :new-account-holds-old-work :spawns (%generation-spawns)))
+            ;; Now the old spawn returns.
+            (sb-thread:signal-semaphore gate 10)
+            (when stuck (bt:join-thread stuck))
+            (%await (lambda () (%late-workers ledger old-generation old)) :within 5)
+            (let ((late-workers (%late-workers ledger old-generation old)))
+              (dolist (worker late-workers)
+                (unless (%await (lambda () (ended-p ledger worker)) :within 5)
+                  (add :late-worker-left-live :worker (worker-id worker)))
+                (let ((state (pool-state)))
+                  (when (member worker (append (getf state :all) (getf state :standby)))
+                    (add :late-worker-joined-new-pool :worker (worker-id worker)))))
+              (unless late-workers (add :late-spawn-never-returned))))
+          (let ((returned-at nil))
+            (shutdown-pool)
+            (setf returned-at (%now))
+            (dolist (violation (after-shutdown-violations ledger returned-at))
+              (push violation violations))))
+        (nreverse violations)))))
+
+(defun %outcome-lent-p (outcome)
+  "True when OUTCOME, from %OUTCOME, is a worker lent."
+  (and (eq :value (first outcome)) (typep (second outcome) 'worker)))
+
+(defun %late-workers (ledger old-generation before)
+  "The workers LEDGER saw spawned by work OLD-GENERATION started, other than
+those in BEFORE: the spawns that outlived that generation's shutdown."
+  (with-ledger (ledger)
+    (loop for worker in (ledger-spawned ledger)
+          when (and (eql old-generation (gethash worker (ledger-spawned-in ledger)))
+                    (not (member worker before)))
+            collect worker)))
