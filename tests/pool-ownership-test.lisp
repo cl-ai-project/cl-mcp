@@ -130,6 +130,21 @@
                                (cl-mcp/src/pool:kill-session-worker session)
                                (funcall real session))
                              '((:acquire "s0") (:acquire "s0"))))))
+      (testing "an acquire that throws away a usable standby, then fails to spawn"
+        ;; The standby's state after the acquire is the state the acquire left
+        ;; it in; whether it was usable is decided before.
+        (ok (member :unexpected-refusal
+                    (swapped 'get-or-assign-worker
+                             (lambda (session)
+                               (let ((standby
+                                       (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                                         (let ((w (pop cl-mcp/src/pool::*standby-workers*)))
+                                           (setf cl-mcp/src/pool::*all-workers*
+                                                 (remove w cl-mcp/src/pool::*all-workers*))
+                                           w))))
+                                 (when standby (cl-mcp/src/pool::%kill-worker standby))
+                                 (funcall real session)))
+                             '((:run-work) (:fail-next-spawn) (:acquire "s0"))))))
       (testing "and one that then fails to spawn had nothing to refuse"
         (ok (member :unexpected-refusal
                     (swapped 'get-or-assign-worker
@@ -229,7 +244,13 @@
       (run-pending-work ledger)
       (ok (killed-p ledger standby))
       (ok (not (member standby (getf (pool-snapshot) :standby)))
-          "and it is no longer offered as a standby"))))
+          "and it is no longer offered as a standby")
+      ;; And the pool is back to its warmup: this arm returned before
+      ;; replenishing, since only a bound worker was taken to need it.
+      (let ((standbys (getf (pool-snapshot) :standby)))
+        (ok (= 1 (length standbys)) "a new standby took its place")
+        (ok (notany (lambda (w) (killed-p ledger w)) standbys)))
+      (ok (null (ownership-violations ledger :stable t))))))
 
 (deftest a-worker-recovery-bound-comes-back-without-a-check
   ;; The other finding was the model's: recovery binds a replacement to the

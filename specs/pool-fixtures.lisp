@@ -90,6 +90,10 @@
   (dead (make-hash-table :test 'eq))
   ;; Spawns still to fail, as an injected fault.
   (spawn-failures 0)
+  ;; How many injected spawn failures were spent.  Replenishment stops at a
+  ;; failed spawn and waits for the next event to try again, so a pool short
+  ;; of standbys is only a fault in a run where none was spent.
+  (spawn-failures-spent 0)
   ;; Background work the pool started and nobody has run, oldest first, as
   ;; (NAME . THUNK).
   (tasks '())
@@ -108,6 +112,7 @@
 when a failure was injected."
   (when (plusp (ledger-spawn-failures ledger))
     (decf (ledger-spawn-failures ledger))
+    (incf (ledger-spawn-failures-spent ledger))
     (error "Injected spawn failure."))
   (let ((worker (make-worker :id (incf (ledger-next-id ledger)) :state :standby)))
     (setf (ledger-spawned ledger) (append (ledger-spawned ledger) (list worker)))
@@ -283,8 +288,10 @@ At every point between operations:
   ledger and the spawns in flight (%USAGE), and its own count agrees.
 
 STABLE -- nothing queued -- adds what holds only at rest: no spawn is in
-flight, so no placeholder is left in the map, and the tracked list is
-exactly the map's workers and the standbys, with nothing left over.
+flight, so no placeholder is left in the map; the tracked list is exactly the
+map's workers and the standbys, with nothing left over; and, in a run where
+no injected spawn failure was spent, the pool has its warmup of standbys, as
+far as the cap leaves room.
 
 SHUT-DOWN adds what a stopped pool owes: it holds nothing, and every worker
 it was handed has been ended.
@@ -328,7 +335,20 @@ the pool left live."
                                   unless (typep entry 'worker) collect session)))
           (when placeholders (add :placeholder-at-rest :sessions placeholders)))
         (let ((stray (set-difference all held)))
-          (when stray (add :tracked-but-not-held :workers (ids stray)))))
+          (when stray (add :tracked-but-not-held :workers (ids stray))))
+        ;; Every path that takes a standby away schedules replenishment, so at
+        ;; rest the pool has its warmup of them -- as many as the cap leaves
+        ;; room for beside the rest of what it answers for.  Not after a
+        ;; spent spawn failure: replenishment stops at one and waits for the
+        ;; next event.
+        (when (and (getf snapshot :running)
+                   (zerop (ledger-spawn-failures-spent ledger)))
+          (let* ((standbys (count-if-not (lambda (w) (killed-p ledger w)) standby))
+                 (others (- (%usage ledger snapshot) standbys))
+                 (owed (min *worker-pool-warmup*
+                            (max 0 (- *max-pool-size* others)))))
+            (when (< standbys owed)
+              (add :standby-not-replenished :standbys standbys :owed owed)))))
       (when shut-down
         (when (or all standby (getf snapshot :map))
           (add :holds-after-shutdown :tracked (ids all)))
@@ -442,41 +462,61 @@ session was lent."
                       (add :lent-to-two-sessions :first owner))))))
     (nreverse violations)))
 
-(defun %check-refusal (ledger session condition before failures-before keep)
-  "Return the violations of refusing SESSION with CONDITION, given the pool
-BEFORE the acquire (a snapshot), the injected spawn failures still owed
-then, and KEEP, the worker the session had to get back (%WORKER-TO-KEEP).
+(defun %acquire-pre-state (ledger model session)
+  "Return what an acquire for SESSION is judged against, decided before it
+runs: :RUNNING, :KEEP (the worker the session must get back,
+%WORKER-TO-KEEP), :USABLE-STANDBY (whether a standby was :STANDBY and alive)
+and :FAILURES-BEFORE (injected spawn failures still owed)."
+  (let ((before (pool-snapshot)))
+    (list :running (getf before :running)
+          :keep (%worker-to-keep ledger model before session)
+          :usable-standby (and (some (lambda (worker)
+                                       (and (eq :standby (worker-state worker))
+                                            (%fake-alive-p ledger worker)))
+                                     (getf before :standby))
+                               t)
+          :failures-before (ledger-spawn-failures ledger))))
 
-A session with a worker to get back has nothing to be refused: no spawn, and
-no room, is needed to return it.  A spent spawn failure or a full pool does
-not excuse an acquire that threw that worker away and then tried to spawn.
-Otherwise a refusal is only a refusal when the pool had a reason, judged from
-outside it:
+(defun %check-refusal (ledger session condition pre)
+  "Return the violations of refusing SESSION with CONDITION.  PRE is what the
+pool was before the acquire, decided then (%ACQUIRE-PRE-STATE): whether it
+ran, the worker the session had to get back, whether it had a usable
+standby, and the injected spawn failures still owed.
+
+Decided before, because a worker's state is its state now: an acquire that
+threw away a usable standby would otherwise have made it look unusable.
+
+A refusal is only a refusal when the pool had a reason, judged from outside
+it:
 - it was not running;
-- a spawn failure injected for this acquire was spent on it;
-- it was full: it had no usable standby to hand over and no worker already
-  bound to the session, and the workers it answers for plus the spawns in
-  flight (%USAGE, from the ledger) leave no room -- and it said so with
+- it had nothing it could hand over -- no worker to give back to the session
+  and no usable standby -- and then either the spawn it had to make failed
+  on a spawn failure injected for this acquire, with room for that spawn by
+  the ledger's count, or it had no room by that count and said so with
   POOL-CAPACITY-EXCEEDED.
-Anything else is a caller turned away from a pool that could serve it."
+Anything else is a caller turned away from a pool that could serve it: a
+spent spawn failure does not excuse an acquire that had a worker to give and
+tried to spawn anyway."
   (let ((after (pool-snapshot))
         (violations '()))
     (when (assoc session (getf after :map) :test #'equal)
       (push (%violation :refused-but-mapped :session session) violations))
-    (let ((stopped (not (getf before :running)))
-          (spent (< (ledger-spawn-failures ledger) failures-before))
-          (full (and (typep condition 'cl-mcp/src/pool:pool-capacity-exceeded)
-                     (not (some (lambda (worker)
-                                  (and (eq :standby (worker-state worker))
-                                       (%fake-alive-p ledger worker)))
-                                (getf before :standby)))
-                     (let ((bound (%bound-worker before session)))
-                       (not (and bound (eq :bound (worker-state bound)))))
-                     (>= (%usage ledger after) *max-pool-size*))))
-      (when (or keep (not (or stopped spent full)))
+    (let* ((usage (%usage ledger after))
+           (nothing-to-give (not (or (getf pre :keep) (getf pre :usable-standby))))
+           (stopped (not (getf pre :running)))
+           (spawn-failed (and nothing-to-give
+                              (< (ledger-spawn-failures ledger)
+                                 (getf pre :failures-before))
+                              (< usage *max-pool-size*)))
+           (full (and nothing-to-give
+                      (typep condition 'cl-mcp/src/pool:pool-capacity-exceeded)
+                      (>= usage *max-pool-size*))))
+      (unless (or stopped spawn-failed full)
         (push (%violation :unexpected-refusal :session session
                           :condition (type-of condition)
-                          :usage (%usage ledger after) :cap *max-pool-size*)
+                          :had-worker (and (getf pre :keep) t)
+                          :had-standby (getf pre :usable-standby)
+                          :usage usage :cap *max-pool-size*)
               violations)))
     violations))
 
@@ -522,20 +562,19 @@ Operations:
   (destructuring-bind (kind &optional argument) operation
     (ecase kind
       (:acquire
-       (let* ((before (pool-snapshot))
-              (failures-before (ledger-spawn-failures ledger))
-              ;; Decided now: after the acquire, a worker it ended itself
-              ;; would look like one there was no need to keep.
-              (keep (%worker-to-keep ledger model before argument)))
+       ;; Decided now: after the acquire, a worker it ended itself would
+       ;; look like one there was no need to keep, and a standby it threw
+       ;; away like one that was never usable.
+       (let ((pre (%acquire-pre-state ledger model argument)))
          (handler-case
              (let ((worker (get-or-assign-worker argument)))
                (values (list :lent (worker-id worker))
-                       (%check-acquire ledger model argument worker keep)))
+                       (%check-acquire ledger model argument worker
+                                       (getf pre :keep))))
            (error (condition)
              (remhash argument (model-holding model))
              (values (list :refused (type-of condition))
-                     (%check-refusal ledger argument condition
-                                     before failures-before keep))))))
+                     (%check-refusal ledger argument condition pre))))))
       ((:release :kill-session)
        ;; Named before the operation: what it must end is the worker the
        ;; session held, wherever the operation leaves it.

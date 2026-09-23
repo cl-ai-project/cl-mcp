@@ -1086,6 +1086,21 @@ end, before the release, sees that it was not."
               (cl-mcp/src/worker-client:worker-session-id worker) nil)
         (push worker cl-mcp/src/pool::*standby-workers*)))))
 
+(defun %acquire-discarding-a-standby (real)
+  "Return a wrong GET-OR-ASSIGN-WORKER, for the negative control: it takes a
+standby off the lists and ends it, properly, and then does what REAL does --
+so with a spawn failure owed, a pool that had a worker to hand over refuses.
+After the call the standby is ended and looks unusable; only a check that
+decided its usability before the acquire sees there was one to give."
+  (lambda (session-id)
+    (let ((standby (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                     (let ((worker (pop cl-mcp/src/pool::*standby-workers*)))
+                       (setf cl-mcp/src/pool::*all-workers*
+                             (remove worker cl-mcp/src/pool::*all-workers*))
+                       worker))))
+      (when standby (cl-mcp/src/pool::%kill-worker standby))
+      (funcall real session-id))))
+
 (defun %negative-controls ()
   "Return the deliberately wrong implementations the negative control swaps in:
 each names the function, its replacement, the targets to run, and the targets
@@ -1400,6 +1415,11 @@ the argument as it is after the call cannot see."
            :targets (list (list :property pool-sequences) (list :property pool-full))
            :must-fail (list (list :property pool-sequences)
                             (list :property pool-full)))
+     (list :function 'get-or-assign-worker
+           :description "ends a usable standby before acquiring, so a failed spawn refuses a pool that had one"
+           :replacement (%acquire-discarding-a-standby real-acquire)
+           :targets (list (list :property pool-sequences) (list :property pool-full))
+           :must-fail (list (list :property pool-sequences)))
      (list :function 'release-session
            :description "puts a released session's worker back on the standby list, unended"
            :replacement #'%release-back-to-standby

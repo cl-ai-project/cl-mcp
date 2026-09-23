@@ -1300,8 +1300,11 @@ between states.
     count (`%effective-pool-size`) must agree with that; the pool decides
     every spawn by it, so an undercount spawns past the cap while agreeing
     with itself.
-- *At rest:* no placeholder is left in the map, and the tracked list is
-  exactly the mapped workers and the standbys.
+- *At rest:* no placeholder is left in the map; the tracked list is exactly
+  the mapped workers and the standbys; and, in a run where no injected spawn
+  failure was spent, the pool has its warmup of standbys as far as the cap
+  leaves room (replenishment stops at a failed spawn and waits for the next
+  event, so a spent failure excuses a short pool).
 - *After a shutdown:* the pool holds nothing, and every worker it was handed
   has been ended.
 - *Model:*
@@ -1317,12 +1320,13 @@ between states.
     afterwards, whatever became of it in the lists: a release that kept it
     as a standby leaves every list consistent;
   - an acquire may be refused only for a reason judged from outside the pool:
-    it was stopped, a spawn failure injected for this acquire was spent on
-    it, or it was full (no usable standby, nothing bound to the session, and
-    the ledger's count leaves no room); anything else is an unexpected
-    refusal. A session with a worker to get back has nothing to be refused
-    for, so a spent spawn failure does not excuse an acquire that threw that
-    worker away first;
+    it was stopped; or it had nothing it could hand over -- no worker to give
+    back to the session and no usable standby, both decided **before** the
+    acquire -- and then either the spawn it had to make failed on a spawn
+    failure injected for this acquire, with room by the ledger's count, or
+    it had no room by that count. Anything else is an unexpected refusal: a
+    spent spawn failure does not excuse an acquire that threw away a worker
+    or a standby it could have handed over;
   - a refused acquire leaves nothing mapped for the session.
 
 **The fixture's own cleanup.** After a run the fixture shuts the pool down and
@@ -1349,12 +1353,14 @@ sessions:
 The generator does not shrink. A counterexample is the whole sequence, and
 each violation names the operation index it followed.
 
-The negative control swaps in six wrong pools, and each must fail:
+The negative control swaps in seven wrong pools, and each must fail:
 - a `release-session` that ends nothing;
 - a `shutdown-pool` that ends nothing;
 - a `get-or-assign-worker` that refuses every session;
 - a `get-or-assign-worker` that ends the session's healthy worker and binds
   another on every call;
+- a `get-or-assign-worker` that ends a usable standby before acquiring, so a
+  failed spawn refuses a pool that had a worker to give;
 - a `release-session` that keeps the worker as a standby;
 - a `%effective-pool-size` that counts nothing.
 
@@ -1390,7 +1396,10 @@ found the fourth; the third needs an ordering no sequential run produces.
   process died and which an RPC then marked `:crashed` reaches recovery's
   `:crashed` arm. That arm removed it from `*all-workers*` and ended it, but
   left it on `*standby-workers*`: an ended worker, still offered as a
-  standby and still counted when replenishing. It now leaves both lists.
+  standby and still counted when replenishing. It now leaves both lists, and
+  the arm schedules replenishment for it as the `:standby` arm does -- it
+  used to return having replenished only for a bound worker, leaving the pool
+  a standby short.
 
 The review of the first version of these checks found three ways they could
 pass a wrong pool, and each is now a negative control as well as a fixed
@@ -1405,7 +1414,11 @@ case:
 A second review found a fourth: affinity was judged after the acquire, so an
 acquire that ended the session's healthy worker and bound another excused
 itself. The worker to keep is now decided before the acquire runs, and that
-wrong acquire is a negative control and a fixed case too.
+wrong acquire is a negative control and a fixed case too. A third found the
+same flaw for standbys: whether one was usable was read after the acquire, so
+an acquire that ended a usable standby and then failed to spawn excused its
+refusal. Everything an acquire is judged against is now decided before it
+runs (`%acquire-pre-state`), and that acquire is a seventh negative control.
 
 Making the model check recovery's own bindings removed one false positive:
 a replacement that died after recovery bound it was read as an unusable
