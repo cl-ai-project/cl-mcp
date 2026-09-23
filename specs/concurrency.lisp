@@ -125,10 +125,11 @@ matter: see POOL-LATE-WORK-STAYS-WITH-ITS-GENERATION."
       ((scenario late-scenario))
     "A spawn -- an acquire's, a replenishment's or a recovery's -- that outlives
 a shutdown's deadline does not hold the shutdown past it, and stays on the
-stopped pool generation's account: a pool initialized after it lends a
-session a worker at once whatever its cap, keeps its standby, and never
-counts or receives the late spawn's worker, which the work that spawned it
-ends once it returns.  The new pool, shut down in turn, owes nothing."
+stopped pool generation's account: a pool initialized after it completes
+its own warmup, lends a session a worker once that is done whatever its cap,
+replenishes its standby where its cap leaves room, and never counts or
+receives the late spawn's worker, which the work that spawned it ends once
+it returns.  The new pool, shut down in turn, owes nothing."
     (:about initialize-pool
             shutdown-pool
             get-or-assign-worker

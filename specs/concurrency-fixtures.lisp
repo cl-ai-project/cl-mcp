@@ -726,8 +726,9 @@ shutdown's deadline, made one second here.  The shutdown returns, a new pool
 is initialized with :MAX-SIZE and :WARMUP, and only then is the old spawn
 let go.  What the new pool must not feel:
 
-- it lends a session a worker at once, the old spawn notwithstanding, and
-  keeps its standby when asked to;
+- it completes its own warmup, lends a session a worker once that is done,
+  and replenishes its standby where its cap leaves room -- the old spawn
+  notwithstanding;
 - its account never holds the old spawn;
 - the old spawn's worker never enters it, and is ended by the work that
   spawned it once it returns.
@@ -769,8 +770,16 @@ The new pool is then shut down, and owes nothing (AFTER-SHUTDOWN-VIOLATIONS)."
                   *max-pool-size* max-size
                   cl-mcp/src/worker-client::*worker-startup-timeout* 2)
             (initialize-pool)
+            ;; The new pool's own warmup first: unhindered by the old spawn,
+            ;; and before an acquire, since with a cap of one that spawn of
+            ;; its own rightly fills the pool while it runs.
+            (when (plusp warmup)
+              (unless (%await (lambda () (getf (pool-state) :standby)) :within 3)
+                (add :new-pool-not-warmed-up)))
             (unless (%outcome-lent-p (%outcome (lambda () (get-or-assign-worker "n1"))))
               (add :new-pool-refused))
+            ;; And its standby replenished after that lending, where its cap
+            ;; leaves room for one.
             (when (and (plusp warmup) (< 1 max-size))
               (unless (%await (lambda () (getf (pool-state) :standby)) :within 3)
                 (add :new-pool-not-replenished)))

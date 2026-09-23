@@ -1772,7 +1772,8 @@ which processes died, every thread the pool started.
   a recovery's -- past the shutdown's deadline, initialize a new pool with a
   cap of one or two, with or without a standby, and only then let the old
   spawn return. The checks: the shutdown did not wait past its deadline; the
-  new pool lends a session a worker at once and keeps its standby; its
+  new pool completes its own warmup, then lends a session a worker, and
+  replenishes its standby where its cap leaves room; its
   account never holds the old spawn; the late worker never enters it and is
   ended by the work that spawned it; and the new pool, shut down in turn,
   owes nothing. Deterministic.

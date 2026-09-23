@@ -1343,10 +1343,11 @@ that has only just started to finish its handshake, or fail it."
 (defun shutdown-pool ()
   "Shut down all workers and clean up the pool.
 
-When it returns, the pool owes nothing: every worker it was handed is ended,
-none is left in its lists or on its way into them, and its background work
--- the health monitor, replenishment, crash recovery -- has finished.  In
-order:
+When it returns, and the work in flight finished within its deadline, the
+pool owes nothing: every worker it was handed is ended, none is left in its
+lists or on its way into them, and its background work -- the health
+monitor, replenishment, crash recovery -- has finished.  Work past the
+deadline is the exception below.  In order:
 
 - the pool stops, under *POOL-LOCK*, so no acquire, replenishment or
   recovery decides anything after this;
