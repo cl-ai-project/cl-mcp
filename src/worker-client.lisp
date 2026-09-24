@@ -989,8 +989,46 @@ process has exited."
   (and (eql +leaked-thread-exit-code+ (worker-last-exit-code worker))
        (%reported-a-leak-p worker)))
 
+(defparameter *stream-wait-slice* 0.1d0
+  "Seconds a request waiting for a worker's stream waits between looks at
+whether it should still wait (%CALL-WITH-STREAM-HELD).")
+
+(defun %call-with-stream-held (worker thunk &key timeout while-waiting)
+  "Call THUNK with WORKER's stream lock held, and return its values.
+
+With neither TIMEOUT nor WHILE-WAITING, waits for the lock as long as it
+takes.  Otherwise the wait is bounded: after TIMEOUT seconds without the
+lock, RPC-NOT-SENT is signalled with reason :BUSY; and WHILE-WAITING, a
+function of no arguments, is asked every *STREAM-WAIT-SLICE* seconds -- it
+returns :WAIT to go on waiting, or a keyword saying why not, which is
+signalled as RPC-NOT-SENT's reason.  Nothing has been sent in either case.
+
+A request waits here while another request of its session runs on the same
+worker, which can take as long as that request's own deadline allows."
+  (let ((lock (worker-stream-lock worker)))
+    (if (not (or timeout while-waiting))
+        (bt:with-lock-held (lock) (funcall thunk))
+        (let ((deadline (and timeout
+                             (+ (get-internal-real-time)
+                                (round (* timeout internal-time-units-per-second))))))
+          (loop
+            (let ((held nil))
+              (unwind-protect
+                   (progn
+                     (setf held (sb-thread:grab-mutex lock :timeout *stream-wait-slice*))
+                     (when held
+                       (return (funcall thunk))))
+                (when held (sb-thread:release-mutex lock))))
+            (when while-waiting
+              (let ((verdict (funcall while-waiting)))
+                (unless (eq :wait verdict)
+                  (error 'rpc-not-sent :worker worker :reason verdict))))
+            (when (and deadline (>= (get-internal-real-time) deadline))
+              (error 'rpc-not-sent :worker worker :reason :busy)))))))
+
 (defun worker-rpc (worker method params &key timeout preserve-json-types
-                                             before-send after-receive)
+                                             before-send after-receive
+                                             lock-timeout while-waiting)
   "Send a JSON-RPC request to WORKER and return the result hash-table.
 TIMEOUT, when non-NIL, is the maximum seconds to wait for a response.
 PRESERVE-JSON-TYPES keeps false and null apart in the result (see
@@ -1006,6 +1044,14 @@ worker's answer has been read, a JSON-RPC error answer included: it returns
 RPC-ANSWER-WITHDRAWN is signalled instead of either the result or the error.
 Between the two the worker is running this request and nothing else.
 
+TIMEOUT bounds sending the request and reading its answer together: a
+worker that stops reading holds a write as surely as one that stops
+answering holds a read.  Waiting for the worker's stream -- held by another
+request -- is not part of it, and is bounded only when asked:
+LOCK-TIMEOUT, in seconds, and WHILE-WAITING, asked while waiting whether to
+go on (%CALL-WITH-STREAM-HELD); either refuses with RPC-NOT-SENT, the worker
+untouched.  Without them the wait is as long as the stream is held.
+
 Signals WORKER-CRASHED if the worker process has died (EOF on stream),
 timed out (sb-ext:timeout), encountered a stream/socket error, or if
 the stream is already NIL (e.g. marked crashed by a concurrent thread).
@@ -1015,7 +1061,9 @@ response ID mismatch) which indicate the stream is desynchronized.
 Signals WORKER-RPC-ERROR for legitimate JSON-RPC error responses from
 the worker handler (e.g. \"symbol not found\").  These are re-signaled
 without marking the worker as crashed."
-  (bt:with-lock-held ((worker-stream-lock worker))
+  (%call-with-stream-held
+   worker
+   (lambda ()
     (unless (worker-stream worker)
       ;; Whoever got here first has already worked out what killed this
       ;; worker; say that, rather than a second and weaker answer.  Callers
@@ -1058,11 +1106,15 @@ without marking the worker as crashed."
            (answered-error nil)
            (result
              (handler-case
-                 (progn
-                   (%send-json-rpc (worker-stream worker) id method params)
+                 (flet ((exchange ()
+                          (%send-json-rpc (worker-stream worker) id method params)
+                          (%read-json-rpc-response (worker-stream worker) id nil
+                                                   :preserve-json-types
+                                                   preserve-json-types)))
                    (multiple-value-bind (result leaked)
-                       (%read-json-rpc-response (worker-stream worker) id timeout
-                                                :preserve-json-types preserve-json-types)
+                       (if timeout
+                           (sb-ext:with-timeout timeout (exchange))
+                           (exchange))
                      ;; Recorded for pool-status.  Nothing here acts on it: the
                      ;; worker retires itself rather than waiting to be told,
                      ;; since only it can see whether the thread is still
@@ -1117,7 +1169,9 @@ without marking the worker as crashed."
       (when (and after-receive (not (eq :publish (funcall after-receive))))
         (error 'rpc-answer-withdrawn :worker worker))
       (when answered-error (error answered-error))
-      result)))
+      result))
+   :timeout lock-timeout
+   :while-waiting while-waiting))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Public API — kill

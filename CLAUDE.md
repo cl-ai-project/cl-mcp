@@ -86,6 +86,13 @@ kill and shutdown paths, the proxy's failure results) and object ids (`src/objec
 and, in a fresh process, `worker-leaked-thread-test` and `pool-test`. A worker's end is recorded
 before the signal that carries it out, and only the first record counts; a reset is told only by
 claiming it (`claim-session-resets`), never by copying it to a replacement.
+So does the pool under overlapping operations (`shutdown-pool`, the spawn and ending accounting
+-- `%begin-spawn`, `%begin-ending`, `%end-worker`, `%wait-for-work-in-flight` --
+`%handle-worker-crash`, `%replenish-standbys`, `%effective-pool-size`) and the wait for a worker's
+stream (`%call-with-stream-held`): `property=` for `pool-shutdown-leaves-nothing-behind` and
+`pool-holds-while-operations-overlap`, then run `concurrency-test` and, in a fresh process,
+`pool-ownership-test` and `pool-test`. A spawn or an ending is accounted for in the critical
+section that decides it, and a spawn hands its count to its worker in the one that registers it.
 Elsewhere the bundle is not required.
 
 ## Architecture

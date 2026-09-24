@@ -1210,6 +1210,10 @@ the argument as it is after the call cannot see."
           (%bundle-name :property "RESETS-ARE-TOLD-EXACTLY-ONCE-WHEN-THE-POOL-IS-FULL"))
         (handles
           (%bundle-name :property "OBJECT-IDS-NEVER-OUTLIVE-THEIR-IMAGE"))
+        (shutdowns
+          (%bundle-name :property "POOL-SHUTDOWN-LEAVES-NOTHING-BEHIND"))
+        (late-work
+          (%bundle-name :property "POOL-LATE-WORK-STAYS-WITH-ITS-GENERATION"))
         ;; Taken before any swap, so a wrong implementation can defer to it.
         (real-read (fdefinition 'allowed-read-path))
         (real-write (fdefinition 'ensure-write-path))
@@ -1543,7 +1547,39 @@ the argument as it is after the call cannot see."
            :description "resolves an id by its number alone, whatever image issued it"
            :replacement #'%lookup-ignoring-the-generation
            :targets (list (list :property handles))
-           :must-fail (list (list :property handles))))))
+           :must-fail (list (list :property handles)))
+     ;; Shutdown.  Each fault is a shutdown that returns owing something, or
+     ;; does not return: one that ends a worker without signalling it first
+     ;; and so waits behind the RPC holding its stream; one that does not
+     ;; wait for the spawns and endings in flight; and a pool that takes a
+     ;; worker out to end it without accounting for it.
+     (list :function 'cl-mcp/src/pool::%signal-worker
+           :description "ends a worker without signalling it, behind the RPC holding its stream"
+           :replacement (lambda (worker) (declare (ignore worker)) nil)
+           :targets (list (list :property shutdowns))
+           :must-fail (list (list :property shutdowns)))
+     (list :function 'cl-mcp/src/pool::%wait-for-work-in-flight
+           :description "returns from a shutdown without waiting for spawns and endings in flight"
+           :replacement (lambda (seconds &optional generation)
+                          (declare (ignore seconds generation))
+                          t)
+           :targets (list (list :property shutdowns))
+           :must-fail (list (list :property shutdowns)))
+     (list :function 'cl-mcp/src/pool::%begin-ending
+           :description "takes a worker out to end it without accounting for it"
+           :replacement #'identity
+           :targets (list (list :property shutdowns))
+           :must-fail (list (list :property shutdowns)))
+     ;; Work past the deadline.  The fault is one account spanning pools: a
+     ;; new pool that is the old generation carried on, so the late spawn
+     ;; fills its cap and its worker is taken in.
+     (list :function 'cl-mcp/src/pool::%make-generation
+           :description "carries the stopped pool's generation on into the next pool"
+           :replacement (lambda (id)
+                          (declare (ignore id))
+                          cl-mcp/src/pool::*generation*)
+           :targets (list (list :property late-work))
+           :must-fail (list (list :property late-work))))))
 
 (defun %call-with-replaced-function (symbol replacement thunk)
   "Call THUNK with SYMBOL's global function replaced by REPLACEMENT, and put

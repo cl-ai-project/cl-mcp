@@ -205,7 +205,7 @@ BEFORE-SEND hook decides whether it is sent; then the worker answers, or dies
 under it -- and records every request that reached the worker.  CRASH makes
 it die under this request whatever its process's state."
   (lambda (worker method params &key timeout before-send after-receive
-                                      preserve-json-types)
+                                      preserve-json-types &allow-other-keys)
     (declare (ignore method params timeout preserve-json-types))
     ;; The pool handed this worker to SESSION's request: it is bound to it,
     ;; though it may end before any snapshot of the pool shows that.

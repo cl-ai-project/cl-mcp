@@ -1484,7 +1484,7 @@ user's next call learns why the session was reset")
                       (lambda (session) (declare (ignore session)) worker))
                     (cl-mcp/src/proxy::%cached-worker-rpc%
                       (lambda (w method params &key timeout before-send
-                                                   after-receive)
+                                                   after-receive &allow-other-keys)
                         (declare (ignore method params timeout after-receive))
                         ;; Sent, then the worker died: the order the real
                         ;; WORKER-RPC keeps, and what it does on its way out.
@@ -1559,7 +1559,7 @@ user's next call learns why the session was reset")
              (lambda (session) (declare (ignore session)) worker))
            (cl-mcp/src/proxy::%cached-worker-rpc%
              (lambda (w method params &key timeout before-send after-receive
-                                           preserve-json-types)
+                                           preserve-json-types &allow-other-keys)
                (declare (ignore method params timeout after-receive
                                 preserve-json-types))
                (incf calls)

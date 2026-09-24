@@ -62,6 +62,14 @@ twice:
 No request is ever sent again automatically. The text of these results says
 the same as the field, since a client need show only the text.
 
+A session's requests run on its worker one at a time. A request that arrives
+while another of the session is running waits for it, for at most its own
+RPC budget (its `timeout_seconds`, or the default, plus the proxy's margin),
+and stops waiting at once when it is cancelled. Either way it was not sent:
+`not-executed`. A pool with no room for a new session's worker refuses at
+once (`Pool size limit reached`, `not-executed`); requests are not queued for
+room.
+
 A request whose worker was retired -- it exits on receiving a request while
 it still carries a thread an earlier deadline could not stop -- is
 `not-executed`: it retires before running it.
