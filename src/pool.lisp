@@ -350,6 +350,25 @@ decided, and whether it is still owed.  Every slot is guarded by
   ;; decides it.
   (replenish-thread nil))
 
+;;; A DEFSTRUCT slot takes no documentation, so the readers get theirs here.
+(progn
+  (setf (documentation 'generation-id 'function)
+        "GENERATION's number: one more than the generation before it."
+        (documentation 'generation-spawns 'function)
+        "How many spawn operations GENERATION decided and has not finished --
+each ends with its worker registered in the pool's lists, or ended.  Read
+and written under *POOL-LOCK*."
+        (documentation 'generation-ending 'function)
+        "The workers GENERATION took out of the pool's lists to be ended and
+has not ended yet.  Read and written under *POOL-LOCK*."
+        (documentation 'generation-replenish-running 'function)
+        "True from GENERATION's decision to replenish until that replenishment
+ends; one at a time per generation.  Read and written under *POOL-LOCK*."
+        (documentation 'generation-replenish-thread 'function)
+        "The handle of GENERATION's replenishment, published in the critical
+section that decides it.  Read and written under *POOL-LOCK*.")
+  'pool-generation)
+
 (defvar *generation* (%make-generation 0)
   "The pool generation that is running, or was last.  INITIALIZE-POOL starts a
 new one.  Background work notes the generation it was started for and adds
