@@ -1339,3 +1339,26 @@ direct lost-update regression."
           (if verdict
               (format nil "round ~S: ~A" (first verdict) (rest verdict))
               "a relative and an absolute spelling take the same lock")))))
+
+(deftest lisp-patch-form-stays-inside-the-form-under-the-reader-pass
+  ;; Issue #191: under the CL-reader pass the form's range used to end past
+  ;; the newline after it, so old_text could reach outside the form.
+  (let ((file (format nil "(defun a () 1)~%(defun b () 2)~%")))
+    (dolist (readtable '(nil :standard))
+      (testing (format nil "old_text past the form is refused, readtable ~S" readtable)
+        (with-temp-file "tests/tmp/patch-reader-pass-outside.lisp" file
+          (lambda (path)
+            (ok (handler-case
+                    (progn (lisp-patch-form :file-path path :form-type "defun" :form-name "a"
+                                            :old-text (format nil "1)~%") :new-text "1) "
+                                            :readtable readtable)
+                           nil)
+                  (error () t)))
+            (ok (string= file (fs-read-file path))))))
+      (testing (format nil "a patch inside the form still works, readtable ~S" readtable)
+        (with-temp-file "tests/tmp/patch-reader-pass-inside.lisp" file
+          (lambda (path)
+            (lisp-patch-form :file-path path :form-type "defun" :form-name "a"
+                             :old-text "1)" :new-text "10)" :readtable readtable)
+            (ok (string= (format nil "(defun a () 10)~%(defun b () 2)~%")
+                         (fs-read-file path)))))))))

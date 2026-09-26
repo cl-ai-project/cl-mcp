@@ -1196,3 +1196,14 @@ message it signals, or NIL when it returns normally."
                (content (gethash "content" result)))
           (ok (string= (gethash "mode" result) "raw"))
           (ok (search "(list 1)))" content)))))))
+
+(deftest lisp-read-file-expands-a-form-after-in-readtable-to-its-own-lines
+  ;; Issue #191: the expansion prints the form's own lines after an
+  ;; in-readtable switch, not the newline or blank line after it.
+  (with-temp-lisp-file "tests/tmp/read-file-in-readtable.lisp"
+      (format nil "(named-readtables:in-readtable :standard)~%(defun a ()~%  1)~%~%~
+                   (defun b () 2)~%")
+    (lambda (relative)
+      (let ((text (gethash "content" (lisp-read-file relative :name-pattern "^a$"))))
+        (ok (search (format nil "2: (defun a ()~%3:   1)~%5: (defun b () ...)") text)
+            text)))))

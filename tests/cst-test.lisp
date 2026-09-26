@@ -7,6 +7,8 @@
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms
                 #:cst-node-kind
+                #:cst-node-start
+                #:cst-node-end
                 #:cst-node-start-line
                 #:cst-node-end-line
                 #:cst-node-value
@@ -133,3 +135,31 @@
         (text-reached-in-readtable (format nil "(~A 1)~%(in-readtable :foo)" name))
         (ok (null (find-symbol name :cl-user)))
         (ok (null (find-symbol name *package*)))))))
+
+(defun %spans (text &rest options)
+  "Return the (START END) of every :expr node PARSE-TOP-LEVEL-FORMS gives TEXT."
+  (loop for node in (apply #'parse-top-level-forms text options)
+        when (eq :expr (cst-node-kind node))
+          collect (list (cst-node-start node) (cst-node-end node))))
+
+(deftest reader-pass-ends-a-node-where-the-form-ends
+  ;; Issue #191: READ consumed the whitespace after a top-level form, so under
+  ;; the CL-reader pass END was one past the form and every caller editing
+  ;; next to it saw the newline as part of the form.
+  (let ((form "(defun a () 1)")
+        (tails (list (string #\Newline)
+                     (format nil "~C~C" #\Return #\Newline)
+                     " "
+                     (string #\Tab)
+                     "")))
+    (dolist (tail tails)
+      (let* ((text (concatenate 'string form tail))
+             (expected (%spans text)))
+        (ok (equal '((0 14)) expected) (format nil "standard syntax, tail ~S" tail))
+        (ok (equal expected (%spans text :readtable :standard))
+            (format nil "explicit :standard, tail ~S" tail))
+        (ok (equal '((42 56))
+                   (rest (%spans (concatenate 'string
+                                              "(named-readtables:in-readtable :standard)"
+                                              (string #\Newline) text))))
+            (format nil "after in-readtable, tail ~S" tail))))))
