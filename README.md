@@ -79,8 +79,11 @@ use cl-mcp tools effectively:
   Properties, baselines, seed replay, and reading `spec-check` verdicts.
   Supplements the two prompts above rather than replacing them
 
-Reference them from your project's `CLAUDE.md` (or equivalent) so the agent
-loads them at conversation start:
+cl-mcp also sends a short summary of the first and third as its MCP server
+instructions (see [Server instructions](docs/tools.md#server-instructions)), so
+a client that honours them gets the essentials without any setup. Reference
+the full prompts from your project's `CLAUDE.md` (or equivalent) when you want
+the complete guide, or when your client ignores server instructions:
 
 ```markdown
 # CLAUDE.md
