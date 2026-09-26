@@ -1145,8 +1145,9 @@ Response (excerpt):
 ## Server instructions
 
 `initialize` returns an `instructions` string: the base guidance (set the project root first;
-read and change Lisp source only with the Lisp tools, never a shell command, script or
-built-in Read/Edit; `load-system` after an edit; run code through `run-tests` and `repl-eval`
+read and change Lisp source only with cl-mcp tools, never a shell command, script or
+built-in Read/Edit, and `fs-write-file` only for a new file or one that no longer parses;
+`load-system` after an edit; run code through `run-tests` and `repl-eval`
 rather than a shell `ros`/`sbcl`; the worker pool) and, for each enabled tool group, that
 group's guidance (for `cl-spec`: read or first write the contract, check with both
 `spec-check` and `run-tests`, change a contract only when asked). It is built from the same
