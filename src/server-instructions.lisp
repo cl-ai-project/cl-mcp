@@ -1,5 +1,5 @@
 ;;;; src/server-instructions.lisp
-
+;;;;
 ;;;; The instructions cl-mcp returns from initialize: the standing guidance an
 ;;;; agent gets from enabling the server, before it reads any tool description.
 ;;;;
