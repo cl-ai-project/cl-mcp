@@ -10,6 +10,7 @@
   (:import-from #:cl-mcp/src/pool
                 #:initialize-pool #:shutdown-pool #:release-session
                 #:%warn-if-init-without-pool)
+  (:import-from #:cl-mcp/src/project-root #:forget-session-project-root)
   (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
   (:import-from #:hunchentoot)
   (:import-from #:yason)
@@ -127,6 +128,8 @@ they will be cleaned up once all in-flight requests complete."
               (t
                (setf (http-session-last-access session) now)
                (setf result session)))))))
+    (when expired-id
+      (forget-session-project-root expired-id))
     (when (and expired-id *use-worker-pool*)
       (ignore-errors (release-session expired-id)))
     result))
@@ -143,6 +146,7 @@ they will be cleaned up once all in-flight requests complete."
   "Delete a session by ID.  Also releases the worker pool assignment."
   (bordeaux-threads:with-lock-held (*sessions-lock*)
     (remhash session-id *sessions*))
+  (forget-session-project-root session-id)
   (when *use-worker-pool*
     (release-session session-id)))
 
@@ -193,6 +197,7 @@ Sessions with active in-flight requests are skipped even when expired."
                    (when expired
                      (log-event :info "http.session.cleanup"
                                 "expired_count" (length expired))
+                     (mapc #'forget-session-project-root expired)
                      (when *use-worker-pool*
                        (dolist (id expired)
                          (ignore-errors (release-session id)))))

@@ -302,7 +302,9 @@ to normalize relative paths.
 Output:
 - `project_root` (string): resolved project root
 - `cwd` (string|null): current working directory
-- `project_root_source` (string): one of `env` or `explicit`
+- `project_root_source` (string): `session` when this session set its own root (with
+  `fs-set-project-root` or `initialize`'s `rootPath`/`rootUri`), otherwise `env`
+  (`MCP_PROJECT_ROOT`) or `explicit` (the server default, set outside any session)
 - `relative_cwd` (string|null): cwd relative to project root when inside it
 
 ## `fs-set-project-root`
@@ -314,6 +316,16 @@ Input:
 This tool allows AI agents to explicitly set the server's working directory, ensuring
 path resolution works correctly. The server updates both `*project-root*` and the
 current working directory (via `uiop:chdir`).
+
+The root is the **calling session's own**: the parent-side tools (`fs-*`, `lisp-read-file`,
+`lisp-edit-form`, `lisp-patch-form`, `lisp-check-parens`, `clgrep-search`, `project-scaffold`)
+resolve that session's paths against it, and only that session's worker is told. Other
+sessions on the same server keep their roots, and a session that never sets one works under
+the server default (`MCP_PROJECT_ROOT`, or a root set outside any session). `initialize`'s
+`rootPath`/`rootUri` sets the connecting session's root the same way. A session's root is
+dropped when the session ends (TCP connection closed, HTTP session deleted or expired). The
+process working directory is shared by all sessions and follows the last root set; no path is
+resolved against it.
 
 Output:
 - `project_root` (string): new project root path

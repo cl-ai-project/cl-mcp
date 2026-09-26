@@ -6,8 +6,14 @@
 (defpackage #:cl-mcp/src/project-root
   (:use #:cl)
   (:import-from #:bordeaux-threads #:make-lock)
+  (:import-from #:cl-mcp/src/state #:*current-session-id*)
   (:export #:*project-root*
            #:*project-root-lock*
+           #:session-project-root
+           #:set-project-root
+           #:forget-session-project-root
+           #:call-with-session-project-root
+           #:with-session-project-root
            #:register-project-root-source-registry))
 
 (in-package #:cl-mcp/src/project-root)
@@ -25,6 +31,87 @@ Set via MCP_PROJECT_ROOT environment variable or fs-set-project-root tool.")
 
 (defvar *project-root-lock* (bt:make-lock "project-root-lock")
   "Lock protecting multi-step mutations of *project-root* and related globals.")
+
+;;; Per-session roots.
+;;;
+;;; *PROJECT-ROOT*'s global value is the server default (MCP_PROJECT_ROOT, or a
+;;; root set outside any session).  A session that sets a root -- through
+;;; fs-set-project-root or its initialize rootPath/rootUri -- gets an entry in
+;;; *SESSION-PROJECT-ROOTS* instead, and each of its requests runs with
+;;; *PROJECT-ROOT* bound to that entry (CALL-WITH-SESSION-PROJECT-ROOT).  So a
+;;; session never moves another session's root, and every reader of
+;;; *PROJECT-ROOT* keeps working unchanged.
+
+(defvar *session-project-roots* (make-hash-table :test #'equal)
+  "Maps a session id to the project root (a directory pathname) that session set.
+A session with no entry works under the global value of *PROJECT-ROOT*.")
+
+(defvar *session-project-roots-lock* (bt:make-lock "session-project-roots-lock")
+  "Guards *SESSION-PROJECT-ROOTS*.")
+
+(defvar *bound-session-id* nil
+  "The session whose root CALL-WITH-SESSION-PROJECT-ROOT bound *PROJECT-ROOT* to
+in this thread, or NIL outside such a binding.  SET-PROJECT-ROOT assigns the
+binding only when it belongs to the session being set, so a session's root never
+reaches the global value.")
+
+(defun session-project-root (session-id)
+  "Return the project root SESSION-ID set, or NIL when it set none."
+  (and session-id
+       (bt:with-lock-held (*session-project-roots-lock*)
+         (values (gethash session-id *session-project-roots*)))))
+
+(defun forget-session-project-root (session-id)
+  "Drop the project root SESSION-ID set.  Called when the session ends, so a
+later session reusing the id starts from the server default."
+  (when session-id
+    (bt:with-lock-held (*session-project-roots-lock*)
+      (remhash session-id *session-project-roots*))))
+
+(defun set-project-root (root &key (session-id *current-session-id*))
+  "Make ROOT, an absolute directory, the project root of SESSION-ID and return it
+as a directory pathname.
+
+With a SESSION-ID (the default is the current request's), only that session's
+entry changes, plus the *PROJECT-ROOT* and *DEFAULT-PATHNAME-DEFAULTS* bindings
+of its request when this thread is running one; the global default and every
+other session keep their roots.  With a NIL SESSION-ID -- a call from outside
+any transport -- the global default changes, as it always has.
+
+Either way the process changes its working directory to ROOT.  The working
+directory is shared by the whole process; no path is resolved against it."
+  (let ((dir (uiop:ensure-directory-pathname root)))
+    (bt:with-lock-held (*project-root-lock*)
+      (cond
+        (session-id
+         (bt:with-lock-held (*session-project-roots-lock*)
+           (setf (gethash session-id *session-project-roots*) dir))
+         (when (equal *bound-session-id* session-id)
+           (setf *project-root* dir
+                 *default-pathname-defaults* dir)))
+        (t
+         (setf *project-root* dir
+               *default-pathname-defaults* dir)))
+      (uiop:chdir dir))
+    dir))
+
+(defun call-with-session-project-root (thunk &key (session-id *current-session-id*))
+  "Call THUNK with *PROJECT-ROOT* and *DEFAULT-PATHNAME-DEFAULTS* bound to the
+root SESSION-ID set, or to the global default when it set none.  With a NIL
+SESSION-ID nothing is bound, so a root set inside THUNK is the global default."
+  (if session-id
+      (let* ((root (session-project-root session-id))
+             (*bound-session-id* session-id)
+             (*project-root* (or root *project-root*))
+             (*default-pathname-defaults*
+               (if root root *default-pathname-defaults*)))
+        (funcall thunk))
+      (funcall thunk)))
+
+(defmacro with-session-project-root ((&key (session-id '*current-session-id*)) &body body)
+  "Evaluate BODY under the project root of SESSION-ID (the current session by
+default).  See CALL-WITH-SESSION-PROJECT-ROOT."
+  `(call-with-session-project-root (lambda () ,@body) :session-id ,session-id))
 
 (defvar *registered-project-root* nil
   "The project-root directory this worker last added to ASDF:*CENTRAL-REGISTRY*
