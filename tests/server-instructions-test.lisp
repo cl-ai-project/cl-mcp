@@ -27,19 +27,39 @@
 (in-package #:cl-mcp/tests/server-instructions-test)
 
 (deftest group-instructions-follow-the-enabled-groups
-  (register-tool-group-instructions :test-instructions-group "Test group text.")
-  (testing "a group that is off contributes nothing"
-    (let ((*enabled-tool-groups* '()))
-      (ok (not (member "Test group text." (enabled-tool-group-instructions)
-                       :test #'string=)))))
-  (testing "a group that is on contributes its text"
-    (let ((*enabled-tool-groups* (list "TEST-INSTRUCTIONS-GROUP")))
-      (ok (member "Test group text." (enabled-tool-group-instructions)
-                  :test #'string=))))
-  (testing "re-registering replaces the text instead of adding a second one"
-    (register-tool-group-instructions "test-instructions-group" "Replaced.")
-    (let ((*enabled-tool-groups* (list "TEST-INSTRUCTIONS-GROUP")))
-      (ok (equal '("Replaced.") (enabled-tool-group-instructions))))))
+  (let ((cl-mcp/src/tools/registry::*tool-group-instructions* '()))
+    (register-tool-group-instructions :test-instructions-group "Test group text.")
+    (testing "a group that is off contributes nothing"
+      (let ((*enabled-tool-groups* '()))
+        (ok (not (member "Test group text." (enabled-tool-group-instructions)
+                         :test #'string=)))))
+    (testing "a group that is on contributes its text"
+      (let ((*enabled-tool-groups* (list "TEST-INSTRUCTIONS-GROUP")))
+        (ok (member "Test group text." (enabled-tool-group-instructions)
+                    :test #'string=))))
+    (testing "re-registering replaces the text instead of adding a second one"
+      (register-tool-group-instructions "test-instructions-group" "Replaced.")
+      (let ((*enabled-tool-groups* (list "TEST-INSTRUCTIONS-GROUP")))
+        (ok (equal '("Replaced.") (enabled-tool-group-instructions)))))))
+
+(deftest group-instructions-follow-registration-order
+  ;; F1: multiple groups compose in registration order, not enablement order,
+  ;; and re-registering a group replaces its text where it already stands.
+  (let ((cl-mcp/src/tools/registry::*tool-group-instructions* '()))
+    (register-tool-group-instructions :group-a "A1")
+    (register-tool-group-instructions :group-b "B")
+    (register-tool-group-instructions :group-a "A2")
+    (let ((*enabled-tool-groups* (list "GROUP-B" "GROUP-A")))
+      (ok (equal (format nil "~A~%~%~A~%~%~A" +base-instructions+ "A2" "B")
+                 (server-instructions))))))
+
+(deftest register-tool-group-instructions-refuses-empty-names
+  ;; F2: NIL and "" both normalize to "no group", which TOOL-GROUP-ENABLED-P
+  ;; always treats as enabled, so their text would ship unconditionally.
+  (dolist (group (list nil ""))
+    (ok (handler-case (progn (register-tool-group-instructions group "text") nil)
+          (error () t))
+        (format nil "~S is refused" group))))
 
 (defparameter *group-settings* (list '() (list "CL-SPEC"))
   "Every combination of the groups cl-mcp ships, as *ENABLED-TOOL-GROUPS* values.")

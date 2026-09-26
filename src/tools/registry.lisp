@@ -119,15 +119,20 @@ a client about using it are decided by the same TOOL-GROUP-ENABLED-P.")
   "Register TEXT as the instructions of the optional tool GROUP; return its name.
 
 Registering the same group again replaces its text where it stands, so
-reloading a file does not move its group behind the others or repeat it."
+reloading a file does not move its group behind the others or repeat it.
+GROUP must name a group: NIL and the empty string are refused, because
+TOOL-GROUP-ENABLED-P treats both as \"no group\", which is always enabled, so
+their text would otherwise ship with every initialize regardless of setting."
   (check-type text string)
-  (let* ((name (normalize-tool-group group))
-         (entry (assoc name *tool-group-instructions* :test #'equal)))
-    (if entry
-        (setf (cdr entry) text)
-        (setf *tool-group-instructions*
-              (append *tool-group-instructions* (list (cons name text)))))
-    name))
+  (let ((name (normalize-tool-group group)))
+    (assert (and name (plusp (length name))) (group)
+            "GROUP must name a non-empty tool group, not ~S." group)
+    (let ((entry (assoc name *tool-group-instructions* :test #'equal)))
+      (if entry
+          (setf (cdr entry) text)
+          (setf *tool-group-instructions*
+                (append *tool-group-instructions* (list (cons name text)))))
+      name)))
 
 (defun enabled-tool-group-instructions ()
   "Return the instructions texts of the enabled tool groups, in registration order."
@@ -179,5 +184,6 @@ mistake to correct, the second a setting to change."
     (coerce (nreverse descriptors) 'vector)))
 
 (defun clear-tool-registry ()
-  "Clear all registered tools. Mainly for testing."
-  (clrhash *tool-registry*))
+  "Clear all registered tools and their group instructions. Mainly for testing."
+  (clrhash *tool-registry*)
+  (setf *tool-group-instructions* '()))
