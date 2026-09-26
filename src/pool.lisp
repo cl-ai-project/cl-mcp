@@ -58,7 +58,8 @@
                 #:discard-session-resets
                 #:discard-all-resets)
   (:import-from #:cl-mcp/src/project-root
-                #:*project-root*)
+                #:*project-root*
+                #:session-project-root)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:export #:*worker-pool-warmup*
            #:*max-pool-size*
@@ -782,7 +783,15 @@ in its place, or once the worker is ended."
       (let ((new-worker nil))
         (unwind-protect
             (progn
-              (setf new-worker (%spawn-worker))
+              ;; Under the session's own root: the worker takes its root from
+              ;; the environment it is spawned with, and a recovery spawns on
+              ;; a pool thread, outside the request that bound the session's
+              ;; root -- the replacement would start under the server default
+              ;; while the parent kept editing under the session's (#129).
+              (setf new-worker
+                    (let ((*project-root* (or (session-project-root session-id)
+                                              *project-root*)))
+                      (%spawn-worker)))
               (setf (worker-state new-worker) :bound)
               (setf (worker-session-id new-worker) session-id)
               (let ((cancelled nil) (shut-down nil))

@@ -1,0 +1,262 @@
+;;;; tests/session-project-root-test.lisp
+;;;;
+;;;; A session's project root is its own (#129): setting one, by
+;;;; fs-set-project-root or by initialize's rootPath, must not move the root
+;;;; another session's parent-side tools resolve paths against.
+
+(defpackage #:cl-mcp/tests/session-project-root-test
+  (:use #:cl)
+  (:import-from #:rove
+                #:deftest #:testing #:ok)
+  (:import-from #:cl-mcp/src/protocol
+                #:process-json-line)
+  (:import-from #:cl-mcp/src/state
+                #:*current-session-id*)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*
+                #:set-project-root
+                #:session-project-root
+                #:forget-session-project-root)
+  (:import-from #:cl-mcp/src/pool
+                #:get-or-assign-worker)
+  (:import-from #:cl-mcp/src/worker-client
+                #:worker-id)
+  (:import-from #:cl-mcp/specs/pool-fixtures
+                #:with-fake-pool
+                #:fake-spawn
+                #:ledger-dead
+                #:run-pending-work)
+  ;; A bare :import-from declares the dependency; the session table it clears
+  ;; is internal and found by name where it is used.
+  (:import-from #:cl-mcp/src/http)
+  (:import-from #:yason #:parse))
+
+(in-package #:cl-mcp/tests/session-project-root-test)
+
+(defun %scratch-dir (name)
+  "Return a fresh directory NAME under tests/tmp/ of the cl-mcp source tree."
+  (let ((dir (uiop:ensure-directory-pathname
+              (merge-pathnames (format nil "tests/tmp/session-root-~A/" name)
+                               (asdf:system-source-directory :cl-mcp)))))
+    (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)
+    (ensure-directories-exist dir)
+    (truename dir)))
+
+(defun %call (session method params)
+  "Send METHOD with PARAMS (a hash-table) as SESSION, the way a transport does,
+and return the parsed response."
+  (let ((*current-session-id* session)
+        (msg (make-hash-table :test #'equal)))
+    (setf (gethash "jsonrpc" msg) "2.0"
+          (gethash "id" msg) 1
+          (gethash "method" msg) method
+          (gethash "params" msg) params)
+    (parse (process-json-line
+            (with-output-to-string (s) (yason:encode msg s))))))
+
+(defun %tool (session name &rest args)
+  "Call tool NAME as SESSION with ARGS, a plist of JSON keys and values, and
+return the response's result, or its error when it has no result."
+  (let ((params (make-hash-table :test #'equal))
+        (arguments (make-hash-table :test #'equal)))
+    (loop for (k v) on args by #'cddr
+          do (setf (gethash k arguments) v))
+    (setf (gethash "name" params) name
+          (gethash "arguments" params) arguments)
+    (let ((resp (%call session "tools/call" params)))
+      (or (gethash "result" resp) (gethash "error" resp)))))
+
+(defun %root-of (session)
+  "The project root SESSION's parent-side tools resolve against, as a native
+namestring, or NIL when it has none."
+  (gethash "project_root" (%tool session "fs-get-project-info")))
+
+(defun %native (pathname)
+  (uiop:native-namestring pathname))
+
+(defun call-with-isolated-roots (thunk sessions)
+  "Call THUNK without the worker pool, then put back the global root, the
+default pathname, the working directory, forget SESSIONS' roots and delete the
+scratch directories %SCRATCH-DIR made."
+  (let ((root *project-root*)
+        (defaults *default-pathname-defaults*)
+        (cwd (ignore-errors (uiop:getcwd)))
+        (*use-worker-pool* nil))
+    (unwind-protect (funcall thunk)
+      (mapc #'forget-session-project-root sessions)
+      (setf *project-root* root
+            *default-pathname-defaults* defaults)
+      (when cwd (ignore-errors (uiop:chdir cwd)))
+      (dolist (dir (directory (merge-pathnames "tests/tmp/session-root-*/"
+                                               (asdf:system-source-directory :cl-mcp))))
+        (ignore-errors
+          (uiop:delete-directory-tree dir :validate t))))))
+
+(defmacro with-isolated-roots ((&rest sessions) &body body)
+  `(call-with-isolated-roots (lambda () ,@body) (list ,@sessions)))
+
+(deftest a-session-root-does-not-move-another-session
+  (testing "fs-set-project-root in one session leaves the other and the default alone"
+    (with-isolated-roots ("tA" "tB")
+      (let ((default (%scratch-dir "default"))
+            (a (%scratch-dir "a")))
+        (setf *project-root* default)
+        (%tool "tA" "fs-set-project-root" "path" (%native a))
+        (ok (equal (%root-of "tA") (%native a))
+            "the session that set the root works under it")
+        (ok (equal (%root-of "tB") (%native default))
+            "another session still works under the server default")
+        (ok (equal (%native *project-root*) (%native default))
+            "the global default is untouched")
+        (ok (equal (gethash "project_root_source"
+                            (%tool "tA" "fs-get-project-info"))
+                   "session")
+            "fs-get-project-info says the root is the session's own")))))
+
+(deftest a-relative-write-lands-in-the-writing-sessions-tree
+  (testing "the #129 hazard: a relative path must not resolve under the other root"
+    (with-isolated-roots ("tA" "tB")
+      (let ((a (%scratch-dir "write-a"))
+            (b (%scratch-dir "write-b")))
+        (%tool "tA" "fs-set-project-root" "path" (%native a))
+        ;; B sets its root after A, which used to re-point A as well.
+        (%tool "tB" "fs-set-project-root" "path" (%native b))
+        (%tool "tA" "fs-write-file" "path" "note.txt" "content" "from A")
+        (ok (probe-file (merge-pathnames "note.txt" a))
+            "A's relative write lands in A's tree")
+        (ok (not (probe-file (merge-pathnames "note.txt" b)))
+            "and not in B's, which B set last")
+        (let ((listing (%tool "tB" "fs-list-directory" "path" ".")))
+          (ok (not (search "note.txt" (with-output-to-string (s)
+                                         (yason:encode listing s))))
+              "B's listing is of B's tree"))))))
+
+(deftest initialize-sets-only-the-connecting-sessions-root
+  (testing "a client connecting with rootPath does not re-point the sessions already there"
+    (with-isolated-roots ("tA" "tB")
+      (let ((a (%scratch-dir "init-a"))
+            (b (%scratch-dir "init-b"))
+            (params (make-hash-table :test #'equal)))
+        (%tool "tA" "fs-set-project-root" "path" (%native a))
+        (setf (gethash "protocolVersion" params) "2025-06-18"
+              (gethash "rootPath" params) (%native b))
+        (ok (gethash "result" (%call "tB" "initialize" params))
+            "initialize succeeds")
+        (ok (equal (%root-of "tB") (%native b))
+            "the connecting session works under its rootPath")
+        (ok (equal (%root-of "tA") (%native a))
+            "the session already connected keeps its own root")))))
+
+(deftest a-root-set-outside-any-session-is-the-default
+  (testing "with no session id the call sets the global default, as before"
+    (with-isolated-roots ("tA")
+      (let ((d (%scratch-dir "global")))
+        (%tool nil "fs-set-project-root" "path" (%native d))
+        (ok (equal (%native *project-root*) (%native d))
+            "the global default moved")
+        (ok (null (session-project-root "tA"))
+            "no session entry was made")
+        (ok (equal (%root-of "tA") (%native d))
+            "a session with no root of its own works under the new default")))))
+
+(deftest an-ended-session-forgets-its-root
+  (testing "deleting an HTTP session drops its root, so a reused id starts from the default"
+    (with-isolated-roots ("tA")
+      (let ((default (%scratch-dir "forget-default"))
+            (a (%scratch-dir "forget-a")))
+        (setf *project-root* default)
+        (%tool "tA" "fs-set-project-root" "path" (%native a))
+        (ok (session-project-root "tA") "the session has a root")
+        (cl-mcp/src/http::delete-session "tA")
+        (ok (null (session-project-root "tA")) "the ended session's root is gone")
+        (ok (equal (%root-of "tA") (%native default))
+            "the id now resolves against the default")))))
+
+(deftest a-deleted-session-keeps-its-root-for-requests-in-flight
+  (testing "DELETE during a POST: the root goes when the last request finishes"
+    ;; The request was found and counted in one step (get-session :acquire),
+    ;; so the delete sees it and leaves the root; forgetting it at once let a
+    ;; request already accepted fall back to the server default.
+    (let* ((session (cl-mcp/src/http::create-session))
+           (id (cl-mcp/src/http::http-session-id session)))
+      (with-isolated-roots (id)
+        (let ((a (%scratch-dir "delete-a")))
+          (set-project-root a :session-id id)
+          (ok (eq session (cl-mcp/src/http::get-session id :acquire t))
+              "a request of the session is in flight")
+          (cl-mcp/src/http::delete-session id)
+          (ok (equal (session-project-root id) a)
+              "the delete leaves the root to the request in flight")
+          (cl-mcp/src/http::%release-session-request session)
+          (ok (null (session-project-root id))
+              "the last request to finish forgets it"))))))
+
+(deftest a-finished-stdio-session-forgets-its-root
+  (testing "a later run in the same image starts from the server default"
+    (with-isolated-roots ("stdio")
+      (let* ((a (%scratch-dir "stdio-a"))
+             (request (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",~
+\"params\":{\"name\":\"fs-set-project-root\",\"arguments\":{\"path\":\"~A\"}}}~%"
+                              (%native a)))
+             (out (make-string-output-stream)))
+        (cl-mcp/src/run:run :transport :stdio
+                            :in (make-string-input-stream request)
+                            :out out
+                            :worker-pool nil)
+        (ok (search "Project root set to" (get-output-stream-string out))
+            "the session set its root")
+        (ok (null (session-project-root "stdio"))
+            "and it was forgotten when the stream ended")))))
+
+(deftest a-deadline-thread-runs-under-the-sessions-root
+  (testing "with the pool off, repl-eval's timeout thread sees the request's root"
+    ;; The deadline runs the form on a thread of its own, which does not see
+    ;; the request's bindings: it saw the global root (here NIL) instead.
+    (with-isolated-roots ("tA")
+      (let ((a (%scratch-dir "deadline-a")))
+        (setf *project-root* nil)
+        (%tool "tA" "fs-set-project-root" "path" (%native a))
+        (let* ((result (%tool "tA" "repl-eval"
+                              "code" "(format nil \"ROOT=~A DPD=~A\"
+                                        (and cl-mcp/src/project-root:*project-root*
+                                             (uiop:native-namestring
+                                              cl-mcp/src/project-root:*project-root*))
+                                        (uiop:native-namestring *default-pathname-defaults*))"
+                              "package" "CL-USER"
+                              "timeout_seconds" 5))
+               (content (gethash "content" result))
+               (text (if (plusp (length content))
+                         (gethash "text" (aref content 0))
+                         "")))
+          (ok (search (format nil "ROOT=~A" (%native a)) text)
+              (format nil "*project-root* is the session's root; got ~S" text))
+          (ok (search (format nil "DPD=~A" (%native a)) text)
+              (format nil "*default-pathname-defaults* is too; got ~S" text)))))))
+
+(deftest a-recovered-worker-starts-under-the-sessions-root
+  (testing "the replacement for a crashed worker is spawned with its session's root"
+    ;; Recovery spawns on a pool thread, outside any request, where only the
+    ;; global default is visible: the replacement came up under the server
+    ;; default while the parent kept editing under the session's root.
+    (with-isolated-roots ("s0")
+      (let ((a (%scratch-dir "recover-a"))
+            (seen '()))
+        (with-fake-pool (ledger :warmup 0)
+          (setf cl-mcp/src/pool::*spawn-worker-function*
+                (lambda ()
+                  (push *project-root* seen)
+                  (fake-spawn ledger)))
+          (set-project-root a :session-id "s0")
+          (let ((first (get-or-assign-worker "s0")))
+            (setf (gethash first (ledger-dead ledger)) t)
+            (cl-mcp/src/pool::%check-worker-health)
+            (run-pending-work ledger)
+            (let ((replacement (get-or-assign-worker "s0")))
+              (ok (not (eql (worker-id first) (worker-id replacement)))
+                  "the session was given a replacement")
+              (ok (= 2 (length seen)) "two spawns: the first and the replacement")
+              (ok (every (lambda (root) (equal root a)) seen)
+                  (format nil "every spawn for the session saw its root; saw ~S"
+                          seen)))))))))

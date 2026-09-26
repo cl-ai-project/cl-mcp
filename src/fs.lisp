@@ -5,7 +5,8 @@
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*
-                #:*project-root-lock*)
+                #:set-project-root
+                #:session-project-root)
   (:import-from #:bordeaux-threads
                 #:with-lock-held
                 #:make-lock
@@ -28,7 +29,6 @@
                 #:ensure-directory-pathname
                 #:getenv
                 #:getcwd
-                #:chdir
                 #:subpathp
                 #:merge-pathnames*
                 #:directory
@@ -630,13 +630,18 @@ listings stay useful."
 Returns a hash-table with keys:
   - project_root: absolute path to project root
   - cwd: current working directory
-  - project_root_source: how project root was determined (env|cwd|asdf)
+  - project_root_source: how project root was determined: session (this
+    session set its own), env (MCP_PROJECT_ROOT) or explicit (the server
+    default, set outside any session)
   - relative_cwd: cwd relative to project_root (when inside project)"
   (ensure-project-root)
   (let ((cwd (ignore-errors (uiop:getcwd)))
         (env-root (uiop:getenv "MCP_PROJECT_ROOT"))
         (h (make-hash-table :test #'equal)))
-    (let ((root-source (if env-root "env" "explicit")))
+    (let ((root-source (cond ((session-project-root *current-session-id*)
+                              "session")
+                             (env-root "env")
+                             (t "explicit"))))
       (setf (gethash "project_root" h) (native-path-namestring *project-root*)
             (gethash "cwd" h) (native-path-namestring cwd)
             (gethash "project_root_source" h) root-source)
@@ -665,7 +670,9 @@ Returns a hash-table with updated path information:
          ;; named project[old]/ came back as a wild pathname it then refused.
          ;; The wire protocol carries POSIX paths; parse them as such.
          (requested (uiop:parse-unix-namestring path :ensure-directory t))
-         (base (ignore-errors (uiop/os:getcwd)))
+         ;; The session's own root, not the process's working directory,
+         ;; which is whatever the last session to set a root left it at.
+         (base (or prev-root (ignore-errors (uiop/os:getcwd))))
          (temp-root
           (if (uiop/pathname:absolute-pathname-p requested)
               requested
@@ -677,12 +684,9 @@ Returns a hash-table with updated path information:
       (error "Refusing to set project root to ~A — too broad"
              (native-path-namestring temp-root)))
     (let ((new-root (truename temp-root)))
-      ;; C3: Atomic multi-step mutation under lock
-      (bt:with-lock-held (*project-root-lock*)
-        (setf *project-root* new-root)
-        (uiop/os:chdir new-root)
-        (setf *default-pathname-defaults*
-                (uiop/pathname:ensure-directory-pathname new-root)))
+      ;; The calling session's root only: another session's relative paths
+      ;; must not start resolving under this one's tree (#129).
+      (set-project-root new-root)
       (log-event :info "fs.set-project-root" "previous"
        (if prev-root
            (native-path-namestring prev-root)

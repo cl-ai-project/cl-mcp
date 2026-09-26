@@ -25,10 +25,8 @@
   ;; Tool modules register themselves with the registry at load time.
   (:import-from #:cl-mcp/src/tools/all)
   (:import-from #:cl-mcp/src/project-root
-                #:*project-root*
-                #:*project-root-lock*)
-  (:import-from #:bordeaux-threads
-                #:with-lock-held)
+                #:set-project-root
+                #:with-session-project-root)
   (:import-from #:cl-mcp/src/pool
                 #:send-root-to-session-worker)
   (:import-from #:cl-mcp/src/proxy
@@ -228,10 +226,9 @@ On second failure, return a hardcoded valid JSON-RPC error response."
                                 "path" (native-path-namestring root-dir)
                                 "reason" "too broad"))
                     (t
-                     (with-lock-held (*project-root-lock*)
-                       (setf *project-root* root-dir)
-                       (uiop/os:chdir root-dir)
-                       (setf *default-pathname-defaults* root-dir))
+                     ;; This session's root only: a client connecting must
+                     ;; not re-point the sessions already connected (#129).
+                     (set-project-root root-dir)
                      ;; Propagate root to this session's worker only
                      (ignore-errors
                        (send-root-to-session-worker *current-session-id* root-dir))
@@ -350,14 +347,18 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
         (t (rpc-error id -32601 (format nil "Tool ~A not found" name)))))))
 
 (defun handle-request (state id method params)
-  (cond
-    ((string= method "initialize") (handle-initialize state id params))
-    ((string= method "tools/list") (handle-tools-list id))
-    ((string= method "tools/call")
-     (or (handle-asdf-tools-call id params)
-         (handle-tools-call state id params)))
-    ((string= method "ping") (result id (make-ht)))
-    (t (rpc-error id -32601 (format nil "Method ~A not found" method)))))
+  ;; Every request runs under its own session's project root, so the parent's
+  ;; file, edit and search tools resolve paths where that session set its root
+  ;; rather than wherever another session last moved it (#129).
+  (with-session-project-root ()
+    (cond
+      ((string= method "initialize") (handle-initialize state id params))
+      ((string= method "tools/list") (handle-tools-list id))
+      ((string= method "tools/call")
+       (or (handle-asdf-tools-call id params)
+           (handle-tools-call state id params)))
+      ((string= method "ping") (result id (make-ht)))
+      (t (rpc-error id -32601 (format nil "Method ~A not found" method))))))
 
 (defun process-json-line (line &optional (state (make-state)))
   "Process one JSON-RPC line and return a JSON line to send, or NIL for notifications."

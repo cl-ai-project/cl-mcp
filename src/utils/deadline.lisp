@@ -22,6 +22,8 @@
                 #:request-debugger-result-status
                 #:request-debugger-result-error
                 #:request-debugger-deadline-interrupt)
+  (:import-from #:cl-mcp/src/project-root
+                #:*project-root*)
   (:export #:call-with-deadline-thread
            #:leaked-threads
            #:*retired-leaked-thread-reason*
@@ -154,6 +156,10 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
             (deadline-marker (list :deadline-marker))
             (request-active *request-debugger-boundary-active*)
             (debugger-config *request-debugger-config*)
+            ;; The request's paths: a new thread sees only global values, and
+            ;; a session's root is a binding of the request that set it (#129).
+            (project-root *project-root*)
+            (pathname-defaults *default-pathname-defaults*)
             (outcome nil)
             (thread nil)
             (answered nil))
@@ -240,10 +246,13 @@ called SB-THREAD:ABORT-THREAD, say -- is reported as :ERROR rather than
                    (setf thread
                          (make-thread
                           (lambda ()
-                            ;; Inherit policy and immutable settings only. Each
+                            ;; Inherit policy, immutable settings and the
+                            ;; request's paths only. Each
                             ;; boundary still owns its context, hook, and tags.
                             (let ((*request-debugger-boundary-active* request-active)
-                                  (*request-debugger-config* debugger-config))
+                                  (*request-debugger-config* debugger-config)
+                                  (*project-root* project-root)
+                                  (*default-pathname-defaults* pathname-defaults))
                               (if request-active
                                   (sb-sys:without-interrupts
                                     (let ((boundary-result

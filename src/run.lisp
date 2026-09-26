@@ -10,6 +10,7 @@
   (:import-from #:cl-mcp/src/pool
                 #:initialize-pool #:shutdown-pool #:%warn-if-init-without-pool)
   (:import-from #:cl-mcp/src/tcp #:serve-tcp)
+  (:import-from #:cl-mcp/src/project-root #:forget-session-project-root)
   (:import-from #:cl-mcp/src/worker-client
                 #:%read-line-limited #:+max-json-line-bytes+
                 #:line-too-long)
@@ -189,6 +190,9 @@ call."
                                    (return))))))))
                (log-event :info "stdio.stop")
                t)
+          ;; The session ends with the stream: a later RUN in this image is a
+          ;; new "stdio" session and starts from the server default.
+          (forget-session-project-root "stdio")
           (when *use-worker-pool* (ignore-errors (shutdown-pool)))))))
     (:tcp
      (log-event :info "tcp.start" "host" host "port" port)

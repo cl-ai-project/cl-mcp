@@ -12,6 +12,7 @@
                 #:set-enabled-tool-groups)
   (:import-from #:cl-mcp/src/pool
                 #:initialize-pool #:shutdown-pool #:release-session)
+  (:import-from #:cl-mcp/src/project-root #:forget-session-project-root)
   (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread #:join-thread)
   (:import-from #:cl-mcp/src/worker-client
                 #:%read-line-limited #:+max-json-line-bytes+
@@ -256,6 +257,7 @@ supplied, uses *enabled-tool-groups*, which comes from MCP_ENABLE_TOOL_GROUPS."
            t)
       (when stream (ignore-errors (close stream)))
       (when client (ignore-errors (usocket:socket-close client)))
+      (forget-session-project-root (format nil "tcp-~A" conn-id))
       (when *use-worker-pool*
         (ignore-errors
          (release-session (format nil "tcp-~A" conn-id))))

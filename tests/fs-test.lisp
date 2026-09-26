@@ -676,17 +676,24 @@ must treat :DID-NOT-FINISH as a failure."
   (let ((a-ready (make-semaphore))
         (b-ready (make-semaphore))
         (finished (make-semaphore))
-        (results (make-array 2 :initial-element :did-not-finish)))
+        (results (make-array 2 :initial-element :did-not-finish))
+        ;; A new thread sees only global values, and the root the test set
+        ;; may be a binding: run-tests runs a suite on a deadline thread that
+        ;; binds *PROJECT-ROOT*, so WITH-TEST-PROJECT-ROOT's SETF stays there.
+        (root cl-mcp/src/project-root:*project-root*)
+        (defaults *default-pathname-defaults*))
     (flet ((runner (index mine theirs thunk)
              (lambda ()
-               (unwind-protect
-                    (progn
-                      (signal-semaphore mine)
-                      (wait-on-semaphore theirs :timeout *parallel-wait-seconds*)
-                      (setf (aref results index)
-                            (handler-case (funcall thunk)
-                              (serious-condition (c) c))))
-                 (signal-semaphore finished)))))
+               (let ((cl-mcp/src/project-root:*project-root* root)
+                     (*default-pathname-defaults* defaults))
+                 (unwind-protect
+                      (progn
+                        (signal-semaphore mine)
+                        (wait-on-semaphore theirs :timeout *parallel-wait-seconds*)
+                        (setf (aref results index)
+                              (handler-case (funcall thunk)
+                                (serious-condition (c) c))))
+                   (signal-semaphore finished))))))
       (let ((threads (list (make-thread (runner 0 a-ready b-ready thunk-a)
                                         :name "cl-mcp-file-lock-test-a")
                            (make-thread (runner 1 b-ready a-ready thunk-b)

@@ -10,6 +10,7 @@
   (:import-from #:cl-mcp/src/pool
                 #:initialize-pool #:shutdown-pool #:release-session
                 #:%warn-if-init-without-pool)
+  (:import-from #:cl-mcp/src/project-root #:forget-session-project-root)
   (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
   (:import-from #:hunchentoot)
   (:import-from #:yason)
@@ -99,11 +100,15 @@ returns NIL."
        (set-header :www-authenticate "Bearer")
        nil))))
 
-(defun get-session (session-id)
+(defun get-session (session-id &key acquire)
   "Get session by ID, returning NIL if not found or expired.
 When *session-timeout-seconds* is NIL, sessions never expire.
 Expired sessions with active requests are NOT removed from the table;
-they will be cleaned up once all in-flight requests complete."
+they will be cleaned up once all in-flight requests complete.
+
+With ACQUIRE, a session returned is counted as having one more request in
+flight, in the same critical section that found it, so a DELETE-SESSION after
+this call sees the request (see %RELEASE-SESSION-REQUEST)."
   (let ((result nil)
         (expired-id nil))
     (bordeaux-threads:with-lock-held (*sessions-lock*)
@@ -126,7 +131,13 @@ they will be cleaned up once all in-flight requests complete."
                    (setf expired-id session-id))))
               (t
                (setf (http-session-last-access session) now)
-               (setf result session)))))))
+               (setf result session)))))
+        (when (and result acquire)
+          (bordeaux-threads:with-lock-held
+              ((http-session-active-requests-lock result))
+            (incf (http-session-active-requests result))))))
+    (when expired-id
+      (forget-session-project-root expired-id))
     (when (and expired-id *use-worker-pool*)
       (ignore-errors (release-session expired-id)))
     result))
@@ -140,11 +151,35 @@ they will be cleaned up once all in-flight requests complete."
     session))
 
 (defun delete-session (session-id)
-  "Delete a session by ID.  Also releases the worker pool assignment."
-  (bordeaux-threads:with-lock-held (*sessions-lock*)
-    (remhash session-id *sessions*))
+  "Delete a session by ID.  Also releases the worker pool assignment.
+The session's project root is forgotten now when no request of it is in
+flight, and otherwise by the last of them to finish
+(%RELEASE-SESSION-REQUEST): a request already accepted runs under the root it
+was sent for, never the server default."
+  (let ((idle t))
+    (bordeaux-threads:with-lock-held (*sessions-lock*)
+      (let ((session (gethash session-id *sessions*)))
+        (remhash session-id *sessions*)
+        (when session
+          (setf idle (bordeaux-threads:with-lock-held
+                         ((http-session-active-requests-lock session))
+                       (zerop (http-session-active-requests session)))))))
+    (when idle
+      (forget-session-project-root session-id)))
   (when *use-worker-pool*
     (release-session session-id)))
+
+(defun %release-session-request (session)
+  "Count one request of SESSION as finished.  The last one to finish after the
+session was deleted forgets its project root, which DELETE-SESSION left while
+the request was in flight."
+  (let ((idle (bordeaux-threads:with-lock-held
+                  ((http-session-active-requests-lock session))
+                (zerop (decf (http-session-active-requests session))))))
+    (when (and idle
+               (bordeaux-threads:with-lock-held (*sessions-lock*)
+                 (not (eq session (gethash (http-session-id session) *sessions*)))))
+      (forget-session-project-root (http-session-id session)))))
 
 ;;; ------------------------------------------------------------
 ;;; Session Cleanup
@@ -193,6 +228,7 @@ Sessions with active in-flight requests are skipped even when expired."
                    (when expired
                      (log-event :info "http.session.cleanup"
                                 "expired_count" (length expired))
+                     (mapc #'forget-session-project-root expired)
                      (when *use-worker-pool*
                        (dolist (id expired)
                          (ignore-errors (release-session id)))))
@@ -280,12 +316,11 @@ JSON null across all versions.  The :NULL keyword requires YASON >= 0.8."
       response)))
 
 (defun %handle-mcp-post-session (session-id body)
-  (let ((session (get-session session-id)))
+  ;; Found and counted as in flight in one step, so neither cleanup nor a
+  ;; DELETE-SESSION between the two can take the session's root from under it.
+  (let ((session (get-session session-id :acquire t)))
     (unless session
       (return-from %handle-mcp-post-session (values nil :invalid)))
-    ;; Increment active-requests to prevent cleanup during processing
-    (bordeaux-threads:with-lock-held ((http-session-active-requests-lock session))
-      (incf (http-session-active-requests session)))
     (unwind-protect
          (let* ((state (http-session-state session))
                 (line (with-output-to-string (s)
@@ -299,8 +334,7 @@ JSON null across all versions.  The :NULL keyword requires YASON >= 0.8."
                (values response :response)
                (values nil :notification)))
       ;; Always decrement, even on error
-      (bordeaux-threads:with-lock-held ((http-session-active-requests-lock session))
-        (decf (http-session-active-requests session))))))
+      (%release-session-request session))))
 
 (defun handle-mcp-post ()
   "Handle POST requests to the MCP endpoint."
@@ -551,6 +585,12 @@ Returns the acceptor instance and port number."
       (shutdown-pool))
     ;; Clear all sessions
     (bordeaux-threads:with-lock-held (*sessions-lock*)
+      ;; Their roots too: a session no longer in the table can never be
+      ;; asked for again, so its entry would only outlive it.
+      (maphash (lambda (id session)
+                 (declare (ignore session))
+                 (forget-session-project-root id))
+               *sessions*)
       (clrhash *sessions*))
     (log-event :info "http.stopped")
     t))
