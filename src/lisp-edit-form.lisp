@@ -369,57 +369,116 @@ comments near a target form."
 Whitespace and comments between the forms are not forms.  When any part of
 TEXT does not read -- an unterminated form, a stray ), a disabled #., an
 unterminated block comment -- return NIL and the condition as a second value:
-a block that reads only in part is not a block of forms."
-  (let ((eof (list :eof)))
+a block that reads only in part is not a block of forms.
+
+Each form is read by READ from the end of the previous one, so what counts as
+whitespace or a comment is the readtable's own call.  START is where the form
+itself begins only under standard gap syntax (%GAP-SYNTAX-STANDARD-P); under
+any other readtable it is the previous form's END, the gaps are empty, and
+nothing between the forms is ever rewritten."
+  (let ((eof (list :eof))
+        (scan-gaps (%gap-syntax-standard-p *readtable*)))
     (handler-case
         (call-with-package-context
          package-name
          (lambda ()
            (let ((spans '())
-                 (pos 0)
-                 (len (length text)))
+                 (pos 0))
              (loop
-               (let ((stream (make-string-input-stream text pos)))
-                 (let ((open-comment (%skip-whitespace-and-comments stream *readtable*)))
-                   (when open-comment
-                     (error open-comment)))
-                 (incf pos (file-position stream)))
-               (when (>= pos len)
-                 (return (nreverse spans)))
-               (multiple-value-bind (form end)
-                   (read-from-string text nil eof :start pos :preserve-whitespace t)
-                 ;; A trailing #+nil form reads as end of input.
-                 (when (eq form eof)
-                   (return (nreverse spans)))
-                 (push (cons pos end) spans)
-                 (setf pos end)))))
+               (let ((start pos))
+                 (when scan-gaps
+                   (let ((stream (make-string-input-stream text pos)))
+                     (let ((open-comment (%skip-whitespace-and-comments stream *readtable*)))
+                       (when open-comment
+                         (error open-comment)))
+                     (incf start (file-position stream))))
+                 (multiple-value-bind (form end)
+                     (read-from-string text nil eof :start pos :preserve-whitespace t)
+                   ;; Only whitespace and comments were left (or a trailing
+                   ;; #+nil form, which reads as end of input).
+                   (when (eq form eof)
+                     (return (nreverse spans)))
+                   (push (cons start end) spans)
+                   (setf pos end))))))
          :source-path source-path)
       (error (e)
         (values nil e)))))
 
+(defun %gap-segments (gap)
+  "Split GAP, the text between two top-level forms read under standard gap
+syntax, into (KIND START END) runs of :WHITESPACE or :COMMENT, the comments
+being ; line comments and nested #| |# block comments.  Return NIL when GAP
+holds anything else, so the caller keeps it as it is."
+  (let ((len (length gap))
+        (i 0)
+        (segments '()))
+    (flet ((pair-at-p (index first second)
+             (and (< (1+ index) len)
+                  (char= (char gap index) first)
+                  (char= (char gap (1+ index)) second))))
+      (loop while (< i len)
+            do (let ((start i)
+                     (ch (char gap i)))
+                 (cond
+                   ((%whitespace-char-p ch)
+                    (loop while (and (< i len) (%whitespace-char-p (char gap i)))
+                          do (incf i))
+                    (push (list :whitespace start i) segments))
+                   ((char= ch #\;)
+                    (setf i (or (position #\Newline gap :start i) len))
+                    (push (list :comment start i) segments))
+                   ((pair-at-p i #\# #\|)
+                    (let ((depth 0))
+                      (loop while (< i len)
+                            do (cond ((pair-at-p i #\# #\|)
+                                      (incf depth)
+                                      (incf i 2))
+                                     ((pair-at-p i #\| #\#)
+                                      (decf depth)
+                                      (incf i 2)
+                                      (when (zerop depth)
+                                        (return)))
+                                     (t (incf i))))
+                      (unless (zerop depth)
+                        (return-from %gap-segments nil)))
+                    (push (list :comment start i) segments))
+                   (t
+                    (return-from %gap-segments nil))))))
+    (nreverse segments)))
+
 (defun %normalized-gap (gap)
   "Return GAP, the text between two top-level forms of an inserted block, with
-its whitespace normalised and its comments kept in place.  An end-of-line
-comment on the previous form's line stays there; the forms are then separated
-by one blank line, and any other comments in GAP stay between them, directly
-above the next form.  Only whitespace at the edges of those parts changes."
-  (let* ((first-code (position-if-not #'%whitespace-char-p gap))
-         (newline (position #\Newline gap))
-         (end-of-line-comment-p (and first-code
-                                     (char= (char gap first-code) #\;)
-                                     (or (null newline) (< first-code newline))))
-         (eol (if end-of-line-comment-p
-                  (string-right-trim '(#\Space #\Tab #\Return)
-                                     (subseq gap 0 (or newline (length gap))))
-                  ""))
-         (body (%trim-outer-whitespace
-                (cond ((not end-of-line-comment-p) gap)
-                      (newline (subseq gap (1+ newline)))
-                      (t "")))))
-    (concatenate 'string eol (format nil "~%~%")
-                 (if (plusp (length body))
-                     (concatenate 'string body (string #\Newline))
-                     ""))))
+its whitespace normalised and its comments kept in place.  Every comment that
+starts on the previous form's line -- a ; comment, or a #| |# comment even when
+it runs on over several lines -- stays right after that form.  The forms are
+then separated by one blank line, and any other comments stay between them,
+directly above the next form.  Only whitespace at the edges of those parts
+changes, never text inside a comment.  A gap %GAP-SEGMENTS cannot split is
+returned unchanged."
+  (let ((segments (%gap-segments gap)))
+    (if (and (null segments) (plusp (length gap)))
+        gap
+        (let* ((first-newline
+                 ;; A newline inside a block comment does not end the line the
+                 ;; comment started on; only one in whitespace does.
+                 (loop for (kind start end) in segments
+                       for newline = (and (eq kind :whitespace)
+                                          (position #\Newline gap :start start :end end))
+                       when newline return newline))
+               (same-line-end
+                 ;; MAXIMIZE over no values is unspecified: start from 0.
+                 (reduce #'max
+                         (loop for (kind start end) in segments
+                               when (and (eq kind :comment)
+                                         (or (null first-newline) (< start first-newline)))
+                                 collect end)
+                         :initial-value 0))
+               (same-line (if (plusp same-line-end) (subseq gap 0 same-line-end) ""))
+               (body (%trim-outer-whitespace (subseq gap same-line-end))))
+          (concatenate 'string same-line (format nil "~%~%")
+                       (if (plusp (length body))
+                           (concatenate 'string body (string #\Newline))
+                           ""))))))
 
 (defun %normalize-block-gaps (text spans)
   "Return TEXT with each gap between the top-level forms SPANS gives
@@ -435,17 +494,26 @@ string or a comment is touched."
                              out)))
     (write-string text out :start (cdr (car (last spans))))))
 
-(defun %gap-whitespace-inert-p (readtable-designator)
-  "True when the readtable READTABLE-DESIGNATOR names (the standard one when
-NIL) reads whitespace as plain whitespace, so %NORMALIZE-BLOCK-GAPS may change
-the whitespace between forms without changing what they read as.  A readtable
-that makes a whitespace character a macro character (an indentation-sensitive
-reader) gets its gaps kept as given.  Comments need no check: text the reader
-skipped between two forms is comment or whitespace under that readtable."
-  (let ((readtable (or (%resolve-named-readtable readtable-designator)
-                       *standard-readtable*)))
-    (notany (lambda (ch) (get-macro-character ch readtable))
-            '(#\Space #\Tab #\Newline #\Return #\Page))))
+(defun %gap-syntax-standard-p (readtable)
+  "True when READTABLE reads the text between two top-level forms the standard
+way: Space, Tab, Newline, Return and Page are whitespace, and ; and #| are the
+standard comments.  Only then may the gaps of an inserted block be scanned and
+normalised.  Whitespace is tested by reading, not by GET-MACRO-CHARACTER: a
+character can be neither a macro character nor whitespace (a Tab made a single
+escape reads <Tab>1 as the symbol |1|, and dropping the Tab would make it 1)."
+  (flet ((whitespace-p (ch)
+           (and (null (get-macro-character ch readtable))
+                (let ((*readtable* readtable)
+                      (*read-suppress* t))
+                  ;; A token stops at whitespace, so X ends at index 1.
+                  (eql 1 (ignore-errors
+                          (nth-value 1 (read-from-string (format nil "x~Cy" ch) nil nil
+                                                         :preserve-whitespace t))))))))
+    (and (every #'whitespace-p '(#\Space #\Tab #\Newline #\Return #\Page))
+         (eq (get-macro-character #\; readtable)
+             (get-macro-character #\; *standard-readtable*))
+         (eq (ignore-errors (get-dispatch-macro-character #\# #\| readtable))
+             (get-dispatch-macro-character #\# #\| *standard-readtable*)))))
 
 (defun %repair-block (content nonstandard-rt package-name source-path)
   "Repair CONTENT as one block with the repair %VALIDATE-AND-REPAIR-CONTENT
@@ -788,9 +856,11 @@ reparented forms as \"repair_reparented\" and that number as \"forms\"."
                                                     file-package-name abs))
                 (let* ((spliced
                          ;; Normalise only the gaps between a block's forms, and
-                         ;; only where whitespace reads as whitespace.
+                         ;; only where the gaps read the standard way.
                          (if (and spans normalize-blank-lines
-                                  (%gap-whitespace-inert-p content-readtable))
+                                  (%gap-syntax-standard-p
+                                   (or (%resolve-named-readtable content-readtable)
+                                       *standard-readtable*)))
                              (%normalize-block-gaps validated-content spans)
                              validated-content))
                        (several-forms (and form-count (> form-count 1) form-count))

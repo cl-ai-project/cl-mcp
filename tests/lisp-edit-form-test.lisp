@@ -3348,6 +3348,26 @@ Return the condition it signals, or NIL when it succeeds."
                                   (defun c () 3)~%;; the end~%")
                      (fs-read-file path)))))))
 
+(deftest lisp-edit-form-block-keeps-end-of-line-block-comments
+  (testing "a #| |# comment on a form's line stays on that line (PR #190 review)"
+    (with-temp-file "tests/tmp/multi-insert-eol-block.lisp" (format nil "(defun a () 1)~%")
+      (lambda (path)
+        (ok (null (%insert-block path "insert_after" "a"
+                                 (format nil "(defun b () 2) #| about b |#~%(defun c () 3)"))))
+        (ok (string= (format nil "(defun a () 1)~%~%(defun b () 2) #| about b |#~%~%~
+                                  (defun c () 3)~%")
+                     (fs-read-file path))))))
+  (testing "a block comment that starts on the form's line stays there whole"
+    (with-temp-file "tests/tmp/multi-insert-eol-block-multiline.lisp"
+        (format nil "(defun a () 1)~%")
+      (lambda (path)
+        (ok (null (%insert-block path "insert_after" "a"
+                                 (format nil "(defun b () 2) #| one~%  two |#~%~%~%~
+                                              (defun c () 3)"))))
+        (ok (string= (format nil "(defun a () 1)~%~%(defun b () 2) #| one~%  two |#~%~%~
+                                  (defun c () 3)~%")
+                     (fs-read-file path)))))))
+
 (deftest lisp-edit-form-block-normalizes-only-the-gaps-between-forms
   (testing "normalize_blank_lines true: gaps between forms, never inside a string"
     (with-temp-file "tests/tmp/multi-insert-normalize.lisp" (format nil "(defun a () 1)~%")
@@ -3459,6 +3479,29 @@ Return the condition it signals, or NIL when it succeeds."
               (ok (string= +block-anchor-file+ (fs-read-file path)))))))
     (error ()
       (skip "cl-interpol not available"))))
+
+(deftest lisp-edit-form-block-gaps-kept-where-whitespace-is-not-plain
+  (handler-case
+      (progn
+        (unless (%try-load :named-readtables) (error "not available"))
+        ;; Tab is a single escape here: not a macro character, yet not
+        ;; whitespace either.  <Tab>1 reads as the symbol |1|, and dropping
+        ;; the Tab would turn it into the number 1 (PR #190 review).
+        (let* ((name :cl-mcp-test-tab-escape)
+               (make (find-symbol "MAKE-READTABLE" :named-readtables))
+               (find (find-symbol "FIND-READTABLE" :named-readtables))
+               (readtable (or (funcall find name)
+                              (funcall make name :merge '(:standard)))))
+          (set-syntax-from-char #\Tab #\\ readtable)
+          (with-temp-file "tests/tmp/multi-insert-tab-escape.lisp" (format nil "(defun a () 1)~%")
+            (lambda (path)
+              (ok (null (%insert-block path "insert_after" "a"
+                                       (format nil "(defun b () 2)~%~C1~%(defun c () 3)" #\Tab)
+                                       :readtable name)))
+              (ok (search (format nil "~%~C1~%" #\Tab) (fs-read-file path))
+                  "the Tab before 1 is kept, so it still reads as a symbol")))))
+    (error (e)
+      (skip (format nil "named-readtables not available: ~A" e)))))
 
 (deftest lisp-edit-form-dry-run-previews-the-whole-block
   (testing "dry_run shows every form of the block and writes nothing"
