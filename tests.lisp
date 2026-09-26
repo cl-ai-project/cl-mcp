@@ -22,6 +22,7 @@
   (:import-from #:cl-mcp/tests/inspect-test)
   (:import-from #:cl-mcp/tests/logging-test)
   (:import-from #:cl-mcp/tests/protocol-test)
+  (:import-from #:cl-mcp/tests/server-instructions-test)
   (:import-from #:cl-mcp/tests/proxy-test)
   (:import-from #:cl-mcp/tests/repl-test)
   (:import-from #:cl-mcp/tests/repl-error-context-test)

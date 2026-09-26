@@ -21,7 +21,9 @@
            #:set-enabled-tool-groups
            #:parse-tool-groups
            #:tool-group-enabled-p
-           #:disabled-tool-group))
+           #:disabled-tool-group
+           #:register-tool-group-instructions
+           #:enabled-tool-group-instructions))
 
 (in-package #:cl-mcp/src/tools/registry)
 
@@ -87,7 +89,12 @@ Returns NIL for NIL or for text with no names in it."
 GROUPS is a list of keywords or strings, or a single one of either.  Shared by
 every server entry point that takes a :TOOL-GROUPS argument -- there are five,
 and each normalizing its own argument is five chances for them to disagree
-about what (list :cl-spec) and \"cl-spec\" mean."
+about what (list :cl-spec) and \"cl-spec\" mean.
+
+Call it before a client connects.  A client reads the server's instructions
+once, at initialize, and none of the ones surveyed reads them again on
+tools/list_changed, so changing the groups under a connected client leaves its
+tool list and its instructions disagreeing."
   (setf *enabled-tool-groups*
         (remove nil (mapcar #'normalize-tool-group
                             (if (listp groups) groups (list groups))))))
@@ -100,6 +107,38 @@ must not depend on configuration."
   (let ((name (normalize-tool-group group)))
     (or (null name)
         (and (member name *enabled-tool-groups* :test #'string=) t))))
+
+(defvar *tool-group-instructions* '()
+  "Instructions text of each optional tool group, as (GROUP-NAME . TEXT) in
+first-registration order.
+
+Kept beside the tools so that what tools/list shows and what the server tells
+a client about using it are decided by the same TOOL-GROUP-ENABLED-P.")
+
+(defun register-tool-group-instructions (group text)
+  "Register TEXT as the instructions of the optional tool GROUP; return its name.
+
+Registering the same group again replaces its text where it stands, so
+reloading a file does not move its group behind the others or repeat it.
+GROUP must name a group: NIL and the empty string are refused, because
+TOOL-GROUP-ENABLED-P treats both as \"no group\", which is always enabled, so
+their text would otherwise ship with every initialize regardless of setting."
+  (check-type text string)
+  (let ((name (normalize-tool-group group)))
+    (assert (and name (plusp (length name))) (group)
+            "GROUP must name a non-empty tool group, not ~S." group)
+    (let ((entry (assoc name *tool-group-instructions* :test #'equal)))
+      (if entry
+          (setf (cdr entry) text)
+          (setf *tool-group-instructions*
+                (append *tool-group-instructions* (list (cons name text)))))
+      name)))
+
+(defun enabled-tool-group-instructions ()
+  "Return the instructions texts of the enabled tool groups, in registration order."
+  (loop for (name . text) in *tool-group-instructions*
+        when (tool-group-enabled-p name)
+          collect text))
 
 (defun register-tool (name descriptor handler &key group)
   "Register a tool with its NAME, DESCRIPTOR (hash-table), and HANDLER (function).
@@ -145,5 +184,6 @@ mistake to correct, the second a setting to change."
     (coerce (nreverse descriptors) 'vector)))
 
 (defun clear-tool-registry ()
-  "Clear all registered tools. Mainly for testing."
-  (clrhash *tool-registry*))
+  "Clear all registered tools and their group instructions. Mainly for testing."
+  (clrhash *tool-registry*)
+  (setf *tool-group-instructions* '()))
