@@ -293,9 +293,9 @@
       (ok (search "line 12 \"(when a11\"" msg))
       (ng (search "line 13 \"(when a12\"" msg) "elided entries are not listed")
       (ok (search "... and 19 more" msg))
-      (ok (search "Then re-indent the forms at lines 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, and 19 more to sit inside"
+      (ok (search "Then re-indent the forms at lines 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12 to sit inside the forms your parens put them in (listed above), and likewise the 19 more lines not listed, so"
                   msg)
-          "issue #185: the lines to re-indent are bounded the same way")))
+          "issue #185: only lines whose parents are listed are named; the rest are counted")))
   (testing "a tab-indented body deeper than its form is a dedent, not a relocation"
     ;; A tab is eight columns: the body of (when x sits deeper by indentation,
     ;; so parinfer keeps it inside and nothing moved.
@@ -480,6 +480,22 @@ parens (min count room) is the IF's else branch; by indentation it is not.")
     (let* ((text (format nil "(defun f ()~%  (when x~%  (a) (b))"))
            (note (format-reparent-note (reparented-forms text (repaired-text text)))))
       (ok (search "Then re-indent the forms on line 3 to sit inside \"(when x\" (line 2)" note))))
+  (testing "Codex review: a line is named only when its parent is in the listed entries"
+    ;; Ten moved forms on line 3 fill the listed entries; an eleventh, on line
+    ;; 4, is counted but not listed, so its line must not be named as if its
+    ;; parent were above.
+    (let* ((text (format nil "(defun f ()~%  (when x~%  (a) (b) (c) (d) (e) (f) (g) (h) (i) (j)~%  (k))"))
+           (note (format-reparent-note (reparented-forms text (repaired-text text)))))
+      (ok (search "... and 1 more" note))
+      (ok (search "Then re-indent the forms on line 3 to sit inside \"(when x\" (line 2), and likewise the 1 more line not listed, so"
+                  note)
+          "one shared parent is named, and the unlisted line is only counted")
+      (ng (search "lines 3 and 4" note))))
+  (testing "forms moved off several lines under one shared parent name that parent"
+    (let* ((text (format nil "(defun f ()~%  (when x~%  (a)~%  (b))"))
+           (note (format-reparent-note (reparented-forms text (repaired-text text)))))
+      (ok (search "Then re-indent the forms at lines 3 and 4 to sit inside \"(when x\" (line 2), so"
+                  note))))
   (testing "Codex review: two parents that start on one line are different parents"
     ;; By the parens (x) belongs to (when b and (y) to (when a; both open on
     ;; line 2, so the line alone must not decide that they share a parent.

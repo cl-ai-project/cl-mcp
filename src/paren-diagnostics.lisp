@@ -1283,45 +1283,44 @@ parens put it (issue #185). Appending the missing closers makes the text read
 as the parens say, but the indentation still says what the repair assumed,
 which misleads the next reader and the next repair alike. Naming the lines is
 the whole of it; writing the re-indented code is the caller's job.
-One line whose moved forms share one parens-reading parent (the same list, by
-:PARENS-OFFSET -- two lists can open on one line) is named with that parent;
-otherwise the lines point back at the list above, which gives each parent.
-At most *REPAIR-LINES-LIMIT* lines are named and the rest counted."
-  (let ((lines '())
-        (seen (make-hash-table)))
-    (dolist (entry entries)
-      (let ((line (getf entry :line)))
-        (unless (gethash line seen)
-          (setf (gethash line seen) t)
-          (push line lines))))
-    (setf lines (nreverse lines))
-    (let ((first (first entries)))
-      (cond
-        ((and (null (cdr lines))
-              ;; The same parent is the same list, not the same line: two
-              ;; lists can open on one line (Codex review).
-              (every (lambda (entry)
-                       (eql (getf entry :parens-offset) (getf first :parens-offset)))
-                     entries))
-         (format nil "Then re-indent ~A line ~D to sit ~A, so the indentation says what ~
-                      the parens say."
-                 (if (cdr entries) "the forms on" "the form at")
-                 (first lines)
-                 (if (getf first :parens-line)
+When every moved form shares one parens-reading parent (the same list, by
+:PARENS-OFFSET -- two lists can open on one line), that parent is named;
+otherwise the sentence points back at the note's list. Either way it names only
+the lines of the entries the list shows (the first *REPAIR-LINES-LIMIT*, as
+FORMAT-REPARENT-NOTE cuts them) and counts the other lines, so no line is
+named whose parent the note does not give."
+  (flet ((distinct-lines (list)
+           (let ((seen (make-hash-table))
+                 (out '()))
+             (dolist (entry list (nreverse out))
+               (let ((line (getf entry :line)))
+                 (unless (gethash line seen)
+                   (setf (gethash line seen) t)
+                   (push line out)))))))
+    (let* ((first (first entries))
+           (listed (distinct-lines (if (> (length entries) *repair-lines-limit*)
+                                       (subseq entries 0 *repair-lines-limit*)
+                                       entries)))
+           (unlisted (- (length (distinct-lines entries)) (length listed)))
+           ;; The same parent is the same list, not the same line: two lists
+           ;; can open on one line (Codex review).
+           (one-parent (every (lambda (entry)
+                                (eql (getf entry :parens-offset)
+                                     (getf first :parens-offset)))
+                              entries)))
+      (format nil "Then re-indent ~:[the forms ~:[at lines~;on line~]~;the form at line~*~] ~
+                   ~{~D~#[~; and ~:;, ~]~} to sit ~A~[~:;, and likewise the ~:*~D more ~
+                   line~:P not listed~], so the indentation says what the parens say."
+              (null (cdr entries))
+              (null (cdr listed))
+              listed
+              (cond ((not one-parent)
+                     "inside the forms your parens put them in (listed above)")
+                    ((getf first :parens-line)
                      (format nil "inside ~S (line ~D)"
-                             (getf first :parens-head) (getf first :parens-line))
-                     "at top level")))
-        (t
-         (let* ((shown (if (> (length lines) *repair-lines-limit*)
-                           (subseq lines 0 *repair-lines-limit*)
-                           lines))
-                (more (- (length lines) (length shown))))
-           (format nil "Then re-indent the forms ~:[at lines~;on line~] ~
-                        ~:[~{~D~#[~; and ~:;, ~]~}~;~{~D~^, ~}, and ~D more~] to sit inside ~
-                        the forms your parens put them in (listed above), so the ~
-                        indentation says what the parens say."
-                   (null (cdr lines))
-                   (plusp more) shown more)))))))
+                             (getf first :parens-head) (getf first :parens-line)))
+                    (t "at top level"))
+              unlisted))))
 
 (defun format-reparent-note (entries &key (target :form))
   "Return the NOTE for ENTRIES (from REPARENTED-FORMS), or NIL when there are
