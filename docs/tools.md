@@ -406,7 +406,11 @@ Output:
   put it in (`line 4 "(min count room))": by your parens inside "(if (< room
   0)" (line 2), repaired inside "(defun clamp ..." (line 1)`) and gives the
   parens reading as the alternative (`add N ")" at the end of the form
-  instead`, counted per form when several forms are broken). The note is
+  instead`, counted per form when several forms are broken), followed by the
+  lines to re-indent so the indentation matches that reading (`Then re-indent
+  the form at line 4 to sit inside "(if (< room 0)" (line 2)`); appending the
+  closers alone would leave the indentation that caused the ambiguity. The
+  note names the lines; writing the re-indented code is the caller's. The note is
   withheld when the reader, reading the text's top-level forms in order,
   reaches an `(in-readtable ...)` form before the broken one (any case, any
   package prefix; a quoted list, the word in a comment or string, and a
@@ -533,7 +537,8 @@ readable code. The response therefore shows the changed lines and the repaired
 form; check them, and use `dry_run: true` when the content is non-trivial.
 When the repair moved anything out of the form your own parens put it in, a
 NOTE names each such form with both parents and says how to get the parens
-reading instead (resend the content with the missing `)` at its end); the
+reading instead (resend the content with the missing `)` at its end, and
+re-indent the named lines so the indentation says what the parens say); the
 repair is still written, so read that NOTE before moving on. It is not given
 under a `readtable` that changes the syntax, where the parens reading would
 not be a Lisp reading at all. A

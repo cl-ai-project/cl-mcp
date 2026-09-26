@@ -1273,10 +1273,55 @@ the parens reading appended to that form."
                        (subseq repaired (aref r-starts top)
                                (if next (aref r-starts next) (length repaired)))))))))
 
+(defun %reindent-sentence (entries)
+  "Return the sentence that finishes FORMAT-REPARENT-NOTE's alternative for
+ENTRIES (from REPARENTED-FORMS): re-indent what moved, so it sits where the
+parens put it (issue #185). Appending the missing closers makes the text read
+as the parens say, but the indentation still says what the repair assumed,
+which misleads the next reader and the next repair alike. Naming the lines is
+the whole of it; writing the re-indented code is the caller's job.
+One line whose moved forms share one parens-reading parent is named with that
+parent; several lines point back at the list above, which gives each parent.
+At most *REPAIR-LINES-LIMIT* lines are named and the rest counted."
+  (let ((lines '())
+        (seen (make-hash-table)))
+    (dolist (entry entries)
+      (let ((line (getf entry :line)))
+        (unless (gethash line seen)
+          (setf (gethash line seen) t)
+          (push line lines))))
+    (setf lines (nreverse lines))
+    (let ((first (first entries)))
+      (cond
+        ((and (null (cdr lines))
+              (every (lambda (entry)
+                       (eql (getf entry :parens-line) (getf first :parens-line)))
+                     entries))
+         (format nil "Then re-indent ~A line ~D to sit ~A, so the indentation says what ~
+                      the parens say."
+                 (if (cdr entries) "the forms on" "the form at")
+                 (first lines)
+                 (if (getf first :parens-line)
+                     (format nil "inside ~S (line ~D)"
+                             (getf first :parens-head) (getf first :parens-line))
+                     "at top level")))
+        (t
+         (let* ((shown (if (> (length lines) *repair-lines-limit*)
+                           (subseq lines 0 *repair-lines-limit*)
+                           lines))
+                (more (- (length lines) (length shown))))
+           (format nil "Then re-indent the forms ~:[at lines~;on line~] ~
+                        ~:[~{~D~#[~; and ~:;, ~]~}~;~{~D~^, ~}, and ~D more~] to sit inside ~
+                        the forms your parens put them in (listed above), so the ~
+                        indentation says what the parens say."
+                   (null (cdr lines))
+                   (plusp more) shown more)))))))
+
 (defun format-reparent-note (entries &key (target :form))
   "Return the NOTE for ENTRIES (from REPARENTED-FORMS), or NIL when there are
 none: which elements the repair moved, where the parens put each one and where
-the repair put it, then how to get the parens reading instead. TARGET :FORM
+the repair put it, then how to get the parens reading instead -- closers and
+re-indenting both (%REINDENT-SENTENCE, issue #185). TARGET :FORM
 (lisp-check-parens) says to add the closers at the end of the form; :CONTENT
 (lisp-edit-form) says to resend the content with them added. The closers are
 counted per top-level form (:FORM-LINE), since a file can hold several broken
@@ -1330,4 +1375,5 @@ and as many forms, are listed and the rest counted."
                         (:form "add the missing closers to each form")
                         (:content "resend the content with the missing closers added to each form"))
                       (mapcar (lambda (f) (list (cdr f) (car f))) forms-shown)
-                      forms-more)))))))
+                      forms-more))
+          (format s " ~A" (%reindent-sentence entries)))))))
