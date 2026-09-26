@@ -452,8 +452,8 @@ its whitespace normalised and its comments kept in place.  Every comment that
 starts on the previous form's line -- a ; comment, or a #| |# comment even when
 it runs on over several lines -- stays right after that form.  The forms are
 then separated by one blank line, and any other comments stay between them,
-directly above the next form.  Only whitespace at the edges of those parts
-changes, never text inside a comment.  A gap %GAP-SEGMENTS cannot split is
+directly above the next form.  Only whitespace outside the comments changes;
+a comment's own text, trailing spaces included, is copied as it is.  A gap %GAP-SEGMENTS cannot split is
 returned unchanged."
   (let ((segments (%gap-segments gap)))
     (if (and (null segments) (plusp (length gap)))
@@ -474,7 +474,17 @@ returned unchanged."
                                  collect end)
                          :initial-value 0))
                (same-line (if (plusp same-line-end) (subseq gap 0 same-line-end) ""))
-               (body (%trim-outer-whitespace (subseq gap same-line-end))))
+               ;; The comments after that line, from the first one's start to
+               ;; the last one's end: a comment keeps its own trailing spaces,
+               ;; only the whitespace segments around them are dropped.
+               (body-comments (loop for segment in segments
+                                    when (and (eq (first segment) :comment)
+                                              (>= (second segment) same-line-end))
+                                      collect segment))
+               (body (if body-comments
+                         (subseq gap (second (first body-comments))
+                                 (third (car (last body-comments))))
+                         "")))
           (concatenate 'string same-line (format nil "~%~%")
                        (if (plusp (length body))
                            (concatenate 'string body (string #\Newline))

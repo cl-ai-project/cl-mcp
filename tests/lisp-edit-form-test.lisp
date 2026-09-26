@@ -3357,6 +3357,17 @@ Return the condition it signals, or NIL when it succeeds."
         (ok (string= (format nil "(defun a () 1)~%~%(defun b () 2) #| about b |#~%~%~
                                   (defun c () 3)~%")
                      (fs-read-file path))))))
+  (testing "a comment's own trailing spaces are comment text, not gap whitespace"
+    ;; PR #190 review: only whitespace outside comments is normalised.
+    (dolist (operation '("insert_after" "insert_before"))
+      (with-temp-file "tests/tmp/multi-insert-comment-spaces.lisp" +block-anchor-file+
+        (lambda (path)
+          (ok (null (%insert-block path operation (if (string= operation "insert_after") "a" "z")
+                                   (format nil "(defun b () 2) ; eol  ~%;; about c  ~%~
+                                                (defun c () 3)"))))
+          (ok (search (format nil "(defun b () 2) ; eol  ~%~%;; about c  ~%(defun c () 3)")
+                      (fs-read-file path))
+              operation)))))
   (testing "a block comment that starts on the form's line stays there whole"
     (with-temp-file "tests/tmp/multi-insert-eol-block-multiline.lisp"
         (format nil "(defun a () 1)~%")
