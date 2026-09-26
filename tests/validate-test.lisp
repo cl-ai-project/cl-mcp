@@ -22,6 +22,43 @@
   (let ((p (gethash "position" ht)))
     (and p (gethash key p))))
 
+(deftest lisp-check-parens-reparent-note-needs-standard-syntax
+  (let ((broken (format nil "(defun clamp (count room)~%  (if (< room 0)~%      0~%  (min count room))")))
+    (testing "standard syntax: the form the fix moves is named"
+      (let ((res (lisp-check-parens :code broken)))
+        (ok (search "by your parens inside \"(if (< room 0)\"" (gethash "diagnosis_text" res)))))
+    (testing "PR #184 review: under an in-readtable the parens reading is not offered"
+      (let ((res (lisp-check-parens
+                  :code (format nil "(in-readtable :interpol-syntax)~%~%~A" broken))))
+        (ok (not (%ok? res)) "the delimiter finding itself stands")
+        (ng (search "by your parens" (or (gethash "diagnosis_text" res) "")))))
+    (testing "second review: an upper-case, package-qualified IN-READTABLE withholds it too"
+      (let ((res (lisp-check-parens
+                  :code (format nil "(NAMED-READTABLES:IN-READTABLE :INTERPOL-SYNTAX)~%~%~A"
+                                broken))))
+        (ng (search "by your parens" (or (gethash "diagnosis_text" res) "")))))
+    (testing "fourth review: an in-readtable that keeps standard syntax does not withhold it"
+      ;; The same policy lisp-edit-form applies through %NONSTANDARD-READTABLE-P,
+      ;; so the two tools describe the same conflict.
+      (let ((res (lisp-check-parens
+                  :code (format nil "(named-readtables:in-readtable :standard)~%~%~A" broken))))
+        (ok (search "by your parens inside \"(if (< room 0)\"" (gethash "diagnosis_text" res)))))
+    (testing "fourth review: an in-readtable that cannot be resolved withholds it (fail safe)"
+      (let ((res (lisp-check-parens
+                  :code (format nil "(in-readtable :no-such-readtable-for-issue-183)~%~%~A" broken))))
+        (ng (search "by your parens" (or (gethash "diagnosis_text" res) "")))))
+    (testing "third review: a quoted list or a declaration past the broken form does not withhold it"
+      (dolist (code (list (format nil "(defparameter *example* '(in-readtable :foo))~%~%~A" broken)
+                          (format nil "~A~%~%(in-readtable :foo)~%" broken)))
+        (ok (search "by your parens inside \"(if (< room 0)\""
+                    (gethash "diagnosis_text" (lisp-check-parens :code code))))))
+    (testing "second review: the word in a comment or a string does not withhold it"
+      (let ((res (lisp-check-parens
+                  :code (format nil ";; This file does not use in-readtable.~%(defvar *doc* \"no (in-readtable here\")~%~%~A"
+                                broken))))
+        (ok (search "by your parens inside \"(if (< room 0)\""
+                    (gethash "diagnosis_text" res)))))))
+
 (deftest lisp-check-parens-ok-string
   (testing "balanced string returns ok"
     (let ((res (lisp-check-parens :code "(let ((x 1)) (+ x 2))")))

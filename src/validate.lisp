@@ -10,13 +10,17 @@
   ;; a direct dependency so the verdict is there in any image that has this
   ;; file, not only when lisp-edit-form-core happened to load first.
   (:import-from #:cl-mcp/src/lisp-edit-form-core
-                #:%file-unparseable-by-edit-tools-p)
+                #:%file-unparseable-by-edit-tools-p
+                #:%resolve-named-readtable
+                #:%nonstandard-readtable-p)
   (:import-from #:cl-mcp/src/paren-diagnostics
                 #:*repair-lines-limit*
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis
                 #:format-overwrite-recovery
                 #:next-top-level-hint-line)
+  (:import-from #:cl-mcp/src/cst
+                #:text-reached-in-readtable)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content
                 #:arg-validation-error #:json-bool)
@@ -76,6 +80,20 @@ whole answer, and a next_tool would only send the caller into a loop."
 When a custom readtable is active, the standard CL reader would produce
 false-positive reader errors on valid custom syntax."
   (not (null (search "in-readtable" text))))
+
+(defun %parens-reading-withheld-p (text)
+  "Return T when TEXT's parens must not be read with standard syntax for the
+reparent note (issue #183): the reader reaches a top-level IN-READTABLE form
+(TEXT-REACHED-IN-READTABLE) whose readtable changes the syntax. The policy is
+lisp-edit-form's (%NONSTANDARD-READTABLE-P), so the two tools describe the same
+conflict: :standard, or any readtable that reads like it, keeps the note. A
+designator that does not resolve here is treated as nonstandard -- nothing
+says its parens mean what the standard reader thinks."
+  (let ((designator (text-reached-in-readtable text)))
+    (and designator
+         (or (null (ignore-errors (%resolve-named-readtable designator)))
+             (ignore-errors (%nonstandard-readtable-p designator)))
+         t)))
 
 (defun %project-root-truename ()
   "Return the project root as a resolved directory pathname, or NIL when it is
@@ -312,7 +330,17 @@ it is flagged in \"diagnosis_text\" as a likely artifact of the window."
               (gethash "expected" h) nil
               (gethash "found" h) nil)
         (return-from lisp-check-parens h)))
-    (let* ((diagnosis (diagnose-delimiters text :base-offset base-off))
+    (let* ((diagnosis (let ((d (diagnose-delimiters text :base-offset base-off)))
+                        ;; The reparent note reads the text's parens with
+                        ;; standard syntax; under an in-readtable a reader
+                        ;; macro may consume them as data (issue #183).
+                        ;; %PARENS-READING-WITHHELD-P decides it on what the
+                        ;; reader reaches and on lisp-edit-form's readtable
+                        ;; policy, not on %CUSTOM-READTABLE-P's plain search
+                        ;; (PR #184 review).
+                        (if (and (getf d :reparented) (%parens-reading-withheld-p text))
+                            (list* :reparented nil d)
+                            d)))
            ;; The reader check only matters when the delimiters balance.
            (reader-info (and (getf diagnosis :ok) (%try-reader-check text base-off))))
       (destructuring-bind (&key ok kind expected found
