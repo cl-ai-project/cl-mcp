@@ -85,6 +85,52 @@
       (ok (search "function=" text))
       (ok (search "Replay:" text)))))
 
+(deftest instructions-keep-the-prompts-workflow
+  ;; What the summaries must not lose from prompts/: the Lisp tools, not a
+  ;; shell ros or sbcl, run the code; a new behaviour gets its contract before
+  ;; its code; a change is checked by both spec-check and run-tests; and any
+  ;; contract change the request did not ask for needs the user.
+  (ok (search "not ros or sbcl from a shell" +base-instructions+))
+  ;; Naming grep/cat/sed left python and heredocs open; name every other way.
+  (ok (search "no shell command, script or built-in Read/Edit"
+              (substitute #\Space #\Newline +base-instructions+)))
+  (let ((*enabled-tool-groups* (list "CL-SPEC")))
+    (let ((text (format nil "~{~A~}" (enabled-tool-group-instructions))))
+      (ok (search "before the code" text))
+      (ok (search "re-run spec-check and run-tests" text))
+      (ok (search "only when the request asks" text)))))
+
+(deftest instructions-allow-the-recovery-lisp-edit-form-gives
+  ;; Rule 2 keeps Lisp source to cl-mcp tools, yet a new file and a file that
+  ;; no longer parses are written with fs-write-file, and lisp-edit-form's own
+  ;; error sends the agent there.  The rule has to allow that path, and the
+  ;; path may name only tools the client can see.
+  (ok (search "fs-write-file only for" +base-instructions+))
+  (ok (search "a new or unparseable file" +base-instructions+))
+  (let* ((root (asdf:system-source-directory :cl-mcp))
+         (cl-mcp/src/project-root:*project-root* root)
+         (relative "tests/tmp/instructions-unparseable.lisp")
+         (path (merge-pathnames relative root)))
+    (ensure-directories-exist path)
+    (with-open-file (out path :direction :output :if-exists :supersede)
+      (format out "(defun a ()~%  (list 1 2)~%~%(defun b () 2)~%"))
+    (unwind-protect
+         (let ((message (handler-case
+                            (progn (cl-mcp/src/lisp-edit-form:lisp-edit-form
+                                    :file-path relative :form-type "defun" :form-name "b"
+                                    :operation "insert_after" :content "(defun c () 3)")
+                                   nil)
+                          (error (e) (princ-to-string e))))
+               (listed (%listed-tool-names)))
+           (ok message "lisp-edit-form refuses a file that does not parse")
+           (ok (and message (%mentions-tool-p message "fs-write-file"))
+               "the recovery writes the file back with fs-write-file")
+           (loop for name being the hash-keys of cl-mcp/src/tools/registry::*tool-registry*
+                 when (and message (%mentions-tool-p message name))
+                   do (ok (member name listed :test #'string=)
+                          (format nil "the recovery names ~A, which tools/list shows" name))))
+      (ignore-errors (delete-file path)))))
+
 (deftest instructions-fit-the-budget
   (dolist (groups *group-settings*)
     (let ((*enabled-tool-groups* groups))

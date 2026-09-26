@@ -29,20 +29,20 @@ Claude Code truncates server instructions past 2,048 characters.")
 structure-aware editing of Lisp source.
 
 1. Call fs-set-project-root with the project's absolute path before any file tool.
-2. For .lisp/.asd files use clgrep-search, lisp-read-file, lisp-edit-form and
-lisp-patch-form, never shell grep/cat/sed: they parse the code and keep its comments.
+2. Read and change .lisp/.asd only with cl-mcp tools, no shell command, script or
+built-in Read/Edit: lisp-edit-form/lisp-patch-form for forms, fs-write-file only for
+a new or unparseable file (see lisp-check-parens).
 3. An edit changes the file only. Run load-system before repl-eval or code-* tools see
 it; run-tests reloads its test system itself.
 
 Loop: explore (clgrep-search; lisp-read-file collapsed, then name_pattern) -> try
 (repl-eval with package) -> persist (lisp-edit-form) -> verify (load-system, run-tests).
+Run tests and evaluate code with run-tests and repl-eval, not ros or sbcl from a shell.
 
 With the worker pool (default), repl-eval, load-system, run-tests, code-*,
 clos-describe, lisp-macroexpand and inspect-object run in this session's own worker
 image. Definitions made in repl-eval live only there. When a response says the worker
-was lost, its state is gone: load-system again; old object ids are refused.
-A defmethod's form_name includes its specializers: \"print-object ((o point) stream)\".
-If a file no longer parses, lisp-check-parens shows where and the likely fix."
+was lost, its state is gone: load-system again; old object ids are refused."
   "Instructions every client gets, whatever groups are on.  The three numbered
 rules come first because a client may read only the opening.")
 
