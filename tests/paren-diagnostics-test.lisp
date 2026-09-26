@@ -479,7 +479,16 @@ parens (min count room) is the IF's else branch; by indentation it is not.")
   (testing "issue #185: several forms moved off one line under one parent are named together"
     (let* ((text (format nil "(defun f ()~%  (when x~%  (a) (b))"))
            (note (format-reparent-note (reparented-forms text (repaired-text text)))))
-      (ok (search "Then re-indent the forms on line 3 to sit inside \"(when x\" (line 2)" note)))))
+      (ok (search "Then re-indent the forms on line 3 to sit inside \"(when x\" (line 2)" note))))
+  (testing "Codex review: two parents that start on one line are different parents"
+    ;; By the parens (x) belongs to (when b and (y) to (when a; both open on
+    ;; line 2, so the line alone must not decide that they share a parent.
+    (let* ((text (format nil "(defun f ()~%  (when a (when b~%  (x)) (y))"))
+           (note (format-reparent-note (reparented-forms text (repaired-text text)))))
+      (ng (search "to sit inside \"(when b\" (line 2), so" note)
+          "no single parent is named for forms with different parents")
+      (ok (search "Then re-indent the forms on line 3 to sit inside the forms your parens put them in (listed above)"
+                  note)))))
 
 (deftest reparented-forms-is-linear-in-the-number-of-forms
   (testing "a large file with thousands of forms is compared in one pass, not one per form"

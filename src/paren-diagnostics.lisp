@@ -1208,6 +1208,8 @@ element whose enclosing list differs; NEWLINES indexes ORIGINAL."
                                 (multiple-value-bind (r-line r-head) (where as-repaired)
                                   (list :line line :head head
                                         :parens-line p-line :parens-head p-head
+                                        :parens-offset (and by-parens
+                                                            (+ start (aref l-starts by-parens)))
                                         :repaired-line r-line :repaired-head r-head
                                         :form-line form-line :missing missing)))))))))))
 
@@ -1238,7 +1240,8 @@ The parens reading assumes standard syntax: a caller whose text is read with a
 readtable that changes what ( and ) mean must not call this.
 
 Each entry is a plist: :line and :head name the element, :parens-line and
-:parens-head the list enclosing it by ORIGINAL's parens, :repaired-line and
+:parens-head the list enclosing it by ORIGINAL's parens (:parens-offset is where
+that list starts in ORIGINAL, which tells two lists on one line apart), :repaired-line and
 :repaired-head the one enclosing it in REPAIRED (both NIL at top level),
 :form-line the line where its top-level form starts, and :missing the closers
 the parens reading appended to that form."
@@ -1280,8 +1283,9 @@ parens put it (issue #185). Appending the missing closers makes the text read
 as the parens say, but the indentation still says what the repair assumed,
 which misleads the next reader and the next repair alike. Naming the lines is
 the whole of it; writing the re-indented code is the caller's job.
-One line whose moved forms share one parens-reading parent is named with that
-parent; several lines point back at the list above, which gives each parent.
+One line whose moved forms share one parens-reading parent (the same list, by
+:PARENS-OFFSET -- two lists can open on one line) is named with that parent;
+otherwise the lines point back at the list above, which gives each parent.
 At most *REPAIR-LINES-LIMIT* lines are named and the rest counted."
   (let ((lines '())
         (seen (make-hash-table)))
@@ -1294,8 +1298,10 @@ At most *REPAIR-LINES-LIMIT* lines are named and the rest counted."
     (let ((first (first entries)))
       (cond
         ((and (null (cdr lines))
+              ;; The same parent is the same list, not the same line: two
+              ;; lists can open on one line (Codex review).
               (every (lambda (entry)
-                       (eql (getf entry :parens-line) (getf first :parens-line)))
+                       (eql (getf entry :parens-offset) (getf first :parens-offset)))
                      entries))
          (format nil "Then re-indent ~A line ~D to sit ~A, so the indentation says what ~
                       the parens say."
