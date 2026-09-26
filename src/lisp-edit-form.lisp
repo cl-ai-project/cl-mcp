@@ -28,6 +28,8 @@
                 #:opener-ambiguous-p
                 #:format-opener-caveat
                 #:format-relocation-note
+                #:reparented-forms
+                #:format-reparent-note
                 #:scan-delimiters)
   (:import-from #:cl-mcp/src/state
                 #:protocol-version)
@@ -483,21 +485,29 @@ dry-run summary show the edited form instead of the whole updated file.
          (%trim-outer-whitespace content)
          (ensure-trailing-newline content)))))
 
-(defun %repair-summary (warning fixes repaired-form &key include-form)
+(defun %repair-summary (warning fixes repaired-form &key include-form original)
   "Return the text appended to a success summary when parinfer repaired the
 content, or NIL when WARNING is NIL. Lists the changed lines and, when
 INCLUDE-FORM is true, the repaired form itself (bounded by %TRUNCATE-SNIPPET).
-The relocation note (FORMAT-RELOCATION-NOTE: a closer inserted on a line
-whose next code line sits at the same indentation) is the one
-lisp-check-parens prints, so the two tools describe the same repair in the
-same words. The bracket-opener reminder is part of WARNING, built by
+When ORIGINAL (the content as the caller sent it) is given, the forms the
+repair moved out of the form ORIGINAL's own parens put them in are named
+(FORMAT-REPARENT-NOTE, issue #183): the repair follows indentation, and where
+that disagrees with the parens the caller has to say which was meant.
+Otherwise, or when nothing moved, the relocation note (FORMAT-RELOCATION-NOTE:
+a closer inserted on a line whose next code line sits at the same indentation)
+is the one lisp-check-parens prints, so the two tools describe the same repair
+in the same words. The bracket-opener reminder is part of WARNING, built by
 %REPAIR-WARNING where the readtable is known."
   (when warning
     (with-output-to-string (s)
       (format s "~%WARNING: ~A" warning)
       (when fixes
         (format s "~%Changed lines:~A" (format-repair-lines fixes)))
-      (let ((note (format-relocation-note fixes repaired-form)))
+      (let* ((moved (and original repaired-form
+                         (reparented-forms original repaired-form)))
+             (note (if moved
+                       (format-reparent-note moved :target :content)
+                       (format-relocation-note fixes repaired-form))))
         (when note
           (format s "~%~A" note)))
       (when include-form
@@ -767,7 +777,8 @@ without a guard."))
                               operation form_type form_name file_path would-change
                               (%repair-summary pw (gethash "repair_fixes" updated)
                                                (or (gethash "validated_content" updated)
-                                                   preview-form))
+                                                   preview-form)
+                                               :original content)
                               bw
                               (%truncate-snippet original-form)
                               (%truncate-snippet preview-form))))
@@ -795,14 +806,16 @@ without a guard."))
                                  ~@[~A~]~@[~%WARNING: ~A~]"
                                 form_type form_name file_path
                                 (%repair-summary parinfer-warning repair-fixes
-                                                 repaired-form :include-form t)
+                                                 repaired-form :include-form t
+                                                 :original content)
                                 bracket-warning))
                        (t
                         (format nil "Applied ~A to ~A ~A in ~A (~D chars)~@[~A~]~
                                      ~@[~%WARNING: ~A~]"
                                 operation form_type form_name file_path (length updated)
                                 (%repair-summary parinfer-warning repair-fixes
-                                                 repaired-form :include-form t)
+                                                 repaired-form :include-form t
+                                                 :original content)
                                 bracket-warning)))))
                 (result id
                         (apply #'make-ht

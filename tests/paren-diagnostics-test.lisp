@@ -12,7 +12,9 @@
                 #:repair-line-differences
                 #:format-repair-lines
                 #:format-delimiter-diagnosis
-                #:format-overwrite-recovery))
+                #:format-overwrite-recovery
+                #:reparented-forms
+                #:format-reparent-note))
 
 (in-package #:cl-mcp/tests/paren-diagnostics-test)
 
@@ -276,16 +278,21 @@
   (testing "a relocating fix carries a note in the diagnosis text too"
     (let* ((text (format nil "(defun f ()~%  (when x~%  (g x)~%  (h x))"))
            (msg (format-delimiter-diagnosis (diagnose-delimiters text))))
-      (ok (search "NOTE: the fix on line 2 closes a form" msg)))))
+      ;; Issue #183: the note names the forms the fix moves out of the WHEN.
+      (ok (search "line 3 \"(g x)\": by your parens inside \"(when x\" (line 2)" msg))
+      (ok (search "line 4 \"(h x))\": by your parens inside \"(when x\" (line 2)" msg)))))
 
 (deftest relocation-note-is-bounded-and-tab-aware
-  (testing "the note lists at most *repair-lines-limit* lines and counts the rest"
+  (testing "the note lists at most *repair-lines-limit* entries and counts the rest"
     (let* ((text (with-output-to-string (s)
                    (format s "(defun f (x)~%")
                    (loop for i from 1 to 30 do (format s "  (when a~D~%" i))))
            (msg (format-delimiter-diagnosis (diagnose-delimiters text))))
-      (ok (search "NOTE: the fixes on lines 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, and 19 more" msg))
-      (ng (search "12, 13" msg) "elided lines are not listed")))
+      ;; Issue #183: the reparent note replaces the relocation note here and
+      ;; is bounded the same way.
+      (ok (search "line 12 \"(when a11\"" msg))
+      (ng (search "line 13 \"(when a12\"" msg) "elided entries are not listed")
+      (ok (search "... and 19 more" msg))))
   (testing "a tab-indented body deeper than its form is a dedent, not a relocation"
     ;; A tab is eight columns: the body of (when x sits deeper by indentation,
     ;; so parinfer keeps it inside and nothing moved.
@@ -369,6 +376,94 @@
                 (diagnose-delimiters
                  (format nil "(defun f (x)~%  (let ((y 1))~%      (g y)~%    (h y)")))))
       (ng (search "NOTE:" msg)))))
+
+(defparameter +dedented-else+
+  (format nil "(defun clamp (count room)~%  (if (< room 0)~%      0~%  (min count room))")
+  "Issue #183: one ) short, else branch dedented to the IF's column. By its
+parens (min count room) is the IF's else branch; by indentation it is not.")
+
+(defparameter +dedented-atom-else+
+  (format nil "(defun clamp (count room)~%  (if (< room 0)~%      0~%  room)")
+  "As +DEDENTED-ELSE+, with an atom as the else branch.")
+
+(defun repaired-text (text)
+  "Parinfer's repair of TEXT, as DIAGNOSE-DELIMITERS computes it."
+  (getf (diagnose-delimiters text) :repaired))
+
+(deftest reparented-forms-names-what-the-repair-moved
+  (testing "the else branch the repair took out of the IF is named, with both parents"
+    (let ((moved (reparented-forms +dedented-else+ (repaired-text +dedented-else+))))
+      (ok (= 1 (length moved)))
+      (let ((entry (first moved)))
+        (ok (= 4 (getf entry :line)))
+        (ok (string= "(min count room))" (getf entry :head)))
+        (ok (= 2 (getf entry :parens-line)))
+        (ok (eql 0 (search "(if (< room 0)" (getf entry :parens-head))))
+        (ok (= 1 (getf entry :repaired-line)))
+        (ok (eql 0 (search "(defun clamp" (getf entry :repaired-head)))))))
+  (testing "an atom moved out of its form is named too"
+    (let ((moved (reparented-forms +dedented-atom-else+
+                                   (repaired-text +dedented-atom-else+))))
+      (ok (= 1 (length moved)))
+      (ok (string= "room)" (getf (first moved) :head)))))
+  (testing "a body pushed out to the top level but still indented is reported, not taken for a new form"
+    ;; Found by deleting one ) from src/repl-core.lisp's DEFVAR: parinfer
+    ;; closes the DEFVAR on line 1 because the docstring's second line
+    ;; starts in column 1, leaving the docstring as an indented top-level
+    ;; element.
+    (let* ((text (format nil "(defvar *x* 1~%  \"First line.~%Second line.\"~%"))
+           (moved (reparented-forms text (repaired-text text))))
+      (ok (= 1 (length moved)))
+      (ok (string= "\"First line." (getf (first moved) :head)))
+      (ok (null (getf (first moved) :repaired-line)) "repaired at top level")))
+  (testing "a repair that follows indentation against the parens is reported whichever is right"
+    ;; Here indentation is right and the parens are not; the finding is the
+    ;; same disagreement, and the caller decides.
+    (let ((moved (reparented-forms +let-binding-unclosed+
+                                   (repaired-text +let-binding-unclosed+))))
+      (ok (= 1 (length moved)))
+      (ok (= 3 (getf (first moved) :line))))))
+
+(deftest check-parens-diagnosis-names-the-reparented-form
+  (testing "the likely fix is followed by what it moves and the parens-reading alternative"
+    (let ((msg (format-delimiter-diagnosis (diagnose-delimiters +dedented-else+))))
+      (ok (search "line 3" msg) "the indentation fix is still offered")
+      (ok (search "line 4 \"(min count room))\"" msg))
+      (ok (search "by your parens inside \"(if (< room 0)\" (line 2)" msg))
+      (ok (search "add 1 \")\" at the end of the form instead" msg))
+      (ng (search "closes a form there" msg)
+          "the reparent note replaces the relocation note")))
+  (testing "no note when both readings agree"
+    (let ((msg (format-delimiter-diagnosis
+                (diagnose-delimiters (format nil "(defun f (x)~%  (let ((y 1))~%    (+ x y")))))
+      (ng (search "NOTE:" msg)))))
+
+(deftest reparented-forms-is-silent-when-the-readings-agree
+  (dolist (text (list (format nil "(defun f (x)~%  (with-output-to-string (out)~%    (format out \"~~A\" x))")
+                      (format nil "(defun f (x)~%  (let ((y 1))~%    (+ x y")
+                      "(defun f () (list (+ 1 2 (* 3 4)))"
+                      (format nil "(defun b (s)~%  (format nil \"(~~A)\" (string #\\())")
+                      (format nil "(defun f (x)~%  (let ((y 1))~%      (g y)~%    (h y)")))
+    (testing (format nil "no entry for ~S" text)
+      (ok (null (reparented-forms text (repaired-text text)))))))
+
+(deftest reparented-forms-only-judges-an-unclosed-text
+  (testing "an extra closer or a balanced text gives nothing"
+    (ok (null (reparented-forms +trailing-extra-close+
+                                (repaired-text +trailing-extra-close+))))
+    (ok (null (reparented-forms "(a (b))" "(a (b))"))))
+  (testing "a repaired text that differs in more than closers gives nothing"
+    (ok (null (reparented-forms (format nil "(a~%  (b") (format nil "(a~%  (c))"))))))
+
+(deftest format-reparent-note-wording
+  (testing "no entries, no note"
+    (ok (null (format-reparent-note nil))))
+  (testing "for content, the alternative is to resend it with the closers appended"
+    (let ((note (format-reparent-note
+                 (reparented-forms +dedented-else+ (repaired-text +dedented-else+))
+                 :target :content)))
+      (ok (search "This form leaves the form your parens put it in:" note))
+      (ok (search "resend the content with 1 \")\" added at its end" note)))))
 
 (deftest extra-close-bracket-carries-the-symbol-caveat
   (testing "a stray ] is described as possibly part of a symbol"

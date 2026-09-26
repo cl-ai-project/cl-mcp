@@ -401,10 +401,18 @@ Output:
   pure removal, `insert N ")" at column C (before the trailing ; comment)` when
   they go before a comment, and otherwise the resulting line; a line cut at the
   120-character bound is described by position, never offered as text to write.
-  When a fix closes a form whose next code line sits at the same indentation
-  (the shape of a body that was meant to stay inside it), or whose next code
-  line sits in column 1 below an indented fix line (a body that lost its
-  indentation), a NOTE says the lines below have left that form; when the
+  When the fixes follow the indentation where it disagrees with the text's own
+  closing parens, a NOTE names every form they move out of the form the parens
+  put it in (`line 4 "(min count room))": by your parens inside "(if (< room
+  0)" (line 2), repaired inside "(defun clamp ..." (line 1)`) and gives the
+  parens reading as the alternative (`add N ")" at the end of the form
+  instead`). Neither reading is judged: an `if`'s dedented else branch and a
+  statement after a `when` have the same shape, and only the author knows
+  which was meant (issue #183). Failing that, when a fix closes a form whose
+  next code line sits at the same indentation, or in column 1 below an
+  indented fix line (a body that lost its indentation, which the per-form
+  comparison cannot tell from the next top-level form), a NOTE says the lines
+  below have left that form; when the
   fix rests on an unclosed `[`/`{`, a reminder says the `)` fixes are wrong if
   that bracket was meant as `(`. The next top-level form hint names its
   evidence (a `(` in column 1 while a form is still open) and is dropped when
@@ -514,7 +522,11 @@ Auto-repair: when `content` does not read, missing `)` are inferred from
 inference can place a `)` on the wrong line when the indentation is not what
 you meant, moving a sub-form in or out of its parent while still producing
 readable code. The response therefore shows the changed lines and the repaired
-form; check them, and use `dry_run: true` when the content is non-trivial. A
+form; check them, and use `dry_run: true` when the content is non-trivial.
+When the repair moved anything out of the form your own parens put it in, a
+NOTE names each such form with both parents and says how to get the parens
+reading instead (resend the content with the missing `)` at its end); the
+repair is still written, so read that NOTE before moving on. A
 `]` or `}` left where `)` was meant, and any leftover the repair cannot make
 readable, is refused with the same line-level diagnosis as `lisp-check-parens`
 and nothing is written. A repair that would change text inside a string or a

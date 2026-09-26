@@ -2193,6 +2193,36 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (search "--- repaired form ---" text))
           (ok (search "(let ((y 1))" text)))))))
 
+(deftest lisp-edit-form-summary-names-forms-the-repair-moved
+  (testing "issue #183: a repair that moves a form out of its parent says which, and how to undo it"
+    (flet ((summary (content dry-run)
+             (with-temp-file "tests/tmp/edit-form-reparent.lisp"
+                 (format nil "(defun target () :old)~%")
+               (lambda (path)
+                 (let* ((state (cl-mcp/src/state:make-state))
+                        (handler #'cl-mcp/src/lisp-edit-form::lisp-edit-form-handler)
+                        (args (cl-mcp/src/tools/helpers:make-ht
+                               "file_path" path
+                               "form_type" "defun"
+                               "form_name" "target"
+                               "operation" "replace"
+                               "dry_run" dry-run
+                               "content" content))
+                        (response (funcall handler state "reparent-1" args))
+                        (result-obj (gethash "result" response)))
+                   (gethash "text" (aref (gethash "content" result-obj) 0)))))))
+      (let ((dedented-else
+              (format nil "(defun target (count room)~%  (if (< room 0)~%      0~%  (min count room))")))
+        (dolist (dry-run '(nil t))
+          (let ((text (summary dedented-else dry-run)))
+            (ok (search "line 4 \"(min count room))\": by your parens inside \"(if (< room 0)\" (line 2)"
+                        text)
+                (format nil "the moved else branch is named (dry_run ~A)" dry-run))
+            (ok (search "resend the content with 1 \")\" added at its end" text)))))
+      (let ((text (summary (format nil "(defun target (x)~%  (list x x)") nil)))
+        (ok (search "1 closing delimiter added by parinfer" text))
+        (ng (search "NOTE:" text) "a repair that only appends moves nothing")))))
+
 (deftest lisp-edit-form-dry-run-summary-shows-changed-lines
   (testing "dry-run summary lists the changed lines but not a second copy of the form"
     (with-temp-file "tests/tmp/edit-form-dry-run-changed-lines.lisp"
