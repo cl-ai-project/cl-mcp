@@ -10,6 +10,8 @@
                 #:skip)
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
+  (:import-from #:cl-mcp/src/lisp-patch-form
+                #:lisp-patch-form)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%normalize-string
                 #:locate-form-in-nodes
@@ -476,8 +478,8 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                   (setf err-msg (princ-to-string e))
                   t)))
           (ok (stringp err-msg))
-          (ok (search "content must contain exactly one top-level form" err-msg))
-          (ok (search "multiple forms are not supported in a single call" err-msg))
+          (ok (search "replace takes exactly one top-level form" err-msg))
+          (ok (search "insert_after" err-msg))
           (ok (string= before (fs-read-file path))))))))
 
 (deftest lisp-edit-form-trailing-garbage-errors
@@ -3302,3 +3304,253 @@ loser's text disappearing with no conflict reported anywhere."
                    (format nil "the path must be the one on disk; message was ~S" message))))
         (ignore-errors (delete-file file))
         (ignore-errors (uiop:delete-empty-directory dir))))))
+
+;;; Issue #189: insert_before and insert_after take several top-level forms.
+
+(defparameter +block-anchor-file+ (format nil "(defun a () 1)~%~%(defun z () 26)~%")
+  "A two-form file the multi-form insert tests put their blocks between.")
+
+(defun %insert-block (path operation anchor content &rest options)
+  "Call lisp-edit-form's OPERATION with CONTENT at the defun ANCHOR in PATH.
+Return the condition it signals, or NIL when it succeeds."
+  (handler-case
+      (progn (apply #'lisp-edit-form :file-path path :form-type "defun"
+                    :form-name anchor :operation operation :content content options)
+             nil)
+    (error (e) e)))
+
+(deftest lisp-edit-form-inserts-several-forms-in-order
+  (testing "insert_after puts the block after the anchor, in the order given"
+    (with-temp-file "tests/tmp/multi-insert-after.lisp" +block-anchor-file+
+      (lambda (path)
+        (ok (null (%insert-block path "insert_after" "a"
+                                 (format nil "(defun b () 2)~%(defun c () 3)"))))
+        (ok (string= (format nil "(defun a () 1)~%~%(defun b () 2)~%~%(defun c () 3)~%~%~
+                                  (defun z () 26)~%")
+                     (fs-read-file path))))))
+  (testing "insert_before puts the block before the anchor, in the order given"
+    (with-temp-file "tests/tmp/multi-insert-before.lisp" +block-anchor-file+
+      (lambda (path)
+        (ok (null (%insert-block path "insert_before" "z"
+                                 (format nil "(defun b () 2)~%~%(defun c () 3)"))))
+        (ok (string= (format nil "(defun a () 1)~%~%(defun b () 2)~%~%(defun c () 3)~%~%~
+                                  (defun z () 26)~%")
+                     (fs-read-file path)))))))
+
+(deftest lisp-edit-form-block-keeps-comments-where-they-are
+  (testing "an end-of-line comment, a comment between forms and one after the last stay put"
+    (with-temp-file "tests/tmp/multi-insert-comments.lisp" (format nil "(defun a () 1)~%")
+      (lambda (path)
+        (ok (null (%insert-block path "insert_after" "a"
+                                 (format nil "(defun b () 2) ; about b~%;; about c~%~
+                                              (defun c () 3)~%;; the end"))))
+        (ok (string= (format nil "(defun a () 1)~%~%(defun b () 2) ; about b~%~%;; about c~%~
+                                  (defun c () 3)~%;; the end~%")
+                     (fs-read-file path)))))))
+
+(deftest lisp-edit-form-block-keeps-end-of-line-block-comments
+  (testing "a #| |# comment on a form's line stays on that line (PR #190 review)"
+    (with-temp-file "tests/tmp/multi-insert-eol-block.lisp" (format nil "(defun a () 1)~%")
+      (lambda (path)
+        (ok (null (%insert-block path "insert_after" "a"
+                                 (format nil "(defun b () 2) #| about b |#~%(defun c () 3)"))))
+        (ok (string= (format nil "(defun a () 1)~%~%(defun b () 2) #| about b |#~%~%~
+                                  (defun c () 3)~%")
+                     (fs-read-file path))))))
+  (testing "a comment's own trailing spaces are comment text, not gap whitespace"
+    ;; PR #190 review: only whitespace outside comments is normalised.
+    (dolist (operation '("insert_after" "insert_before"))
+      (with-temp-file "tests/tmp/multi-insert-comment-spaces.lisp" +block-anchor-file+
+        (lambda (path)
+          (ok (null (%insert-block path operation (if (string= operation "insert_after") "a" "z")
+                                   (format nil "(defun b () 2) ; eol  ~%;; about c  ~%~
+                                                (defun c () 3)"))))
+          (ok (search (format nil "(defun b () 2) ; eol  ~%~%;; about c  ~%(defun c () 3)")
+                      (fs-read-file path))
+              operation)))))
+  (testing "a block comment that starts on the form's line stays there whole"
+    (with-temp-file "tests/tmp/multi-insert-eol-block-multiline.lisp"
+        (format nil "(defun a () 1)~%")
+      (lambda (path)
+        (ok (null (%insert-block path "insert_after" "a"
+                                 (format nil "(defun b () 2) #| one~%  two |#~%~%~%~
+                                              (defun c () 3)"))))
+        (ok (string= (format nil "(defun a () 1)~%~%(defun b () 2) #| one~%  two |#~%~%~
+                                  (defun c () 3)~%")
+                     (fs-read-file path)))))))
+
+(deftest lisp-edit-form-block-normalizes-only-the-gaps-between-forms
+  (testing "normalize_blank_lines true: gaps between forms, never inside a string"
+    (with-temp-file "tests/tmp/multi-insert-normalize.lisp" (format nil "(defun a () 1)~%")
+      (lambda (path)
+        (ok (null (%insert-block path "insert_after" "a"
+                                 (format nil "(defun b () \"x~%~%~% y\")~%~%~%~%(defun c () 3)"))))
+        (ok (string= (format nil "(defun a () 1)~%~%(defun b () \"x~%~%~% y\")~%~%~
+                                  (defun c () 3)~%")
+                     (fs-read-file path))))))
+  (testing "normalize_blank_lines false: the block is kept, the outer separation is today's"
+    ;; No final newline in the file: a single-form insert adds the blank line
+    ;; and the trailing newline even without normalization, and a block does
+    ;; the same around itself.
+    (with-temp-file "tests/tmp/multi-insert-preserve.lisp" "(defun a () 1)"
+      (lambda (path)
+        (ok (null (%insert-block path "insert_after" "a"
+                                 (format nil "(defun b () 2)~%~%~%~%(defun c () 3)")
+                                 :normalize-blank-lines nil)))
+        (ok (string= (format nil "(defun a () 1)~%~%(defun b () 2)~%~%~%~%(defun c () 3)~%")
+                     (fs-read-file path)))))))
+
+(deftest lisp-edit-form-readable-block-is-not-repaired
+  (testing "a block that reads is inserted as given, even where indentation disagrees"
+    ;; Parinfer would move the dedented 2 out of the IF; the parens are
+    ;; complete, so the block must go in exactly as written.
+    (let ((block (format nil "(defun b (x)~%  (if x~%      1~%  2))~%~%(defun c () 3)")))
+      (with-temp-file "tests/tmp/multi-insert-readable.lisp" (format nil "(defun a () 1)~%")
+        (lambda (path)
+          (multiple-value-bind (updated warning)
+              (lisp-edit-form :file-path path :form-type "defun" :form-name "a"
+                              :operation "insert_after" :content block)
+            (declare (ignore updated))
+            (ok (null warning) "no parinfer warning")
+            (ok (search block (fs-read-file path)))))))))
+
+(deftest lisp-edit-form-repairs-a-block-before-splitting-it
+  (testing "a missing ) in the middle form is repaired as a block, then inserted"
+    (with-temp-file "tests/tmp/multi-insert-repair.lisp" (format nil "(defun a () 1)~%")
+      (lambda (path)
+        (multiple-value-bind (updated warning)
+            (lisp-edit-form :file-path path :form-type "defun" :form-name "a"
+                            :operation "insert_after"
+                            :content (format nil "(defun b () 2)~%~%(defun c ()~%  3~%~%~
+                                                  (defun d () 4)"))
+          (declare (ignore updated))
+          (ok (stringp warning) "the repair is reported")
+          (let ((text (fs-read-file path)))
+            (ok (search (format nil "(defun c ()~%  3)") text))
+            (ok (search "(defun d () 4)" text)))))))
+  (testing "a block the repair cannot turn into complete forms is refused, file unchanged"
+    (with-temp-file "tests/tmp/multi-insert-unrepairable.lisp" +block-anchor-file+
+      (lambda (path)
+        (ok (%insert-block path "insert_after" "a"
+                           (format nil "(defun b () 2)~%(defun c () #<)")))
+        (ok (string= +block-anchor-file+ (fs-read-file path)))))))
+
+(deftest lisp-edit-form-block-fails-as-a-whole
+  (testing "a block whose last form does not read writes nothing"
+    (with-temp-file "tests/tmp/multi-insert-late-failure.lisp" +block-anchor-file+
+      (lambda (path)
+        (ok (%insert-block path "insert_after" "a"
+                           (format nil "(defun b () 2)~%(defun c () 3)~%~
+                                        (defun d () #.(error \"no\"))")))
+        (ok (string= +block-anchor-file+ (fs-read-file path))))))
+  (testing "a stale guard refuses a block, file unchanged"
+    (with-temp-file "tests/tmp/multi-insert-guard.lisp" +block-anchor-file+
+      (lambda (path)
+        (let ((guard (%edit-guard-for path "defun" "a")))
+          (fs-write-file "tests/tmp/multi-insert-guard.lisp"
+                         (format nil "(defun a () 100)~%~%(defun z () 26)~%"))
+          (ok (typep (%insert-block path "insert_after" "a"
+                                    (format nil "(defun b () 2)~%(defun c () 3)")
+                                    :guard guard)
+                     'edit-guard-conflict-error))
+          (ok (string= (format nil "(defun a () 100)~%~%(defun z () 26)~%")
+                       (fs-read-file path))))))))
+
+(deftest lisp-edit-form-block-under-a-custom-readtable
+  (handler-case
+      (progn
+        (unless (%try-load :cl-interpol) (error "not available"))
+        (testing "a later half the repair can fix is repaired and inserted"
+          (with-temp-file "tests/tmp/multi-insert-interpol.lisp" (format nil "(defun a () 1)~%")
+            (lambda (path)
+              (ok (null (%insert-block path "insert_after" "a"
+                                       (format nil "(defun b (x) #?\"hi ${x}\")~%~%~
+                                                    (defun c ()~%  3~%~%(defun d () 4)")
+                                       :readtable :interpol-syntax)))
+              (let ((text (fs-read-file path)))
+                (ok (search "#?\"hi ${x}\"" text))
+                (ok (search (format nil "(defun c ()~%  3)") text))
+                (ok (search "(defun d () 4)" text))))))
+        (testing "a readtable that keeps whitespace plain still gets its gaps normalised"
+          (with-temp-file "tests/tmp/multi-insert-interpol-gaps.lisp"
+              (format nil "(defun a () 1)~%")
+            (lambda (path)
+              (ok (null (%insert-block path "insert_after" "a"
+                                       (format nil "(defun b (x) #?\"hi ${x}\")~%~%~%~%~
+                                                    (defun c () 3)")
+                                       :readtable :interpol-syntax)))
+              (ok (search (format nil "#?\"hi ${x}\")~%~%(defun c () 3)")
+                          (fs-read-file path))))))
+        (testing "a later half still malformed is refused; the first half is not inserted"
+          (with-temp-file "tests/tmp/multi-insert-interpol-bad.lisp" +block-anchor-file+
+            (lambda (path)
+              (ok (%insert-block path "insert_after" "a"
+                                 (format nil "(defun b (x) #?\"hi ${x}\")~%(defun c () #<)")
+                                 :readtable :interpol-syntax))
+              (ok (string= +block-anchor-file+ (fs-read-file path)))))))
+    (error ()
+      (skip "cl-interpol not available"))))
+
+(deftest lisp-edit-form-block-gaps-kept-where-whitespace-is-not-plain
+  (handler-case
+      (progn
+        (unless (%try-load :named-readtables) (error "not available"))
+        ;; Tab is a single escape here: not a macro character, yet not
+        ;; whitespace either.  <Tab>1 reads as the symbol |1|, and dropping
+        ;; the Tab would turn it into the number 1 (PR #190 review).
+        (let* ((name :cl-mcp-test-tab-escape)
+               (make (find-symbol "MAKE-READTABLE" :named-readtables))
+               (find (find-symbol "FIND-READTABLE" :named-readtables))
+               (readtable (or (funcall find name)
+                              (funcall make name :merge '(:standard)))))
+          (set-syntax-from-char #\Tab #\\ readtable)
+          (with-temp-file "tests/tmp/multi-insert-tab-escape.lisp" (format nil "(defun a () 1)~%")
+            (lambda (path)
+              (ok (null (%insert-block path "insert_after" "a"
+                                       (format nil "(defun b () 2)~%~C1~%(defun c () 3)" #\Tab)
+                                       :readtable name)))
+              (ok (search (format nil "~%~C1~%" #\Tab) (fs-read-file path))
+                  "the Tab before 1 is kept, so it still reads as a symbol")))))
+    (error (e)
+      (skip (format nil "named-readtables not available: ~A" e)))))
+
+(deftest lisp-edit-form-dry-run-previews-the-whole-block
+  (testing "dry_run shows every form of the block and writes nothing"
+    (with-temp-file "tests/tmp/multi-insert-dry-run.lisp" +block-anchor-file+
+      (lambda (path)
+        (let ((result (lisp-edit-form :file-path path :form-type "defun" :form-name "a"
+                                      :operation "insert_after" :dry-run t
+                                      :content (format nil "(defun b () 2)~%(defun c () 3)"))))
+          (ok (string= (format nil "(defun b () 2)~%~%(defun c () 3)")
+                       (gethash "preview_form" result)))
+          (ok (eql 2 (gethash "forms" result)))
+          (ok (string= +block-anchor-file+ (fs-read-file path))))))))
+
+(deftest lisp-edit-form-single-form-paths-are-unchanged
+  (testing "a single-form dry run carries no forms count"
+    (with-temp-file "tests/tmp/multi-insert-single.lisp" +block-anchor-file+
+      (lambda (path)
+        (let ((result (lisp-edit-form :file-path path :form-type "defun" :form-name "a"
+                                      :operation "insert_after" :dry-run t
+                                      :content "(defun b () 2)")))
+          (ok (null (nth-value 1 (gethash "forms" result))))))))
+  (testing "replace still refuses several forms, pointing at replace + insert_after"
+    (with-temp-file "tests/tmp/multi-replace.lisp" +block-anchor-file+
+      (lambda (path)
+        (let ((condition (%insert-block path "replace" "a"
+                                        (format nil "(defun a () 2)~%(defun b () 3)"))))
+          (ok (typep condition 'cl-mcp/src/lisp-edit-form::multiple-top-level-forms-error))
+          (ok (string= "replace_then_insert_after"
+                       (gethash "action"
+                                (cl-mcp/src/lisp-edit-form::%multiple-top-level-forms-error-data))))
+          (ok (string= +block-anchor-file+ (fs-read-file path)))))))
+  (testing "lisp-patch-form still refuses a patch that leaves two forms"
+    (with-temp-file "tests/tmp/multi-patch.lisp" +block-anchor-file+
+      (lambda (path)
+        (ok (handler-case
+                (progn (lisp-patch-form
+                        :file-path path :form-type "defun" :form-name "a"
+                        :old-text "1)" :new-text "1) (defun b () 2)")
+                       nil)
+              (error () t)))
+        (ok (string= +block-anchor-file+ (fs-read-file path)))))))

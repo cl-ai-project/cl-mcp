@@ -927,16 +927,14 @@
                (data (and err (gethash "data" err)))
                (example (and data (gethash "example_operation_sequence" data))))
           (ok err)
-          (ok (string= msg
-                       "content must contain exactly one top-level form; multiple forms are not supported in a single call"))
+          (ok (search "replace takes exactly one top-level form" msg))
           (ok (hash-table-p data))
           (ok (string= (gethash "code" data) "multiple_forms_not_supported"))
           (ok (string= (gethash "next_tool" data) "lisp-edit-form"))
-          (ok (string= (gethash "action" data) "split_into_multiple_calls"))
-          (ok (vectorp example))
-          (ok (> (length example) 0))
-          (ok (every (lambda (step) (string= step "insert_after"))
-                     (coerce example 'list))))))))
+          ;; insert_before/insert_after take several forms (issue #189), so a
+          ;; replace with several is one replace plus one insert_after.
+          (ok (string= (gethash "action" data) "replace_then_insert_after"))
+          (ok (equalp example #("replace" "insert_after"))))))))
 
 (deftest tools-call-lisp-edit-form-multiple-forms-guidance-newline
   (testing "multiple forms separated by escaped newline still return guidance"
@@ -981,9 +979,33 @@
           (ok err)
           (ok (stringp msg))
           (ok (search "trailing malformed characters" msg))
-          (ok (null (search "multiple forms are not supported in a single call" msg)))
+          (ok (null (search "replace takes exactly one top-level form" msg)))
           (ok (not (and (stringp code)
                         (string= code "multiple_forms_not_supported")))))))))
+
+(deftest tools-call-lisp-edit-form-insert-reports-a-block-of-forms
+  (testing "a multi-form insert carries forms, a single-form one does not (dry run only)"
+    (with-test-project-root
+      (flet ((dry-insert (id content)
+               (parse (%pjl (format nil
+                                    (concatenate
+                                     'string
+                                     "{\"jsonrpc\":\"2.0\",\"id\":~D,\"method\":\"tools/call\","
+                                     "\"params\":{\"name\":\"lisp-edit-form\","
+                                     "\"arguments\":{\"file_path\":\"src/core.lisp\","
+                                     "\"form_type\":\"defun\",\"form_name\":\"version\","
+                                     "\"operation\":\"insert_after\",\"dry_run\":true,"
+                                     "\"content\":\"~A\"}}}")
+                                    id content)))))
+        (let* ((block (gethash "result" (dry-insert 2401 "(defun b () 2)\\n(defun c () 3)")))
+               (single (gethash "result" (dry-insert 2402 "(defun b () 2)")))
+               (block-text (gethash "text" (aref (gethash "content" block) 0))))
+          (ok (eql 2 (gethash "forms" block)))
+          (ok (search "Dry-run insert_after of 2 forms on defun version" block-text))
+          (ok (search "(defun c () 3)" (gethash "preview_form" block)))
+          (ok (null (nth-value 1 (gethash "forms" single))))
+          (ok (search "Dry-run insert_after on defun version"
+                      (gethash "text" (aref (gethash "content" single) 0)))))))))
 
 (deftest tools-call-code-find-references-project-only-false
   (testing "tools/call code-find-references with project_only=false includes external refs"

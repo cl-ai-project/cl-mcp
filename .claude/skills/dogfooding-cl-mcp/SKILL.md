@@ -110,7 +110,7 @@ Use `fs-write-file` for **new** files, `lisp-edit-form` / `lisp-patch-form` for 
 
 **Tool parameter gotchas** (easy to trip on):
 - `lisp-edit-form` / `lisp-patch-form` use `file_path`, NOT `path`. Reading tools (`lisp-read-file`, `fs-read-file`) use `path`.
-- `lisp-edit-form content` must contain **exactly one top-level form**. To insert multiple forms, chain `insert_after` calls.
+- `lisp-edit-form content`: `replace` takes **exactly one top-level form**; `insert_before`/`insert_after` take one or more, inserted in order as one block. To replace one form with several, `replace` with the first and `insert_after` the rest in one call.
 - `code-find` requires `symbol`, NOT `name`. When the symbol is not in `CL-USER`, also pass `package`.
 - `lisp-edit-form` / `lisp-patch-form` accept `form_type: "defsystem"` for `.asd` files, NOT `"asdf:defsystem"`.
 
@@ -264,7 +264,7 @@ These are documented pitfalls that have tripped previous dogfooding runs. If you
 | `load-system system=<name>` fails with `Component "<name>" not found` immediately after `project-scaffold` | Fixed: `load-system` now auto-discovers `.asd` files under the project root on MISSING-COMPONENT | Resolved. Verified in cycle 10 (2026-04-13). Manual `asdf:load-asd` only needed if `.asd` is outside the project root |
 | `run-tests` single-test mode reports `Test runner crashed` with `no applicable method for TEST-NAME` on `FAILED-ASSERTION` | Rove internal bug: `rove:run-tests` calls `TEST-NAME` on `FAILED-ASSERTION` objects. Caught by handler-case in `run-rove-selected-tests`; `%safe-test-name` guards `run-rove-tests` path | Failure is reported gracefully (not a hard crash). The "Test runner crashed" reason text reflects Rove's internal error |
 | `inspect-object id=<N>` returns `id must be an integer` even when N is clearly an integer | Deferred tool schema not hydrated (harness-side, not cl-mcp) | Run ToolSearch hydration batch from step 1 before first use |
-| `lisp-edit-form content=<multi-form>` rejects with `content must contain exactly one top-level form` | Tool only accepts one form per call | Chain multiple `insert_after` calls, one form each |
+| `lisp-edit-form operation=replace content=<multi-form>` rejects with `replace takes exactly one top-level form` | `replace` swaps one form for one form; only `insert_before`/`insert_after` take several | `replace` with the first form, then one `insert_after` with the rest |
 | `clgrep-search form_types=[...]` filter returns fewer results than expected | Filter works for most cases but may miss forms with non-standard structure | Omit `form_types` and post-filter client-side if results seem incomplete, OR prefer `code-find` / `code-describe` for exact lookups |
 | `clgrep-search` signature field is a 4KB blob with the whole form body | Fixed: results are now deduplicated by (file, form-start-byte) with `match_lines` array | Should be resolved; if still noisy, use `limit` param or targeted `lisp-read-file name_pattern=...` |
 | `lisp-edit-form` has no way to remove a form from a file | Fixed: `operation: "delete"` is now available (content param not needed) | Use `lisp-edit-form` with `operation: "delete"` to remove scaffold stubs like `defun greet` |
