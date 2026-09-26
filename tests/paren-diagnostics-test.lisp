@@ -14,7 +14,8 @@
                 #:format-delimiter-diagnosis
                 #:format-overwrite-recovery
                 #:reparented-forms
-                #:format-reparent-note))
+                #:format-reparent-note
+                #:in-readtable-form-p))
 
 (in-package #:cl-mcp/tests/paren-diagnostics-test)
 
@@ -465,6 +466,20 @@ parens (min count room) is the IF's else branch; by indentation it is not.")
       (ok (search "This form leaves the form your parens put it in:" note))
       (ok (search "resend the content with 1 \")\" added at its end" note)))))
 
+(deftest in-readtable-form-p-needs-a-real-form
+  (testing "a form headed by IN-READTABLE, in any case, with or without a package"
+    (ok (in-readtable-form-p "(in-readtable :interpol-syntax)"))
+    (ok (in-readtable-form-p (format nil "(in-package :x)~%( IN-READTABLE :FOO)")))
+    (ok (in-readtable-form-p "(named-readtables:in-readtable :foo)"))
+    (ok (in-readtable-form-p "(NAMED-READTABLES:IN-READTABLE :FOO)")))
+  (testing "the word elsewhere does not count"
+    (ng (in-readtable-form-p ";; This file does not use in-readtable."))
+    (ng (in-readtable-form-p "(defvar *doc* \"see (in-readtable :x)\")"))
+    (ng (in-readtable-form-p "#| (in-readtable :x) |# (defun f () 1)"))
+    (ng (in-readtable-form-p "(list 'in-readtable in-readtable)"))
+    (ng (in-readtable-form-p "(in-readtable-helper :x)"))
+    (ng (in-readtable-form-p "(defun f () #\\( in-readtable)"))))
+
 (deftest reparented-forms-is-linear-in-the-number-of-forms
   (testing "a large file with thousands of forms is compared in one pass, not one per form"
     ;; PR #184 review: the per-form balance used to rescan the whole text for
@@ -481,6 +496,27 @@ parens (min count room) is the IF's else branch; by indentation it is not.")
            (seconds (/ (- (get-internal-real-time) start)
                        internal-time-units-per-second)))
       (ok (= 1 (length moved)) "only the broken form's else branch moved")
+      (ok (< seconds 5) (format nil "took ~,2F s" seconds)))))
+
+(deftest reparented-forms-is-linear-in-the-length-of-a-line
+  (testing "many elements moved out of one long line do not each copy the rest of the line"
+    ;; Second review of PR #184: naming each element copied from it to the
+    ;; end of its line before cutting to 40 characters, O(line^2) for a line
+    ;; full of moved elements. Measured before the fix: 0.35 s at 80 KB,
+    ;; 1.33 s at 160 KB (x3.8 for x2); after: 0.05 s at 160 KB, 0.26 s at 640 KB.
+    (let* ((count 160000)
+           (text (with-output-to-string (s)
+                   (format s "(defun f ()~%  (when x~%  ")
+                   (dotimes (i count) (write-string "(a) " s))
+                   (write-string ")" s)))
+           (repaired (repaired-text text))
+           (start (get-internal-real-time))
+           (moved (reparented-forms text repaired))
+           (seconds (/ (- (get-internal-real-time) start)
+                       internal-time-units-per-second)))
+      (ok (= count (length moved)) "every (a) left the WHEN")
+      (ok (string= "(a) (a) (a) (a) (a) (a) (a) (a) (a) (a)" (getf (first moved) :head))
+          "the head is still cut to 40 characters")
       (ok (< seconds 5) (format nil "took ~,2F s" seconds)))))
 
 (deftest reparent-note-counts-closers-per-form

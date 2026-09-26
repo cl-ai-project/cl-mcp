@@ -16,6 +16,7 @@
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis
                 #:format-overwrite-recovery
+                #:in-readtable-form-p
                 #:next-top-level-hint-line)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:text-content
@@ -315,8 +316,13 @@ it is flagged in \"diagnosis_text\" as a likely artifact of the window."
     (let* ((diagnosis (let ((d (diagnose-delimiters text :base-offset base-off)))
                         ;; The reparent note reads the text's parens with
                         ;; standard syntax; under an in-readtable a reader
-                        ;; macro may consume them as data (issue #183).
-                        (if (and (getf d :reparented) (%custom-readtable-p text))
+                        ;; macro may consume them as data (issue #183). Only
+                        ;; a real (in-readtable ...) form counts: the word in
+                        ;; a comment must not withhold the note, and
+                        ;; (NAMED-READTABLES:IN-READTABLE ...) must not be
+                        ;; missed, which %CUSTOM-READTABLE-P's plain search
+                        ;; gets wrong both ways (PR #184 review).
+                        (if (and (getf d :reparented) (in-readtable-form-p text))
                             (list* :reparented nil d)
                             d)))
            ;; The reader check only matters when the delimiters balance.

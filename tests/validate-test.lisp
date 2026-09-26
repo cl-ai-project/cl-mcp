@@ -31,7 +31,18 @@
       (let ((res (lisp-check-parens
                   :code (format nil "(in-readtable :interpol-syntax)~%~%~A" broken))))
         (ok (not (%ok? res)) "the delimiter finding itself stands")
-        (ng (search "by your parens" (or (gethash "diagnosis_text" res) "")))))))
+        (ng (search "by your parens" (or (gethash "diagnosis_text" res) "")))))
+    (testing "second review: an upper-case, package-qualified IN-READTABLE withholds it too"
+      (let ((res (lisp-check-parens
+                  :code (format nil "(NAMED-READTABLES:IN-READTABLE :INTERPOL-SYNTAX)~%~%~A"
+                                broken))))
+        (ng (search "by your parens" (or (gethash "diagnosis_text" res) "")))))
+    (testing "second review: the word in a comment or a string does not withhold it"
+      (let ((res (lisp-check-parens
+                  :code (format nil ";; This file does not use in-readtable.~%(defvar *doc* \"no (in-readtable here\")~%~%~A"
+                                broken))))
+        (ok (search "by your parens inside \"(if (< room 0)\""
+                    (gethash "diagnosis_text" res)))))))
 
 (deftest lisp-check-parens-ok-string
   (testing "balanced string returns ok"

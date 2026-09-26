@@ -28,7 +28,8 @@
            #:format-overwrite-recovery
            #:format-relocation-note
            #:reparented-forms
-           #:format-reparent-note))
+           #:format-reparent-note
+           #:in-readtable-form-p))
 
 (in-package #:cl-mcp/src/paren-diagnostics)
 
@@ -1137,7 +1138,8 @@ a ) closes nothing."
   "Return the 1-based line of position INDEX in TEXT and the text from INDEX to
 the end of that line, right-trimmed and cut to 40 characters, for naming the
 element that starts there. NEWLINES is TEXT's %NEWLINE-POSITIONS: the line is
-found by binary search, so naming many elements stays linear in TEXT."
+found by binary search, and only the head's 40 characters are copied, so
+naming many elements costs O(log lines) each, however long their line."
   (let ((lo 0) (hi (length newlines)))
     ;; The number of newlines before INDEX.
     (loop while (< lo hi)
@@ -1145,9 +1147,13 @@ found by binary search, so naming many elements stays linear in TEXT."
                (if (< (aref newlines mid) index)
                    (setf lo (1+ mid))
                    (setf hi mid))))
-    (let* ((eol (if (< lo (length newlines)) (aref newlines lo) (length text)))
-           (head (string-right-trim '(#\Space #\Tab #\Return) (subseq text index eol))))
-      (values (1+ lo) (if (> (length head) 40) (subseq head 0 40) head)))))
+    ;; Copy at most the 40 characters the head keeps: copying to the end of
+    ;; the line first would make a long line with many moved elements
+    ;; quadratic (PR #184 review), each element copying the rest of the line.
+    (let ((eol (if (< lo (length newlines)) (aref newlines lo) (length text))))
+      (values (1+ lo)
+              (string-right-trim '(#\Space #\Tab #\Return)
+                                 (subseq text index (min eol (+ index 40))))))))
 
 (defun %without-code-closers (text)
   "Return TEXT with every ) that is code removed: what is left is what a repair
@@ -1175,6 +1181,36 @@ COUNT-DELIMITER-DEPTH per region would rescan TEXT from its start each time."
           (#\) (decf net))))
       (setf (aref balance (1+ i)) net))
     balance))
+
+(defun in-readtable-form-p (text)
+  "Return T when TEXT's code holds a form headed by IN-READTABLE: a ( outside
+strings, comments and character literals, then optional whitespace, then a
+symbol whose name, after any package prefix, is IN-READTABLE in any case --
+(in-readtable :foo), (NAMED-READTABLES:IN-READTABLE :FOO). The word in a
+comment or a string does not count. This is what decides whether a text's
+parens may be read with standard syntax (issue #183): under an in-readtable a
+reader macro may consume them as data."
+  (let ((mask (%code-state-mask text))
+        (len (length text)))
+    (flet ((delimiter-p (ch)
+             (member ch '(#\Space #\Tab #\Newline #\Return #\Page
+                          #\( #\) #\" #\; #\' #\` #\,))))
+      (loop for i below len
+            thereis (and (char= (char text i) #\()
+                         (eq (svref mask i) :code)
+                         (let* ((start (or (position-if-not
+                                            (lambda (ch)
+                                              (member ch '(#\Space #\Tab #\Newline
+                                                           #\Return #\Page)))
+                                            text :start (1+ i))
+                                           len))
+                                (end (or (position-if #'delimiter-p text :start start)
+                                         len))
+                                (token (subseq text start (min end (+ start 64))))
+                                (colon (position #\: token :from-end t)))
+                           (and (< start len)
+                                (string-equal (if colon (subseq token (1+ colon)) token)
+                                              "in-readtable"))))))))
 
 (defun %reparented-in-form (original start end missing newlines repaired-form)
   "Compare one top-level form for REPARENTED-FORMS: ORIGINAL's text from START to
@@ -1283,10 +1319,13 @@ and as many forms, are listed and the rest counted."
                       entries))
            (more (- (length entries) (length shown)))
            ;; (form-line . missing) per top-level form, in order.
-           (forms (let ((seen '()))
-                    (dolist (entry entries (nreverse seen))
-                      (unless (assoc (getf entry :form-line) seen)
-                        (push (cons (getf entry :form-line) (getf entry :missing)) seen)))))
+           (forms (let ((seen (make-hash-table))
+                        (out '()))
+                    (dolist (entry entries (nreverse out))
+                      (let ((line (getf entry :form-line)))
+                        (unless (gethash line seen)
+                          (setf (gethash line seen) t)
+                          (push (cons line (getf entry :missing)) out))))))
            (forms-shown (if (> (length forms) *repair-lines-limit*)
                             (subseq forms 0 *repair-lines-limit*)
                             forms))
