@@ -1125,14 +1125,29 @@ a ) closes nothing."
                        (pop stack)
                        (return-from %code-elements nil))))))))))
 
-(defun %element-line-and-head (text index)
+(defun %newline-positions (text)
+  "Return a vector of the positions of every newline in TEXT, in order."
+  (let ((out (make-array 0 :adjustable t :fill-pointer t)))
+    (loop for i from 0 below (length text)
+          when (char= (char text i) #\Newline)
+            do (vector-push-extend i out))
+    out))
+
+(defun %element-line-and-head (text index newlines)
   "Return the 1-based line of position INDEX in TEXT and the text from INDEX to
 the end of that line, right-trimmed and cut to 40 characters, for naming the
-element that starts there."
-  (let* ((line (1+ (count #\Newline text :end index)))
-         (eol (or (position #\Newline text :start index) (length text)))
-         (head (string-right-trim '(#\Space #\Tab #\Return) (subseq text index eol))))
-    (values line (if (> (length head) 40) (subseq head 0 40) head))))
+element that starts there. NEWLINES is TEXT's %NEWLINE-POSITIONS: the line is
+found by binary search, so naming many elements stays linear in TEXT."
+  (let ((lo 0) (hi (length newlines)))
+    ;; The number of newlines before INDEX.
+    (loop while (< lo hi)
+          do (let ((mid (floor (+ lo hi) 2)))
+               (if (< (aref newlines mid) index)
+                   (setf lo (1+ mid))
+                   (setf hi mid))))
+    (let* ((eol (if (< lo (length newlines)) (aref newlines lo) (length text)))
+           (head (string-right-trim '(#\Space #\Tab #\Return) (subseq text index eol))))
+      (values (1+ lo) (if (> (length head) 40) (subseq head 0 40) head)))))
 
 (defun %without-code-closers (text)
   "Return TEXT with every ) that is code removed: what is left is what a repair
@@ -1143,6 +1158,53 @@ that only moves, adds or drops closers must keep unchanged."
             for i from 0
             unless (and (char= ch #\)) (eq (svref mask i) :code))
               do (write-char ch s)))))
+
+(defun %code-paren-balance (text)
+  "Return a vector of length (1+ (length TEXT)) whose element I is the number
+of code ( minus the number of code ) in TEXT before position I, so the balance
+of any region [START, END) is one subtraction. One lexical pass, where calling
+COUNT-DELIMITER-DEPTH per region would rescan TEXT from its start each time."
+  (let* ((mask (%code-state-mask text))
+         (len (length text))
+         (balance (make-array (1+ len) :element-type 'fixnum :initial-element 0))
+         (net 0))
+    (dotimes (i len)
+      (when (eq (svref mask i) :code)
+        (case (char text i)
+          (#\( (incf net))
+          (#\) (decf net))))
+      (setf (aref balance (1+ i)) net))
+    balance))
+
+(defun %reparented-in-form (original start end missing newlines repaired-form)
+  "Compare one top-level form for REPARENTED-FORMS: ORIGINAL's text from START to
+END, read by its own parens with MISSING closers appended, against
+REPAIRED-FORM, the same form as the repair wrote it. Return an entry for every
+element whose enclosing list differs; NEWLINES indexes ORIGINAL."
+  (let ((literal (concatenate 'string (subseq original start end)
+                              (string #\Newline)
+                              (make-string missing :initial-element #\))))
+        (form-line (%element-line-and-head original start newlines)))
+    (multiple-value-bind (l-starts l-parents) (%code-elements literal)
+      (multiple-value-bind (s-starts s-parents) (%code-elements repaired-form)
+        (declare (ignore s-starts))
+        (when (and l-starts s-parents (= (length l-parents) (length s-parents)))
+          (flet ((where (ordinal)
+                   (if ordinal
+                       (%element-line-and-head original (+ start (aref l-starts ordinal))
+                                               newlines)
+                       (values nil nil))))
+            (loop for i below (length l-parents)
+                  for by-parens = (aref l-parents i)
+                  for as-repaired = (aref s-parents i)
+                  unless (eql by-parens as-repaired)
+                    collect (multiple-value-bind (line head) (where i)
+                              (multiple-value-bind (p-line p-head) (where by-parens)
+                                (multiple-value-bind (r-line r-head) (where as-repaired)
+                                  (list :line line :head head
+                                        :parens-line p-line :parens-head p-head
+                                        :repaired-line r-line :repaired-head r-head
+                                        :form-line form-line :missing missing)))))))))))
 
 (defun reparented-forms (original repaired)
   "Return the elements of ORIGINAL that REPAIRED (parinfer's output for it) puts
@@ -1164,11 +1226,17 @@ closers appended at its end, and every element's enclosing list is compared
 between that reading and REPAIRED. Elements are matched by position in order,
 which is sound only when REPAIRED differs from ORIGINAL in code closers alone;
 otherwise, or when either text has a ) that closes nothing, the result is NIL.
+The work is linear in the length of the texts: the balance of every form comes
+from one pass, and lines from one index of the newlines.
+
+The parens reading assumes standard syntax: a caller whose text is read with a
+readtable that changes what ( and ) mean must not call this.
 
 Each entry is a plist: :line and :head name the element, :parens-line and
 :parens-head the list enclosing it by ORIGINAL's parens, :repaired-line and
-:repaired-head the one enclosing it in REPAIRED (both NIL at top level), and
-:missing the closers the parens reading appended to that top-level form."
+:repaired-head the one enclosing it in REPAIRED (both NIL at top level),
+:form-line the line where its top-level form starts, and :missing the closers
+the parens reading appended to that form."
   (unless (string= (%without-code-closers original) (%without-code-closers repaired))
     (return-from reparented-forms nil))
   (multiple-value-bind (o-starts o-parents) (%code-elements original)
@@ -1176,74 +1244,53 @@ Each entry is a plist: :line and :head name the element, :parens-line and
     (multiple-value-bind (r-starts r-parents) (%code-elements repaired)
       (unless (and o-starts r-starts (= (length o-starts) (length r-starts)))
         (return-from reparented-forms nil))
-      (let* ((count (length r-starts))
-             ;; A top-level element of REPAIRED starts a new form only in
-             ;; column 1. One still indented is a body the repair pushed out
-             ;; to the top level (a docstring after a closed DEFVAR head), so
-             ;; it stays with the form before it and is reported as moved.
-             (tops (loop for k below count
-                         for start = (aref r-starts k)
-                         when (and (null (aref r-parents k))
-                                   (or (null tops-so-far)
-                                       (zerop start)
-                                       (char= (char repaired (1- start)) #\Newline)))
-                           collect k into tops-so-far
-                         finally (return tops-so-far))))
-        (flet ((describe-parent (seg-start seg-starts ordinal)
-                 (if ordinal
-                     (%element-line-and-head original
-                                             (+ seg-start (aref seg-starts ordinal)))
-                     (values nil nil))))
-          (loop for (top next) on tops
-                for start = (aref o-starts top)
-                for end = (if next (aref o-starts next) (length original))
-                for missing = (multiple-value-bind (opens closes)
-                                  (count-delimiter-depth original :start start :end end)
-                                (- opens closes))
-                when (plusp missing)
-                  nconc (let ((literal (concatenate 'string (subseq original start end)
-                                                    (string #\Newline)
-                                                    (make-string missing
-                                                                 :initial-element #\)))))
-                          (multiple-value-bind (l-starts l-parents) (%code-elements literal)
-                            (multiple-value-bind (s-starts s-parents)
-                                (%code-elements
-                                 (subseq repaired (aref r-starts top)
-                                         (if next (aref r-starts next) (length repaired))))
-                              (declare (ignore s-starts))
-                              (when (and l-starts s-parents
-                                         (= (length l-parents) (length s-parents)))
-                                (loop for i below (length l-parents)
-                                      for by-parens = (aref l-parents i)
-                                      for as-repaired = (aref s-parents i)
-                                      unless (eql by-parens as-repaired)
-                                        collect (multiple-value-bind (line head)
-                                                    (%element-line-and-head
-                                                     original (+ start (aref l-starts i)))
-                                                  (multiple-value-bind (p-line p-head)
-                                                      (describe-parent start l-starts by-parens)
-                                                    (multiple-value-bind (r-line r-head)
-                                                        (describe-parent start l-starts as-repaired)
-                                                      (list :line line :head head
-                                                            :parens-line p-line
-                                                            :parens-head p-head
-                                                            :repaired-line r-line
-                                                            :repaired-head r-head
-                                                            :missing missing)))))))))))))))
+      (let ((balance (%code-paren-balance original))
+            (newlines (%newline-positions original))
+            ;; A top-level element of REPAIRED starts a new form only in
+            ;; column 1. One still indented is a body the repair pushed out
+            ;; to the top level (a docstring after a closed DEFVAR head), so
+            ;; it stays with the form before it and is reported as moved.
+            (tops (loop for k below (length r-starts)
+                        for start = (aref r-starts k)
+                        when (and (null (aref r-parents k))
+                                  (or (null tops-so-far)
+                                      (zerop start)
+                                      (char= (char repaired (1- start)) #\Newline)))
+                          collect k into tops-so-far
+                        finally (return tops-so-far))))
+        (loop for (top next) on tops
+              for start = (aref o-starts top)
+              for end = (if next (aref o-starts next) (length original))
+              for missing = (- (aref balance end) (aref balance start))
+              when (plusp missing)
+                nconc (%reparented-in-form
+                       original start end missing newlines
+                       (subseq repaired (aref r-starts top)
+                               (if next (aref r-starts next) (length repaired)))))))))
 
 (defun format-reparent-note (entries &key (target :form))
   "Return the NOTE for ENTRIES (from REPARENTED-FORMS), or NIL when there are
 none: which elements the repair moved, where the parens put each one and where
 the repair put it, then how to get the parens reading instead. TARGET :FORM
 (lisp-check-parens) says to add the closers at the end of the form; :CONTENT
-(lisp-edit-form) says to resend the content with them added. At most
-*REPAIR-LINES-LIMIT* entries are listed and the rest counted."
+(lisp-edit-form) says to resend the content with them added. The closers are
+counted per top-level form (:FORM-LINE), since a file can hold several broken
+forms that each miss a different number. At most *REPAIR-LINES-LIMIT* entries,
+and as many forms, are listed and the rest counted."
   (when entries
     (let* ((shown (if (> (length entries) *repair-lines-limit*)
                       (subseq entries 0 *repair-lines-limit*)
                       entries))
            (more (- (length entries) (length shown)))
-           (missing (getf (first entries) :missing)))
+           ;; (form-line . missing) per top-level form, in order.
+           (forms (let ((seen '()))
+                    (dolist (entry entries (nreverse seen))
+                      (unless (assoc (getf entry :form-line) seen)
+                        (push (cons (getf entry :form-line) (getf entry :missing)) seen)))))
+           (forms-shown (if (> (length forms) *repair-lines-limit*)
+                            (subseq forms 0 *repair-lines-limit*)
+                            forms))
+           (forms-more (- (length forms) (length forms-shown))))
       (flet ((place (line head)
                (if line
                    (format nil "inside ~S (line ~D)" head line)
@@ -1260,10 +1307,19 @@ the repair put it, then how to get the parens reading instead. TARGET :FORM
                     (place (getf entry :repaired-line) (getf entry :repaired-head))))
           (when (plusp more)
             (format s "~%  ... and ~D more" more))
-          (ecase target
-            (:form
-             (format s "~%If your parens were right, add ~D \")\" at the end of the form ~
-                        instead." missing))
-            (:content
-             (format s "~%If your parens were right, resend the content with ~D \")\" ~
-                        added at its end." missing))))))))
+          (if (null (cdr forms))
+              (ecase target
+                (:form
+                 (format s "~%If your parens were right, add ~D \")\" at the end of the ~
+                            form instead." (cdar forms)))
+                (:content
+                 (format s "~%If your parens were right, resend the content with ~D \")\" ~
+                            added at its end." (cdar forms))))
+              (format s "~%If your parens were right, ~A instead: ~
+                         ~{~{~D \")\" at the end of the form starting at line ~D~}~^, ~}~
+                         ~[~:;, and so on for ~:*~D more form~:P~]."
+                      (ecase target
+                        (:form "add the missing closers to each form")
+                        (:content "resend the content with the missing closers added to each form"))
+                      (mapcar (lambda (f) (list (cdr f) (car f))) forms-shown)
+                      forms-more)))))))

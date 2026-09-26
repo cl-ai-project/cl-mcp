@@ -22,6 +22,17 @@
   (let ((p (gethash "position" ht)))
     (and p (gethash key p))))
 
+(deftest lisp-check-parens-reparent-note-needs-standard-syntax
+  (let ((broken (format nil "(defun clamp (count room)~%  (if (< room 0)~%      0~%  (min count room))")))
+    (testing "standard syntax: the form the fix moves is named"
+      (let ((res (lisp-check-parens :code broken)))
+        (ok (search "by your parens inside \"(if (< room 0)\"" (gethash "diagnosis_text" res)))))
+    (testing "PR #184 review: under an in-readtable the parens reading is not offered"
+      (let ((res (lisp-check-parens
+                  :code (format nil "(in-readtable :interpol-syntax)~%~%~A" broken))))
+        (ok (not (%ok? res)) "the delimiter finding itself stands")
+        (ng (search "by your parens" (or (gethash "diagnosis_text" res) "")))))))
+
 (deftest lisp-check-parens-ok-string
   (testing "balanced string returns ok"
     (let ((res (lisp-check-parens :code "(let ((x 1)) (+ x 2))")))

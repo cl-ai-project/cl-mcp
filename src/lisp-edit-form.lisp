@@ -168,9 +168,11 @@ blank line. For EOF boundary use a single newline."
 (defun %validate-and-repair-content (content &optional readtable-designator
                                              package-name source-path)
   "Ensure CONTENT is a single valid form. If parsing fails, attempt to repair
-using parinfer:apply-indent-mode. Returns four values: the validated
+using parinfer:apply-indent-mode. Returns five values: the validated
 (possibly repaired) content, a parinfer warning string or NIL, the repair
-line diff or NIL, and a bracket warning (FORMAT-BRACKET-WARNING) or NIL.
+line diff or NIL, a bracket warning (FORMAT-BRACKET-WARNING) or NIL, and the
+forms the repair moved out of the form CONTENT's own parens put them in
+(REPARENTED-FORMS; always NIL under a readtable that changes the syntax).
 When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing.
 Unknown package prefixes are handled leniently via stub packages.
 
@@ -324,7 +326,12 @@ comments near a target form."
                        (values repaired-result
                                (%repair-warning fixes repaired-result nonstandard-rt)
                                fixes
-                               (%bracket-warning repaired-result nonstandard-rt))))
+                               (%bracket-warning repaired-result nonstandard-rt)
+                               ;; The parens reading is a standard-syntax one:
+                               ;; under a readtable that changes what ( and )
+                               ;; mean it would name "moves" that are not.
+                               (and (not nonstandard-rt)
+                                    (reparented-forms content repaired-result)))))
                     ((and (typep err 'multiple-top-level-forms-error)
                           (typep repaired-err 'multiple-top-level-forms-error))
                      (error err))
@@ -485,29 +492,27 @@ dry-run summary show the edited form instead of the whole updated file.
          (%trim-outer-whitespace content)
          (ensure-trailing-newline content)))))
 
-(defun %repair-summary (warning fixes repaired-form &key include-form original)
+(defun %repair-summary (warning fixes repaired-form &key include-form moved)
   "Return the text appended to a success summary when parinfer repaired the
 content, or NIL when WARNING is NIL. Lists the changed lines and, when
 INCLUDE-FORM is true, the repaired form itself (bounded by %TRUNCATE-SNIPPET).
-When ORIGINAL (the content as the caller sent it) is given, the forms the
-repair moved out of the form ORIGINAL's own parens put them in are named
-(FORMAT-REPARENT-NOTE, issue #183): the repair follows indentation, and where
-that disagrees with the parens the caller has to say which was meant.
-Otherwise, or when nothing moved, the relocation note (FORMAT-RELOCATION-NOTE:
-a closer inserted on a line whose next code line sits at the same indentation)
-is the one lisp-check-parens prints, so the two tools describe the same repair
-in the same words. The bracket-opener reminder is part of WARNING, built by
+MOVED is %VALIDATE-AND-REPAIR-CONTENT's fifth value: the forms the repair moved
+out of the form the content's own parens put them in. When there are any they
+are named (FORMAT-REPARENT-NOTE, issue #183): the repair follows indentation,
+and where that disagrees with the parens the caller has to say which was
+meant. Otherwise the relocation note (FORMAT-RELOCATION-NOTE: a closer
+inserted on a line whose next code line sits at the same indentation) is the
+one lisp-check-parens prints, so the two tools describe the same repair in the
+same words. The bracket-opener reminder is part of WARNING, built by
 %REPAIR-WARNING where the readtable is known."
   (when warning
     (with-output-to-string (s)
       (format s "~%WARNING: ~A" warning)
       (when fixes
         (format s "~%Changed lines:~A" (format-repair-lines fixes)))
-      (let* ((moved (and original repaired-form
-                         (reparented-forms original repaired-form)))
-             (note (if moved
-                       (format-reparent-note moved :target :content)
-                       (format-relocation-note fixes repaired-form))))
+      (let ((note (if moved
+                      (format-reparent-note moved :target :content)
+                      (format-relocation-note fixes repaired-form))))
         (when note
           (format s "~%~A" note)))
       (when include-form
@@ -551,11 +556,13 @@ ordered: an external editor, and equally a second cl-mcp server over the same
 checkout, is not coordinated. GUARD remains the only check against one, and it
 is a precondition, not a lock.
 
-For non-delete operations without DRY-RUN, returns six values: the updated
+For non-delete operations without DRY-RUN, returns seven values: the updated
 file text, the parinfer warning or NIL, whether the file changed, the repair
-line diff or NIL, the validated content that was spliced in, and a bracket
+line diff or NIL, the validated content that was spliced in, a bracket
 warning (a ] or } found where ) was expected, in content that still reads)
-or NIL."
+or NIL, and the forms the repair moved out of the form the content's own
+parens put them in (REPARENTED-FORMS) or NIL. A dry run carries the last as
+\"repair_reparented\"."
   (unless
       (and (stringp file-path) (stringp form-type) (stringp form-name)
            (stringp operation))
@@ -607,7 +614,7 @@ or NIL."
             ;; the caller's argument, or an (in-readtable ...) earlier in the
             ;; file, as lisp-patch-form does.
             (multiple-value-bind (validated-content parinfer-warning repair-fixes
-                                  bracket-warning)
+                                  bracket-warning reparented)
                 (%validate-and-repair-content
                  content
                  (or readtable (%detect-readtable-before-node nodes target))
@@ -637,15 +644,16 @@ or NIL."
                           (gethash "operation" result) op-normalized)
                     (when parinfer-warning
                       (setf (gethash "parinfer_warning" result) parinfer-warning
-                            (gethash "repair_fixes" result) repair-fixes))
+                            (gethash "repair_fixes" result) repair-fixes
+                            (gethash "repair_reparented" result) reparented))
                     (when bracket-warning
                       (setf (gethash "bracket_warning" result) bracket-warning))
                     result))
                  (would-change (fs-write-file rel updated)
                   (values updated parinfer-warning t repair-fixes validated-content
-                          bracket-warning))
+                          bracket-warning reparented))
                  (t (values updated parinfer-warning nil repair-fixes
-                            validated-content bracket-warning))))))))))
+                            validated-content bracket-warning reparented))))))))))
 
 (defun %resolve-guard-argument (args guard guard-token)
   "Return the guard LISP-EDIT-FORM should run with, or NIL for an unguarded
@@ -747,7 +755,7 @@ without a guard."))
              :message (format nil "content is required for ~A operation" operation)))
     (handler-case
         (multiple-value-bind (updated parinfer-warning changed-p repair-fixes
-                              repaired-form bracket-warning)
+                              repaired-form bracket-warning reparented)
             (lisp-edit-form :file-path file_path
                             :form-type form_type
                             :form-name form_name
@@ -778,7 +786,7 @@ without a guard."))
                               (%repair-summary pw (gethash "repair_fixes" updated)
                                                (or (gethash "validated_content" updated)
                                                    preview-form)
-                                               :original content)
+                                               :moved (gethash "repair_reparented" updated))
                               bw
                               (%truncate-snippet original-form)
                               (%truncate-snippet preview-form))))
@@ -807,7 +815,7 @@ without a guard."))
                                 form_type form_name file_path
                                 (%repair-summary parinfer-warning repair-fixes
                                                  repaired-form :include-form t
-                                                 :original content)
+                                                 :moved reparented)
                                 bracket-warning))
                        (t
                         (format nil "Applied ~A to ~A ~A in ~A (~D chars)~@[~A~]~
@@ -815,7 +823,7 @@ without a guard."))
                                 operation form_type form_name file_path (length updated)
                                 (%repair-summary parinfer-warning repair-fixes
                                                  repaired-form :include-form t
-                                                 :original content)
+                                                 :moved reparented)
                                 bracket-warning)))))
                 (result id
                         (apply #'make-ht

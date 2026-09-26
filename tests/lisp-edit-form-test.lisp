@@ -2223,6 +2223,22 @@ Used to prove that a dry-run summary does not grow with the size of the file."
         (ok (search "1 closing delimiter added by parinfer" text))
         (ng (search "NOTE:" text) "a repair that only appends moves nothing")))))
 
+(deftest lisp-edit-form-no-reparent-note-under-a-custom-readtable
+  (testing "PR #184 review: the parens reading is standard syntax, so a readtable that changes it gets no reparent entries"
+    (handler-case
+        (progn
+          (unless (%try-load :cl-interpol) (error "not available"))
+          (let ((content (format nil "(defun target (count room)~%  (if (< room 0)~%      0~%  (min count room))")))
+            (ok (fifth (multiple-value-list
+                        (cl-mcp/src/lisp-edit-form::%validate-and-repair-content content)))
+                "standard syntax: the moved else branch is reported")
+            (ok (null (fifth (multiple-value-list
+                              (cl-mcp/src/lisp-edit-form::%validate-and-repair-content
+                               content :interpol-syntax))))
+                "interpol-syntax: nothing is reported")))
+      (error (e)
+        (skip (format nil "Test dependencies not available: ~A" e))))))
+
 (deftest lisp-edit-form-dry-run-summary-shows-changed-lines
   (testing "dry-run summary lists the changed lines but not a second copy of the form"
     (with-temp-file "tests/tmp/edit-form-dry-run-changed-lines.lisp"

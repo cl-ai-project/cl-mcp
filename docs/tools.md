@@ -406,7 +406,9 @@ Output:
   put it in (`line 4 "(min count room))": by your parens inside "(if (< room
   0)" (line 2), repaired inside "(defun clamp ..." (line 1)`) and gives the
   parens reading as the alternative (`add N ")" at the end of the form
-  instead`). Neither reading is judged: an `if`'s dedented else branch and a
+  instead`, counted per form when several forms are broken). The note is
+  withheld for text with an `in-readtable`, whose reader macros may consume
+  parens as data. Neither reading is judged: an `if`'s dedented else branch and a
   statement after a `when` have the same shape, and only the author knows
   which was meant (issue #183). Failing that, when a fix closes a form whose
   next code line sits at the same indentation, or in column 1 below an
@@ -526,7 +528,9 @@ form; check them, and use `dry_run: true` when the content is non-trivial.
 When the repair moved anything out of the form your own parens put it in, a
 NOTE names each such form with both parents and says how to get the parens
 reading instead (resend the content with the missing `)` at its end); the
-repair is still written, so read that NOTE before moving on. A
+repair is still written, so read that NOTE before moving on. It is not given
+under a `readtable` that changes the syntax, where the parens reading would
+not be a Lisp reading at all. A
 `]` or `}` left where `)` was meant, and any leftover the repair cannot make
 readable, is refused with the same line-level diagnosis as `lisp-check-parens`
 and nothing is written. A repair that would change text inside a string or a

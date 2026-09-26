@@ -465,6 +465,38 @@ parens (min count room) is the IF's else branch; by indentation it is not.")
       (ok (search "This form leaves the form your parens put it in:" note))
       (ok (search "resend the content with 1 \")\" added at its end" note)))))
 
+(deftest reparented-forms-is-linear-in-the-number-of-forms
+  (testing "a large file with thousands of forms is compared in one pass, not one per form"
+    ;; PR #184 review: the per-form balance used to rescan the whole text for
+    ;; every top-level form, O(forms x size): measured 5.2 s for the balances
+    ;; alone at 3000 forms (120 KB), so about 14 s at 5000; one pass takes
+    ;; milliseconds (0.016 s at 3000).
+    (let* ((filler (with-output-to-string (s)
+                     (dotimes (i 5000)
+                       (format s "(defun filler-~D (x)~%  (list x ~D))~%~%" i i))))
+           (text (concatenate 'string filler +dedented-else+ (string #\Newline)))
+           (repaired (repaired-text text))
+           (start (get-internal-real-time))
+           (moved (reparented-forms text repaired))
+           (seconds (/ (- (get-internal-real-time) start)
+                       internal-time-units-per-second)))
+      (ok (= 1 (length moved)) "only the broken form's else branch moved")
+      (ok (< seconds 5) (format nil "took ~,2F s" seconds)))))
+
+(deftest reparent-note-counts-closers-per-form
+  (testing "two broken forms missing different counts get one alternative each"
+    ;; Form 1 (line 1) misses one ), form 2 (line 6) misses two; in both the
+    ;; repair takes the last line out of the form the parens put it in.
+    (let* ((text (format nil "(defun clamp (count room)~%  (if (< room 0)~%      0~%  (min count room))~%~%(defun g (x)~%  (when x~%    (print x)~%  (h x)~%"))
+           (moved (reparented-forms text (repaired-text text)))
+           (msg (format-delimiter-diagnosis (diagnose-delimiters text))))
+      (ok (equal '(1 6) (remove-duplicates (mapcar (lambda (e) (getf e :form-line)) moved))))
+      (ok (equal '(1 2) (remove-duplicates (mapcar (lambda (e) (getf e :missing)) moved))))
+      (ok (search "add the missing closers to each form instead: 1 \")\" at the end of the form starting at line 1, 2 \")\" at the end of the form starting at line 6."
+                  msg))
+      (ng (search "add 1 \")\" at the end of the form instead" msg)
+          "no single count is given for the whole file"))))
+
 (deftest extra-close-bracket-carries-the-symbol-caveat
   (testing "a stray ] is described as possibly part of a symbol"
     (let* ((d (diagnose-delimiters "(list a) b]"))

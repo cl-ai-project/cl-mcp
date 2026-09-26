@@ -312,7 +312,13 @@ it is flagged in \"diagnosis_text\" as a likely artifact of the window."
               (gethash "expected" h) nil
               (gethash "found" h) nil)
         (return-from lisp-check-parens h)))
-    (let* ((diagnosis (diagnose-delimiters text :base-offset base-off))
+    (let* ((diagnosis (let ((d (diagnose-delimiters text :base-offset base-off)))
+                        ;; The reparent note reads the text's parens with
+                        ;; standard syntax; under an in-readtable a reader
+                        ;; macro may consume them as data (issue #183).
+                        (if (and (getf d :reparented) (%custom-readtable-p text))
+                            (list* :reparented nil d)
+                            d)))
            ;; The reader check only matters when the delimiters balance.
            (reader-info (and (getf diagnosis :ok) (%try-reader-check text base-off))))
       (destructuring-bind (&key ok kind expected found
