@@ -44,12 +44,14 @@
  "cl-spec tools are on (spec-list, spec-symbol, spec-describe, spec-check):
 - load-system cl-spec/check-it, the application and its contract system first.
 - Read the contract (spec-symbol, spec-describe) and take a baseline before editing.
+For new behaviour, write the contract (defspec-function, defproperty) before the code.
 - spec-check function= runs only the Function Spec; symbol= only the Properties
 about the symbol. Run both.
 - seed is a decimal string. To replay, copy the Replay: line.
 - After an edit: load-system the primary system with clear_fasls=true, then the
-contract system.
-- Never weaken a contract to make a check pass; ask the user first.
+contract system; re-run spec-check and run-tests.
+- Change an existing contract only when the request asks for that change; otherwise
+ask the user first, and never weaken one to make a check pass.
 - verified covers only what that call ran; report verification_gaps as given.")
 
 (define-tool "spec-list"

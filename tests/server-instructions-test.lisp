@@ -85,6 +85,18 @@
       (ok (search "function=" text))
       (ok (search "Replay:" text)))))
 
+(deftest instructions-keep-the-prompts-workflow
+  ;; What the summaries must not lose from prompts/: the Lisp tools, not a
+  ;; shell ros or sbcl, run the code; a new behaviour gets its contract before
+  ;; its code; a change is checked by both spec-check and run-tests; and any
+  ;; contract change the request did not ask for needs the user.
+  (ok (search "not ros or sbcl from a shell" +base-instructions+))
+  (let ((*enabled-tool-groups* (list "CL-SPEC")))
+    (let ((text (format nil "~{~A~}" (enabled-tool-group-instructions))))
+      (ok (search "before the code" text))
+      (ok (search "re-run spec-check and run-tests" text))
+      (ok (search "only when the request asks" text)))))
+
 (deftest instructions-fit-the-budget
   (dolist (groups *group-settings*)
     (let ((*enabled-tool-groups* groups))
