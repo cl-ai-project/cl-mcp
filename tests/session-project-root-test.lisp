@@ -174,6 +174,42 @@ scratch directories %SCRATCH-DIR made."
         (ok (equal (%root-of "tA") (%native default))
             "the id now resolves against the default")))))
 
+(deftest a-deleted-session-keeps-its-root-for-requests-in-flight
+  (testing "DELETE during a POST: the root goes when the last request finishes"
+    ;; The request was found and counted in one step (get-session :acquire),
+    ;; so the delete sees it and leaves the root; forgetting it at once let a
+    ;; request already accepted fall back to the server default.
+    (let* ((session (cl-mcp/src/http::create-session))
+           (id (cl-mcp/src/http::http-session-id session)))
+      (with-isolated-roots (id)
+        (let ((a (%scratch-dir "delete-a")))
+          (set-project-root a :session-id id)
+          (ok (eq session (cl-mcp/src/http::get-session id :acquire t))
+              "a request of the session is in flight")
+          (cl-mcp/src/http::delete-session id)
+          (ok (equal (session-project-root id) a)
+              "the delete leaves the root to the request in flight")
+          (cl-mcp/src/http::%release-session-request session)
+          (ok (null (session-project-root id))
+              "the last request to finish forgets it"))))))
+
+(deftest a-finished-stdio-session-forgets-its-root
+  (testing "a later run in the same image starts from the server default"
+    (with-isolated-roots ("stdio")
+      (let* ((a (%scratch-dir "stdio-a"))
+             (request (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",~
+\"params\":{\"name\":\"fs-set-project-root\",\"arguments\":{\"path\":\"~A\"}}}~%"
+                              (%native a)))
+             (out (make-string-output-stream)))
+        (cl-mcp/src/run:run :transport :stdio
+                            :in (make-string-input-stream request)
+                            :out out
+                            :worker-pool nil)
+        (ok (search "Project root set to" (get-output-stream-string out))
+            "the session set its root")
+        (ok (null (session-project-root "stdio"))
+            "and it was forgotten when the stream ended")))))
+
 (deftest a-deadline-thread-runs-under-the-sessions-root
   (testing "with the pool off, repl-eval's timeout thread sees the request's root"
     ;; The deadline runs the form on a thread of its own, which does not see
