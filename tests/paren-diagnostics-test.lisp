@@ -293,7 +293,7 @@
       (ok (search "line 12 \"(when a11\"" msg))
       (ng (search "line 13 \"(when a12\"" msg) "elided entries are not listed")
       (ok (search "... and 19 more" msg))
-      (ok (search "Then re-indent the forms at lines 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12 to sit inside the forms your parens put them in (listed above), and likewise the 19 more lines not listed, so"
+      (ok (search "Then re-indent the forms at lines 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12 to sit inside the forms your parens put them in (listed above), and likewise the 19 more forms not listed, so"
                   msg)
           "issue #185: only lines whose parents are listed are named; the rest are counted")))
   (testing "a tab-indented body deeper than its form is a dedent, not a relocation"
@@ -487,14 +487,23 @@ parens (min count room) is the IF's else branch; by indentation it is not.")
     (let* ((text (format nil "(defun f ()~%  (when x~%  (a) (b) (c) (d) (e) (f) (g) (h) (i) (j)~%  (k))"))
            (note (format-reparent-note (reparented-forms text (repaired-text text)))))
       (ok (search "... and 1 more" note))
-      (ok (search "Then re-indent the forms on line 3 to sit inside \"(when x\" (line 2), and likewise the 1 more line not listed, so"
+      (ok (search "Then re-indent the forms on line 3 to sit inside \"(when x\" (line 2), and likewise the 1 more form not listed, so"
                   note)
-          "one shared parent is named, and the unlisted line is only counted")
+          "one shared parent is named, and the unlisted form is only counted")
       (ng (search "lines 3 and 4" note))))
   (testing "forms moved off several lines under one shared parent name that parent"
     (let* ((text (format nil "(defun f ()~%  (when x~%  (a)~%  (b))"))
            (note (format-reparent-note (reparented-forms text (repaired-text text)))))
       (ok (search "Then re-indent the forms at lines 3 and 4 to sit inside \"(when x\" (line 2), so"
+                  note))))
+  (testing "PR #186 review: an omitted form on a listed line is still counted"
+    ;; Ten forms under the inner WHEN fill the listed entries; an eleventh on
+    ;; the same line belongs to the outer WHEN. Its line is already named, but
+    ;; its parent is not listed, so the omission must still be reported.
+    (let* ((text (format nil "(defun f ()~%  (when a (when b~%  (a) (b) (c) (d) (e) (f) (g) (h) (i) (j)) (k))"))
+           (note (format-reparent-note (reparented-forms text (repaired-text text)))))
+      (ok (search "... and 1 more" note))
+      (ok (search "to sit inside the forms your parens put them in (listed above), and likewise the 1 more form not listed, so"
                   note))))
   (testing "Codex review: two parents that start on one line are different parents"
     ;; By the parens (x) belongs to (when b and (y) to (when a; both open on

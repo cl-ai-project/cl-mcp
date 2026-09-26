@@ -1287,8 +1287,8 @@ When every moved form shares one parens-reading parent (the same list, by
 :PARENS-OFFSET -- two lists can open on one line), that parent is named;
 otherwise the sentence points back at the note's list. Either way it names only
 the lines of the entries the list shows (the first *REPAIR-LINES-LIMIT*, as
-FORMAT-REPARENT-NOTE cuts them) and counts the other lines, so no line is
-named whose parent the note does not give."
+FORMAT-REPARENT-NOTE cuts them) and counts the omitted forms, so no line is
+named, and no form left unmentioned, whose parent the note does not give."
   (flet ((distinct-lines (list)
            (let ((seen (make-hash-table))
                  (out '()))
@@ -1301,7 +1301,10 @@ named whose parent the note does not give."
            (listed (distinct-lines (if (> (length entries) *repair-lines-limit*)
                                        (subseq entries 0 *repair-lines-limit*)
                                        entries)))
-           (unlisted (- (length (distinct-lines entries)) (length listed)))
+           ;; Omitted forms, not omitted lines: an omitted form can sit on a
+           ;; line already named while its parent is not listed (PR #186
+           ;; review), and this is the count the list's "... and N more" gives.
+           (unlisted (max 0 (- (length entries) *repair-lines-limit*)))
            ;; The same parent is the same list, not the same line: two lists
            ;; can open on one line (Codex review).
            (one-parent (every (lambda (entry)
@@ -1310,7 +1313,7 @@ named whose parent the note does not give."
                               entries)))
       (format nil "Then re-indent ~:[the forms ~:[at lines~;on line~]~;the form at line~*~] ~
                    ~{~D~#[~; and ~:;, ~]~} to sit ~A~[~:;, and likewise the ~:*~D more ~
-                   line~:P not listed~], so the indentation says what the parens say."
+                   form~:P not listed~], so the indentation says what the parens say."
               (null (cdr entries))
               (null (cdr listed))
               listed
