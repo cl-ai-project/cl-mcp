@@ -64,8 +64,12 @@
 (in-package #:cl-mcp/src/lisp-edit-form)
 
 (defun %multiple-top-level-forms-error-message ()
-  "Return the user-facing error message for multiple top-level form content."
-  "content must contain exactly one top-level form; multiple forms are not supported in a single call")
+  "Return the user-facing error message for multiple top-level form content.
+Only replace signals it: insert_before and insert_after take several forms."
+  (concatenate 'string
+               "replace takes exactly one top-level form; replace the form with the "
+               "first one, then insert the rest with one insert_after on it "
+               "(insert_before and insert_after take several forms)"))
 
 (define-condition multiple-top-level-forms-error (error)
   ()
@@ -77,8 +81,8 @@
   "Return machine-readable remediation guidance for multiple-form content errors."
   (make-ht "code" "multiple_forms_not_supported"
            "next_tool" "lisp-edit-form"
-           "action" "split_into_multiple_calls"
-           "example_operation_sequence" (vector "insert_after" "insert_after")
+           "action" "replace_then_insert_after"
+           "example_operation_sequence" (vector "replace" "insert_after")
            "required_args"
            (vector "file_path" "form_type" "form_name" "operation" "content")))
 
@@ -359,6 +363,160 @@ comments near a target form."
                             (sanitize-condition-text err)
                             (sanitize-condition-text repaired-err))))))))))))
 
+(defun %block-spans (text package-name source-path)
+  "Read TEXT as a sequence of complete top-level forms under the current
+*READTABLE*, and return a list of (START . END), one per form, in order.
+Whitespace and comments between the forms are not forms.  When any part of
+TEXT does not read -- an unterminated form, a stray ), a disabled #., an
+unterminated block comment -- return NIL and the condition as a second value:
+a block that reads only in part is not a block of forms."
+  (let ((eof (list :eof)))
+    (handler-case
+        (call-with-package-context
+         package-name
+         (lambda ()
+           (let ((spans '())
+                 (pos 0)
+                 (len (length text)))
+             (loop
+               (let ((stream (make-string-input-stream text pos)))
+                 (let ((open-comment (%skip-whitespace-and-comments stream *readtable*)))
+                   (when open-comment
+                     (error open-comment)))
+                 (incf pos (file-position stream)))
+               (when (>= pos len)
+                 (return (nreverse spans)))
+               (multiple-value-bind (form end)
+                   (read-from-string text nil eof :start pos :preserve-whitespace t)
+                 ;; A trailing #+nil form reads as end of input.
+                 (when (eq form eof)
+                   (return (nreverse spans)))
+                 (push (cons pos end) spans)
+                 (setf pos end)))))
+         :source-path source-path)
+      (error (e)
+        (values nil e)))))
+
+(defun %normalized-gap (gap)
+  "Return GAP, the text between two top-level forms of an inserted block, with
+its whitespace normalised and its comments kept in place.  An end-of-line
+comment on the previous form's line stays there; the forms are then separated
+by one blank line, and any other comments in GAP stay between them, directly
+above the next form.  Only whitespace at the edges of those parts changes."
+  (let* ((first-code (position-if-not #'%whitespace-char-p gap))
+         (newline (position #\Newline gap))
+         (end-of-line-comment-p (and first-code
+                                     (char= (char gap first-code) #\;)
+                                     (or (null newline) (< first-code newline))))
+         (eol (if end-of-line-comment-p
+                  (string-right-trim '(#\Space #\Tab #\Return)
+                                     (subseq gap 0 (or newline (length gap))))
+                  ""))
+         (body (%trim-outer-whitespace
+                (cond ((not end-of-line-comment-p) gap)
+                      (newline (subseq gap (1+ newline)))
+                      (t "")))))
+    (concatenate 'string eol (format nil "~%~%")
+                 (if (plusp (length body))
+                     (concatenate 'string body (string #\Newline))
+                     ""))))
+
+(defun %normalize-block-gaps (text spans)
+  "Return TEXT with each gap between the top-level forms SPANS gives
+normalised by %NORMALIZED-GAP.  The forms themselves, and the text before the
+first and after the last, are copied unchanged, so nothing inside a form, a
+string or a comment is touched."
+  (with-output-to-string (out)
+    (write-string text out :end (car (first spans)))
+    (loop for (span . rest) on spans
+          do (write-string text out :start (car span) :end (cdr span))
+             (when rest
+               (write-string (%normalized-gap (subseq text (cdr span) (car (first rest))))
+                             out)))
+    (write-string text out :start (cdr (car (last spans))))))
+
+(defun %gap-whitespace-inert-p (readtable-designator)
+  "True when the readtable READTABLE-DESIGNATOR names (the standard one when
+NIL) reads whitespace as plain whitespace, so %NORMALIZE-BLOCK-GAPS may change
+the whitespace between forms without changing what they read as.  A readtable
+that makes a whitespace character a macro character (an indentation-sensitive
+reader) gets its gaps kept as given.  Comments need no check: text the reader
+skipped between two forms is comment or whitespace under that readtable."
+  (let ((readtable (or (%resolve-named-readtable readtable-designator)
+                       *standard-readtable*)))
+    (notany (lambda (ch) (get-macro-character ch readtable))
+            '(#\Space #\Tab #\Newline #\Return #\Page))))
+
+(defun %repair-block (content nonstandard-rt package-name source-path)
+  "Repair CONTENT as one block with the repair %VALIDATE-AND-REPAIR-CONTENT
+uses, and read the result again.  Return the repaired text and its form spans
+when it reads as complete forms, or NIL.  The same refusal applies as for one
+form: under standard syntax, a delimiter problem the repair cannot fix (and
+that is not an ambiguous [ or {) is not repaired at all."
+  (let ((diagnosis (diagnose-delimiters content)))
+    (unless (and (not nonstandard-rt)
+                 (not (getf diagnosis :ok))
+                 (getf diagnosis :repair-failed)
+                 (or (eq (getf diagnosis :repair-failed) :outside-code)
+                     (not (opener-ambiguous-p diagnosis))))
+      (let ((repaired (or (getf diagnosis :repaired) (apply-indent-mode content))))
+        (multiple-value-bind (spans read-error)
+            (%block-spans repaired package-name source-path)
+          (unless read-error
+            (values repaired spans)))))))
+
+(defun %validate-and-repair-block (content &optional readtable-designator
+                                             package-name source-path)
+  "Validate CONTENT for insert_before/insert_after, which take one or more
+top-level forms.  Returns the five values of %VALIDATE-AND-REPAIR-CONTENT,
+then the number of forms and, for a block of several, their spans in the
+validated text.
+
+A block that reads as complete forms is taken as given: parinfer never runs on
+it, since it would change content that is accepted unchanged today.  One form,
+comment-only content, and content that does not read but is one form once
+repaired go through %VALIDATE-AND-REPAIR-CONTENT exactly as before.  Anything
+else that does not read is repaired as a whole block and read again; it is
+accepted only when every part of the result reads.  Under a readtable, a read
+that stops partway is a failed read like any other, so the forms before the
+error are never taken on their own."
+  (let* ((*read-eval* nil)
+         (custom-rt (%resolve-named-readtable readtable-designator))
+         (*readtable* (if custom-rt custom-rt (copy-readtable nil)))
+         (nonstandard-rt (%nonstandard-readtable-p readtable-designator)))
+    (flet ((one-form ()
+             (multiple-value-bind (validated warning fixes bracket reparented)
+                 (%validate-and-repair-content content readtable-designator
+                                               package-name source-path)
+               (values validated warning fixes bracket reparented 1 nil))))
+      (multiple-value-bind (spans read-error)
+          (%block-spans content package-name source-path)
+        (cond
+          ((and (null read-error) (rest spans))
+           (values content nil nil (%bracket-warning content nonstandard-rt) nil
+                   (length spans) spans))
+          ((null read-error)
+           (one-form))
+          (t
+           (handler-case (one-form)
+             (error (one-form-error)
+               (multiple-value-bind (repaired repaired-spans)
+                   (%repair-block content nonstandard-rt package-name source-path)
+                 (unless (rest repaired-spans)
+                   (error one-form-error))
+                 (log-event :info "lisp.edit.form" "auto-repair" "success"
+                            "forms" (length repaired-spans)
+                            "original-error" (princ-to-string read-error))
+                 (let ((fixes (repair-line-differences content repaired)))
+                   (values repaired
+                           (%repair-warning fixes repaired nonstandard-rt)
+                           fixes
+                           (%bracket-warning repaired nonstandard-rt)
+                           (and (not nonstandard-rt)
+                                (reparented-forms content repaired))
+                           (length repaired-spans)
+                           repaired-spans)))))))))))
+
 (defun %apply-operation-preserve-spacing (text node operation content)
   (let ((start (cst-node-start node))
         (end (cst-node-end node)))
@@ -528,6 +686,9 @@ replace/insert_before/insert_after but ignored for delete.
 
 OPERATION must be one of: \"replace\", \"insert_before\", \"insert_after\", \"delete\".
 Missing closing parentheses are auto-repaired using parinfer (non-delete ops).
+replace takes one top-level form; insert_before and insert_after take one or
+more, inserted in order as one block (%VALIDATE-AND-REPAIR-BLOCK), with only
+the gaps between them normalised when NORMALIZE-BLANK-LINES is true.
 
 When DRY-RUN is true, no changes are written; a preview hash-table is returned.
 The same GUARD validation runs whether DRY-RUN is true or not.
@@ -556,13 +717,14 @@ ordered: an external editor, and equally a second cl-mcp server over the same
 checkout, is not coordinated. GUARD remains the only check against one, and it
 is a precondition, not a lock.
 
-For non-delete operations without DRY-RUN, returns seven values: the updated
+For non-delete operations without DRY-RUN, returns eight values: the updated
 file text, the parinfer warning or NIL, whether the file changed, the repair
 line diff or NIL, the validated content that was spliced in, a bracket
 warning (a ] or } found where ) was expected, in content that still reads)
-or NIL, and the forms the repair moved out of the form the content's own
-parens put them in (REPARENTED-FORMS) or NIL. A dry run carries the last as
-\"repair_reparented\"."
+or NIL, the forms the repair moved out of the form the content's own
+parens put them in (REPARENTED-FORMS) or NIL, and the number of forms an
+insert put in when it was more than one, or NIL. A dry run carries the
+reparented forms as \"repair_reparented\" and that number as \"forms\"."
   (unless
       (and (stringp file-path) (stringp form-type) (stringp form-name)
            (stringp operation))
@@ -613,47 +775,62 @@ parens put them in (REPARENTED-FORMS) or NIL. A dry run carries the last as
             ;; Content is validated under the readtable in effect at the target:
             ;; the caller's argument, or an (in-readtable ...) earlier in the
             ;; file, as lisp-patch-form does.
-            (multiple-value-bind (validated-content parinfer-warning repair-fixes
-                                  bracket-warning reparented)
-                (%validate-and-repair-content
-                 content
-                 (or readtable (%detect-readtable-before-node nodes target))
-                 file-package-name abs)
-              (let* ((updated
-                      (%apply-operation original target op-key validated-content
-                                        normalize-blank-lines))
-                     (would-change (not (string= original updated))))
-                (log-event :debug "lisp.edit.form" "path" (namestring abs)
-                           "operation" op-normalized "form_type" form-type
-                           "form_name" form-name "normalize_blank_lines"
-                           normalize-blank-lines "bytes" (length updated) "dry_run"
-                           dry-run "would_change" would-change)
-                (cond
-                 (dry-run
-                  (let ((result (make-hash-table :test #'equal)))
-                    (setf (gethash "would_change" result) would-change
-                          (gethash "original" result) target-snippet
-                          (gethash "preview" result) updated
-                          (gethash "preview_form" result)
-                          (%preview-form-text op-key validated-content
-                                              normalize-blank-lines)
-                          ;; The untrimmed content the repair line numbers
-                          ;; refer to, for the relocation note in the summary.
-                          (gethash "validated_content" result) validated-content
-                          (gethash "file_path" result) (namestring abs)
-                          (gethash "operation" result) op-normalized)
-                    (when parinfer-warning
-                      (setf (gethash "parinfer_warning" result) parinfer-warning
-                            (gethash "repair_fixes" result) repair-fixes
-                            (gethash "repair_reparented" result) reparented))
-                    (when bracket-warning
-                      (setf (gethash "bracket_warning" result) bracket-warning))
-                    result))
-                 (would-change (fs-write-file rel updated)
-                  (values updated parinfer-warning t repair-fixes validated-content
-                          bracket-warning reparented))
-                 (t (values updated parinfer-warning nil repair-fixes
-                            validated-content bracket-warning reparented))))))))))
+            (let ((content-readtable
+                    (or readtable (%detect-readtable-before-node nodes target))))
+              (multiple-value-bind (validated-content parinfer-warning repair-fixes
+                                    bracket-warning reparented form-count spans)
+                  ;; insert_before/insert_after take one or more forms (issue
+                  ;; #189); replace keeps its one-form rule.
+                  (if (member op-key '(:insert-before :insert-after))
+                      (%validate-and-repair-block content content-readtable
+                                                  file-package-name abs)
+                      (%validate-and-repair-content content content-readtable
+                                                    file-package-name abs))
+                (let* ((spliced
+                         ;; Normalise only the gaps between a block's forms, and
+                         ;; only where whitespace reads as whitespace.
+                         (if (and spans normalize-blank-lines
+                                  (%gap-whitespace-inert-p content-readtable))
+                             (%normalize-block-gaps validated-content spans)
+                             validated-content))
+                       (several-forms (and form-count (> form-count 1) form-count))
+                       (updated
+                         (%apply-operation original target op-key spliced
+                                           normalize-blank-lines))
+                       (would-change (not (string= original updated))))
+                  (log-event :debug "lisp.edit.form" "path" (namestring abs)
+                             "operation" op-normalized "form_type" form-type
+                             "form_name" form-name "normalize_blank_lines"
+                             normalize-blank-lines "bytes" (length updated) "dry_run"
+                             dry-run "would_change" would-change)
+                  (cond
+                   (dry-run
+                    (let ((result (make-hash-table :test #'equal)))
+                      (setf (gethash "would_change" result) would-change
+                            (gethash "original" result) target-snippet
+                            (gethash "preview" result) updated
+                            (gethash "preview_form" result)
+                            (%preview-form-text op-key spliced normalize-blank-lines)
+                            ;; The untrimmed content the repair line numbers
+                            ;; refer to, for the relocation note in the summary.
+                            (gethash "validated_content" result) validated-content
+                            (gethash "file_path" result) (namestring abs)
+                            (gethash "operation" result) op-normalized)
+                      (when parinfer-warning
+                        (setf (gethash "parinfer_warning" result) parinfer-warning
+                              (gethash "repair_fixes" result) repair-fixes
+                              (gethash "repair_reparented" result) reparented))
+                      (when bracket-warning
+                        (setf (gethash "bracket_warning" result) bracket-warning))
+                      (when several-forms
+                        (setf (gethash "forms" result) several-forms))
+                      result))
+                   (would-change (fs-write-file rel updated)
+                    (values updated parinfer-warning t repair-fixes validated-content
+                            bracket-warning reparented several-forms))
+                   (t (values updated parinfer-warning nil repair-fixes
+                              validated-content bracket-warning reparented
+                              several-forms)))))))))))
 
 (defun %resolve-guard-argument (args guard guard-token)
   "Return the guard LISP-EDIT-FORM should run with, or NIL for an unguarded
@@ -699,7 +876,8 @@ value is NIL, and only a call that sent neither key runs unguarded."
 (define-tool "lisp-edit-form"
   :description "Structure-aware edit of a top-level Lisp form using Eclector CST parsing.
 Supports replace, insert_before, insert_after, and delete operations while preserving
-formatting and comments.
+formatting and comments. insert_before/insert_after take several top-level forms in
+one call.
 PREFERRED METHOD for editing existing Lisp source code.
 Automatically repairs missing closing parentheses using parinfer (non-delete ops).
 ALWAYS use this tool instead of 'fs-write-file' when modifying Lisp forms to ensure
@@ -718,9 +896,14 @@ Reader macro prefixes #: and : are stripped automatically, so
                     :enum ("replace" "insert_before" "insert_after" "delete")
                     :description "Operation to perform")
          (content :type :string
-                  :description "Full Lisp form for the operation. Required for replace/insert_before/insert_after.
-Ignored for delete. Must contain exactly ONE top-level form.
-Missing closing parentheses are automatically repaired using parinfer.")
+                  :description "Lisp source for the operation. Required for replace/insert_before/insert_after.
+Ignored for delete. replace takes exactly ONE top-level form. insert_before and
+insert_after take one or more, inserted in the order given as one block, so
+several new definitions go in with one call; comments between them stay where
+they are. Comment-only content is accepted too.
+Missing closing parentheses are automatically repaired using parinfer; a block
+is repaired as a whole and must then read as complete forms, or nothing is
+written.")
          (dry_run :type :boolean
                   :description "When true, return a preview without writing to disk")
          (normalize_blank_lines :type :boolean
@@ -755,7 +938,7 @@ without a guard."))
              :message (format nil "content is required for ~A operation" operation)))
     (handler-case
         (multiple-value-bind (updated parinfer-warning changed-p repair-fixes
-                              repaired-form bracket-warning reparented)
+                              repaired-form bracket-warning reparented forms)
             (lisp-edit-form :file-path file_path
                             :form-type form_type
                             :form-name form_name
@@ -777,12 +960,15 @@ without a guard."))
                      (original-form (gethash "original" updated))
                      (pw (gethash "parinfer_warning" updated))
                      (bw (gethash "bracket_warning" updated))
+                     (block-forms (gethash "forms" updated))
                      (summary
-                      (format nil "Dry-run ~A on ~A ~A in ~A (~:[no change~;would change~])~
+                      (format nil "Dry-run ~A~@[ of ~D forms~] on ~A ~A in ~A ~
+                                   (~:[no change~;would change~])~
                                    ~@[~A~]~@[~%WARNING: ~A~]~
                                    ~@[~%~%--- original ---~%~A~]~
                                    ~@[~%~%--- preview ---~%~A~]"
-                              operation form_type form_name file_path would-change
+                              operation block-forms form_type form_name file_path
+                              would-change
                               (%repair-summary pw (gethash "repair_fixes" updated)
                                                (or (gethash "validated_content" updated)
                                                    preview-form)
@@ -805,7 +991,9 @@ without a guard."))
                                 (when pw
                                   (list "parinfer_warning" pw))
                                 (when bw
-                                  (list "bracket_warning" bw))))))
+                                  (list "bracket_warning" bw))
+                                (when block-forms
+                                  (list "forms" block-forms))))))
               (let ((summary
                      (cond
                        ((not changed-p)
@@ -818,9 +1006,10 @@ without a guard."))
                                                  :moved reparented)
                                 bracket-warning))
                        (t
-                        (format nil "Applied ~A to ~A ~A in ~A (~D chars)~@[~A~]~
-                                     ~@[~%WARNING: ~A~]"
-                                operation form_type form_name file_path (length updated)
+                        (format nil "Applied ~A~@[ of ~D forms~] to ~A ~A in ~A ~
+                                     (~D chars)~@[~A~]~@[~%WARNING: ~A~]"
+                                operation forms form_type form_name file_path
+                                (length updated)
                                 (%repair-summary parinfer-warning repair-fixes
                                                  repaired-form :include-form t
                                                  :moved reparented)
@@ -834,8 +1023,11 @@ without a guard."))
                                "would_change" (json-bool changed-p)
                                "bytes" (length updated)
                                "content" (text-content summary)
-                               (when bracket-warning
-                                 (list "bracket_warning" bracket-warning)))))))
+                               (append
+                                (when bracket-warning
+                                  (list "bracket_warning" bracket-warning))
+                                (when forms
+                                  (list "forms" forms))))))))
       (content-unrepairable-error (e)
         (tool-error id (sanitize-for-json (princ-to-string e))
                     :protocol-version (protocol-version state)))

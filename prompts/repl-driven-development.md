@@ -123,6 +123,7 @@ the text a client actually renders.)
 **`lisp-edit-form`** (structural, with parinfer auto-repair):
 - Operations: `replace`, `insert_before`, `insert_after`
 - Content must be the complete form including `(defun ...)` wrapper
+- `replace` takes one top-level form; `insert_before`/`insert_after` take one or more, inserted in order as one block (several new definitions go in with one call)
 - For `defmethod`, MUST include specializers in `form_name`: `"print-object ((obj my-class) stream)"`
 
 **`lisp-patch-form`** (scoped text replacement, no auto-repair):
@@ -136,7 +137,7 @@ the text a client actually renders.)
 1. Create minimal file via `fs-write-file`: `(in-package ...)` + a stub `defun` as anchor
 2. Read `fs-write-file`'s response: if the file does not parse it says `WARNING`, shows the
    diagnosis, and the next write to it needs `allow_unparseable_overwrite: true`
-3. Expand via `lisp-edit-form`: `replace` the stub, then `insert_after` for additional forms
+3. Expand via `lisp-edit-form`: `replace` the stub, then one `insert_after` carrying the additional forms
 
 **File edits do not reload in the worker.** After `lisp-edit-form`, either re-evaluate the form via `repl-eval` or call `load-system` to reload from disk.
 
