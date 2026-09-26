@@ -278,7 +278,10 @@ fs-write-file overwrite guard) inspect the second value."
                            :stream stream
                            :message (format nil "Unmatched closing parenthesis ~
 character ). Remove the extra \")\" (lisp-check-parens reports its line and column).")))))
-        (let ((form (handler-case (read stream nil :eof)
+        ;; READ-PRESERVING-WHITESPACE, not READ: READ consumes the whitespace
+        ;; character after a top-level object, which put END one past the
+        ;; form (issue #191).  The Eclector pass ends a node right after it.
+        (let ((form (handler-case (read-preserving-whitespace stream nil :eof)
                       (error (e)
                         ;; On read error, return what we have so far and
                         ;; report the error as the second value, normalised

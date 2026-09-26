@@ -3554,3 +3554,55 @@ Return the condition it signals, or NIL when it succeeds."
                        nil)
               (error () t)))
         (ok (string= +block-anchor-file+ (fs-read-file path)))))))
+
+(deftest lisp-edit-form-reader-pass-edits-like-standard-syntax
+  ;; Issue #191: under the CL-reader pass a form's range ended past the
+  ;; newline after it, so insert_after added a blank line and a replace
+  ;; without normalisation joined the next form onto the same line.
+  (let ((file (format nil "(defun a () 1)~%(defun b () 2)~%"))
+        (readtables (if (%try-load :cl-interpol)
+                        '(:standard :interpol-syntax)
+                        '(:standard))))
+    (flet ((edit (operation normalize readtable)
+             (with-temp-file "tests/tmp/reader-pass-edit.lisp" file
+               (lambda (path)
+                 (apply #'lisp-edit-form :file-path path :form-type "defun" :form-name "a"
+                        :operation operation :normalize-blank-lines normalize
+                        :readtable readtable
+                        (unless (string= operation "delete")
+                          (list :content "(defun c () 3)")))
+                 (fs-read-file path)))))
+      (dolist (operation '("replace" "insert_before" "insert_after" "delete"))
+        (dolist (normalize '(t nil))
+          (let ((expected (edit operation normalize nil)))
+            (dolist (readtable readtables)
+              (ok (string= expected (edit operation normalize readtable))
+                  (format nil "~A, normalize ~A, readtable ~S" operation normalize
+                          readtable)))))))))
+
+(deftest lisp-edit-form-guard-on-an-in-readtable-file
+  ;; Issue #191: the guard's form_end/form_digest come from the same range, so
+  ;; after the fix a guard for the form's true extent is accepted and one
+  ;; taken with the old, one-character-longer boundary is a mismatch.
+  (let ((file (format nil "(named-readtables:in-readtable :standard)~%~
+                           (defun a () 1)~%(defun b () 2)~%")))
+    (testing "a guard for the form's own range lets the edit through"
+      (with-temp-file "tests/tmp/reader-pass-guard.lisp" file
+        (lambda (path)
+          (let ((guard (%edit-guard-for path "defun" "a")))
+            (ok (null (%insert-block path "replace" "a" "(defun a () 10)" :guard guard)))
+            (let ((text (fs-read-file path)))
+              (ok (search "(defun a () 10)" text))
+              (ok (search "(defun b () 2)" text)))))))
+    (testing "a guard with the old boundary, one past the form, is refused"
+      (with-temp-file "tests/tmp/reader-pass-guard-old.lisp" file
+        (lambda (path)
+          (let* ((guard (%edit-guard-for path "defun" "a"))
+                 (snapshot (read-source-snapshot path))
+                 (start (gethash "form_start" guard))
+                 (old-end (1+ (gethash "form_end" guard))))
+            (setf (gethash "form_end" guard) old-end
+                  (gethash "form_digest" guard) (snapshot-range-digest snapshot start old-end))
+            (ok (typep (%insert-block path "replace" "a" "(defun a () 10)" :guard guard)
+                       'edit-guard-conflict-error))
+            (ok (string= file (fs-read-file path)))))))))
