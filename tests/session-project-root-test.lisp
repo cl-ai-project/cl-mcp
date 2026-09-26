@@ -16,8 +16,18 @@
                 #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*
+                #:set-project-root
                 #:session-project-root
                 #:forget-session-project-root)
+  (:import-from #:cl-mcp/src/pool
+                #:get-or-assign-worker)
+  (:import-from #:cl-mcp/src/worker-client
+                #:worker-id)
+  (:import-from #:cl-mcp/specs/pool-fixtures
+                #:with-fake-pool
+                #:fake-spawn
+                #:ledger-dead
+                #:run-pending-work)
   ;; A bare :import-from declares the dependency; the session table it clears
   ;; is internal and found by name where it is used.
   (:import-from #:cl-mcp/src/http)
@@ -163,3 +173,54 @@ scratch directories %SCRATCH-DIR made."
         (ok (null (session-project-root "tA")) "the ended session's root is gone")
         (ok (equal (%root-of "tA") (%native default))
             "the id now resolves against the default")))))
+
+(deftest a-deadline-thread-runs-under-the-sessions-root
+  (testing "with the pool off, repl-eval's timeout thread sees the request's root"
+    ;; The deadline runs the form on a thread of its own, which does not see
+    ;; the request's bindings: it saw the global root (here NIL) instead.
+    (with-isolated-roots ("tA")
+      (let ((a (%scratch-dir "deadline-a")))
+        (setf *project-root* nil)
+        (%tool "tA" "fs-set-project-root" "path" (%native a))
+        (let* ((result (%tool "tA" "repl-eval"
+                              "code" "(format nil \"ROOT=~A DPD=~A\"
+                                        (and cl-mcp/src/project-root:*project-root*
+                                             (uiop:native-namestring
+                                              cl-mcp/src/project-root:*project-root*))
+                                        (uiop:native-namestring *default-pathname-defaults*))"
+                              "package" "CL-USER"
+                              "timeout_seconds" 5))
+               (content (gethash "content" result))
+               (text (if (plusp (length content))
+                         (gethash "text" (aref content 0))
+                         "")))
+          (ok (search (format nil "ROOT=~A" (%native a)) text)
+              (format nil "*project-root* is the session's root; got ~S" text))
+          (ok (search (format nil "DPD=~A" (%native a)) text)
+              (format nil "*default-pathname-defaults* is too; got ~S" text)))))))
+
+(deftest a-recovered-worker-starts-under-the-sessions-root
+  (testing "the replacement for a crashed worker is spawned with its session's root"
+    ;; Recovery spawns on a pool thread, outside any request, where only the
+    ;; global default is visible: the replacement came up under the server
+    ;; default while the parent kept editing under the session's root.
+    (with-isolated-roots ("s0")
+      (let ((a (%scratch-dir "recover-a"))
+            (seen '()))
+        (with-fake-pool (ledger :warmup 0)
+          (setf cl-mcp/src/pool::*spawn-worker-function*
+                (lambda ()
+                  (push *project-root* seen)
+                  (fake-spawn ledger)))
+          (set-project-root a :session-id "s0")
+          (let ((first (get-or-assign-worker "s0")))
+            (setf (gethash first (ledger-dead ledger)) t)
+            (cl-mcp/src/pool::%check-worker-health)
+            (run-pending-work ledger)
+            (let ((replacement (get-or-assign-worker "s0")))
+              (ok (not (eql (worker-id first) (worker-id replacement)))
+                  "the session was given a replacement")
+              (ok (= 2 (length seen)) "two spawns: the first and the replacement")
+              (ok (every (lambda (root) (equal root a)) seen)
+                  (format nil "every spawn for the session saw its root; saw ~S"
+                          seen)))))))))
