@@ -28,6 +28,8 @@
                 #:spec-symbol-response
                 #:spec-describe-response
                 #:spec-check-response)
+  (:import-from #:cl-mcp/src/tools/registry
+                #:register-tool-group-instructions)
   (:import-from #:cl-mcp/src/proxy
                 #:with-proxy-dispatch)
   (:export #:spec-list
@@ -36,6 +38,19 @@
            #:spec-check))
 
 (in-package #:cl-mcp/src/tools/spec-tools)
+
+(register-tool-group-instructions
+ :cl-spec
+ "cl-spec tools are on (spec-list, spec-symbol, spec-describe, spec-check):
+- load-system cl-spec/check-it, the application and its contract system first.
+- Read the contract (spec-symbol, spec-describe) and take a baseline before editing.
+- spec-check function= runs only the Function Spec; symbol= only the Properties
+about the symbol. Run both.
+- seed is a decimal string. To replay, copy the Replay: line.
+- After an edit: load-system the primary system with clear_fasls=true, then the
+contract system.
+- Never weaken a contract to make a check pass; ask the user first.
+- verified covers only what that call ran; report verification_gaps as given.")
 
 (define-tool "spec-list"
   :group :cl-spec
