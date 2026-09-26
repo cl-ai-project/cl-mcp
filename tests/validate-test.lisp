@@ -37,6 +37,11 @@
                   :code (format nil "(NAMED-READTABLES:IN-READTABLE :INTERPOL-SYNTAX)~%~%~A"
                                 broken))))
         (ng (search "by your parens" (or (gethash "diagnosis_text" res) "")))))
+    (testing "third review: a quoted list or a declaration past the broken form does not withhold it"
+      (dolist (code (list (format nil "(defparameter *example* '(in-readtable :foo))~%~%~A" broken)
+                          (format nil "~A~%~%(in-readtable :foo)~%" broken)))
+        (ok (search "by your parens inside \"(if (< room 0)\""
+                    (gethash "diagnosis_text" (lisp-check-parens :code code))))))
     (testing "second review: the word in a comment or a string does not withhold it"
       (let ((res (lisp-check-parens
                   :code (format nil ";; This file does not use in-readtable.~%(defvar *doc* \"no (in-readtable here\")~%~%~A"

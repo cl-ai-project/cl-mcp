@@ -29,6 +29,7 @@
            #:cst-node-start-line
            #:cst-node-end-line
            #:parse-top-level-forms
+           #:text-reaches-in-readtable-p
            #:unterminated-source
            #:stray-right-parenthesis
            #:readtable-unavailable
@@ -86,6 +87,33 @@ whitespace still mean what the structural checks assume. Never modified.")
               (string= (symbol-name head) "IN-READTABLE")
               (consp (cdr form))
               (second form)))))
+
+(defun text-reaches-in-readtable-p (text)
+  "Return T when reading TEXT's top-level forms in order, with the standard
+readtable, reaches an IN-READTABLE form (%IN-READTABLE-FORM-P) before the first
+form that fails to read. This is the evidence PARSE-TOP-LEVEL-FORMS switches
+readtables on, for a text that may be broken: only a top-level form counts
+(a quoted '(in-readtable ...) is data), comments anywhere are whitespace, the
+word in a string or comment is not a form, and a declaration after the point
+where the reader stops is never reached. Until an IN-READTABLE is reached the
+text is standard syntax by definition, so the standard reader is the right
+one to read it with. *READ-EVAL* is off and unknown package prefixes are read
+leniently. The forms are read into a temporary package that is deleted
+afterwards, so no symbol is left behind; any read error ends the scan with NIL."
+  (let ((scratch (make-package (string (gensym "CL-MCP-IN-READTABLE-PROBE-")) :use '())))
+    (unwind-protect
+         (let ((*readtable* (copy-readtable *standard-readtable*))
+               (*read-eval* nil)
+               (*package* scratch))
+           (handler-case
+               (call-with-lenient-packages
+                (lambda ()
+                  (with-input-from-string (stream text)
+                    (loop for form = (read stream nil stream)
+                          until (eq form stream)
+                          thereis (and (%in-readtable-form-p form) t)))))
+             (error () nil)))
+      (delete-package scratch))))
 
 (defun %in-package-form-p (form)
   "Return the package designator string if FORM is an IN-PACKAGE form, NIL otherwise."

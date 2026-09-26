@@ -407,9 +407,11 @@ Output:
   0)" (line 2), repaired inside "(defun clamp ..." (line 1)`) and gives the
   parens reading as the alternative (`add N ")" at the end of the form
   instead`, counted per form when several forms are broken). The note is
-  withheld for text holding an `(in-readtable ...)` form (any case, any
-  package prefix; the word in a comment or string does not count), whose
-  reader macros may consume parens as data. Neither reading is judged: an `if`'s dedented else branch and a
+  withheld when the reader, reading the text's top-level forms in order,
+  reaches an `(in-readtable ...)` form before the broken one (any case, any
+  package prefix; a quoted list, the word in a comment or string, and a
+  declaration after the breakage do not count), since its reader macros may
+  consume parens as data. Neither reading is judged: an `if`'s dedented else branch and a
   statement after a `when` have the same shape, and only the author knows
   which was meant (issue #183). Failing that, when a fix closes a form whose
   next code line sits at the same indentation, or in column 1 below an

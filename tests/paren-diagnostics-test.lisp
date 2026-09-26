@@ -14,8 +14,7 @@
                 #:format-delimiter-diagnosis
                 #:format-overwrite-recovery
                 #:reparented-forms
-                #:format-reparent-note
-                #:in-readtable-form-p))
+                #:format-reparent-note))
 
 (in-package #:cl-mcp/tests/paren-diagnostics-test)
 
@@ -465,20 +464,6 @@ parens (min count room) is the IF's else branch; by indentation it is not.")
                  :target :content)))
       (ok (search "This form leaves the form your parens put it in:" note))
       (ok (search "resend the content with 1 \")\" added at its end" note)))))
-
-(deftest in-readtable-form-p-needs-a-real-form
-  (testing "a form headed by IN-READTABLE, in any case, with or without a package"
-    (ok (in-readtable-form-p "(in-readtable :interpol-syntax)"))
-    (ok (in-readtable-form-p (format nil "(in-package :x)~%( IN-READTABLE :FOO)")))
-    (ok (in-readtable-form-p "(named-readtables:in-readtable :foo)"))
-    (ok (in-readtable-form-p "(NAMED-READTABLES:IN-READTABLE :FOO)")))
-  (testing "the word elsewhere does not count"
-    (ng (in-readtable-form-p ";; This file does not use in-readtable."))
-    (ng (in-readtable-form-p "(defvar *doc* \"see (in-readtable :x)\")"))
-    (ng (in-readtable-form-p "#| (in-readtable :x) |# (defun f () 1)"))
-    (ng (in-readtable-form-p "(list 'in-readtable in-readtable)"))
-    (ng (in-readtable-form-p "(in-readtable-helper :x)"))
-    (ng (in-readtable-form-p "(defun f () #\\( in-readtable)"))))
 
 (deftest reparented-forms-is-linear-in-the-number-of-forms
   (testing "a large file with thousands of forms is compared in one pass, not one per form"

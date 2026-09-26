@@ -28,8 +28,7 @@
            #:format-overwrite-recovery
            #:format-relocation-note
            #:reparented-forms
-           #:format-reparent-note
-           #:in-readtable-form-p))
+           #:format-reparent-note))
 
 (in-package #:cl-mcp/src/paren-diagnostics)
 
@@ -1181,36 +1180,6 @@ COUNT-DELIMITER-DEPTH per region would rescan TEXT from its start each time."
           (#\) (decf net))))
       (setf (aref balance (1+ i)) net))
     balance))
-
-(defun in-readtable-form-p (text)
-  "Return T when TEXT's code holds a form headed by IN-READTABLE: a ( outside
-strings, comments and character literals, then optional whitespace, then a
-symbol whose name, after any package prefix, is IN-READTABLE in any case --
-(in-readtable :foo), (NAMED-READTABLES:IN-READTABLE :FOO). The word in a
-comment or a string does not count. This is what decides whether a text's
-parens may be read with standard syntax (issue #183): under an in-readtable a
-reader macro may consume them as data."
-  (let ((mask (%code-state-mask text))
-        (len (length text)))
-    (flet ((delimiter-p (ch)
-             (member ch '(#\Space #\Tab #\Newline #\Return #\Page
-                          #\( #\) #\" #\; #\' #\` #\,))))
-      (loop for i below len
-            thereis (and (char= (char text i) #\()
-                         (eq (svref mask i) :code)
-                         (let* ((start (or (position-if-not
-                                            (lambda (ch)
-                                              (member ch '(#\Space #\Tab #\Newline
-                                                           #\Return #\Page)))
-                                            text :start (1+ i))
-                                           len))
-                                (end (or (position-if #'delimiter-p text :start start)
-                                         len))
-                                (token (subseq text start (min end (+ start 64))))
-                                (colon (position #\: token :from-end t)))
-                           (and (< start len)
-                                (string-equal (if colon (subseq token (1+ colon)) token)
-                                              "in-readtable"))))))))
 
 (defun %reparented-in-form (original start end missing newlines repaired-form)
   "Compare one top-level form for REPARENTED-FORMS: ORIGINAL's text from START to
