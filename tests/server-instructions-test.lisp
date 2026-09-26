@@ -91,6 +91,8 @@
   ;; its code; a change is checked by both spec-check and run-tests; and any
   ;; contract change the request did not ask for needs the user.
   (ok (search "not ros or sbcl from a shell" +base-instructions+))
+  ;; Naming grep/cat/sed left python and heredocs open; name every other way.
+  (ok (search "no shell command, script or built-in Read/Edit" +base-instructions+))
   (let ((*enabled-tool-groups* (list "CL-SPEC")))
     (let ((text (format nil "~{~A~}" (enabled-tool-group-instructions))))
       (ok (search "before the code" text))

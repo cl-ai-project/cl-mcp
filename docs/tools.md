@@ -1144,13 +1144,15 @@ Response (excerpt):
 
 ## Server instructions
 
-`initialize` returns an `instructions` string: the base guidance (set the project root first,
-edit Lisp with the Lisp tools, `load-system` after an edit, run code through `run-tests` and
-`repl-eval` rather than a shell `ros`/`sbcl`, the worker pool) and, for each enabled tool
-group, that group's guidance (for `cl-spec`: read or first write the contract, check with
-both `spec-check` and `run-tests`, change a contract only when asked). It is built from the same group setting as
-`tools/list`, so it never names a tool the client cannot see, and it is at most 2,048
-characters for any combination of groups — the length at which Claude Code truncates it.
+`initialize` returns an `instructions` string: the base guidance (set the project root first;
+read and change Lisp source only with the Lisp tools, never a shell command, script or
+built-in Read/Edit; `load-system` after an edit; run code through `run-tests` and `repl-eval`
+rather than a shell `ros`/`sbcl`; the worker pool) and, for each enabled tool group, that
+group's guidance (for `cl-spec`: read or first write the contract, check with both
+`spec-check` and `run-tests`, change a contract only when asked). It is built from the same
+group setting as `tools/list`, so it never names a tool the client cannot see, and it is at
+most 2,048 characters for any combination of groups — the length at which Claude Code
+truncates it.
 
 Clients read it once per connection. Clients differ in what they do with it: Claude Code,
 Gemini CLI (trusted folders only), VS Code/Copilot, Goose, opencode and ChatGPT put it in

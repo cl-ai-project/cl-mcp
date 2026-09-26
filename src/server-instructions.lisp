@@ -29,8 +29,8 @@ Claude Code truncates server instructions past 2,048 characters.")
 structure-aware editing of Lisp source.
 
 1. Call fs-set-project-root with the project's absolute path before any file tool.
-2. For .lisp/.asd files use clgrep-search, lisp-read-file, lisp-edit-form and
-lisp-patch-form, never shell grep/cat/sed: they parse the code and keep its comments.
+2. Read and change .lisp/.asd files only with clgrep-search, lisp-read-file,
+lisp-edit-form and lisp-patch-form: no shell command, script or built-in Read/Edit.
 3. An edit changes the file only. Run load-system before repl-eval or code-* tools see
 it; run-tests reloads its test system itself.
 
