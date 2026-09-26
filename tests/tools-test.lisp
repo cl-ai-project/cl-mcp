@@ -1558,55 +1558,67 @@
   (testing "fs-set-project-root and fs reads stay stable under concurrent calls"
     (with-test-project-root
       (let ((root (namestring cl-mcp/src/project-root:*project-root*))
+             (root-path cl-mcp/src/project-root:*project-root*)
+             (defaults *default-pathname-defaults*)
              (errors '())
              (lock (bordeaux-threads:make-lock "tools-test-fs-root-concurrency")))
         (labels ((record-error (message)
                    (bordeaux-threads:with-lock-held (lock)
-                     (push message errors))))
+                     (push message errors)))
+                 (under-test-root (thunk)
+                   ;; A new thread sees only global values, and the root set
+                   ;; above may be a binding: run-tests runs a suite on a
+                   ;; deadline thread that binds *PROJECT-ROOT*.
+                   (lambda ()
+                     (let ((cl-mcp/src/project-root:*project-root* root-path)
+                           (*default-pathname-defaults* defaults))
+                       (funcall thunk)))))
           (let ((setter (bordeaux-threads:make-thread
-                         (lambda ()
-                           (dotimes (i 20)
-                             (let* ((req (format nil
-                                                 (concatenate
-                                                  'string
-                                                  "{\"jsonrpc\":\"2.0\",\"id\":~A,"
-                                                  "\"method\":\"tools/call\","
-                                                  "\"params\":{\"name\":\"fs-set-project-root\","
-                                                  "\"arguments\":{\"path\":\"~A\"}}}")
-                                                 (+ 30000 i)
-                                                 root))
-                                    (obj (parse (%pjl req))))
-                               (when (%tool-call-failed-p obj)
-                                 (record-error "fs-set-project-root failed")))))
+                         (under-test-root
+                          (lambda ()
+                            (dotimes (i 20)
+                              (let* ((req (format nil
+                                                  (concatenate
+                                                   'string
+                                                   "{\"jsonrpc\":\"2.0\",\"id\":~A,"
+                                                   "\"method\":\"tools/call\","
+                                                   "\"params\":{\"name\":\"fs-set-project-root\","
+                                                   "\"arguments\":{\"path\":\"~A\"}}}")
+                                                  (+ 30000 i)
+                                                  root))
+                                     (obj (parse (%pjl req))))
+                                (when (%tool-call-failed-p obj)
+                                  (record-error "fs-set-project-root failed"))))))
                          :name "tools-fs-root-setter"))
                 (reader (bordeaux-threads:make-thread
-                         (lambda ()
-                           (dotimes (i 20)
-                             (let* ((req-info (concatenate
-                                               'string
-                                               "{\"jsonrpc\":\"2.0\",\"id\":31000,"
-                                               "\"method\":\"tools/call\","
-                                               "\"params\":{\"name\":\"fs-get-project-info\","
-                                               "\"arguments\":{}}}"))
-                                    (obj-info (parse (%pjl req-info)))
-                                    (result-info (gethash "result" obj-info))
-                                    (project-root (and result-info
-                                                       (gethash "project_root" result-info)))
-                                    (req-list (concatenate
-                                               'string
-                                               "{\"jsonrpc\":\"2.0\",\"id\":32000,"
-                                               "\"method\":\"tools/call\","
-                                               "\"params\":{\"name\":\"fs-list-directory\","
-                                               "\"arguments\":{\"path\":\".\"}}}"))
-                                    (obj-list (parse (%pjl req-list)))
-                                    (result-list (gethash "result" obj-list))
-                                    (entries (and result-list
-                                                  (gethash "entries" result-list))))
-                               (unless (and (null (%tool-call-failed-p obj-info))
-                                            (stringp project-root)
-                                            (null (%tool-call-failed-p obj-list))
-                                            (arrayp entries))
-                                 (record-error "concurrent fs read failed")))))
+                         (under-test-root
+                          (lambda ()
+                            (dotimes (i 20)
+                              (let* ((req-info (concatenate
+                                                'string
+                                                "{\"jsonrpc\":\"2.0\",\"id\":31000,"
+                                                "\"method\":\"tools/call\","
+                                                "\"params\":{\"name\":\"fs-get-project-info\","
+                                                "\"arguments\":{}}}"))
+                                     (obj-info (parse (%pjl req-info)))
+                                     (result-info (gethash "result" obj-info))
+                                     (project-root (and result-info
+                                                        (gethash "project_root" result-info)))
+                                     (req-list (concatenate
+                                                'string
+                                                "{\"jsonrpc\":\"2.0\",\"id\":32000,"
+                                                "\"method\":\"tools/call\","
+                                                "\"params\":{\"name\":\"fs-list-directory\","
+                                                "\"arguments\":{\"path\":\".\"}}}"))
+                                     (obj-list (parse (%pjl req-list)))
+                                     (result-list (gethash "result" obj-list))
+                                     (entries (and result-list
+                                                   (gethash "entries" result-list))))
+                                (unless (and (null (%tool-call-failed-p obj-info))
+                                             (stringp project-root)
+                                             (null (%tool-call-failed-p obj-list))
+                                             (arrayp entries))
+                                  (record-error "concurrent fs read failed"))))))
                          :name "tools-fs-root-reader")))
             (bordeaux-threads:join-thread setter)
             (bordeaux-threads:join-thread reader))
