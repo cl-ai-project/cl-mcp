@@ -292,7 +292,10 @@
       ;; is bounded the same way.
       (ok (search "line 12 \"(when a11\"" msg))
       (ng (search "line 13 \"(when a12\"" msg) "elided entries are not listed")
-      (ok (search "... and 19 more" msg))))
+      (ok (search "... and 19 more" msg))
+      (ok (search "Then re-indent the forms at lines 3, 4, 5, 6, 7, 8, 9, 10, 11 and 12 to sit inside the forms your parens put them in (listed above), and likewise the 19 more forms not listed, so"
+                  msg)
+          "issue #185: only lines whose parents are listed are named; the rest are counted")))
   (testing "a tab-indented body deeper than its form is a dedent, not a relocation"
     ;; A tab is eight columns: the body of (when x sits deeper by indentation,
     ;; so parinfer keeps it inside and nothing moved.
@@ -463,7 +466,54 @@ parens (min count room) is the IF's else branch; by indentation it is not.")
                  (reparented-forms +dedented-else+ (repaired-text +dedented-else+))
                  :target :content)))
       (ok (search "This form leaves the form your parens put it in:" note))
-      (ok (search "resend the content with 1 \")\" added at its end" note)))))
+      (ok (search "resend the content with 1 \")\" added at its end" note))))
+  (testing "issue #185: the alternative also says to re-indent what moved, and where"
+    ;; Appending the closer alone keeps the indentation that caused the
+    ;; ambiguity; the note must say the job is not done until it matches.
+    (dolist (target '(:form :content))
+      (ok (search "Then re-indent the form at line 4 to sit inside \"(if (< room 0)\" (line 2), so the indentation says what the parens say."
+                  (format-reparent-note
+                   (reparented-forms +dedented-else+ (repaired-text +dedented-else+))
+                   :target target))
+          (format nil "target ~S" target))))
+  (testing "issue #185: several forms moved off one line under one parent are named together"
+    (let* ((text (format nil "(defun f ()~%  (when x~%  (a) (b))"))
+           (note (format-reparent-note (reparented-forms text (repaired-text text)))))
+      (ok (search "Then re-indent the forms on line 3 to sit inside \"(when x\" (line 2)" note))))
+  (testing "Codex review: a line is named only when its parent is in the listed entries"
+    ;; Ten moved forms on line 3 fill the listed entries; an eleventh, on line
+    ;; 4, is counted but not listed, so its line must not be named as if its
+    ;; parent were above.
+    (let* ((text (format nil "(defun f ()~%  (when x~%  (a) (b) (c) (d) (e) (f) (g) (h) (i) (j)~%  (k))"))
+           (note (format-reparent-note (reparented-forms text (repaired-text text)))))
+      (ok (search "... and 1 more" note))
+      (ok (search "Then re-indent the forms on line 3 to sit inside \"(when x\" (line 2), and likewise the 1 more form not listed, so"
+                  note)
+          "one shared parent is named, and the unlisted form is only counted")
+      (ng (search "lines 3 and 4" note))))
+  (testing "forms moved off several lines under one shared parent name that parent"
+    (let* ((text (format nil "(defun f ()~%  (when x~%  (a)~%  (b))"))
+           (note (format-reparent-note (reparented-forms text (repaired-text text)))))
+      (ok (search "Then re-indent the forms at lines 3 and 4 to sit inside \"(when x\" (line 2), so"
+                  note))))
+  (testing "PR #186 review: an omitted form on a listed line is still counted"
+    ;; Ten forms under the inner WHEN fill the listed entries; an eleventh on
+    ;; the same line belongs to the outer WHEN. Its line is already named, but
+    ;; its parent is not listed, so the omission must still be reported.
+    (let* ((text (format nil "(defun f ()~%  (when a (when b~%  (a) (b) (c) (d) (e) (f) (g) (h) (i) (j)) (k))"))
+           (note (format-reparent-note (reparented-forms text (repaired-text text)))))
+      (ok (search "... and 1 more" note))
+      (ok (search "to sit inside the forms your parens put them in (listed above), and likewise the 1 more form not listed, so"
+                  note))))
+  (testing "Codex review: two parents that start on one line are different parents"
+    ;; By the parens (x) belongs to (when b and (y) to (when a; both open on
+    ;; line 2, so the line alone must not decide that they share a parent.
+    (let* ((text (format nil "(defun f ()~%  (when a (when b~%  (x)) (y))"))
+           (note (format-reparent-note (reparented-forms text (repaired-text text)))))
+      (ng (search "to sit inside \"(when b\" (line 2), so" note)
+          "no single parent is named for forms with different parents")
+      (ok (search "Then re-indent the forms on line 3 to sit inside the forms your parens put them in (listed above)"
+                  note)))))
 
 (deftest reparented-forms-is-linear-in-the-number-of-forms
   (testing "a large file with thousands of forms is compared in one pass, not one per form"
@@ -516,7 +566,10 @@ parens (min count room) is the IF's else branch; by indentation it is not.")
       (ok (search "add the missing closers to each form instead: 1 \")\" at the end of the form starting at line 1, 2 \")\" at the end of the form starting at line 6."
                   msg))
       (ng (search "add 1 \")\" at the end of the form instead" msg)
-          "no single count is given for the whole file"))))
+          "no single count is given for the whole file")
+      (ok (search "Then re-indent the forms at lines 4 and 9 to sit inside the forms your parens put them in (listed above), so the indentation says what the parens say."
+                  msg)
+          "issue #185: every moved line is named for re-indenting"))))
 
 (deftest extra-close-bracket-carries-the-symbol-caveat
   (testing "a stray ] is described as possibly part of a symbol"

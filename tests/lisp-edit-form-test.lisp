@@ -2218,7 +2218,10 @@ Used to prove that a dry-run summary does not grow with the size of the file."
             (ok (search "line 4 \"(min count room))\": by your parens inside \"(if (< room 0)\" (line 2)"
                         text)
                 (format nil "the moved else branch is named (dry_run ~A)" dry-run))
-            (ok (search "resend the content with 1 \")\" added at its end" text)))))
+            (ok (search "resend the content with 1 \")\" added at its end" text))
+            (ok (search "Then re-indent the form at line 4 to sit inside \"(if (< room 0)\" (line 2)"
+                        text)
+                "issue #185: following the alternative must fix the indentation too"))))
       (let ((text (summary (format nil "(defun target (x)~%  (list x x)") nil)))
         (ok (search "1 closing delimiter added by parinfer" text))
         (ng (search "NOTE:" text) "a repair that only appends moves nothing")))))
