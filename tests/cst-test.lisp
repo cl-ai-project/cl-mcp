@@ -10,7 +10,7 @@
                 #:cst-node-start-line
                 #:cst-node-end-line
                 #:cst-node-value
-                #:text-reaches-in-readtable-p))
+                #:text-reached-in-readtable))
 
 (in-package #:cl-mcp/tests/cst-test)
 
@@ -97,34 +97,39 @@
           (end-of-file () nil)
           (error () t)))))
 
-(deftest text-reaches-in-readtable-p-follows-the-reader
+(deftest text-reached-in-readtable-follows-the-reader
   (let ((broken (format nil "(defun clamp (count room)~%  (if (< room 0)~%      0~%  (min count room))")))
-    (testing "a top-level IN-READTABLE the reader reaches counts, in any case and package"
-      (ok (text-reaches-in-readtable-p (format nil "(in-readtable :foo)~%~A" broken)))
-      (ok (text-reaches-in-readtable-p
-           (format nil "(in-package :cl-user)~%(NAMED-READTABLES:IN-READTABLE :FOO)~%~A" broken)))
-      (ok (text-reaches-in-readtable-p
-           (format nil "(~%  ;; choose syntax~%  NAMED-READTABLES:IN-READTABLE :FOO)~%~A" broken))
+    (testing "a top-level IN-READTABLE the reader reaches yields its designator"
+      (ok (eq :foo (text-reached-in-readtable (format nil "(in-readtable :foo)~%~A" broken))))
+      (ok (eq :standard
+              (text-reached-in-readtable
+               (format nil "(named-readtables:in-readtable :standard)~%~A" broken)))
+          "the designator is returned as written, so a caller can tell :standard apart")
+      (ok (eq :foo (text-reached-in-readtable
+                    (format nil "(in-package :cl-user)~%(NAMED-READTABLES:IN-READTABLE :FOO)~%~A"
+                            broken))))
+      (ok (eq :foo (text-reached-in-readtable
+                    (format nil "(~%  ;; choose syntax~%  NAMED-READTABLES:IN-READTABLE :FOO)~%~A"
+                            broken)))
           "a line comment inside the form is whitespace to the reader")
-      (ok (text-reaches-in-readtable-p
-           (format nil "(#| comment |# NAMED-READTABLES:IN-READTABLE :FOO)~%~A" broken))
+      (ok (eq :foo (text-reached-in-readtable
+                    (format nil "(#| comment |# NAMED-READTABLES:IN-READTABLE :FOO)~%~A" broken)))
           "so is a block comment"))
     (testing "PR #184 third review: data, text and unreachable forms do not count"
-      (ok (not (text-reaches-in-readtable-p
-                (format nil "(defparameter *example*~%  '(in-readtable :foo))~%~%~A" broken)))
+      (ok (null (text-reached-in-readtable
+                 (format nil "(defparameter *example*~%  '(in-readtable :foo))~%~%~A" broken)))
           "a quoted list is data")
-      (ok (not (text-reaches-in-readtable-p (format nil "'(in-readtable :foo)~%~A" broken))))
-      (ok (not (text-reaches-in-readtable-p
-                (format nil ";; This file does not use in-readtable.~%~A" broken))))
-      (ok (not (text-reaches-in-readtable-p
-                (format nil "(defvar *doc* \"(in-readtable :foo)\")~%~A" broken))))
-      (ok (not (text-reaches-in-readtable-p
-                (format nil "~A~%~%(in-readtable :foo)~%" broken)))
+      (ok (null (text-reached-in-readtable (format nil "'(in-readtable :foo)~%~A" broken))))
+      (ok (null (text-reached-in-readtable
+                 (format nil ";; This file does not use in-readtable.~%~A" broken))))
+      (ok (null (text-reached-in-readtable
+                 (format nil "(defvar *doc* \"(in-readtable :foo)\")~%~A" broken))))
+      (ok (null (text-reached-in-readtable (format nil "~A~%~%(in-readtable :foo)~%" broken)))
           "the reader stops at the broken form and never reaches the declaration")
-      (ok (not (text-reaches-in-readtable-p "(when x (in-readtable :foo))"))
+      (ok (null (text-reached-in-readtable "(when x (in-readtable :foo))"))
           "only a top-level form switches the readtable"))
     (testing "reading leaves no symbols behind"
       (let ((name "READER-PROBE-SYMBOL-FOR-183"))
-        (text-reaches-in-readtable-p (format nil "(~A 1)~%(in-readtable :foo)" name))
+        (text-reached-in-readtable (format nil "(~A 1)~%(in-readtable :foo)" name))
         (ok (null (find-symbol name :cl-user)))
         (ok (null (find-symbol name *package*)))))))

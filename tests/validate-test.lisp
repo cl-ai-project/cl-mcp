@@ -37,6 +37,16 @@
                   :code (format nil "(NAMED-READTABLES:IN-READTABLE :INTERPOL-SYNTAX)~%~%~A"
                                 broken))))
         (ng (search "by your parens" (or (gethash "diagnosis_text" res) "")))))
+    (testing "fourth review: an in-readtable that keeps standard syntax does not withhold it"
+      ;; The same policy lisp-edit-form applies through %NONSTANDARD-READTABLE-P,
+      ;; so the two tools describe the same conflict.
+      (let ((res (lisp-check-parens
+                  :code (format nil "(named-readtables:in-readtable :standard)~%~%~A" broken))))
+        (ok (search "by your parens inside \"(if (< room 0)\"" (gethash "diagnosis_text" res)))))
+    (testing "fourth review: an in-readtable that cannot be resolved withholds it (fail safe)"
+      (let ((res (lisp-check-parens
+                  :code (format nil "(in-readtable :no-such-readtable-for-issue-183)~%~%~A" broken))))
+        (ng (search "by your parens" (or (gethash "diagnosis_text" res) "")))))
     (testing "third review: a quoted list or a declaration past the broken form does not withhold it"
       (dolist (code (list (format nil "(defparameter *example* '(in-readtable :foo))~%~%~A" broken)
                           (format nil "~A~%~%(in-readtable :foo)~%" broken)))

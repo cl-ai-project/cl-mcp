@@ -410,8 +410,11 @@ Output:
   withheld when the reader, reading the text's top-level forms in order,
   reaches an `(in-readtable ...)` form before the broken one (any case, any
   package prefix; a quoted list, the word in a comment or string, and a
-  declaration after the breakage do not count), since its reader macros may
-  consume parens as data. Neither reading is judged: an `if`'s dedented else branch and a
+  declaration after the breakage do not count) whose readtable changes the
+  syntax, since its reader macros may consume parens as data. That is decided
+  as `lisp-edit-form` decides it: `:standard`, or any readtable that reads
+  like it, keeps the note, and a designator that does not resolve in the
+  server withholds it. Neither reading is judged: an `if`'s dedented else branch and a
   statement after a `when` have the same shape, and only the author knows
   which was meant (issue #183). Failing that, when a fix closes a form whose
   next code line sits at the same indentation, or in column 1 below an

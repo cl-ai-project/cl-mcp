@@ -29,7 +29,7 @@
            #:cst-node-start-line
            #:cst-node-end-line
            #:parse-top-level-forms
-           #:text-reaches-in-readtable-p
+           #:text-reached-in-readtable
            #:unterminated-source
            #:stray-right-parenthesis
            #:readtable-unavailable
@@ -88,18 +88,27 @@ whitespace still mean what the structural checks assume. Never modified.")
               (consp (cdr form))
               (second form)))))
 
-(defun text-reaches-in-readtable-p (text)
-  "Return T when reading TEXT's top-level forms in order, with the standard
-readtable, reaches an IN-READTABLE form (%IN-READTABLE-FORM-P) before the first
-form that fails to read. This is the evidence PARSE-TOP-LEVEL-FORMS switches
-readtables on, for a text that may be broken: only a top-level form counts
-(a quoted '(in-readtable ...) is data), comments anywhere are whitespace, the
-word in a string or comment is not a form, and a declaration after the point
-where the reader stops is never reached. Until an IN-READTABLE is reached the
-text is standard syntax by definition, so the standard reader is the right
-one to read it with. *READ-EVAL* is off and unknown package prefixes are read
-leniently. The forms are read into a temporary package that is deleted
-afterwards, so no symbol is left behind; any read error ends the scan with NIL."
+(defun text-reached-in-readtable (text)
+  "Return the designator of the first IN-READTABLE form reached by reading
+TEXT's top-level forms in order with the standard readtable, or NIL when none
+is reached before the first form that fails to read. This is the evidence
+PARSE-TOP-LEVEL-FORMS switches readtables on (%IN-READTABLE-FORM-P), for a
+text that may be broken: only a top-level form counts (a quoted
+'(in-readtable ...) is data), comments anywhere are whitespace, the word in a
+string or comment is not a form, and a declaration after the point where the
+reader stops is never reached. Until an IN-READTABLE is reached the text is
+standard syntax by definition, so the standard reader is the right one.
+
+The designator is returned as written, so a caller can tell a readtable that
+keeps standard syntax (:standard) from one that changes it: decide that with
+%NONSTANDARD-READTABLE-P, as lisp-edit-form does, and treat a designator that
+does not resolve as nonstandard. A designator written as an unqualified,
+non-keyword symbol is read into the scratch package below, which is deleted,
+so it does not resolve.
+
+*READ-EVAL* is off and unknown package prefixes are read leniently. The forms
+are read into a temporary package that is deleted afterwards, so no symbol is
+left behind; any read error ends the scan with NIL."
   (let ((scratch (make-package (string (gensym "CL-MCP-IN-READTABLE-PROBE-")) :use '())))
     (unwind-protect
          (let ((*readtable* (copy-readtable *standard-readtable*))
@@ -111,7 +120,7 @@ afterwards, so no symbol is left behind; any read error ends the scan with NIL."
                   (with-input-from-string (stream text)
                     (loop for form = (read stream nil stream)
                           until (eq form stream)
-                          thereis (and (%in-readtable-form-p form) t)))))
+                          thereis (%in-readtable-form-p form)))))
              (error () nil)))
       (delete-package scratch))))
 
