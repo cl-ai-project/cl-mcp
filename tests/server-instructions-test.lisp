@@ -14,9 +14,14 @@
                 #:+base-instructions+
                 #:server-instructions)
   ;; Loads every tool module, so the registry below is the one the server has.
+  (:import-from #:cl-mcp/src/protocol
+                #:process-json-line
+                #:+supported-protocol-versions+)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*)
+  (:import-from #:yason
+                #:parse)
   ;; Bare import-from: only the ASDF dependency is needed, not the symbols.
-  (:import-from #:cl-mcp/src/protocol)
-  (:import-from #:yason)
   (:import-from #:cl-ppcre))
 
 (in-package #:cl-mcp/tests/server-instructions-test)
@@ -102,3 +107,19 @@
         (ok (member name listed :test #'string=) name)
         (ok (%mentions-tool-p (server-instructions) name)
             (format nil "the instructions name ~A" name))))))
+
+(defun %initialize-result (version)
+  (let ((*use-worker-pool* nil))
+    (gethash "result"
+             (parse (process-json-line
+                     (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",~
+                                  \"params\":{\"protocolVersion\":\"~A\"}}"
+                             version))))))
+
+(deftest initialize-returns-the-instructions
+  (dolist (groups *group-settings*)
+    (let ((*enabled-tool-groups* groups))
+      (dolist (version +supported-protocol-versions+)
+        (let ((result (%initialize-result version)))
+          (ok (equal (server-instructions) (gethash "instructions" result))
+              (format nil "~A with groups ~S" version groups)))))))

@@ -38,6 +38,8 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:broad-root-p
                 #:native-path-namestring)
+  (:import-from #:cl-mcp/src/server-instructions
+                #:server-instructions)
   (:import-from #:yason
                 #:encode
                 #:parse)
@@ -258,7 +260,8 @@ On second failure, return a hardcoded valid JSON-RPC error response."
           (result id
                    (make-ht "protocolVersion" chosen "serverInfo"
                              (make-ht "name" "cl-mcp" "version" (version))
-                             "capabilities" caps))))))
+                             "capabilities" caps
+                             "instructions" (server-instructions)))))))
 
 (defun %handle-cancel-notification (params)
   "Handle a notifications/cancelled message from the MCP client.
