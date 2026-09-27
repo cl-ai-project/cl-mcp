@@ -361,6 +361,41 @@
           (setf cl-mcp/src/pool::*recovery-threads*
                 (remove recovery cl-mcp/src/pool::*recovery-threads*)))))))
 
+(deftest a-root-sync-crash-leaves-a-worker-taken-elsewhere-alone
+  ;; Found in review of the fix above: when the project-root sync of a worker
+  ;; just lent marks it crashed, GET-OR-ASSIGN-WORKER ended it -- even when
+  ;; something else had taken it out of the pool meanwhile and was ending it
+  ;; (crash handling, or a shutdown's snapshot).  The second ending ran after
+  ;; the first was accounted for, so after a shutdown had returned.  Here the
+  ;; sync itself stands in for that: it marks the worker crashed and takes it
+  ;; out to be ended, as the pool's other paths do, and that ending completes
+  ;; only after the acquire -- which must not end the worker a second time.
+  (with-fake-pool (ledger :warmup 0)
+    (let ((cl-mcp/src/project-root:*project-root* #p"/tmp/")
+          (taken nil))
+      (%with-replaced
+       'cl-mcp/src/pool:send-root-to-session-worker
+       (lambda (session-id path)
+         (declare (ignore path))
+         (let ((worker (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                         (gethash session-id cl-mcp/src/pool::*affinity-map*))))
+           (setf taken worker
+                 (worker-state worker) :crashed)
+           (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+             (setf cl-mcp/src/pool::*all-workers*
+                   (remove worker cl-mcp/src/pool::*all-workers*))
+             (cl-mcp/src/pool::%begin-ending worker))))
+       (lambda ()
+         (ok (handler-case (progn (get-or-assign-worker "s0") nil)
+               (error () t))
+             "the acquire reports the crash")))
+      (ok taken "the sync ran on the worker just lent")
+      ;; What took it out ends it now.
+      (cl-mcp/src/pool::%end-worker taken)
+      (ok (= 1 (gethash taken (cl-mcp/specs/pool-fixtures:ledger-kill-count ledger) 0))
+          (format nil "it was ended once, by what took it; ended ~D times"
+                  (gethash taken (cl-mcp/specs/pool-fixtures:ledger-kill-count ledger) 0))))))
+
 (deftest a-replenishment-decided-before-a-shutdown-is-waited-for
   ;; Found in review: the replenishment was decided under the lock and its
   ;; thread started and published after it, so a shutdown in between saw
