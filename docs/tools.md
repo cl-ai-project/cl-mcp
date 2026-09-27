@@ -1208,7 +1208,7 @@ is what is missing.
 
 ### Group `cl-spec` — `spec-list`, `spec-symbol`, `spec-describe`, `spec-check`
 
-Fetch the [cl-spec](https://github.com/cl-ai-project/cl-spec) Spec, Property or
+Fetch the [cl-spec](https://github.com/masatoi/cl-spec) Spec, Property or
 function spec registered about a symbol, read one in full, and run it for a
 structured counterexample. cl-mcp does not depend on cl-spec: these tools
 resolve it at call time and report `cl-spec-not-loaded` when it is absent, and

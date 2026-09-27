@@ -21,7 +21,7 @@
   :description "Model Context Protocol server for Common Lisp"
   :author "cxxxr, Satoshi Imai"
   :license "MIT"
-  :version "2.3.1"
+  :version "3.0.0"
   :depends-on ("alexandria"
                "cl-ppcre"
                "yason"
