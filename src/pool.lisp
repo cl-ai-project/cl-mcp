@@ -444,6 +444,23 @@ NIL, with what is still in flight as the second and third values."
           (bt:condition-wait *work-in-flight-condvar* *pool-lock*
                              :timeout (min remaining 1)))))))
 
+(defun %wait-for-endings (seconds generation)
+  "Wait up to SECONDS until GENERATION has no worker waiting to be ended.
+Returns NIL when that was reached, otherwise how many are still being ended.
+Spawns in flight are not waited for."
+  (let ((deadline (+ (get-internal-real-time)
+                     (* seconds internal-time-units-per-second))))
+    (bt:with-lock-held (*pool-lock*)
+      (loop
+        (when (null (generation-ending generation))
+          (return nil))
+        (let ((remaining (/ (- deadline (get-internal-real-time))
+                            internal-time-units-per-second)))
+          (unless (plusp remaining)
+            (return (length (generation-ending generation))))
+          (bt:condition-wait *work-in-flight-condvar* *pool-lock*
+                             :timeout (min remaining 1)))))))
+
 (defun %replenish-running-p ()
   "True while the running generation's replenishment is under way."
   (bt:with-lock-held (*pool-lock*)
@@ -1481,7 +1498,18 @@ whose work it waits for and whose workers it ends."
     ;; takes its stream, which an RPC running on it holds for as long as the
     ;; request takes -- a shutdown behind a long load waited for all of it.
     (dolist (w workers) (ignore-errors (%signal-worker w)))
-    (dolist (w workers) (%end-worker w)))
+    (dolist (w workers) (%end-worker w))
+    ;; An ending begun after the wait above and before the snapshot --
+    ;; RELEASE-SESSION or KILL-SESSION-WORKER took the worker out of the lists
+    ;; and is ending it outside the lock -- is on this generation too, and
+    ;; the snapshot did not see it.  Wait for it, or it completes after the
+    ;; shutdown returned.  None can begin now: the lists are empty.  Endings
+    ;; only: a spawn that outlived the wait above stays on this generation's
+    ;; account and ends its own worker, and must not hold the shutdown.
+    (let ((ending (%wait-for-endings (%shutdown-wait-seconds) generation)))
+      (when ending
+        (log-event :warn "pool.shutdown.work-still-in-flight"
+                   "spawns" 0 "ending" ending))))
   ;; Wait for in-flight reaper threads (process cleanup from crashes).
   ;; bordeaux-threads 0.x join-thread does not support :timeout,
   ;; so poll thread-alive-p with a deadline instead.
