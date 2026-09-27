@@ -451,6 +451,54 @@ attacks like localhost.evil.com."
         (check-prefix "http://[::1]")
         (check-prefix "https://[::1]"))))
 
+(defvar *http-server-host* nil
+  "The address the running HTTP server was started on, or NIL.")
+
+(defun %loopback-host-p (host)
+  "Return T when HOST, a Host header value such as \"127.0.0.1:3000\",
+\"localhost\" or \"[::1]:3000\", names this machine's loopback interface."
+  (when (and (stringp host) (plusp (length host)))
+    (let ((name (if (char= (char host 0) #\[)
+                    (subseq host 0 (1+ (or (position #\] host) (1- (length host)))))
+                    (subseq host 0 (or (position #\: host) (length host))))))
+      (and (member name '("localhost" "127.0.0.1" "[::1]") :test #'string-equal) t))))
+
+(defun %bound-to-loopback-p ()
+  "Return T when the HTTP server listens on a loopback address only."
+  (and *http-server-host*
+       (member *http-server-host* '("127.0.0.1" "localhost" "::1" "[::1]")
+               :test #'string-equal)
+       t))
+
+(defun %request-refusal ()
+  "Return (values STATUS MESSAGE) when the current request must be refused
+before anything else looks at it, or NIL.
+
+cl-mcp answers repl-eval, so a request that reaches it is code execution.  A
+browser page may not be allowed to make one: the MCP Streamable HTTP
+transport requires validating Origin for exactly this, since a page on a
+rebinding domain resolves to 127.0.0.1 and is same-origin to itself.
+  - Origin, when sent, must be a loopback origin.  Clients that are not
+    browsers send none.
+  - Host must name the loopback interface while the server listens only on
+    it -- the rebinding page's own name arrives here.  A server started on
+    another address was exposed on purpose, and its Host is not checked.
+  - A POST must be application/json: text/plain is what a page can send
+    without a CORS preflight."
+  (let ((origin (get-header :origin))
+        (host (get-header :host)))
+    (cond
+      ((and origin (not (%loopback-origin-p origin)))
+       (values 403 (format nil "Forbidden: Origin ~A is not a loopback origin." origin)))
+      ((and (%bound-to-loopback-p) (not (%loopback-host-p host)))
+       (values 403 (format nil "Forbidden: Host ~A does not name this machine's ~
+loopback interface." (or host "(none)"))))
+      ((and (eq (hunchentoot:request-method hunchentoot:*request*) :post)
+            (let ((content-type (get-header :content-type)))
+              (not (and content-type
+                        (search "application/json" content-type :test #'char-equal)))))
+       (values 415 "Unsupported Media Type: a POST must be Content-Type: application/json.")))))
+
 (defun mcp-dispatcher (request)
   "Dispatch requests to the MCP endpoint."
   (let ((path (hunchentoot:script-name request))
@@ -462,15 +510,19 @@ attacks like localhost.evil.com."
           (when (and origin (%loopback-origin-p origin))
             (set-header :access-control-allow-origin origin)))
         (set-header :access-control-expose-headers "Mcp-Session-Id")
-
-        (case method
-          (:post (handle-mcp-post))
-          (:get (handle-mcp-get))
-          (:delete (handle-mcp-delete))
-          (:options (handle-mcp-options))
-          (otherwise
-           (setf (hunchentoot:return-code*) 405)
-           (json-response "{\"error\":\"Method not allowed\"}")))))))
+        (multiple-value-bind (status message) (%request-refusal)
+          (if status
+              (progn
+                (log-event :warn "http.refused" "status" status "reason" message)
+                (json-response (%http-error-json -32600 message) :status status))
+              (case method
+                (:post (handle-mcp-post))
+                (:get (handle-mcp-get))
+                (:delete (handle-mcp-delete))
+                (:options (handle-mcp-options))
+                (otherwise
+                 (setf (hunchentoot:return-code*) 405)
+                 (json-response "{\"error\":\"Method not allowed\"}")))))))))
 
 ;;; ------------------------------------------------------------
 ;;; Server Control
@@ -558,7 +610,8 @@ Returns the acceptor instance and port number."
                           (when *use-worker-pool*
                             (ignore-errors (shutdown-pool))))))
     (hunchentoot:start *http-server*))
-  (setf *http-server-port* (hunchentoot:acceptor-port *http-server*))
+  (setf *http-server-port* (hunchentoot:acceptor-port *http-server*)
+        *http-server-host* host)
 
   ;; Start periodic session cleanup
   (%start-session-cleanup)
@@ -577,6 +630,7 @@ Returns the acceptor instance and port number."
     (hunchentoot:stop *http-server*)
     (setf *http-server* nil
           *http-server-port* nil
+          *http-server-host* nil
           *http-auth-token* nil)
     ;; Stop session cleanup thread
     (%stop-session-cleanup)

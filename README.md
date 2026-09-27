@@ -311,5 +311,14 @@ full system privileges. Do not expose the endpoint beyond localhost. File
 operation restrictions (project root enforcement) are convenience guardrails
 to prevent accidental mistakes, not security boundaries.
 
+Because a request that reaches it is code execution, the HTTP transport refuses
+what a web page could send it, as the MCP Streamable HTTP transport requires:
+a request whose `Origin` is not a loopback origin (403), a request whose `Host`
+does not name the loopback interface while the server listens only on it
+(403; this is what stops DNS rebinding), and a `POST` that is not
+`Content-Type: application/json` (415). Clients that are not browsers send no
+`Origin` and are unaffected. A server started on a non-loopback address was
+exposed on purpose, and its `Host` is not checked.
+
 ## License
 MIT
