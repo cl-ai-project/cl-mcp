@@ -66,8 +66,9 @@ work on different projects, and none of them moves another's root.
 `MCP_PROJECT_ROOT`, when set, is the default for a session that sets none. If it
 is not set, a session's first file access returns an error prompting it to call
 `fs-set-project-root`; AI agents handle this by setting it to their working
-directory. A root lasts as long as its session, so a reconnect -- a new HTTP
-session or TCP connection -- starts without one and has to set it again.
+directory. A session's own root lasts as long as the session, so a reconnect -- a
+new HTTP session or TCP connection -- starts from `MCP_PROJECT_ROOT` when it is set,
+and otherwise without a root, and has to set its own again.
 
 ### System Prompts
 
