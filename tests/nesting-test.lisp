@@ -11,7 +11,8 @@
                 #:+max-lisp-nesting+
                 #:+max-json-nesting+)
   (:import-from #:cl-mcp/src/validate
-                #:lisp-check-parens))
+                #:lisp-check-parens)
+  (:import-from #:cl-mcp/src/worker-client))
 
 (in-package #:cl-mcp/tests/nesting-test)
 
@@ -53,3 +54,36 @@
   (let ((result (lisp-check-parens
                  :code (concatenate 'string (%opens 20000) (%opens 20000 #\))))))
     (ok (hash-table-p result) "an answer, not a stopped thread")))
+
+(defun %chain (n prefix)
+  (with-output-to-string (s)
+    (dotimes (i n) (write-string prefix s))
+    (write-string "x" s)))
+
+(deftest lisp-depth-counts-prefix-chains
+  ;; From review: only ( was counted, and the reader recurses once per prefix
+  ;; as well, so 20000 quotes exhausted the parent's reader unrefused.
+  (testing "each prefix that reads the object after it is a level"
+    (dolist (prefix '("'" "`" "," ",@" "#'" "#+sbcl " "#-(or a b) " "#1=" "'("))
+      (ok (lisp-too-deep-p (%chain 20000 prefix)) prefix))
+    (ok (not (lisp-too-deep-p (%chain (1- +max-lisp-nesting+) "'")))
+        "a chain within the limit is allowed"))
+  (testing "prefixes whose object is complete give their level back"
+    (ok (not (lisp-too-deep-p (%chain 20000 "'a "))))
+    (ok (not (lisp-too-deep-p (%chain 20000 "'(a) "))))
+    (ok (not (lisp-too-deep-p (%chain 20000 "#+sbcl a "))))))
+
+(deftest lisp-check-parens-refuses-a-prefix-chain
+  (let ((result (lisp-check-parens :code (%chain 20000 "'"))))
+    (ok (hash-table-p result) "an answer, not an exhausted stack")))
+
+(deftest worker-answer-too-deep-is-an-error-answer
+  ;; The parent parses what the worker encodes, and a client chooses how
+  ;; deep that is (preview_max_depth, max_depth).
+  (let ((line (format nil "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":~A~A}~%"
+                      (%opens 5000 #\[) (%opens 5000 #\]))))
+    (with-input-from-string (s line)
+      (ok (handler-case
+              (progn (cl-mcp/src/worker-client::%read-json-rpc-response s 7 nil) nil)
+            (cl-mcp/src/worker-client:worker-rpc-error (e)
+              (search "levels deep" (princ-to-string e))))))))

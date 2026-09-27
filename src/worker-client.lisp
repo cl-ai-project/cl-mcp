@@ -18,6 +18,7 @@
   (:import-from #:usocket)
   (:import-from #:yason)
   (:import-from #:cl-mcp/src/utils/random #:generate-random-hex-string)
+  (:import-from #:cl-mcp/src/utils/nesting #:json-too-deep-p #:+max-json-nesting+)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:*retired-leaked-thread-reason*
                 #:+leaked-thread-exit-code+)
@@ -488,6 +489,17 @@ corruption."
            (let ((line (%read-line-limited stream nil +max-json-line-bytes+)))
              (unless line
                (error 'end-of-file :stream stream))
+             ;; The worker encodes what a client asked it to build, and the
+             ;; parse below recurses per level; an exhausted stack here is the
+             ;; parent's.  The line was read whole, so the stream is still in
+             ;; step and the worker keeps serving: an ordinary error answer.
+             (when (json-too-deep-p line)
+               (error 'worker-rpc-error
+                      :code -32603
+                      :message (format nil "The worker's answer nests more than ~D levels ~
+deep, too deep for this server to read; ask for a shallower result (a lower ~
+preview_max_depth or max_depth)."
+                                       +max-json-nesting+)))
              (let ((json (if preserve-json-types
                              (yason:parse line
                                           :json-arrays-as-vectors t

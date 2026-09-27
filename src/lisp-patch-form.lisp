@@ -214,7 +214,7 @@ parentheses as data), so the reader's own failure is reported."
   ;; The reader recurses once per level; see CHECK-LISP-NESTING.
   (when (lisp-too-deep-p form-text)
     (error 'patch-operation-error
-           :reason (format nil "the patched form nests lists more than ~D levels ~
+           :reason (format nil "the patched form nests lists and prefixes more than ~D levels ~
 deep, which is deeper than cl-mcp will read"
                            +max-lisp-nesting+)))
   (let* ((*read-eval* nil)

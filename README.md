@@ -324,9 +324,11 @@ a page rebound to its LAN address sends an `Origin` matching that `Host`.
 Input that would drive a recursive parser off the end of a thread's stack is
 refused before any parser sees it. SBCL cannot always recover from an exhausted
 stack, and when it cannot, the whole server stops. A JSON message nested more
-than 1000 levels deep is a parse error (-32700). Lisp source nested more than
-500 levels deep is refused by the tools that read it, whether it is a file or
-tool content.
+than 1000 levels deep is a parse error (-32700). A worker's answer that deep
+comes back as an error instead of being read: ask for a shallower `preview_max_depth` or `max_depth`. Lisp source
+that would make the reader recurse more than 500 levels is refused by the tools
+that read it, whether it is a file, tool content or `repl-eval` code. That
+covers nested lists and also chains of prefixes such as `'`, `#'` and `#+`.
 
 ## License
 MIT
