@@ -190,7 +190,13 @@ Host header's value, which is 127.0.0.1:PORT otherwise."
                  (testing "a POST that is not application/json is refused"
                    (ok (eql 415 (status :headers '(("Content-Type" . "text/plain")))))
                    (ok (eql 415 (status :headers '()))
-                       "and one with no Content-Type"))
+                       "and one with no Content-Type")
+                   ;; From review: the media type was searched for, so a header
+                   ;; merely containing it passed.
+                   (ok (eql 415 (status :headers '(("Content-Type" . "text/plain; x=application/json"))))
+                       "a parameter spelling application/json is not the media type")
+                   (ok (eql 415 (status :headers '(("Content-Type" . "application/jsonp"))))
+                       "nor is a longer media type that starts with it"))
                  (testing "a loopback client is still served"
                    (ok (eql 200 (status :headers '(("Content-Type" . "application/json; charset=utf-8")
                                                    ("Origin" . "http://localhost:3000")))))
@@ -208,6 +214,18 @@ Host header's value, which is 127.0.0.1:PORT otherwise."
     (ok (not (funcall host-p "127.0.0.1.evil.example:3000")))
     (ok (not (funcall host-p "")))
     (ok (not (funcall host-p nil)))))
+
+(deftest json-media-type-is-compared-whole
+  (let ((json-p #'cl-mcp/src/http::%json-media-type-p))
+    (ok (funcall json-p "application/json"))
+    (ok (funcall json-p "Application/JSON"))
+    (ok (funcall json-p "application/json; charset=utf-8"))
+    (ok (funcall json-p " application/json ;charset=utf-8"))
+    (ok (not (funcall json-p "text/plain; x=application/json")))
+    (ok (not (funcall json-p "application/jsonp")))
+    (ok (not (funcall json-p "application/json-seq")))
+    (ok (not (funcall json-p "")))
+    (ok (not (funcall json-p nil)))))
 
 ;;; Session timeout tests
 

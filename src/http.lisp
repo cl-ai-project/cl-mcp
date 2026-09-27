@@ -470,6 +470,17 @@ attacks like localhost.evil.com."
                :test #'string-equal)
        t))
 
+(defun %json-media-type-p (content-type)
+  "Return T when CONTENT-TYPE's media type, its parameters removed, is exactly
+application/json (case-insensitively).  Compared whole, not searched for:
+\"text/plain; x=application/json\" and \"application/jsonp\" both contain the
+string and are not JSON."
+  (when (stringp content-type)
+    (let ((media-type (string-trim '(#\Space #\Tab)
+                                   (subseq content-type 0 (or (position #\; content-type)
+                                                              (length content-type))))))
+      (string-equal media-type "application/json"))))
+
 (defun %request-refusal ()
   "Return (values STATUS MESSAGE) when the current request must be refused
 before anything else looks at it, or NIL.
@@ -494,9 +505,7 @@ rebinding domain resolves to 127.0.0.1 and is same-origin to itself.
        (values 403 (format nil "Forbidden: Host ~A does not name this machine's ~
 loopback interface." (or host "(none)"))))
       ((and (eq (hunchentoot:request-method hunchentoot:*request*) :post)
-            (let ((content-type (get-header :content-type)))
-              (not (and content-type
-                        (search "application/json" content-type :test #'char-equal)))))
+            (not (%json-media-type-p (get-header :content-type))))
        (values 415 "Unsupported Media Type: a POST must be Content-Type: application/json.")))))
 
 (defun mcp-dispatcher (request)
