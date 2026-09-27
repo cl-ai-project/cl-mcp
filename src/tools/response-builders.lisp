@@ -296,11 +296,14 @@ still see what was warned about."
                   (when presentp
                     (let ((from (gethash "fasls_cleared_from" ht)))
                       (if (plusp deleted)
-                          (format s "~%clear_fasls: deleted ~D cached FASL~:P~@[ of ~A~], ~
-so every file in it was recompiled from source"
+                          ;; What was deleted, not what was recompiled: a
+                          ;; sibling subsystem this load never reaches loses
+                          ;; its FASLs too and is compiled only when loaded.
+                          (format s "~%clear_fasls: deleted ~D cached FASL~:P~@[ of ~A~]; ~
+every file this load reached without a FASL was compiled from source"
                                   deleted (and from (string/= from system) from))
-                          (format s "~%⚠ clear_fasls deleted no FASLs (~A): nothing ~
-was forced to recompile, so a file is recompiled only if ASDF finds it stale"
+                          (format s "~%⚠ clear_fasls deleted no FASLs (~A), so it forced ~
+no recompilation: a file with a FASL elsewhere was reused unless ASDF judged it stale"
                                   (if from
                                       (format nil "none were cached for ~A" from)
                                       (format nil "no source directory found for ~A ~
