@@ -383,6 +383,13 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                                 (not (string= framework-name "asdf"))
                                 (zerop (length failed-tests-vector)))
                            "⚠ NO TESTS RAN")
+                          ;; The ASDF fallback's successful run: it counts
+                          ;; nothing, and a runner that reports failure by
+                          ;; return value returns normally from a red suite
+                          ;; too, so this is not a pass (#131).
+                          ((and (string= framework-name "asdf")
+                                (zerop failed) (zerop passed))
+                           "⚠ RAN, RESULT UNKNOWN (the ASDF fallback counts nothing; read stdout)")
                           ((zerop failed) "✓ PASS")
                           (t "✗ FAIL")))
             (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%" passed
@@ -411,7 +418,8 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
            (make-ht "content" (text-content summary) "passed" passed "failed"
                     failed "pending" pending "framework" framework-name
                     "duration_ms" duration "failed_tests" failed-tests-vector)))
-      (dolist (field '("success" "stdout" "stderr" "debug_output" "passed_tests"))
+      (dolist (field '("success" "stdout" "stderr" "debug_output" "passed_tests"
+                       "counts_available"))
         (multiple-value-bind (value presentp)
             (gethash field test-result)
           (when presentp (setf (gethash field response) value))))

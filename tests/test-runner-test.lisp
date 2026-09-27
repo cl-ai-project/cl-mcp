@@ -758,9 +758,14 @@
       (ok (search "✗ FAIL" (banner 0 1 0))
           "and a failing run still fails")
       ;; The ASDF fallback reports no counts at all, so its SUCCESS is also
-      ;; zero/zero.  Calling that "no tests ran" would be false.
-      (ok (search "✓ PASS" (banner 0 0 0 :framework :asdf))
-          "a successful asdf:test-system run is a pass, not an empty run")
+      ;; zero/zero.  Calling that "no tests ran" would be false -- and so is
+      ;; calling it a pass: a runner that reports failures by its return value
+      ;; (prove, rove:run) returns normally from a red suite too (#131).
+      (let ((text (banner 0 0 0 :framework :asdf)))
+        (ok (search "RAN, RESULT UNKNOWN" text)
+            "a successful asdf:test-system run says its result is unknown")
+        (ok (not (search "✓ PASS" text)) "not that it passed")
+        (ok (not (search "NO TESTS RAN" text)) "nor that nothing ran"))
       ;; Likewise, entries in failed_tests prove something ran.
       (ok (not (search "NO TESTS RAN"
                        (banner 0 0 0 :failed-tests
@@ -1148,6 +1153,123 @@ RUN-TESTS-LOAD-LOCK-WRAPPER-COVERS-LOAD-PHASE-ONLY is running its thunk.")
                   (remove :fiveam-detail-probe (symbol-value var))))
           (ignore-errors (asdf:clear-system system))
           (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
+
+(defun %call-with-prove-fixture (thunk &key failing)
+  "Write a prove-asdf test system with two test files -- one green, one with a
+SUBTEST and, when FAILING, one wrong assertion -- then call THUNK with its name."
+  (let* ((tmp-dir (uiop:ensure-directory-pathname
+                   (uiop:merge-pathnames*
+                    (format nil "cl-mcp-prove-~A-~A/" (get-universal-time) (random 100000))
+                    (uiop:temporary-directory))))
+         (system (format nil "prove-probe-~A" (random 1000000)))
+         (asd-path (uiop:merge-pathnames* (format nil "~A.asd" system) tmp-dir)))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist tmp-dir)
+           (with-open-file (s asd-path :direction :output :if-exists :supersede)
+             (format s "(asdf:defsystem ~S~%  :defsystem-depends-on (\"prove-asdf\")~%~
+                        ~2@T:depends-on (\"prove\")~%~
+                        ~2@T:components ((:test-file \"first\") (:test-file \"second\"))~%~
+                        ~2@T:perform (asdf:test-op (o c) ~
+                        (uiop:symbol-call :prove-asdf :run-test-system c)))~%"
+                     system))
+           (with-open-file (s (uiop:merge-pathnames* "first.lisp" tmp-dir)
+                              :direction :output :if-exists :supersede)
+             (format s "(defpackage #:~A-first (:use #:cl #:prove))~%~
+                        (in-package #:~A-first)~%~
+                        (plan 2)~%(sleep 0.3)~%(ok t \"truth\")~%(is (+ 1 1) 2 \"adds\")~%~
+                        (finalize)~%"
+                     system system))
+           (with-open-file (s (uiop:merge-pathnames* "second.lisp" tmp-dir)
+                              :direction :output :if-exists :supersede)
+             (format s "(defpackage #:~A-second (:use #:cl #:prove))~%~
+                        (in-package #:~A-second)~%~
+                        (plan 2)~%~
+                        (subtest \"nested\" (ok t \"inner one\") (ok t \"inner two\"))~%~
+                        (is (* 2 3) ~D \"multiplies\")~%(finalize)~%"
+                     system system (if failing 7 6)))
+           ;; On the central registry: RUN-TESTS force-reloads, and the
+           ;; CLEAR-SYSTEM before the reload drops a system ASDF cannot re-find.
+           (let ((asdf:*central-registry* (cons tmp-dir asdf:*central-registry*)))
+             (asdf:load-asd asd-path)
+             (funcall thunk system)))
+      (ignore-errors (asdf:clear-system system))
+      (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t)))))
+
+(deftest prove-suites-are-counted-per-assertion
+  ;; #131: the :prove branch fell through to the ASDF fallback, which counts
+  ;; nothing and took "asdf:test-system did not signal" for success -- and
+  ;; prove reports failure by return value -- so a red prove suite read as
+  ;; ✓ PASS, 0/0.  Prove is resolved at run time, as FiveAM is.
+  (if (null (asdf:find-system "prove-asdf" nil))
+      (rove:skip "prove is not installed; the prove backend cannot run here")
+      (progn
+        (asdf:load-system "prove-asdf")
+        (asdf:load-system "prove")
+        (testing "a green suite reports its real counts"
+          (%call-with-prove-fixture
+           (lambda (system)
+             (let ((result (run-tests system)))
+               (ok (equal "prove" (gethash "framework" result))
+                   (format nil "framework=~A" (gethash "framework" result)))
+               ;; truth, adds, the subtest's two, multiplies.
+               (ok (= 5 (gethash "passed" result)) (format nil "passed=~A" (gethash "passed" result)))
+               (ok (= 0 (gethash "failed" result)))
+               ;; The first file sleeps 0.3s: the duration is the run's, not
+               ;; the ~100ms the fallback reported for a 25s suite.
+               (ok (>= (gethash "duration_ms" result) 250)
+                   (format nil "duration_ms=~A" (gethash "duration_ms" result)))
+               (ok (search "✓ PASS" (gethash "text" (aref (gethash "content"
+                                                                    (build-run-tests-response result))
+                                                          0))))))))
+        (testing "a failing assertion is a failure, with its detail"
+          (%call-with-prove-fixture
+           (lambda (system)
+             (let* ((result (run-tests system))
+                    (failures (gethash "failed_tests" result))
+                    (failure (and (plusp (length failures)) (aref failures 0)))
+                    (text (gethash "text" (aref (gethash "content"
+                                                         (build-run-tests-response result))
+                                                0))))
+               (ok (= 4 (gethash "passed" result)))
+               (ok (= 1 (gethash "failed" result)))
+               (ok (search "✗ FAIL" text) "the banner is a failure, not a pass")
+               (ok (and failure (search "multiplies" (gethash "test_name" failure)))
+                   "the failure names the assertion")
+               (ok (and failure (equal "multiplies" (gethash "description" failure))))
+               (ok (and failure (search "expected 7" (gethash "reason" failure)))
+                   (and failure (gethash "reason" failure)))))
+           :failing t)))))
+
+(deftest asdf-fallback-does-not-call-a-silent-run-a-pass
+  (testing "a test-op that reports failure by return value is not reported green"
+    ;; The hazard #131 names beyond prove: the fallback took "no condition
+    ;; signalled" for success, so any runner that reports failure by its
+    ;; return value rendered as ✓ PASS.
+    (let* ((tmp-dir (uiop:ensure-directory-pathname
+                     (uiop:merge-pathnames*
+                      (format nil "cl-mcp-silent-~A-~A/" (get-universal-time) (random 100000))
+                      (uiop:temporary-directory))))
+           (system (format nil "silent-probe-~A" (random 1000000)))
+           (asd-path (uiop:merge-pathnames* (format nil "~A.asd" system) tmp-dir)))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist tmp-dir)
+             (with-open-file (s asd-path :direction :output :if-exists :supersede)
+               (format s "(asdf:defsystem ~S~%  :perform (asdf:test-op (o c) ~
+                          (format t \"1 of 1 tests failed~~%\") nil))~%"
+                       system))
+             (let ((asdf:*central-registry* (cons tmp-dir asdf:*central-registry*)))
+               (asdf:load-asd asd-path)
+               (let* ((result (run-tests system :framework "asdf"))
+                      (response (build-run-tests-response result))
+                      (text (gethash "text" (aref (gethash "content" response) 0))))
+                 (ok (not (search "✓ PASS" text)) text)
+                 (ok (search "RESULT UNKNOWN" text))
+                 (ok (eq 'yason:false (gethash "counts_available" response))
+                     "counts_available says no counts were taken"))))
+        (ignore-errors (asdf:clear-system system))
+        (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
 
 (deftest fiveam-captures-output-from-a-suite-with-threads-and-sockets
   ;; The FiveAM backend's stdout/stderr capture was removed on the grounds

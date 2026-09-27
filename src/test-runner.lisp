@@ -31,7 +31,10 @@
 Supports multiple test frameworks with automatic detection:
 - Rove: Full structured results with failure details
 - FiveAM: Full structured results with failure details
-- ASDF fallback: Text output capture
+- Prove (prove-asdf test files): one count per assertion, with failure details
+- ASDF fallback: Text output capture only.  It cannot count, so a run that
+  returned without signalling is reported as RAN, RESULT UNKNOWN, never as a
+  pass: read stdout
 
 Returns:
 - content (summary text, backward compatible)
