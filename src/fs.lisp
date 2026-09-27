@@ -670,8 +670,10 @@ Returns a hash-table with updated path information:
          ;; named project[old]/ came back as a wild pathname it then refused.
          ;; The wire protocol carries POSIX paths; parse them as such.
          (requested (uiop:parse-unix-namestring path :ensure-directory t))
-         ;; The session's own root, not the process's working directory,
-         ;; which is whatever the last session to set a root left it at.
+         ;; The session's own root first.  The process's working directory,
+         ;; for a session with none, is the server's own: a session's root
+         ;; no longer moves it (SET-PROJECT-ROOT), so this cannot resolve into
+         ;; another session's tree.
          (base (or prev-root (ignore-errors (uiop/os:getcwd))))
          (temp-root
           (if (uiop/pathname:absolute-pathname-p requested)
@@ -684,6 +686,11 @@ Returns a hash-table with updated path information:
       (error "Refusing to set project root to ~A — too broad"
              (native-path-namestring temp-root)))
     (let ((new-root (truename temp-root)))
+      ;; Checked again on what the path resolves to: a link such as
+      ;; /proc/self/cwd or ~/link-to-root passes the check above as spelled.
+      (when (broad-root-p new-root)
+        (error "Refusing to set project root to ~A — too broad"
+               (native-path-namestring new-root)))
       ;; The calling session's root only: another session's relative paths
       ;; must not start resolving under this one's tree (#129).
       (set-project-root new-root)

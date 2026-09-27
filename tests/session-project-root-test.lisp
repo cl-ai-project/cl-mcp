@@ -149,6 +149,43 @@ scratch directories %SCRATCH-DIR made."
         (ok (equal (%root-of "tA") (%native a))
             "the session already connected keeps its own root")))))
 
+(deftest a-rootless-session-cannot-reach-another-sessions-root
+  (testing "a session's root does not move the process's working directory"
+    ;; Every session shares one working directory, and a session's root was
+    ;; set there: a session with no root of its own then resolved "." -- the
+    ;; documented first call -- into that root and read its files.
+    (with-isolated-roots ("tA" "tN")
+      (let ((a (%scratch-dir "leak-a"))
+            (cwd-before (uiop:getcwd)))
+        (%tool "tA" "fs-set-project-root" "path" (%native a))
+        (ok (equal (uiop:getcwd) cwd-before)
+            "setting a session's root leaves the process's cwd alone")
+        (%tool "tN" "fs-set-project-root" "path" ".")
+        (ok (not (equal (%root-of "tN") (%native a)))
+            (format nil "the rootless session's \".\" is not the other root: ~A"
+                    (%root-of "tN")))))))
+
+(deftest initialize-resolves-a-linked-root-path
+  (testing "a rootPath that is a symbolic link is taken as what it names"
+    ;; Kept as spelled, a link such as /proc/self/cwd was re-resolved by every
+    ;; later guard and followed whatever it came to name.
+    (with-isolated-roots ("tL")
+      (let ((target (%scratch-dir "link-target"))
+             (link (merge-pathnames "session-root-link"
+                                    (merge-pathnames "tests/tmp/"
+                                                     (asdf:system-source-directory :cl-mcp))))
+             (params (make-hash-table :test #'equal)))
+        (ignore-errors (delete-file link))
+        (unwind-protect
+             (progn
+               (sb-posix:symlink (%native target) (namestring link))
+               (setf (gethash "protocolVersion" params) "2025-06-18"
+                     (gethash "rootPath" params) (namestring link))
+               (%call "tL" "initialize" params)
+               (ok (equal (%native (session-project-root "tL")) (%native target))
+                   (format nil "stored as the target: ~A" (session-project-root "tL"))))
+          (ignore-errors (delete-file link)))))))
+
 (deftest a-root-set-outside-any-session-is-the-default
   (testing "with no session id the call sets the global default, as before"
     (with-isolated-roots ("tA")

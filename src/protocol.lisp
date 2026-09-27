@@ -217,6 +217,10 @@ On second failure, return a hardcoded valid JSON-RPC error response."
             ;; keep cl-mcp's own default root.
             (let ((root-dir (uiop:parse-unix-namestring root :ensure-directory t)))
               (when (uiop/filesystem:directory-exists-p root-dir)
+                ;; Resolved, as fs-set-project-root resolves its path: kept as
+                ;; spelled, a link such as /proc/self/cwd was re-resolved by
+                ;; every later guard and followed whatever it came to name.
+                (setf root-dir (uiop:ensure-directory-pathname (truename root-dir)))
                 (let ((broad-p (broad-root-p root-dir)))
                   (cond
                     ;; Reject overly broad roots (same policy as fs.lisp)
