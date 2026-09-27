@@ -277,20 +277,35 @@ dependencies — for package-inferred systems the actual code lives in
 dependency subsystems, so forcing the top system alone recompiles
 nothing, and a source edit landing in the same second as the previous
 compile is masked by second-granularity FILE-WRITE-DATE.  Deleting the
-fasls makes recompilation unconditional.  Returns the number of files
-deleted (0 when the system or its cache directory is absent)."
-  (let* ((system (asdf:find-system system-name nil))
-         (source-dir (and system (asdf:system-source-directory system))))
-    (if (null source-dir)
-        0
-        (let ((deleted 0))
-          (dolist (fasl (directory
-                         (merge-pathnames
-                          "**/*.fasl"
-                          (asdf:apply-output-translations source-dir)))
-                  deleted)
-            (when (ignore-errors (delete-file fasl) t)
-              (incf deleted)))))))
+fasls makes recompilation unconditional.
+
+A package-inferred subsystem such as \"my-app/src/contracts\" has no source
+directory of its own, so its primary system's (\"my-app\") is used: that
+directory holds every fasl in the tree, the subsystem's dependencies
+included.
+
+Returns two values: the number of files deleted (0 when no system or cache
+directory is found), and the name of the system whose directory was
+cleared, or NIL."
+  (flet ((source-dir-of (name)
+           (let ((system (ignore-errors (asdf:find-system name nil))))
+             (and system (asdf:system-source-directory system)))))
+    (let* ((primary (asdf:primary-system-name system-name))
+           (cleared (cond ((source-dir-of system-name) system-name)
+                          ((and (string/= primary system-name)
+                                (source-dir-of primary))
+                           primary)))
+           (source-dir (and cleared (source-dir-of cleared))))
+      (if (null source-dir)
+          (values 0 nil)
+          (let ((deleted 0))
+            (dolist (fasl (directory
+                           (merge-pathnames
+                            "**/*.fasl"
+                            (asdf:apply-output-translations source-dir))))
+              (when (ignore-errors (delete-file fasl) t)
+                (incf deleted)))
+            (values deleted cleared))))))
 
 (declaim (ftype (function (string &key (:force boolean)
                                        (:clear-fasls boolean)
@@ -330,7 +345,10 @@ registering it."
   (check-type system-name string)
   (check-type timeout-seconds (or null (real (0))))
   (let ((system-name (string-downcase system-name))
-        (start-time (get-internal-real-time)))
+        (start-time (get-internal-real-time))
+        ;; Set by the load thread; read after it has been joined.
+        (fasls-deleted nil)
+        (fasls-cleared-from nil))
     (setf *auto-discovered-asd* nil)
     (log-event :info "load-system" "system" system-name "force" force
                "clear_fasls" clear-fasls "timeout" timeout-seconds)
@@ -339,7 +357,11 @@ registering it."
          (lambda ()
            (flet ((%do-load ()
                     (when clear-fasls
-                      (%delete-system-fasls system-name))
+                      (multiple-value-bind (count from)
+                          (%delete-system-fasls system-name)
+                        ;; Summed: a retry after auto-discovery clears again.
+                        (setf fasls-deleted (+ (or fasls-deleted 0) count)
+                              fasls-cleared-from (or from fasls-cleared-from))))
                     (let ((cleared-prior-p
                             (when (and force
                                        (member system-name
@@ -450,4 +472,11 @@ registering it."
                         "duration_ms" elapsed-ms "warnings" warning-count))))
         (when *auto-discovered-asd*
           (setf (gethash "auto_discovered_asd" ht) *auto-discovered-asd*))
+        ;; What clear_fasls did, not only that it was asked: a request that
+        ;; deleted nothing forced no recompilation, and the caller must be
+        ;; able to see that.
+        (when (and clear-fasls fasls-deleted)
+          (setf (gethash "fasls_deleted" ht) fasls-deleted)
+          (when fasls-cleared-from
+            (setf (gethash "fasls_cleared_from" ht) fasls-cleared-from)))
         ht))))

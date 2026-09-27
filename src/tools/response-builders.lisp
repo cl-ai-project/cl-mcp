@@ -291,6 +291,23 @@ still see what was warned about."
                ((string= status "loaded")
                 (format s "System ~A loaded successfully in ~Dms"
                         system (gethash "duration_ms" ht))
+                (multiple-value-bind (deleted presentp)
+                    (gethash "fasls_deleted" ht)
+                  (when presentp
+                    (let ((from (gethash "fasls_cleared_from" ht)))
+                      (if (plusp deleted)
+                          ;; What was deleted, not what was recompiled: a
+                          ;; sibling subsystem this load never reaches loses
+                          ;; its FASLs too and is compiled only when loaded.
+                          (format s "~%clear_fasls: deleted ~D cached FASL~:P~@[ of ~A~]; ~
+every file this load reached without a FASL was compiled from source"
+                                  deleted (and from (string/= from system) from))
+                          (format s "~%⚠ clear_fasls deleted no FASLs (~A), so it forced ~
+no recompilation: a file with a FASL elsewhere was reused unless ASDF judged it stale"
+                                  (if from
+                                      (format nil "none were cached for ~A" from)
+                                      (format nil "no source directory found for ~A ~
+or its primary system" system)))))))
                 (let ((discovered (gethash "auto_discovered_asd" ht)))
                   (when discovered
                     (format s
