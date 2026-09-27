@@ -17,8 +17,8 @@
                 #:transient-error)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
-  (:import-from #:cl-mcp/src/project-root
-                #:*project-root*)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:discover-asd-in-project)
   (:export #:load-system
            #:*system-load-lock-wrapper*
            #:*last-compiler-stderr*))
@@ -128,32 +128,6 @@ prior system instance was actually cleared.
   NIL    - never suppress."
   (cond ((eq flag :auto) cleared-prior-p)
         (t flag)))
-
-(defun %discover-asd-in-project (system-name)
-  "Search *project-root* for a .asd file matching SYSTEM-NAME.
-For package-inferred subsystems like \"foo/tests\", searches for the
-root system \"foo\" since .asd files are named after the root.
-Returns the pathname of the shallowest match, or NIL if none found.
-Wrapped in IGNORE-ERRORS for filesystem robustness."
-  (when *project-root*
-    (ignore-errors
-     (let* ((root-name (string-downcase
-                        (subseq system-name
-                                0 (or (position #\/ system-name)
-                                      (length system-name)))))
-            (pattern (merge-pathnames
-                      (make-pathname :directory '(:relative :wild-inferiors)
-                                     :name root-name
-                                     :type "asd")
-                      *project-root*))
-            (matches (directory pattern)))
-       (when matches
-         ;; Prefer shallowest path (closest to project root)
-         (first
-          (sort (copy-list matches)
-                (lambda (a b)
-                  (< (length (pathname-directory a))
-                     (length (pathname-directory b)))))))))))
 
 (defun %call-with-suppressed-output (thunk &key suppress-redefinition)
   "Call THUNK with compilation and load output suppressed.
@@ -393,7 +367,7 @@ registering it."
                         (asd-path
                           (when (or (string-equal system-name missing)
                                     (string-equal root-name missing))
-                            (%discover-asd-in-project system-name))))
+                            (discover-asd-in-project system-name))))
                    (unless asd-path
                      (error c))
                    (log-event :info "load-system-auto-discover"

@@ -1266,6 +1266,10 @@ SUBTEST and, when FAILING, one wrong assertion -- then call THUNK with its name.
                       (text (gethash "text" (aref (gethash "content" response) 0))))
                  (ok (not (search "✓ PASS" text)) text)
                  (ok (search "RESULT UNKNOWN" text))
+                 ;; The runner's own words are the fallback's only verdict,
+                 ;; and content[].text is all a client renders.
+                 (ok (search "1 of 1 tests failed" text)
+                     "the text carries the tail of what the runner printed")
                  (ok (eq 'yason:false (gethash "counts_available" response))
                      "counts_available says no counts were taken")
                  ;; The structured field must not say what the banner denies.
@@ -1274,6 +1278,50 @@ SUBTEST and, when FAILING, one wrong assertion -- then call THUNK with its name.
                        (format nil "success is null (unknown), not true: ~S" success))))))
         (ignore-errors (asdf:clear-system system))
         (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
+
+(deftest run-tests-finds-an-unregistered-asd-under-the-project-root
+  (testing "a test system whose .asd nobody registered yet is found, as load-system finds it"
+    ;; Found dogfooding v3.0.1: a freshly written .asd made run-tests stop at
+    ;; MISSING-COMPONENT while load-system found the same system unprompted.
+    (let* ((root (uiop:ensure-directory-pathname (asdf:system-source-directory :cl-mcp)))
+           (system (format nil "discover-probe-~A" (random 1000000)))
+           (dir (uiop:merge-pathnames* (format nil "tests/tmp/~A/" system) root)))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist dir)
+             (with-open-file (s (uiop:merge-pathnames* (format nil "~A.asd" system) dir)
+                                :direction :output :if-exists :supersede)
+               (format s "(asdf:defsystem ~S :perform (asdf:test-op (o c) ~
+                          (format t \"probe ran~~%\")))~%" system))
+             (ok (null (asdf:find-system system nil)) "precondition: ASDF does not know it")
+             ;; Bound first: the discovery searches *PROJECT-ROOT*.
+             (let ((cl-mcp/src/project-root:*project-root* root))
+               (let ((result (run-tests system :framework "asdf")))
+                 (ok (equal "asdf" (gethash "framework" result))
+                     (format nil "it ran instead of failing to load: framework=~A"
+                             (gethash "framework" result))))))
+        (ignore-errors (asdf:clear-system system))
+        (ignore-errors (uiop:delete-directory-tree dir :validate t))))))
+
+(deftest run-tests-on-an-unknown-system-does-not-blame-the-worker
+  (testing "a name ASDF cannot find says so, rather than advising pool-kill-worker"
+    (let* ((system (format nil "no-such-system-~A" (random 1000000)))
+           (result (let ((cl-mcp/src/project-root:*project-root*
+                           (asdf:system-source-directory :cl-mcp)))
+                     (run-tests system)))
+           (reason (gethash "reason" (aref (gethash "failed_tests" result) 0))))
+      (ok (equal "load-error" (gethash "framework" result)))
+      (ok (search "Check the name" reason) reason)
+      (ok (not (search "pool-kill-worker" reason)) "the worker is not to blame"))))
+
+(deftest output-tail-keeps-the-last-lines
+  (let ((tail #'cl-mcp/src/tools/response-builders::%output-tail))
+    (ok (null (funcall tail "")) "empty is NIL")
+    (ok (null (funcall tail nil)) "absent is NIL")
+    (ok (equal "a" (funcall tail (format nil "a~%~%"))) "trailing blank lines dropped")
+    (ok (equal (format nil "c~%d") (funcall tail (format nil "a~%b~%c~%d~%") :max-lines 2))
+        "the last N lines")
+    (ok (equal "xyz" (funcall tail "uvwxyz" :max-chars 3)) "and at most N characters")))
 
 (deftest fiveam-captures-output-from-a-suite-with-threads-and-sockets
   ;; The FiveAM backend's stdout/stderr capture was removed on the grounds

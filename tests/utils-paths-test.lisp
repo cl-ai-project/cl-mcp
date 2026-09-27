@@ -229,3 +229,19 @@
                    "and the shown path is accepted by the read policy")))
         (ignore-errors (delete-file file))
         (ignore-errors (uiop:delete-empty-directory dir))))))
+
+(deftest root-not-set-advice-survives-the-client-cut
+  (testing "the reconnect advice is not lost to the 500-character cut"
+    ;; Found dogfooding v3.0.1: the message reaches the client through a
+    ;; tool's "Internal error during <tool>: " prefix and SANITIZE-ERROR-MESSAGE,
+    ;; which cuts at 500 characters -- and cut the old message mid-word, just
+    ;; before the advice that a reconnect needs the root again.
+    (let* ((*project-root* nil)
+           (message (handler-case (progn (cl-mcp/src/utils/paths:ensure-project-root) nil)
+                      (error (e) (princ-to-string e))))
+           (shown (cl-mcp/src/utils/sanitize:sanitize-error-message
+                   (format nil "Internal error during fs-get-project-info: ~A" message))))
+      (ok (search "Project root is not set" shown))
+      (ok (search "fs-set-project-root" shown))
+      (ok (search "reconnect" shown) shown)
+      (ok (search "MCP_PROJECT_ROOT" shown) shown))))
