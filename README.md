@@ -59,10 +59,16 @@ sbcl --eval '(require :asdf)' \
      --eval '(cl-mcp:run :transport :stdio)'
 ```
 
-**Project root**: File operations require a project root to be set. If
-`MCP_PROJECT_ROOT` is not set, the first file access will return an error
-prompting you to call `fs-set-project-root`. AI agents handle this
-automatically by setting it to their working directory.
+**Project root**: File operations require a project root to be set. The root
+belongs to the session that sets it, with `fs-set-project-root` or with
+`initialize`'s `rootPath`/`rootUri`: several agents can share one server and
+work on different projects, and none of them moves another's root.
+`MCP_PROJECT_ROOT`, when set, is the default for a session that sets none. If it
+is not set, a session's first file access returns an error prompting it to call
+`fs-set-project-root`; AI agents handle this by setting it to their working
+directory. A session's own root lasts as long as the session, so a reconnect -- a
+new HTTP session or TCP connection -- starts from `MCP_PROJECT_ROOT` when it is set,
+and otherwise without a root, and has to set its own again.
 
 ### System Prompts
 
@@ -197,7 +203,8 @@ you keep your SLIME/Sly session while Codex works through the bridge.
 Eval-dependent tools (`repl-eval`, `load-system`, `run-tests`, `code-*`,
 `clos-describe`, `inspect-object`) run in isolated child SBCL processes. Each session gets
 a dedicated worker with automatic crash recovery and circuit breaker protection.
-File-system and editing tools run inline in the parent process.
+File-system and editing tools run inline in the parent process, each request under
+its own session's project root.
 
 With the worker pool enabled, a worker crash loses all worker-local Lisp state
 (loaded systems, definitions, packages, and REPL state). Any in-flight call
@@ -224,7 +231,7 @@ Disable the worker pool with `MCP_NO_WORKER_POOL=1` or the `:worker-pool` keywor
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `MCP_PROJECT_ROOT` | Project root directory for file operations | client working directory |
+| `MCP_PROJECT_ROOT` | Default project root for sessions that set none of their own | (not set: each session sets its own) |
 | `MCP_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
 | `MCP_LOG_FILE` | Log to file (timestamped with PID) | (stderr only) |
 | `MCP_NO_WORKER_POOL` | Set to `1` to disable worker pool isolation | (not set = pool enabled) |

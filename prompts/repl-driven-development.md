@@ -233,6 +233,8 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
 
 ### "Project root is not set"
 Call `fs-set-project-root` with your working directory, or set `MCP_PROJECT_ROOT` env var.
+The root belongs to the session: a new session -- after a reconnect, for instance --
+does not inherit one an earlier session set; without `MCP_PROJECT_ROOT` it starts with none.
 
 ### "Symbol not found"
 - System not loaded -> `load-system`

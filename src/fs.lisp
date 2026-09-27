@@ -837,10 +837,12 @@ path resolution context."
                      "workers" (gethash "workers" info)))))
 
 (define-tool "fs-set-project-root"
-  :description "Set the server's project root directory to the specified path.
-Use this to synchronize the server's working directory with the client's
-project location. The server will change its current working directory
-to the specified path.
+  :description "Set this session's project root directory to the specified path.
+Use this to synchronize the server with the client's project location. File,
+edit and search tools resolve this session's relative paths against it, and
+this session's worker is moved to it; other sessions on the same server keep
+their own roots. The root lasts as long as the session: after a reconnect,
+call this again.
 RESTRICTION: You MUST only provide your current working directory (e.g., obtained via pwd).
 Do not use arbitrary paths."
   :args ((path :type :string :required t

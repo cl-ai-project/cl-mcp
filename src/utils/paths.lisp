@@ -37,11 +37,14 @@ call fs-set-project-root tool with your current working directory:
    Arguments: {\"path\": \"/absolute/path/to/your/project\"}
 
 CURRENT SERVER STATE:
-- Current working directory: ~A
+- Server process working directory (shared by every session, not this
+  session's root): ~A
 - Registered ASDF systems: ~D
 
-For AI agents: Call fs-set-project-root at the start of your session with your
-current working directory to synchronize the server's project root."
+For AI agents: the project root belongs to your session. Call
+fs-set-project-root at the start of every session with your current working
+directory -- again after a reconnect, since a new session starts without one
+unless the server was started with MCP_PROJECT_ROOT."
            (or (ignore-errors (namestring (uiop/os:getcwd))) "(unknown)")
            (length (asdf/system-registry:registered-systems)))))
 
