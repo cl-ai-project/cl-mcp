@@ -393,6 +393,40 @@ Cleans up server and socket on exit. AUTHENTICATED selects post-auth tests."
           (ok (stringp (gethash "stdout" result))
               "result has stdout string"))))))
 
+(deftest worker-survives-a-lone-surrogate-in-a-result
+  (testing "a result holding U+DFFF is answered, and the connection goes on"
+    ;; Yason writes a lone surrogate as the character itself, and the UTF-8
+    ;; stream to the parent cannot encode one: the write signalled and the
+    ;; worker died, for any result or output line holding (code-char #xDFFF).
+    (with-handler-server (stream :authenticated t)
+      (flet ((eval-code (id code)
+               (let ((params (make-hash-table :test 'equal)))
+                 (setf (gethash "code" params) code
+                       (gethash "package" params) "CL-USER")
+                 (%result-of (%send-and-receive stream id "worker/eval" params)))))
+        (let* ((result (eval-code 110 "(format nil \"a~Cb\" (code-char #xDFFF))"))
+               (text (gethash "text" (aref (gethash "content" result) 0))))
+          (ok (search (coerce (list #\a (code-char #xFFFD) #\b) 'string) text)
+              (format nil "replaced by U+FFFD: ~S" text))
+          (ok (notany (lambda (c) (<= #xD800 (char-code c) #xDFFF)) text)
+              "no surrogate reaches the parent"))
+        (let* ((result (eval-code 111 "(progn (princ (code-char #xDC00)) :printed)"))
+               (text (gethash "text" (aref (gethash "content" result) 0))))
+          (ok (search "printed" text :test #'char-equal) "output holding one is answered too"))
+        (let* ((result (eval-code 112 "(+ 1 2)"))
+               (text (gethash "text" (aref (gethash "content" result) 0))))
+          (ok (search "3" text) "and the worker is still serving"))))))
+
+(deftest encode-response-keeps-a-pair-escaped-and-replaces-a-lone-surrogate
+  (let ((encode #'cl-mcp/src/worker/server::%encode-response)
+         (ht (make-hash-table :test 'equal)))
+    (setf (gethash "s" ht) (coerce (list #\x (code-char #xD800) (code-char #x1F600)) 'string))
+    (let ((json (funcall encode ht)))
+      (ok (notany (lambda (c) (<= #xD800 (char-code c) #xDFFF)) json))
+      (ok (search (string (code-char #xFFFD)) json))
+      (ok (search "\\uD83D\\uDE00" json :test #'char-equal)
+          "a character above U+FFFF is still escaped as its pair"))))
+
 (deftest worker-eval-returns-object-preview
   (testing "worker/eval returns result_preview for non-primitive results"
     (with-handler-server (stream :authenticated t)

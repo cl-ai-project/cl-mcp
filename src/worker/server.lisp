@@ -82,8 +82,21 @@ that returns a hash-table to be used as the JSON-RPC result."
   (log-event :debug "worker.method.registered" "method" method-name))
 
 (defun %encode-response (obj)
-  "Encode OBJ as a single-line JSON string."
-  (with-output-to-string (s) (yason:encode obj s)))
+  "Encode OBJ as a single-line JSON string.
+
+A lone UTF-16 surrogate (U+D800-U+DFFF) is replaced by U+FFFD.  Yason escapes a
+character above U+FFFF as a \\uXXXX surrogate pair but writes a lone surrogate
+as the character itself, and a UTF-8 stream cannot encode one: the write to the
+parent signalled, and the worker died -- from nothing more than a result or a
+line of output holding (code-char #xDFFF).  Replaced here, after encoding, so
+every field is covered whatever produced it; such a character can only occur
+inside a JSON string."
+  (let ((json (with-output-to-string (s) (yason:encode obj s))))
+    (if (find-if (lambda (c) (<= #xD800 (char-code c) #xDFFF)) json)
+        (substitute-if (code-char #xFFFD)
+                       (lambda (c) (<= #xD800 (char-code c) #xDFFF))
+                       json)
+        json)))
 
 (defparameter *retire-action*
   (lambda (leaked)
