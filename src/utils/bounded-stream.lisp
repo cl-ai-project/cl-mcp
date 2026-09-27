@@ -33,8 +33,13 @@
    ;; The last TAIL-LIMIT characters written, dropped ones included, when a
    ;; TAIL-LIMIT was given: the head kept above is what a chatty writer
    ;; printed first, and a runner's verdict is what it printed last.
-   (tail-limit :initarg :tail-limit :initform nil :reader %tail-limit)
-   (tail :initform nil :accessor %tail))
+   (tail-limit :initarg :tail-limit :initform nil :reader %tail-limit
+               :documentation "How many of the last characters written to keep,
+or NIL to keep no tail.")
+   (tail :initform nil :accessor %tail
+         :documentation "The tail buffer, created on the first write when
+TAIL-LIMIT is set: an adjustable string cut back to TAIL-LIMIT characters
+whenever it reaches twice that."))
   (:documentation "A character sink that keeps at most LIMIT characters.
 
 Writes past the limit are counted and discarded rather than stored, so the

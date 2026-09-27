@@ -879,7 +879,7 @@ COMPILE-FILE-ERROR."
             (unless (asdf:find-system system-name nil)
               (let ((asd (discover-asd-in-project system-name)))
                 (when asd
-                  (log-event :info "run-tests-auto-discover"
+                  (log-event :info "test.runner.discover"
                              "system" system-name "asd_path" (namestring asd))
                   (asdf:load-asd asd))))
             (when (asdf:find-system system-name nil)
