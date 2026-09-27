@@ -417,7 +417,7 @@
 
 (deftest load-system-response-says-when-clear-fasls-deleted-nothing
   (testing "a clear_fasls that deleted nothing is not silent"
-    (let* ((ht (make-hash-table :test #'equal)))
+    (let ((ht (make-hash-table :test #'equal)))
       (setf (gethash "status" ht) "loaded"
             (gethash "duration_ms" ht) 5
             (gethash "warnings" ht) 0
