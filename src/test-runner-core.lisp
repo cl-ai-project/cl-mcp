@@ -8,6 +8,7 @@
                 #:log-event)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht
+                #:json-bool
                 #:transient-error)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
@@ -1243,7 +1244,13 @@ the surrounding passed/failed/pending/failure-details bindings."
                         "framework" "asdf"
                         "duration_ms" duration-ms
                         "failed_tests" failed-tests
-                        "success" success)))
+                        ;; ASDF:TEST-SYSTEM returns no counts, and a runner that
+                        ;; reports failure by return value (prove, rove:run)
+                        ;; does not signal: returning normally is not a pass.
+                        ;; A signal is a known failure (false); a normal return
+                        ;; is unknown (null), never true.
+                        "success" (if success nil (json-bool nil))
+                        "counts_available" (json-bool nil))))
       (when (plusp (length stdout))
         (setf (gethash "stdout" ht) stdout))
       (when (plusp (length stderr))
@@ -1252,6 +1259,160 @@ the surrounding passed/failed/pending/failure-details bindings."
         (when (plusp (length debug-output))
           (setf (gethash "debug_output" ht) debug-output)))
       ht)))
+
+;;; ---------------------------------------------------------------------------
+;;; Prove
+;;;
+;;; cl-mcp does not depend on prove: every prove symbol is looked up when a
+;;; run needs it.  A prove-asdf test system declares its files as
+;;; (:test-file ...) components, whose load-op only records them in
+;;; PROVE.ASDF::*SYSTEM-TEST-FILES*; loading one (load-source-op) runs it.
+;;; ASDF:TEST-SYSTEM reports the outcome by return value, never by signalling,
+;;; so the ASDF fallback saw every prove run as a pass (#131).  Here each file
+;;; is run under a suite of our own, bound to PROVE.SUITE:*SUITE*, which every
+;;; assertion of the file -- a SUBTEST's as one composed report -- lands in.
+;;; ---------------------------------------------------------------------------
+
+(defun %prove-symbol (package-name symbol-name)
+  "Return prove's symbol SYMBOL-NAME in PACKAGE-NAME, or NIL when absent."
+  (let ((package (find-package package-name)))
+    (and package (find-symbol symbol-name package))))
+
+(defun %prove-test-files (system-name)
+  "Return SYSTEM-NAME's prove-asdf test-file components in declaration order,
+or NIL when prove-asdf recorded none."
+  (let ((table (%prove-symbol "PROVE.ASDF" "*SYSTEM-TEST-FILES*"))
+        (system (asdf:find-system system-name nil)))
+    (and table system (boundp table)
+         (reverse (gethash system (symbol-value table))))))
+
+(defun %prove-report-kind (report)
+  "Classify a prove leaf REPORT as :PASSED, :FAILED, :SKIPPED or NIL (a comment)."
+  (flet ((of-class-p (name)
+           (let ((class (%prove-symbol "PROVE.REPORT" name)))
+             (and class (typep report class)))))
+    (cond ((of-class-p "SKIPPED-TEST-REPORT") :skipped)
+          ((of-class-p "FAILED-TEST-REPORT") :failed)
+          ((of-class-p "PASSED-TEST-REPORT") :passed))))
+
+(defun %prove-leaf-reports (reports)
+  "Return the leaf reports under REPORTS (a sequence), expanding each SUBTEST's
+composed report into the assertions it holds, in order."
+  (let ((composed (%prove-symbol "PROVE.REPORT" "COMPOSED-TEST-REPORT"))
+        (children (%prove-symbol "PROVE.REPORT" "CHILDREN"))
+        (leaves '()))
+    (labels ((walk (report)
+               (if (and composed (typep report composed))
+                   (map nil #'walk (slot-value report children))
+                   (push report leaves))))
+      (map nil #'walk reports))
+    (nreverse leaves)))
+
+(defun %prove-slot (report name)
+  "Return REPORT's prove slot NAME, or NIL when it has none or it is unbound."
+  (let ((slot (%prove-symbol "PROVE.REPORT" name)))
+    (and slot (slot-exists-p report slot) (slot-boundp report slot)
+         (slot-value report slot))))
+
+(defun %prove-failure-detail (report file-name index)
+  "Build a failure detail for the failed prove REPORT, the INDEXth assertion of
+the test file FILE-NAME."
+  (let ((description (%prove-slot report "DESCRIPTION"))
+         (got (%prove-slot report "GOT"))
+         (expected (%prove-slot report "EXPECTED"))
+         (got-form (%prove-slot report "GOT-FORM"))
+         (notp (%prove-slot report "NOTP"))
+         (errorp (let ((class (%prove-symbol "PROVE.REPORT" "ERROR-TEST-REPORT")))
+                   (and class (typep report class)))))
+    (make-failure-detail
+     :test-name (format nil "~A: ~:[assertion ~D~;~:*~A~*~]" file-name description index)
+     :description description
+     :form got-form
+     :values (list got expected)
+     :reason (if (and errorp (typep got 'condition))
+                 (format nil "raised ~A: ~A" (type-of got)
+                         (or (ignore-errors (princ-to-string got)) "(unprintable)"))
+                 (format nil "got ~A, expected ~:[~;not ~]~A"
+                         (%source-text got) notp (%source-text expected))))))
+
+(defun run-prove-tests (system-name)
+  "Run SYSTEM-NAME's prove test files and return structured results: one count
+per assertion, SUBTESTs expanded, and a failure detail for each failed one.
+
+Falls back to RUN-ASDF-FALLBACK when prove-asdf recorded no test file for the
+system -- a system that runs prove some other way from its test-op."
+  (log-event :info "test.runner" "framework" "prove" "system" system-name)
+  (let ((files (%prove-test-files system-name))
+        (suite-var (%prove-symbol "PROVE.SUITE" "*SUITE*"))
+        (suite-class (%prove-symbol "PROVE.SUITE" "SUITE"))
+        (reports-fn (%prove-symbol "PROVE.SUITE" "REPORTS"))
+        (output-var (%prove-symbol "PROVE.OUTPUT" "*TEST-RESULT-OUTPUT*"))
+        (color-var (%prove-symbol "PROVE.COLOR" "*ENABLE-COLORS*")))
+    (unless (and files suite-var suite-class reports-fn output-var)
+      (log-event :warn "test.runner" "message"
+                 "No prove-asdf test files recorded; using ASDF fallback"
+                 "system" system-name)
+      (return-from run-prove-tests (run-asdf-fallback system-name)))
+    (let ((output (%make-capture-stream))
+          (error-output (%make-capture-stream))
+          (debug-stream (%make-capture-stream))
+          (start-time (get-internal-real-time))
+          (passed 0) (failed 0) (pending 0)
+          (failures '()))
+      (dolist (file files)
+        (let ((suite (make-instance suite-class))
+              (file-name (file-namestring (asdf:component-pathname file))))
+          (handler-case
+              (progv (list suite-var output-var)
+                  (list suite output)
+                (let ((*standard-output* output)
+                      (*error-output* error-output)
+                      (*test-debug-output* debug-stream))
+                  ;; Performed directly, as prove-asdf itself does, so ASDF
+                  ;; warns that the action's prepare-source-op "wasn't done
+                  ;; yet".  It says nothing about the tests: muffled.
+                  (handler-bind
+                      ((warning
+                         (lambda (w)
+                           (when (search "just-done stamp"
+                                         (or (ignore-errors (princ-to-string w)) ""))
+                             (muffle-warning w)))))
+                    (if color-var
+                        (progv (list color-var) (list nil)
+                          (asdf:perform 'asdf:load-source-op file))
+                        (asdf:perform 'asdf:load-source-op file)))))
+            ;; The file itself failed -- a reader error, an error between
+            ;; assertions.  What ran before it still counts.
+            (error (c)
+              (incf failed)
+              (push (make-failure-detail
+                     :test-name file-name
+                     :reason (format nil "the test file signalled ~A: ~A" (type-of c)
+                                     (or (ignore-errors (princ-to-string c))
+                                         "(unprintable)")))
+                    failures)))
+          (loop for report in (%prove-leaf-reports (funcall reports-fn suite))
+                for index from 1
+                do (case (%prove-report-kind report)
+                     (:passed (incf passed))
+                     (:skipped (incf pending))
+                     (:failed
+                      (incf failed)
+                      (push (%prove-failure-detail report file-name index) failures))))))
+      (let ((ht (make-test-result
+                 :passed passed :failed failed :pending pending
+                 :failed-tests (nreverse failures)
+                 :framework :prove
+                 :duration (round (* 1000 (/ (- (get-internal-real-time) start-time)
+                                             internal-time-units-per-second))))))
+        (let ((stdout (bounded-output-string output))
+              (stderr (bounded-output-string error-output))
+              (debug-output (bounded-output-string debug-stream)))
+          (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
+          (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
+          (when (plusp (length debug-output))
+            (setf (gethash "debug_output" ht) debug-output)))
+        ht))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Main Entry Point
@@ -1726,9 +1887,7 @@ may itself block on the caller's lock."
            (when selective-requested-p
              (error
               "Selective test execution is currently supported only with Rove"))
-           (log-event :warn "test.runner" "message"
-                      "Prove support not yet implemented")
-           (run-asdf-fallback system-name))
+           (run-prove-tests system-name))
           (t
            (when selective-requested-p
              (error

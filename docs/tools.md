@@ -984,7 +984,7 @@ Run tests for a system and return structured results with pass/fail counts and f
 
 Input:
 - `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`)
-- `framework` (string, optional): Force a specific framework (`"rove"`, `"fiveam"`, or `"auto"` for auto-detect). Auto-detection reads the test system's own `:depends-on`: a framework the system declares directly wins, then one reached transitively, and only for a system ASDF has not registered does it fall back to guessing from the loaded packages. Detection never loads anything.
+- `framework` (string, optional): Force a specific framework (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, or `"auto"` for auto-detect). Auto-detection reads the test system's own `:depends-on`: a framework the system declares directly wins, then one reached transitively, and only for a system ASDF has not registered does it fall back to guessing from the loaded packages. Detection never loads anything.
 - `test` (string, optional): Run only a specific test by fully qualified name (e.g., `"my-package::my-test-name"`)
 - `tests` (array of strings, optional): Run only the listed fully qualified tests
 
@@ -992,10 +992,15 @@ Output:
 - `passed` (integer): Number of passed tests
 - `failed` (integer): Number of failed tests
 - `pending` (integer): Number of pending/skipped tests (when reported by the framework)
-- `framework` (string): Framework or outcome category used (`"rove"`, `"fiveam"`, `"asdf"`, `"load-error"`, `"unresolved"`, or `"timeout"`)
+- `framework` (string): Framework or outcome category used (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, `"load-error"`, `"unresolved"`, or `"timeout"`)
+- `counts_available` (boolean, ASDF fallback only): `false` — `asdf:test-system` reports no counts
+- `success` (boolean|null, ASDF fallback only): `false` when `asdf:test-system` signalled; `null` when it
+  returned normally, which says nothing about whether the tests passed
 - `duration_ms` (integer): Execution time in milliseconds
 
-The summary line in `content[].text` is `✓ PASS`, `✗ FAIL`, `✗ LOAD FAILED`, `✗ UNRESOLVED`, `✗ TIMEOUT`, or `⚠ NO TESTS RAN`. The last means the run completed but executed nothing — a system with no tests, or a selection that matched none. It is not a failure, but it is not a pass either.
+The summary line in `content[].text` is `✓ PASS`, `✗ FAIL`, `✗ LOAD FAILED`, `✗ UNRESOLVED`, `✗ TIMEOUT`, `⚠ NO TESTS RAN`, or `⚠ RAN, RESULT UNKNOWN`. `⚠ NO TESTS RAN` means the run completed but executed nothing — a system with no tests, or a selection that matched none. It is not a failure, but it is not a pass either. `⚠ RAN, RESULT UNKNOWN` is the ASDF fallback's: `asdf:test-system` returned without signalling, but it reports no counts, and a runner that reports failures by its return value (prove, `rove:run`) returns normally from a failing suite too — read `stdout`.
+
+Prove is supported for prove-asdf test systems (`:defsystem-depends-on ("prove-asdf")` and `(:test-file ...)` components): each test file is run and every assertion counted, a `subtest`'s one by one, with a failure detail per failed assertion (`description`, the tested `form`, `values` got and expected, `reason`). A prove system that runs its tests some other way falls back to ASDF. `test`/`tests` selection is not supported for prove.
 
 - `failed_tests` (array, when failures exist): Detailed failure information including:
   - `test_name`: Name of the failing test

@@ -199,6 +199,7 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
 - Run selected tests: `{"system": "my-system/tests", "tests": ["my-system/tests::first-test", "my-system/tests::second-test"]}`
 - Framework is detected from the test system's own `:depends-on`; override with `{"system": "my-system/tests", "framework": "fiveam"}`
 - A `⚠ NO TESTS RAN` summary means the run completed but executed nothing — check the system name and any `tests` selection before reading it as success
+- A `⚠ RAN, RESULT UNKNOWN` summary is the ASDF fallback's: it cannot count, so read `stdout` for the verdict
 - Failure details: `failed_tests` array with `test_name`, `description`, `form`, `values`, `reason`, `source`
 - Response includes `stdout`/`stderr` fields (structured data only, NOT shown in summary text)
 - **Print debugging**: `format t` output goes to `stdout` (not visible in summary). To see debug prints in the summary, write to `*test-debug-output*`:
