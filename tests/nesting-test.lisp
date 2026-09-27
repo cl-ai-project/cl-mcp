@@ -64,7 +64,11 @@
   ;; From review: only ( was counted, and the reader recurses once per prefix
   ;; as well, so 20000 quotes exhausted the parent's reader unrefused.
   (testing "each prefix that reads the object after it is a level"
-    (dolist (prefix '("'" "`" "," ",@" "#'" "#+sbcl " "#-(or a b) " "#1=" "'("))
+    (dolist (prefix '("'" "`" "," ",@" "#'" "#+sbcl " "#-(or a b) " "#1=" "'("
+                      ;; From the third review: dispatch macros other than the
+                      ;; named ones fell through as atoms, and a feature
+                      ;; expression's own nesting was skipped uncounted.
+                      "#C" "#S" "#P" "#0A" "#X" "#.(" "#(" "#+(not " "#+#+a b "))
       (ok (lisp-too-deep-p (%chain 20000 prefix)) prefix))
     (ok (not (lisp-too-deep-p (%chain (1- +max-lisp-nesting+) "'")))
         "a chain within the limit is allowed"))
@@ -87,3 +91,15 @@
               (progn (cl-mcp/src/worker-client::%read-json-rpc-response s 7 nil) nil)
             (cl-mcp/src/worker-client:worker-rpc-error (e)
               (search "levels deep" (princ-to-string e))))))))
+
+(deftest a-request-to-the-worker-carries-no-lone-surrogate
+  ;; A client's \uDFFF decodes to a lone surrogate; written raw, the UTF-8
+  ;; write to the worker failed and the worker was marked crashed.
+  (let* ((params (make-hash-table :test 'equal))
+         (line (progn
+                 (setf (gethash "code" params) (coerce (list #\a (code-char #xDFFF) #\b) 'string))
+                 (with-output-to-string (s)
+                   (cl-mcp/src/worker-client::%send-json-rpc s 1 "worker/eval" params)))))
+    (ok (notany (lambda (c) (<= #xD800 (char-code c) #xDFFF)) line) "no surrogate is written")
+    (ok (search (coerce (list #\a (code-char #xFFFD) #\b) 'string) line)
+        "U+FFFD stands in its place")))

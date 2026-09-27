@@ -54,30 +54,43 @@ need not be valid JSON."
   "Return T when reading TEXT, Lisp source in standard syntax, would recurse
 more than LIMIT levels deep.
 
-The reader recurses once per open list and once per prefix that reads the
-object after it -- ' ` , ,@ #' #. #+ #- and #n= -- so a chain of prefixes
-counts like nested lists: ''''x is four levels, and a prefix before a list
-stays counted until that list closes.  Parentheses and prefixes in strings,
-|symbols|, comments and character names such as #\\( do not count, nor does
-one after a single escape.  The text need not read; custom reader syntax is
-counted as standard syntax, so the answer is an estimate, which is all a limit
-this far from real code needs."
+The scan mirrors the reader's recursion with an explicit stack of the reads
+still waiting for an object: an open list waits for its ), a prefix such as
+' ` , ,@ #' or #. waits for one object, and #+ or #- for two -- the feature
+expression, then the form.  Any other dispatch (#C, #S, #P, #A, #n=, one a
+readtable defines ...) is taken to wait for one object too, so an unknown
+macro can only make the count larger.  An atom completes the read on top of
+the stack, and a read that completes completes the one below it.  Strings,
+|symbols|, comments and #\\x are atoms or skipped, so a ( inside them does
+not count.  The text need not read; custom syntax is counted as standard
+syntax, so the answer is an estimate -- one that errs towards a larger
+depth, which is all a limit this far from real code needs."
   (declare (type string text) (type fixnum limit))
-  (let ((depth 0)                       ; levels held by open lists
-        (run 0)                         ; prefixes waiting for their object
-        (held '())                      ; levels each open list holds
+  (let ((stack '())                     ; :list, or a cons (:need . n)
+        (depth 0)
         (i 0)
         (n (length text)))
-    (declare (type fixnum depth run i n))
+    (declare (type fixnum depth i n))
     (labels ((peek (k)
                (and (< (+ i k) n) (char text (+ i k))))
-             (prefix ()
-               (incf run)
-               (when (> (+ depth run) limit)
+             (push-frame (frame)
+               (push frame stack)
+               (when (> (incf depth) limit)
                  (return-from lisp-too-deep-p t)))
-             (object-done ()
-               ;; An atom completes the object every waiting prefix reads.
-               (setf run 0))
+             (pop-frame ()
+               (pop stack)
+               (decf depth))
+             (complete ()
+               ;; An object was read: it satisfies the read on top of the
+               ;; stack, and a prefix read that is satisfied is itself an
+               ;; object for the read below it.
+               (loop while (and stack (consp (first stack)))
+                     do (if (zerop (decf (cdr (first stack))))
+                            (pop-frame)
+                            (return))))
+             (terminating-p (c)
+               (member c '(#\Space #\Tab #\Newline #\Return #\Page
+                           #\( #\) #\" #\' #\` #\, #\;)))
              (skip-delimited (close)
                ;; I is on the opening delimiter; leave it just past CLOSE.
                (incf i)
@@ -86,84 +99,76 @@ this far from real code needs."
                           (cond ((char= c #\\) (incf i 2))
                                 ((char= c close) (incf i) (return))
                                 (t (incf i))))))
-             (skip-feature-expression ()
-               ;; After #+ or #-: the feature expression is not the object the
-               ;; prefix waits for, so it neither counts nor completes it.
-               (loop while (and (< i n) (member (char text i) '(#\Space #\Tab #\Newline #\Return)))
-                     do (incf i))
-               (if (eql (peek 0) #\()
-                   (let ((level 0))
-                     (declare (type fixnum level))
-                     (loop while (< i n)
-                           do (let ((c (char text i)))
-                                (incf i)
-                                (cond ((char= c #\() (incf level))
-                                      ((char= c #\))
-                                       (when (zerop (decf level)) (return)))))))
-                   (loop while (and (< i n)
-                                    (not (member (char text i)
-                                                 '(#\Space #\Tab #\Newline #\Return
-                                                   #\( #\) #\" #\; #\'))))
-                         do (incf i)))))
+             (skip-token ()
+               ;; A token runs to a terminating character; escapes and
+               ;; |...| inside it are part of it.
+               (loop while (< i n)
+                     do (let ((c (char text i)))
+                          (cond ((char= c #\\) (incf i 2))
+                                ((char= c #\|) (skip-delimited #\|))
+                                ((terminating-p c) (return))
+                                (t (incf i))))))
+             (skip-block-comment ()
+               (let ((level 1))
+                 (declare (type fixnum level))
+                 (incf i 2)
+                 (loop while (and (< i n) (plusp level))
+                       do (cond ((and (char= (char text i) #\|) (eql (peek 1) #\#))
+                                 (decf level) (incf i 2))
+                                ((and (char= (char text i) #\#) (eql (peek 1) #\|))
+                                 (incf level) (incf i 2))
+                                (t (incf i))))))
+             (dispatch ()
+               ;; I is on #.  Leave I past the dispatch characters.
+               (let* ((j (or (position-if-not #'digit-char-p text :start (1+ i)) n))
+                      (sub (and (< j n) (char text j)))
+                      (digits-p (> j (1+ i))))
+                 (cond
+                   ((null sub) (setf i n) (complete))
+                   ((and (not digits-p) (char= sub #\|)) (skip-block-comment))
+                   ((char= sub #\\)
+                    ;; #\x, #\Space: the character after \ is data.
+                    (setf i (+ j 2)) (skip-token) (complete))
+                   ((char= sub #\()
+                    ;; #( and #n( read a list.
+                    (setf i (1+ j)) (push-frame :list))
+                   ((and digits-p (char= sub #\#))
+                    ;; #n# refers to a labelled object: an atom.
+                    (setf i (1+ j)) (complete))
+                   ((and (not digits-p) (char= sub #\:))
+                    (setf i (1+ j)) (skip-token) (complete))
+                   ((and (not digits-p) (member sub '(#\+ #\-)))
+                    (setf i (1+ j)) (push-frame (cons :need 2)))
+                   (t
+                    ;; #' #. #C #S #P #A #nA #n= #B #X ... and any macro a
+                    ;; readtable adds: counted as reading one object.  For #B
+                    ;; #X #R the token after them is that object.
+                    (setf i (1+ j)) (push-frame (cons :need 1)))))))
       (loop while (< i n)
             do (let ((c (char text i)))
                  (cond
-                   ((char= c #\\) (incf i 2) (object-done))
-                   ((char= c #\") (skip-delimited #\") (object-done))
-                   ((char= c #\|) (skip-delimited #\|) (object-done))
-                   ((char= c #\;)
-                    (setf i (or (position #\Newline text :start i) n)))
-                   ((member c '(#\' #\`))
-                    (prefix) (incf i))
-                   ((char= c #\,)
-                    (prefix)
-                    (incf i (if (member (peek 1) '(#\@ #\.)) 2 1)))
-                   ((char= c #\#)
-                    (let ((next (peek 1)))
-                      (cond
-                        ((eql next #\|)
-                         (let ((level 1))
-                           (declare (type fixnum level))
-                           (incf i 2)
-                           (loop while (and (< i n) (plusp level))
-                                 do (cond ((and (char= (char text i) #\|) (eql (peek 1) #\#))
-                                           (decf level) (incf i 2))
-                                          ((and (char= (char text i) #\#) (eql (peek 1) #\|))
-                                           (incf level) (incf i 2))
-                                          (t (incf i))))))
-                        ((eql next #\\)
-                         ;; #\x: the character after the backslash is data.
-                         (incf i 3) (object-done))
-                        ((member next '(#\' #\.))
-                         (prefix) (incf i 2))
-                        ((member next '(#\+ #\-))
-                         (prefix) (incf i 2) (skip-feature-expression))
-                        ((and next (digit-char-p next))
-                         ;; #n= labels the object after it; #n# is an atom.
-                         (let ((j (position-if-not #'digit-char-p text :start (1+ i))))
-                           (cond ((and j (char= (char text j) #\=))
-                                  (prefix) (setf i (1+ j)))
-                                 ((and j (char= (char text j) #\#))
-                                  (setf i (1+ j)) (object-done))
-                                 (t (setf i (or j n))))))
-                        ;; #( #S( #C( ...: the ( that follows is counted as a list.
-                        (t (incf i)))))
-                   ((char= c #\()
-                    (let ((levels (1+ run)))
-                      (declare (type fixnum levels))
-                      (incf depth levels)
-                      (push levels held)
-                      (setf run 0)
-                      (when (> depth limit)
-                        (return-from lisp-too-deep-p t)))
-                    (incf i))
-                   ((char= c #\))
-                    (when held (decf depth (pop held)))
-                    (object-done)
-                    (incf i))
                    ((member c '(#\Space #\Tab #\Newline #\Return #\Page))
                     (incf i))
-                   (t (object-done) (incf i))))))
+                   ((char= c #\;)
+                    (setf i (or (position #\Newline text :start i) n)))
+                   ((char= c #\") (skip-delimited #\") (complete))
+                   ((member c '(#\' #\`))
+                    (incf i) (push-frame (cons :need 1)))
+                   ((char= c #\,)
+                    (incf i (if (member (peek 1) '(#\@ #\.)) 2 1))
+                    (push-frame (cons :need 1)))
+                   ((char= c #\#) (dispatch))
+                   ((char= c #\()
+                    (incf i) (push-frame :list))
+                   ((char= c #\))
+                    (incf i)
+                    ;; Close the innermost list, abandoning any prefix left
+                    ;; waiting inside it; a stray ) closes nothing.
+                    (when (member :list stack)
+                      (loop until (eq (first stack) :list) do (pop-frame))
+                      (pop-frame)
+                      (complete)))
+                   (t (skip-token) (complete))))))
     nil))
 
 (defun check-lisp-nesting (text)
