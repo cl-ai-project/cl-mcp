@@ -1627,6 +1627,33 @@
                   (format nil "fs/root concurrency errors: ~{~A~^, ~}" (nreverse errors))
                   "no fs/root concurrency errors")))))))
 
+(deftest tools-call-on-deeply-nested-input-answers-instead-of-stopping
+  (testing "a form nested far past the stack's depth gets a tool error, not the debugger"
+    ;; lisp-read-file on a form 3000 deep exhausted the server's control stack.
+    ;; CONTROL-STACK-EXHAUSTED is a STORAGE-CONDITION, not an ERROR, so it
+    ;; passed every handler and reached the debugger of the server's REPL: the
+    ;; request thread stopped there and the HTTP client got no response.
+    (with-test-project-root
+      (let* ((relative "tests/tmp/deeply-nested.lisp")
+             (path (merge-pathnames relative cl-mcp/src/project-root:*project-root*))
+             (depth 20000))
+        (ensure-directories-exist path)
+        (with-open-file (s path :direction :output :if-exists :supersede)
+          (write-string "(defun deep () " s)
+          (loop repeat depth do (write-char #\( s))
+          (loop repeat depth do (write-char #\) s))
+          (write-line ")" s))
+        (unwind-protect
+             (let* ((req (format nil "{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"tools/call\",~
+\"params\":{\"name\":\"lisp-read-file\",\"arguments\":{\"path\":\"~A\"}}}" relative))
+                    (obj (parse (%pjl req)))
+                    (message (%tool-call-message obj)))
+               (ok (%tool-call-failed-p obj) "the call fails")
+               (ok (and message (search "nested too deeply" message)) message)
+               (let ((after (parse (%pjl "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\",\"params\":{\"name\":\"fs-get-project-info\",\"arguments\":{}}}"))))
+                 (ok (not (%tool-call-failed-p after)) "and the next call is served")))
+          (ignore-errors (delete-file path)))))))
+
 (deftest tools-call-lisp-edit-form-defstruct-with-options
   (testing "lisp-edit-form matches defstruct with (name options...) syntax"
     (with-test-project-root
