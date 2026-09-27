@@ -6,7 +6,8 @@
                 #:regex-replace-all)
   (:export #:sanitize-for-json
            #:sanitize-error-message
-           #:sanitize-condition-text))
+           #:sanitize-condition-text
+           #:replace-lone-surrogates))
 
 (in-package #:cl-mcp/src/utils/sanitize)
 
@@ -158,3 +159,22 @@ that text, and anything else goes through SANITIZE-ERROR-MESSAGE."
   (if (eq (type-of condition) 'end-of-file)
       "unexpected end of input"
       (sanitize-error-message (princ-to-string condition))))
+
+(defun replace-lone-surrogates (json)
+  "Return JSON, an encoded JSON text, with every UTF-16 surrogate character
+\(U+D800-U+DFFF) replaced by U+FFFD; JSON itself when it holds none.
+
+Yason escapes a character above U+FFFF as a \\uXXXX surrogate pair, which is
+plain ASCII, but writes a lone surrogate as the character itself -- and a UTF-8
+stream cannot encode one.  The write then signals: a worker writing to the
+parent died, and the parent writing to a client broke the HTTP response,
+dropped the TCP connection, or ended the stdio loop.  A lone surrogate reaches
+a string easily: a client's JSON \"\\uDFFF\" decodes to one, and so does
+(code-char #xDFFF) in evaluated code.  Applied to the encoded text, so every
+field is covered whatever produced it; such a character can only occur inside
+a JSON string, never in the structure."
+  (if (find-if (lambda (c) (<= #xD800 (char-code c) #xDFFF)) json)
+      (substitute-if (code-char #xFFFD)
+                     (lambda (c) (<= #xD800 (char-code c) #xDFFF))
+                     json)
+      json))

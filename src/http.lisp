@@ -15,6 +15,7 @@
   (:import-from #:hunchentoot)
   (:import-from #:yason)
   (:import-from #:cl-mcp/src/utils/random #:generate-random-hex-string)
+  (:import-from #:cl-mcp/src/utils/nesting #:json-too-deep-p)
   (:export
    #:*http-server*
    #:*http-server-port*
@@ -281,11 +282,20 @@ Sessions with active in-flight requests are skipped even when expired."
 (defun parse-json-body ()
   "Parse the request body as JSON."
   (let ((body (hunchentoot:raw-post-data :force-text t)))
+    ;; Counted before parsing: an exhausted stack is not always catchable.
+    (when (and body (json-too-deep-p body))
+      (log-event :warn "http.parse-error" "error" "nested too deeply")
+      (return-from parse-json-body nil))
     (when (and body (plusp (length body)))
       (handler-case
           (yason:parse body)
         (error (e)
           (log-event :warn "http.parse-error" "error" (princ-to-string e))
+          nil)
+        ;; A body nested past the parser's stack: not an ERROR, so it would
+        ;; otherwise escape the clause above and stop the request's thread.
+        (storage-condition ()
+          (log-event :warn "http.parse-error" "error" "nested too deeply")
           nil)))))
 
 (defun %http-error-json (code message)
@@ -490,7 +500,9 @@ browser page may not be allowed to make one: the MCP Streamable HTTP
 transport requires validating Origin for exactly this, since a page on a
 rebinding domain resolves to 127.0.0.1 and is same-origin to itself.
   - Origin, when sent, must be a loopback origin.  Clients that are not
-    browsers send none.
+    browsers send none.  This holds on an exposed server too: an Origin
+    matching the Host is exactly what a page rebound to its LAN address
+    sends, so it is not taken as proof of anything.
   - Host must name the loopback interface while the server listens only on
     it -- the rebinding page's own name arrives here.  A server started on
     another address was exposed on purpose, and its Host is not checked.

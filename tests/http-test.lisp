@@ -204,6 +204,32 @@ Host header's value, which is 127.0.0.1:PORT otherwise."
                                         :host-header (format nil "localhost:~D" port))))))))
         (stop-http-server))))
 
+(deftest http-answers-a-deeply-nested-body
+  ;; A body nested past the parser's stack signalled STORAGE-CONDITION, which
+  ;; the parse's ERROR clause does not catch, and the request's thread stopped.
+  (if (not (http-port-available-p))
+      (ok t "port unavailable")
+      (unwind-protect
+           (multiple-value-bind (acceptor port)
+               (start-http-server :host "127.0.0.1" :port 0 :token nil)
+             (declare (ignore acceptor))
+             (sleep 0.1d0)
+             (let ((deep (concatenate 'string
+                                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":"
+                                      (make-string 200000 :initial-element #\[)
+                                      (make-string 200000 :initial-element #\])
+                                      "}"))
+                   (init "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
+                   (json '(("Content-Type" . "application/json"))))
+               (testing "the deep body gets an HTTP answer"
+                 (let ((status (handler-case (send-http-request port "POST" "/mcp"
+                                                                :body deep :headers json)
+                                 (error () nil))))
+                   (ok (and status (<= 400 status 499)) "a client error, not a dropped connection")))
+               (testing "the server still serves the next request"
+                 (ok (eql 200 (send-http-request port "POST" "/mcp" :body init :headers json))))))
+        (stop-http-server))))
+
 (deftest loopback-host-recognizes-this-machine
   (let ((host-p #'cl-mcp/src/http::%loopback-host-p))
     (ok (funcall host-p "127.0.0.1:3000"))

@@ -1649,7 +1649,10 @@
                     (obj (parse (%pjl req)))
                     (message (%tool-call-message obj)))
                (ok (%tool-call-failed-p obj) "the call fails")
-               (ok (and message (search "nested too deeply" message)) message)
+               ;; Refused before the reader runs: an exhaustion that lands in
+               ;; an allocation is fatal to the whole process, so catching
+               ;; STORAGE-CONDITION alone was not enough.
+               (ok (and message (search "levels deep" message)) message)
                (let ((after (parse (%pjl "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"tools/call\",\"params\":{\"name\":\"fs-get-project-info\",\"arguments\":{}}}"))))
                  (ok (not (%tool-call-failed-p after)) "and the next call is served")))
           (ignore-errors (delete-file path)))))))

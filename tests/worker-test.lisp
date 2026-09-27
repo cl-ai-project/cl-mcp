@@ -417,6 +417,25 @@ Cleans up server and socket on exit. AUTHENTICATED selects post-auth tests."
                (text (gethash "text" (aref (gethash "content" result) 0))))
           (ok (search "3" text) "and the worker is still serving"))))))
 
+(deftest worker-answers-a-deeply-nested-line
+  (testing "a line nested past the parser's stack is a -32700, and the connection goes on"
+    ;; STORAGE-CONDITION is not an ERROR: the parse's ERROR clause let it
+    ;; through and the worker's connection thread stopped.
+    (with-handler-server (stream :authenticated t)
+      (let ((depth 200000))
+        (format stream "{\"jsonrpc\":\"2.0\",\"id\":120,\"method\":\"worker/eval\",\"params\":~A~A}~%"
+                (make-string depth :initial-element #\[)
+                (make-string depth :initial-element #\]))
+        (finish-output stream)
+        (let ((response (yason:parse (read-line stream))))
+          (ok (eql -32700 (gethash "code" (gethash "error" response))))))
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "code" params) "(+ 1 2)"
+              (gethash "package" params) "CL-USER")
+        (let* ((result (%result-of (%send-and-receive stream 121 "worker/eval" params)))
+               (text (gethash "text" (aref (gethash "content" result) 0))))
+          (ok (search "3" text) "the worker is still serving"))))))
+
 (deftest encode-response-keeps-a-pair-escaped-and-replaces-a-lone-surrogate
   (let ((encode #'cl-mcp/src/worker/server::%encode-response)
          (ht (make-hash-table :test 'equal)))

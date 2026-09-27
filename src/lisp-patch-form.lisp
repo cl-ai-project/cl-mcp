@@ -29,6 +29,9 @@
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/package-context
                 #:call-with-package-context)
+  (:import-from #:cl-mcp/src/utils/nesting
+                #:lisp-too-deep-p
+                #:+max-lisp-nesting+)
   (:import-from #:cl-mcp/src/paren-diagnostics
                 #:count-delimiter-depth
                 #:diagnose-delimiters
@@ -208,6 +211,12 @@ legitimate edit and still parses.
 Under a READTABLE-DESIGNATOR that changes the syntax the standard delimiter
 diagnosis is not consulted at all (a reader macro may consume raw
 parentheses as data), so the reader's own failure is reported."
+  ;; The reader recurses once per level; see CHECK-LISP-NESTING.
+  (when (lisp-too-deep-p form-text)
+    (error 'patch-operation-error
+           :reason (format nil "the patched form nests lists more than ~D levels ~
+deep, which is deeper than cl-mcp will read"
+                           +max-lisp-nesting+)))
   (let* ((*read-eval* nil)
          (custom-rt (%resolve-named-readtable readtable-designator))
          (*readtable*

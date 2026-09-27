@@ -11,6 +11,9 @@
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/utils/lenient-read
                 #:call-with-lenient-packages)
+  (:import-from #:cl-mcp/src/utils/nesting
+                #:check-lisp-nesting
+                #:lisp-too-deep-p)
   ;; No symbol is wanted from it: the registry is reached through FIND-PACKAGE
   ;; and FIND-SYMBOL so that either of its package names works.  The import is
   ;; what makes package-inferred-system load it, and it has to be loaded for
@@ -108,7 +111,10 @@ so it does not resolve.
 
 *READ-EVAL* is off and unknown package prefixes are read leniently. The forms
 are read into a temporary package that is deleted afterwards, so no symbol is
-left behind; any read error ends the scan with NIL."
+left behind; any read error ends the scan with NIL, and so does text nested
+too deeply to read safely (LISP-TOO-DEEP-P)."
+  (when (lisp-too-deep-p text)
+    (return-from text-reached-in-readtable nil))
   (let ((scratch (make-package (string (gensym "CL-MCP-IN-READTABLE-PROBE-")) :use '())))
     (unwind-protect
          (let ((*readtable* (copy-readtable *standard-readtable*))
@@ -550,7 +556,10 @@ package-local-nicknames activate for subsequent forms.
 Returns a second value: the read error that stopped the lenient CL-reader
 pass early (after an IN-READTABLE switch or when READTABLE is given), or NIL.
 In that mode a malformed later form does not signal; the nodes read so far
-are returned and the error is reported here instead."
+are returned and the error is reported here instead.
+Text nested deeper than +MAX-LISP-NESTING+ is refused with an ERROR before
+any reader sees it (see CHECK-LISP-NESTING)."
+  (check-lisp-nesting text)
   (let ((*line-table* (%build-line-table text))
         (*package* *package*))
     (cond

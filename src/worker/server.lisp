@@ -8,7 +8,9 @@
 (defpackage #:cl-mcp/src/worker/server
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
-  (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-error-message)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-error-message #:replace-lone-surrogates)
+  (:import-from #:cl-mcp/src/utils/nesting #:json-too-deep-p)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:leaked-threads
                 #:+leaked-thread-exit-code+)
@@ -82,21 +84,9 @@ that returns a hash-table to be used as the JSON-RPC result."
   (log-event :debug "worker.method.registered" "method" method-name))
 
 (defun %encode-response (obj)
-  "Encode OBJ as a single-line JSON string.
-
-A lone UTF-16 surrogate (U+D800-U+DFFF) is replaced by U+FFFD.  Yason escapes a
-character above U+FFFF as a \\uXXXX surrogate pair but writes a lone surrogate
-as the character itself, and a UTF-8 stream cannot encode one: the write to the
-parent signalled, and the worker died -- from nothing more than a result or a
-line of output holding (code-char #xDFFF).  Replaced here, after encoding, so
-every field is covered whatever produced it; such a character can only occur
-inside a JSON string."
-  (let ((json (with-output-to-string (s) (yason:encode obj s))))
-    (if (find-if (lambda (c) (<= #xD800 (char-code c) #xDFFF)) json)
-        (substitute-if (code-char #xFFFD)
-                       (lambda (c) (<= #xD800 (char-code c) #xDFFF))
-                       json)
-        json)))
+  "Encode OBJ as a single-line JSON string, lone surrogates replaced (see
+REPLACE-LONE-SURROGATES): written raw, one killed the worker."
+  (replace-lone-surrogates (with-output-to-string (s) (yason:encode obj s))))
 
 (defparameter *retire-action*
   (lambda (leaked)
@@ -274,6 +264,14 @@ Returns a JSON string response, or NIL for notifications."
   (let ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return) line)))
     (when (string= trimmed "")
       (return-from %process-line nil))
+    ;; Counted before parsing: an exhausted stack is not always catchable,
+    ;; and one that is not ends the worker.
+    (when (json-too-deep-p trimmed)
+      (log-event :warn "worker.parse.error" "error" "nested too deeply")
+      (return-from %process-line
+        (%encode-response
+         (%make-error nil -32700 "Parse error: nested too deeply"
+                      (worker-server-authenticated-p server)))))
     (let ((msg (handler-case
                    (yason:parse trimmed)
                  (error (e)
