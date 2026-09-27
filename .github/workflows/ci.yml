@@ -37,6 +37,11 @@ jobs:
       - name: Install Dependencies
         run: |
           ros --version
+          # sbcl-bin's default 1GB heap is too small to compile the whole test
+          # system in one image: old generations keep the compiler's garbage
+          # past 900MB, and a GC with nowhere to copy to is fatal ("Heap
+          # exhausted, game over").  The runner has 16GB.
+          ros config set dynamic-space-size 4096
           ros config
 
           ros install rove cl-ai-project/cl-mcp
