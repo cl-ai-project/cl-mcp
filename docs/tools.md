@@ -308,7 +308,7 @@ Output:
 - `relative_cwd` (string|null): cwd relative to project root when inside it
 
 ## `fs-set-project-root`
-Synchronize the server's project root and working directory with the client's location.
+Set the calling session's project root to the client's location.
 
 Input:
 - `path` (string, required): path to the project root directory (absolute preferred; relative is resolved to an absolute directory)
