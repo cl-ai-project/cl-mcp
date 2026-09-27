@@ -10,11 +10,14 @@
                 #:make-ht
                 #:json-bool
                 #:transient-error)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:discover-asd-in-project)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
   (:import-from #:cl-mcp/src/utils/bounded-stream
                 #:make-bounded-output-stream
-                #:bounded-output-string)
+                #:bounded-output-string
+                #:bounded-output-tail)
   (:export #:run-tests
            #:detect-test-framework
            #:make-load-failure-result
@@ -52,7 +55,7 @@ worker dispatches handlers on the calling thread.")
       (funcall *load-lock-wrapper* thunk)
       (funcall thunk)))
 
-(defun %make-capture-stream ()
+(defun %make-capture-stream (&key tail)
   "Return a stream for capturing test output, bounded by
 *MAX-TEST-OUTPUT-LENGTH*.
 
@@ -61,8 +64,11 @@ holds everything the suite produced, so the limit governed what was reported
 while the heap paid for the rest.  Measured, a suite emitting 40 million
 characters cost 367 MB to report 50 KB of it, and under a smaller dynamic
 space the run died with HEAP-EXHAUSTED-ERROR while materializing the string --
-in a fifth of a second, so the run deadline was no protection."
-  (make-bounded-output-stream *max-test-output-length*))
+in a fifth of a second, so the run deadline was no protection.
+
+With TAIL, the stream also keeps the last TAIL characters written: the bounded
+text is the head of the output, and a runner prints its verdict last."
+  (make-bounded-output-stream *max-test-output-length* :tail tail))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Framework Detection
@@ -458,6 +464,12 @@ inclusion in load-failure error messages."
               (format nil "... (truncated)~%~A" (subseq joined cut)))
             joined)))))
 
+(define-condition test-system-not-found (simple-error) ()
+  (:documentation "RUN-TESTS was given a system ASDF cannot find, and no .asd
+of that name was found under the project root either.  A SIMPLE-ERROR, so
+RUN-TESTS reports it as a load failure; its own type, so that report does not
+send the caller to replace a worker that is fine."))
+
 (defun %format-load-error (system-name condition stderr)
   "Format a test-system load-failure message.
 When STDERR contains captured compiler output, the tail of it is
@@ -501,12 +513,20 @@ opaque RPC-level error.  Mirrors the timeout pattern used by
        ;; concurrent load still holding the ASDF lock, say.  There it is
        ;; actively harmful: following it aborts work about to finish, and
        ;; such a condition carries its own, correct advice.
-       (if (typep condition 'transient-error)
-           text
-           (format nil "~A~%~%Hint: the worker process may have a broken ~
-                        package state. Use pool-kill-worker to get a fresh ~
-                        worker, then retry run-tests."
-                   text)))))))
+       (cond
+         ((typep condition 'transient-error) text)
+         ;; Nothing is wrong with the worker: the name is unknown.
+         ((typep condition 'test-system-not-found)
+          (format nil "~A~%~%Hint: ASDF knows no system ~A, and no ~A.asd was ~
+                       found under the project root. Check the name, or ~
+                       register its .asd with load-system or asdf:load-asd, ~
+                       then retry run-tests."
+                  text system-name (asdf:primary-system-name system-name)))
+         (t
+          (format nil "~A~%~%Hint: the worker process may have a broken ~
+                       package state. Use pool-kill-worker to get a fresh ~
+                       worker, then retry run-tests."
+                  text))))))))
 
 (defun make-resolution-failure-result (condition)
   "Convert a TEST-RESOLUTION-ERROR into a structured test-result so RUN-TESTS
@@ -853,6 +873,15 @@ COMPILE-FILE-ERROR."
               (lambda (c)
                 (format captured-warnings "~A~%" c))))
           (progn
+            ;; As load-system does: a system nobody has registered yet --
+            ;; its .asd freshly written under the project root -- is found
+            ;; there rather than refused as MISSING-COMPONENT.
+            (unless (asdf:find-system system-name nil)
+              (let ((asd (discover-asd-in-project system-name)))
+                (when asd
+                  (log-event :info "test.runner.discover"
+                             "system" system-name "asd_path" (namestring asd))
+                  (asdf:load-asd asd))))
             (when (asdf:find-system system-name nil)
               (let ((asd-src
                       (ignore-errors
@@ -883,8 +912,16 @@ COMPILE-FILE-ERROR."
         (let* ((warnings-text (get-output-stream-string captured-warnings))
                (stderr-text (get-output-stream-string captured-stderr))
                (combined (concatenate 'string warnings-text stderr-text)))
-          (error "~A"
-                 (%format-load-error system-name c combined)))))))
+          (if (and (typep c 'asdf:missing-component)
+                   (null (asdf:find-system system-name nil)))
+              ;; Not a load that went wrong: there is no such system.  Its
+              ;; own condition, so the result does not blame the worker.
+              (error 'test-system-not-found
+                     :format-control "~A"
+                     :format-arguments
+                     (list (%format-load-error system-name c combined)))
+              (error "~A"
+                     (%format-load-error system-name c combined))))))))
 
 (defun %rove-extract-selected-failures (results)
   "Extract failure details from selected test RESULTS returned by rove:run-tests.
@@ -1209,7 +1246,9 @@ the surrounding passed/failed/pending/failure-details bindings."
 (defun run-asdf-fallback (system-name)
   "Run tests using asdf:test-system with text output capture."
   (log-event :info "test.runner" "framework" "asdf-fallback" "system" system-name)
-  (let ((output (%make-capture-stream))
+  ;; Stdout keeps its tail as well: the runner's own summary, printed last, is
+  ;; the only verdict this path has, and the bounded text is only the head.
+  (let ((output (%make-capture-stream :tail 3000))
         (error-output (%make-capture-stream))
         (debug-stream (%make-capture-stream))
         (start-time (get-internal-real-time))
@@ -1253,6 +1292,10 @@ the surrounding passed/failed/pending/failure-details bindings."
                         "counts_available" (json-bool nil))))
       (when (plusp (length stdout))
         (setf (gethash "stdout" ht) stdout))
+      ;; For the response text only; the builder does not forward it.
+      (let ((tail (bounded-output-tail output)))
+        (when tail
+          (setf (gethash "stdout_tail" ht) tail)))
       (when (plusp (length stderr))
         (setf (gethash "stderr" ht) stderr))
       (let ((debug-output (bounded-output-string debug-stream)))

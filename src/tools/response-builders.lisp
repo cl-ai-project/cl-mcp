@@ -361,6 +361,22 @@ Use pool-kill-worker to get a fresh worker, then retry load-system.")))))))
     (setf (gethash "content" ht) (text-content summary))
     ht))
 
+(defun %output-tail (text &key (max-lines 30) (max-chars 3000))
+  "Return the last MAX-LINES lines of TEXT, at most MAX-CHARS characters, with
+trailing blank lines dropped; NIL when TEXT is empty or not a string."
+  (when (and (stringp text) (plusp (length text)))
+    (let* ((trimmed (string-right-trim '(#\Newline #\Return #\Space) text))
+           (start (length trimmed)))
+      (loop repeat max-lines
+            for newline = (position #\Newline trimmed :end start :from-end t)
+            while newline
+            do (setf start newline)
+            finally (unless newline (setf start -1)))
+      (let ((tail (subseq trimmed (min (length trimmed) (1+ start)))))
+        (when (> (length tail) max-chars)
+          (setf tail (subseq tail (- (length tail) max-chars))))
+        (and (plusp (length tail)) tail)))))
+
 (defun build-run-tests-response (test-result)
   "Build the standard run-tests response with summary text.
 TEST-RESULT is the hash-table returned by run-tests core.
@@ -406,7 +422,7 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                           ;; too, so this is not a pass (#131).
                           ((and (string= framework-name "asdf")
                                 (zerop failed) (zerop passed))
-                           "⚠ RAN, RESULT UNKNOWN (the ASDF fallback counts nothing; read stdout)")
+                           "⚠ RAN, RESULT UNKNOWN (the ASDF fallback counts nothing; read its stdout below)")
                           ((zerop failed) "✓ PASS")
                           (t "✗ FAIL")))
             (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%" passed
@@ -429,6 +445,18 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                        (when (gethash "reason" fail)
                          (format s "     Reason: ~A~%"
                                  (gethash "reason" fail)))))
+            ;; The fallback's only verdict is what the runner printed, and
+            ;; content[].text is all a client shows: without its tail here,
+            ;; "read stdout" pointed at a field nobody sees.
+            (when (and (string= framework-name "asdf")
+                       (zerop failed) (zerop passed))
+              ;; stdout_tail is the end of everything printed; stdout is only
+              ;; its bounded head, which a chatty suite fills before its
+              ;; summary is written.
+              (let ((tail (%output-tail (or (gethash "stdout_tail" test-result)
+                                            (gethash "stdout" test-result)))))
+                (format s "~%;; stdout (~:[empty~;last lines~])~%~@[~A~%~]"
+                        tail tail)))
             (when (and debug-output-str (plusp (length debug-output-str)))
               (format s "~%;; debug output~%~A" debug-output-str)))))
     (let ((response

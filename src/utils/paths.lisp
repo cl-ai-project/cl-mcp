@@ -19,34 +19,58 @@
            #:resolve-readable-path
            #:native-path-namestring
            #:normalize-path-for-display
-           #:broad-root-p))
+           #:broad-root-p
+           #:discover-asd-in-project))
 
 (in-package #:cl-mcp/src/utils/paths)
 
 (declaim (ftype (function () null) ensure-project-root))
+
 (defun ensure-project-root ()
   "Ensure *project-root* is set. Signal an error with instructions if not.
-This guard function should be called at the beginning of all file operations."
+This guard function should be called at the beginning of all file operations.
+
+The message is kept short: an error reaching the client is cut at 500
+characters (SANITIZE-ERROR-MESSAGE), after a tool's \"Internal error during
+<tool>: \" prefix, and the part a longer message lost was the advice an agent
+needs most -- that the root belongs to the session."
   (unless *project-root*
-    (error "Project root is not set.
+    (error "Project root is not set for this session. Call fs-set-project-root ~
+with your current working directory: {\"path\": \"/absolute/path/to/your/project\"}. ~
+The root belongs to the session, so set it again after a reconnect unless the ~
+server was started with MCP_PROJECT_ROOT. (Server process working directory, ~
+shared by every session and not this session's root: ~A)"
+           (or (ignore-errors (namestring (uiop/os:getcwd))) "(unknown)"))))
 
-SOLUTION:
-call fs-set-project-root tool with your current working directory:
-   Method: tools/call
-   Tool: fs-set-project-root
-   Arguments: {\"path\": \"/absolute/path/to/your/project\"}
+(defun discover-asd-in-project (system-name)
+  "Search *project-root* for a .asd file matching SYSTEM-NAME.
+For package-inferred subsystems like \"foo/tests\", searches for the
+root system \"foo\" since .asd files are named after the root.
+Returns the pathname of the shallowest match, or NIL if none found.
+Wrapped in IGNORE-ERRORS for filesystem robustness.
 
-CURRENT SERVER STATE:
-- Server process working directory (shared by every session, not this
-  session's root): ~A
-- Registered ASDF systems: ~D
-
-For AI agents: the project root belongs to your session. Call
-fs-set-project-root at the start of every session with your current working
-directory -- again after a reconnect, since a new session starts without one
-unless the server was started with MCP_PROJECT_ROOT."
-           (or (ignore-errors (namestring (uiop/os:getcwd))) "(unknown)")
-           (length (asdf/system-registry:registered-systems)))))
+Used by load-system and run-tests alike, so a system whose .asd was just
+written under the project root is found by either.  It lives here, below
+both, because the loader and the test runner cannot depend on each other."
+  (when *project-root*
+    (ignore-errors
+     (let* ((root-name (string-downcase
+                        (subseq system-name
+                                0 (or (position #\/ system-name)
+                                      (length system-name)))))
+            (pattern (merge-pathnames
+                      (make-pathname :directory '(:relative :wild-inferiors)
+                                     :name root-name
+                                     :type "asd")
+                      *project-root*))
+            (matches (directory pattern)))
+       (when matches
+         ;; Prefer shallowest path (closest to project root)
+         (first
+          (sort (copy-list matches)
+                (lambda (a b)
+                  (< (length (pathname-directory a))
+                     (length (pathname-directory b)))))))))))
 
 (declaim (ftype (function ((or null string pathname) (or null string pathname))
                            boolean)
