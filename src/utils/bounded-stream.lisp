@@ -14,7 +14,8 @@
   (:export #:bounded-output-stream
            #:make-bounded-output-stream
            #:bounded-output-string
-           #:bounded-output-dropped))
+           #:bounded-output-dropped
+           #:bounded-output-tail))
 
 (in-package #:cl-mcp/src/utils/bounded-stream)
 
@@ -28,7 +29,12 @@
           :initform (error "BOUNDED-OUTPUT-STREAM requires a :LIMIT."))
    (kept :initform 0 :accessor %kept)
    (dropped :initform 0 :accessor %dropped)
-   (column :initform 0 :accessor %column))
+   (column :initform 0 :accessor %column)
+   ;; The last TAIL-LIMIT characters written, dropped ones included, when a
+   ;; TAIL-LIMIT was given: the head kept above is what a chatty writer
+   ;; printed first, and a runner's verdict is what it printed last.
+   (tail-limit :initarg :tail-limit :initform nil :reader %tail-limit)
+   (tail :initform nil :accessor %tail))
   (:documentation "A character sink that keeps at most LIMIT characters.
 
 Writes past the limit are counted and discarded rather than stored, so the
@@ -56,15 +62,47 @@ the string stream instead lost characters outright.  Suites that spawn
 threads do not reach these bindings anyway -- in SBCL a new thread starts
 from a special's global value."))
 
-(defun make-bounded-output-stream (limit)
-  "Return a character output stream retaining at most LIMIT characters."
-  (make-instance 'bounded-output-stream :limit (max 0 limit)))
+(defun make-bounded-output-stream (limit &key tail)
+  "Return a character output stream retaining at most LIMIT characters.
+With TAIL, a positive integer, it also keeps the last TAIL characters written,
+however many were written in all; BOUNDED-OUTPUT-TAIL returns them."
+  (make-instance 'bounded-output-stream
+                 :limit (max 0 limit)
+                 :tail-limit (and tail (plusp tail) tail)))
+
+(defun %note-tail (stream string start end)
+  "Append STRING[START,END) to STREAM's tail, keeping its last TAIL-LIMIT
+characters.  The buffer grows to twice the limit before it is cut back, so each
+character is copied a bounded number of times however the writes are split."
+  (let ((limit (%tail-limit stream)))
+    (when limit
+      (let ((tail (or (%tail stream)
+                      (setf (%tail stream)
+                            (make-array (* 2 limit) :element-type 'character
+                                                    :adjustable t :fill-pointer 0))))
+            (start (max start (- end limit))))
+        (when (> (+ (fill-pointer tail) (- end start)) (* 2 limit))
+          (let ((keep (max 0 (- limit (- end start)))))
+            (replace tail tail :start2 (- (fill-pointer tail) keep))
+            (setf (fill-pointer tail) keep)))
+        (loop for i from start below end
+              do (vector-push-extend (char string i) tail))))))
+
+(defun bounded-output-tail (stream)
+  "Return the last characters written to STREAM (up to its TAIL), or NIL when it
+keeps no tail or nothing was written."
+  (let ((tail (%tail stream))
+        (limit (%tail-limit stream)))
+    (when (and tail limit (plusp (fill-pointer tail)))
+      (subseq tail (max 0 (- (fill-pointer tail) limit))))))
 
 (defmethod sb-gray:stream-write-char ((stream bounded-output-stream) character)
   (if (< (%kept stream) (%limit stream))
       (progn (write-char character (%sink stream))
              (incf (%kept stream)))
       (incf (%dropped stream)))
+  (when (%tail-limit stream)
+    (%note-tail stream (string character) 0 1))
   (if (char= character #\Newline)
       (setf (%column stream) 0)
       (incf (%column stream)))
@@ -80,6 +118,8 @@ from a special's global value."))
       (write-string string (%sink stream) :start start :end (+ start taken))
       (incf (%kept stream) taken))
     (incf (%dropped stream) (- length taken))
+    (when (plusp length)
+      (%note-tail stream string start end))
     (when (plusp length)
       (let ((last-newline (position #\Newline string :from-end t
                                                      :start start :end end)))

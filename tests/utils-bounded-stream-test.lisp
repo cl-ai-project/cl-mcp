@@ -11,7 +11,8 @@
   (:import-from #:cl-mcp/src/utils/bounded-stream
                 #:make-bounded-output-stream
                 #:bounded-output-string
-                #:bounded-output-dropped))
+                #:bounded-output-dropped
+                #:bounded-output-tail))
 
 (in-package #:cl-mcp/tests/utils-bounded-stream-test)
 
@@ -217,3 +218,23 @@ three!" s)
       (write-string "xy" s)
       (ok (equal "xy" (bounded-output-string s))
           "the stream still accepts and retains after a failed transform"))))
+
+(deftest bounded-stream-keeps-the-tail-past-its-limit
+  (testing "the last characters written are kept however much was dropped"
+    ;; The retained text is the head; a runner's verdict is printed last, so a
+    ;; capture that fills its limit first would otherwise lose it.
+    (let ((s (make-bounded-output-stream 100 :tail 20)))
+      (dotimes (i 5000) (write-string "noise " s))
+      (write-char #\> s)
+      (write-string "1 of 9 tests failed" s)
+      (ok (plusp (bounded-output-dropped s)) "precondition: the head filled")
+      (ok (equal ">1 of 9 tests failed" (bounded-output-tail s))
+          (format nil "tail=~S" (bounded-output-tail s)))))
+  (testing "a short output is its own tail"
+    (let ((s (make-bounded-output-stream 100 :tail 20)))
+      (write-string "ok" s)
+      (ok (equal "ok" (bounded-output-tail s)))))
+  (testing "without :tail nothing extra is kept"
+    (let ((s (make-bounded-output-stream 100)))
+      (write-string "anything" s)
+      (ok (null (bounded-output-tail s))))))

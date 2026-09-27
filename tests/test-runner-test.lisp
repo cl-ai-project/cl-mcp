@@ -1256,8 +1256,11 @@ SUBTEST and, when FAILING, one wrong assertion -- then call THUNK with its name.
            (progn
              (ensure-directories-exist tmp-dir)
              (with-open-file (s asd-path :direction :output :if-exists :supersede)
+               ;; Chatty on purpose: more than *MAX-TEST-OUTPUT-LENGTH* before
+               ;; the summary, so the bounded head of stdout does not reach it.
                (format s "(asdf:defsystem ~S~%  :perform (asdf:test-op (o c) ~
-                          (format t \"1 of 1 tests failed~~%\") nil))~%"
+                          (format t \"~~A~~%1 of 1 tests failed~~%\" ~
+                          (make-string 60000 :initial-element #\\x)) nil))~%"
                        system))
              (let ((asdf:*central-registry* (cons tmp-dir asdf:*central-registry*)))
                (asdf:load-asd asd-path)

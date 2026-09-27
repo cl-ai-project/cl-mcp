@@ -450,7 +450,11 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
             ;; "read stdout" pointed at a field nobody sees.
             (when (and (string= framework-name "asdf")
                        (zerop failed) (zerop passed))
-              (let ((tail (%output-tail (gethash "stdout" test-result))))
+              ;; stdout_tail is the end of everything printed; stdout is only
+              ;; its bounded head, which a chatty suite fills before its
+              ;; summary is written.
+              (let ((tail (%output-tail (or (gethash "stdout_tail" test-result)
+                                            (gethash "stdout" test-result)))))
                 (format s "~%;; stdout (~:[empty~;last lines~])~%~@[~A~%~]"
                         tail tail)))
             (when (and debug-output-str (plusp (length debug-output-str)))

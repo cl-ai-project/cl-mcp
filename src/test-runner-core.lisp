@@ -16,7 +16,8 @@
                 #:call-with-deadline-thread)
   (:import-from #:cl-mcp/src/utils/bounded-stream
                 #:make-bounded-output-stream
-                #:bounded-output-string)
+                #:bounded-output-string
+                #:bounded-output-tail)
   (:export #:run-tests
            #:detect-test-framework
            #:make-load-failure-result
@@ -54,7 +55,7 @@ worker dispatches handlers on the calling thread.")
       (funcall *load-lock-wrapper* thunk)
       (funcall thunk)))
 
-(defun %make-capture-stream ()
+(defun %make-capture-stream (&key tail)
   "Return a stream for capturing test output, bounded by
 *MAX-TEST-OUTPUT-LENGTH*.
 
@@ -63,8 +64,11 @@ holds everything the suite produced, so the limit governed what was reported
 while the heap paid for the rest.  Measured, a suite emitting 40 million
 characters cost 367 MB to report 50 KB of it, and under a smaller dynamic
 space the run died with HEAP-EXHAUSTED-ERROR while materializing the string --
-in a fifth of a second, so the run deadline was no protection."
-  (make-bounded-output-stream *max-test-output-length*))
+in a fifth of a second, so the run deadline was no protection.
+
+With TAIL, the stream also keeps the last TAIL characters written: the bounded
+text is the head of the output, and a runner prints its verdict last."
+  (make-bounded-output-stream *max-test-output-length* :tail tail))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Framework Detection
@@ -1242,7 +1246,9 @@ the surrounding passed/failed/pending/failure-details bindings."
 (defun run-asdf-fallback (system-name)
   "Run tests using asdf:test-system with text output capture."
   (log-event :info "test.runner" "framework" "asdf-fallback" "system" system-name)
-  (let ((output (%make-capture-stream))
+  ;; Stdout keeps its tail as well: the runner's own summary, printed last, is
+  ;; the only verdict this path has, and the bounded text is only the head.
+  (let ((output (%make-capture-stream :tail 3000))
         (error-output (%make-capture-stream))
         (debug-stream (%make-capture-stream))
         (start-time (get-internal-real-time))
@@ -1286,6 +1292,10 @@ the surrounding passed/failed/pending/failure-details bindings."
                         "counts_available" (json-bool nil))))
       (when (plusp (length stdout))
         (setf (gethash "stdout" ht) stdout))
+      ;; For the response text only; the builder does not forward it.
+      (let ((tail (bounded-output-tail output)))
+        (when tail
+          (setf (gethash "stdout_tail" ht) tail)))
       (when (plusp (length stderr))
         (setf (gethash "stderr" ht) stderr))
       (let ((debug-output (bounded-output-string debug-stream)))
