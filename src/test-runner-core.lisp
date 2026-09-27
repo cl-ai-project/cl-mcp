@@ -1244,10 +1244,12 @@ the surrounding passed/failed/pending/failure-details bindings."
                         "framework" "asdf"
                         "duration_ms" duration-ms
                         "failed_tests" failed-tests
-                        "success" success
                         ;; ASDF:TEST-SYSTEM returns no counts, and a runner that
                         ;; reports failure by return value (prove, rove:run)
                         ;; does not signal: returning normally is not a pass.
+                        ;; A signal is a known failure (false); a normal return
+                        ;; is unknown (null), never true.
+                        "success" (if success nil (json-bool nil))
                         "counts_available" (json-bool nil))))
       (when (plusp (length stdout))
         (setf (gethash "stdout" ht) stdout))

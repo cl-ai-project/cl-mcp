@@ -1267,7 +1267,11 @@ SUBTEST and, when FAILING, one wrong assertion -- then call THUNK with its name.
                  (ok (not (search "✓ PASS" text)) text)
                  (ok (search "RESULT UNKNOWN" text))
                  (ok (eq 'yason:false (gethash "counts_available" response))
-                     "counts_available says no counts were taken"))))
+                     "counts_available says no counts were taken")
+                 ;; The structured field must not say what the banner denies.
+                 (multiple-value-bind (success presentp) (gethash "success" response)
+                   (ok (and presentp (null success))
+                       (format nil "success is null (unknown), not true: ~S" success))))))
         (ignore-errors (asdf:clear-system system))
         (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
 

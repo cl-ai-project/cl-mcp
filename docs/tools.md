@@ -987,6 +987,8 @@ Output:
 - `pending` (integer): Number of pending/skipped tests (when reported by the framework)
 - `framework` (string): Framework or outcome category used (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, `"load-error"`, `"unresolved"`, or `"timeout"`)
 - `counts_available` (boolean, ASDF fallback only): `false` — `asdf:test-system` reports no counts
+- `success` (boolean|null, ASDF fallback only): `false` when `asdf:test-system` signalled; `null` when it
+  returned normally, which says nothing about whether the tests passed
 - `duration_ms` (integer): Execution time in milliseconds
 
 The summary line in `content[].text` is `✓ PASS`, `✗ FAIL`, `✗ LOAD FAILED`, `✗ UNRESOLVED`, `✗ TIMEOUT`, `⚠ NO TESTS RAN`, or `⚠ RAN, RESULT UNKNOWN`. `⚠ NO TESTS RAN` means the run completed but executed nothing — a system with no tests, or a selection that matched none. It is not a failure, but it is not a pass either. `⚠ RAN, RESULT UNKNOWN` is the ASDF fallback's: `asdf:test-system` returned without signalling, but it reports no counts, and a runner that reports failures by its return value (prove, `rove:run`) returns normally from a failing suite too — read `stdout`.
