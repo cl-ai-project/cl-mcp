@@ -301,6 +301,101 @@
                             cl-mcp/specs/concurrency-fixtures::ledger-spawned ledger))))
           "and the late replacement is ended by the recovery itself"))))
 
+(deftest a-shutdown-waits-for-an-ending-its-snapshot-missed
+  ;; Found by POOL-HOLDS-WHILE-OPERATIONS-OVERLAP failing now and then in CI
+  ;; (:ENDED-AFTER-SHUTDOWN).  RELEASE-SESSION does not look at *POOL-RUNNING*:
+  ;; one that took its worker out after the shutdown's wait for work in flight
+  ;; and before its snapshot was ending that worker outside the lock, the
+  ;; snapshot did not list it, and the shutdown returned before it was ended.
+  ;; The order is held in place: a stand-in recovery thread keeps the shutdown
+  ;; between its wait and its snapshot while the release begins, and the
+  ;; release's ending is gated until the shutdown could have returned.
+  (with-concurrent-pool (ledger :warmup 0 :max-size 4)
+    (let* ((worker (get-or-assign-worker "s0"))
+           (window (sb-thread:make-semaphore))
+           (end-gate (sb-thread:make-semaphore))
+           (recovery (bt:make-thread
+                      (lambda () (sb-thread:wait-on-semaphore window :timeout 30))
+                      :name "stand-in-recovery"))
+           (returned-at nil)
+           (shutdown nil)
+           (release nil))
+      (unwind-protect
+           (progn
+             (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+               (push recovery cl-mcp/src/pool::*recovery-threads*))
+             (setf shutdown (bt:make-thread
+                             (lambda ()
+                               (shutdown-pool)
+                               (setf returned-at (get-internal-real-time)))
+                             :name "shutdown"))
+             ;; Past its wait for work in flight -- there is none -- and
+             ;; waiting for the stand-in recovery thread.
+             (%await (lambda () (not cl-mcp/src/pool::*pool-running*)))
+             (sleep 0.2)
+             (bt:with-lock-held ((cl-mcp/specs/concurrency-fixtures::ledger-lock ledger))
+               (setf (gethash worker (cl-mcp/specs/concurrency-fixtures::ledger-end-gates
+                                      ledger))
+                     end-gate))
+             (setf release (bt:make-thread (lambda () (cl-mcp/src/pool:release-session "s0"))
+                                           :name "release"))
+             (ok (%await (lambda ()
+                           (member worker (%ledger-value
+                                           cl-mcp/specs/concurrency-fixtures::ledger-ends-begun
+                                           ledger))))
+                 "the release is ending the worker")
+             ;; Let the shutdown take its snapshot, which no longer lists it.
+             (sb-thread:signal-semaphore window)
+             (%await (lambda () returned-at) :within 1)
+             (sb-thread:signal-semaphore end-gate)
+             (bt:join-thread release)
+             (bt:join-thread shutdown)
+             (let ((ended-at (gethash worker (%ledger-value
+                                              cl-mcp/specs/concurrency-fixtures::ledger-ended-at
+                                              ledger))))
+               (ok (and ended-at returned-at (<= ended-at returned-at))
+                   "the shutdown returned only once the worker was ended")))
+        (sb-thread:signal-semaphore window)
+        (sb-thread:signal-semaphore end-gate)
+        (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+          (setf cl-mcp/src/pool::*recovery-threads*
+                (remove recovery cl-mcp/src/pool::*recovery-threads*)))))))
+
+(deftest a-root-sync-crash-leaves-a-worker-taken-elsewhere-alone
+  ;; Found in review of the fix above: when the project-root sync of a worker
+  ;; just lent marks it crashed, GET-OR-ASSIGN-WORKER ended it -- even when
+  ;; something else had taken it out of the pool meanwhile and was ending it
+  ;; (crash handling, or a shutdown's snapshot).  The second ending ran after
+  ;; the first was accounted for, so after a shutdown had returned.  Here the
+  ;; sync itself stands in for that: it marks the worker crashed and takes it
+  ;; out to be ended, as the pool's other paths do, and that ending completes
+  ;; only after the acquire -- which must not end the worker a second time.
+  (with-fake-pool (ledger :warmup 0)
+    (let ((cl-mcp/src/project-root:*project-root* #p"/tmp/")
+          (taken nil))
+      (%with-replaced
+       'cl-mcp/src/pool:send-root-to-session-worker
+       (lambda (session-id path)
+         (declare (ignore path))
+         (let ((worker (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                         (gethash session-id cl-mcp/src/pool::*affinity-map*))))
+           (setf taken worker
+                 (worker-state worker) :crashed)
+           (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+             (setf cl-mcp/src/pool::*all-workers*
+                   (remove worker cl-mcp/src/pool::*all-workers*))
+             (cl-mcp/src/pool::%begin-ending worker))))
+       (lambda ()
+         (ok (handler-case (progn (get-or-assign-worker "s0") nil)
+               (error () t))
+             "the acquire reports the crash")))
+      (ok taken "the sync ran on the worker just lent")
+      ;; What took it out ends it now.
+      (cl-mcp/src/pool::%end-worker taken)
+      (ok (= 1 (gethash taken (cl-mcp/specs/pool-fixtures:ledger-kill-count ledger) 0))
+          (format nil "it was ended once, by what took it; ended ~D times"
+                  (gethash taken (cl-mcp/specs/pool-fixtures:ledger-kill-count ledger) 0))))))
+
 (deftest a-replenishment-decided-before-a-shutdown-is-waited-for
   ;; Found in review: the replenishment was decided under the lock and its
   ;; thread started and published after it, so a shutdown in between saw

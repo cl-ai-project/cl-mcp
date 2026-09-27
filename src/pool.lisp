@@ -444,6 +444,23 @@ NIL, with what is still in flight as the second and third values."
           (bt:condition-wait *work-in-flight-condvar* *pool-lock*
                              :timeout (min remaining 1)))))))
 
+(defun %wait-for-endings (seconds generation)
+  "Wait up to SECONDS until GENERATION has no worker waiting to be ended.
+Returns NIL when that was reached, otherwise how many are still being ended.
+Spawns in flight are not waited for."
+  (let ((deadline (+ (get-internal-real-time)
+                     (* seconds internal-time-units-per-second))))
+    (bt:with-lock-held (*pool-lock*)
+      (loop
+        (when (null (generation-ending generation))
+          (return nil))
+        (let ((remaining (/ (- deadline (get-internal-real-time))
+                            internal-time-units-per-second)))
+          (unless (plusp remaining)
+            (return (length (generation-ending generation))))
+          (bt:condition-wait *work-in-flight-condvar* *pool-lock*
+                             :timeout (min remaining 1)))))))
+
 (defun %replenish-running-p ()
   "True while the running generation's replenishment is under way."
   (bt:with-lock-held (*pool-lock*)
@@ -1427,6 +1444,8 @@ whose work it waits for and whose workers it ends."
     (handler-case (bordeaux-threads:join-thread *health-thread*)
                   (error () nil)))
   (setf *health-thread* nil)
+  ;; One deadline for every wait below: work in flight, the pool's threads,
+  ;; and the endings the snapshot missed.
   (let ((deadline (+ (get-internal-real-time)
                      (* (%shutdown-wait-seconds) internal-time-units-per-second))))
     (flet ((remaining ()
@@ -1460,28 +1479,41 @@ whose work it waits for and whose workers it ends."
                                                  running)))))
         (dolist (thread threads)
           (unless (bordeaux-threads:thread-alive-p thread)
-            (ignore-errors (bordeaux-threads:join-thread thread)))))))
-  ;; Snapshot and end all workers.
-  (let ((workers nil))
-    (bordeaux-threads:with-lock-held (*pool-lock*)
-      (setf workers (copy-list *all-workers*))
-      (setf *all-workers* nil
-            *standby-workers* nil)
-      (clrhash *affinity-map*)
-      ;; No worker survives a shutdown to be the runtime's owner.
-      (setf *runtime-owner* nil)
-      ;; Recorded before any is signalled, so the EOF each in-flight request
-      ;; then meets is not taken for a crash.  Nothing survives a shutdown
-      ;; to be told anything.
-      (dolist (w workers)
-        (record-worker-termination w :shutdown :owed nil)
-        (%begin-ending w))
-      (discard-all-resets))
-    ;; Signalled before it is ended, as RELEASE-SESSION does: ending a worker
-    ;; takes its stream, which an RPC running on it holds for as long as the
-    ;; request takes -- a shutdown behind a long load waited for all of it.
-    (dolist (w workers) (ignore-errors (%signal-worker w)))
-    (dolist (w workers) (%end-worker w)))
+            (ignore-errors (bordeaux-threads:join-thread thread)))))
+      ;; Snapshot and end all workers.
+      (let ((workers nil))
+        (bordeaux-threads:with-lock-held (*pool-lock*)
+          (setf workers (copy-list *all-workers*))
+          (setf *all-workers* nil
+                *standby-workers* nil)
+          (clrhash *affinity-map*)
+          ;; No worker survives a shutdown to be the runtime's owner.
+          (setf *runtime-owner* nil)
+          ;; Recorded before any is signalled, so the EOF each in-flight request
+          ;; then meets is not taken for a crash.  Nothing survives a shutdown
+          ;; to be told anything.
+          (dolist (w workers)
+            (record-worker-termination w :shutdown :owed nil)
+            (%begin-ending w))
+          (discard-all-resets))
+        ;; Signalled before it is ended, as RELEASE-SESSION does: ending a worker
+        ;; takes its stream, which an RPC running on it holds for as long as the
+        ;; request takes -- a shutdown behind a long load waited for all of it.
+        (dolist (w workers) (ignore-errors (%signal-worker w)))
+        (dolist (w workers) (%end-worker w)))
+      ;; An ending begun after the wait above and before the snapshot --
+      ;; RELEASE-SESSION or KILL-SESSION-WORKER took the worker out of the lists
+      ;; and is ending it outside the lock -- is on this generation too, and
+      ;; the snapshot did not see it.  Wait for it within the same deadline, or
+      ;; it completes after the shutdown returned.  None can begin now: the
+      ;; lists are empty, and every other ending takes a worker the pool still
+      ;; lists.  Endings only: a spawn that outlived the wait above stays on
+      ;; this generation's account and ends its own worker, and must not hold
+      ;; the shutdown.
+      (let ((ending (%wait-for-endings (remaining) generation)))
+        (when ending
+          (log-event :warn "pool.shutdown.work-still-in-flight"
+                     "spawns" 0 "ending" ending)))))
   ;; Wait for in-flight reaper threads (process cleanup from crashes).
   ;; bordeaux-threads 0.x join-thread does not support :timeout,
   ;; so poll thread-alive-p with a deadline instead.
@@ -1681,16 +1713,24 @@ cannot be created."
           (log-event :warn "pool.send-root-corrupted-worker"
                      "session" session-id
                      "worker_id" (worker-id worker))
-          (bordeaux-threads:with-lock-held (*pool-lock*)
-            ;; Only while this worker is still the session's: recovery may
-            ;; have replaced it already.  The crash that marked it recorded
-            ;; the reset it owes in the ledger.
-            (when (eql (gethash session-id *affinity-map*) worker)
-              (%drop-owner-worker worker)
-              (remhash session-id *affinity-map*))
-            (setf *all-workers* (remove worker *all-workers*))
-            (%begin-ending worker))
-          (%end-worker worker)
+          (let ((ours nil))
+            (bordeaux-threads:with-lock-held (*pool-lock*)
+              ;; Only while this worker is still the session's: recovery may
+              ;; have replaced it already.  The crash that marked it recorded
+              ;; the reset it owes in the ledger.
+              (when (eql (gethash session-id *affinity-map*) worker)
+                (%drop-owner-worker worker)
+                (remhash session-id *affinity-map*))
+              ;; Ended here only while the pool still lists it.  Once it does
+              ;; not, whatever took it out -- crash handling, or a shutdown's
+              ;; snapshot -- is ending it: a second ending here would run after
+              ;; that one was accounted for, after a shutdown had returned.
+              (when (member worker *all-workers*)
+                (setf *all-workers* (remove worker *all-workers*))
+                (%begin-ending worker)
+                (setf ours t)))
+            (when ours
+              (%end-worker worker)))
           (%schedule-replenish)
           (error "Worker ~A crashed during project root setup for session ~A"
                  (worker-id worker) session-id)))
