@@ -8,6 +8,8 @@
                 #:load-system)
   (:import-from #:cl-mcp/src/system-loader-core
                 #:%load-with-timeout)
+  (:import-from #:cl-mcp/src/tools/response-builders
+                #:build-load-system-response)
   (:import-from #:cl-mcp/src/utils/request-debugger-boundary
                 #:*request-debugger-boundary-active*
                 #:request-debugger-escape-error-p
@@ -348,3 +350,80 @@
                 "clear_fasls must pick up a same-second source rewrite"))
         (uiop:delete-directory-tree dir :validate t
                                         :if-does-not-exist :ignore)))))
+
+(deftest load-system-clear-fasls-on-a-subsystem-clears-its-primary
+  (testing "clear_fasls given a package-inferred subsystem recompiles its dependencies (#167)"
+    ;; A subsystem such as fixture/src/contracts has no source directory of
+    ;; its own, so clear_fasls used to delete nothing and still report a
+    ;; successful load: an edit to a dependency whose FASL looked newer than
+    ;; its source stayed unloaded.  The FASLs are dated into the future here,
+    ;; so the case does not depend on landing in the same second.
+    (let* ((name "clmcp-clear-fasls-sub")
+           (dir (merge-pathnames (format nil "~A/" name) (uiop:temporary-directory)))
+           (src-dir (merge-pathnames "src/" dir))
+           (impl (merge-pathnames "impl.lisp" src-dir)))
+      (unwind-protect
+           (flet ((write-impl (body)
+                    (with-open-file (out impl :direction :output :if-exists :supersede)
+                      (format out "(defpackage #:~A/src/impl (:use #:cl) (:export #:twice))~%~
+                                   (in-package #:~A/src/impl)~%~
+                                   (defun twice (x) ~A)~%"
+                              name name body)))
+                  (twice (x)
+                    (funcall (find-symbol "TWICE" (format nil "~:@(~A~)/SRC/IMPL" name)) x))
+                  (date-fasls-ahead ()
+                    (let ((future (- (+ (get-universal-time) 120) 2208988800)))
+                      (dolist (fasl (directory
+                                     (merge-pathnames
+                                      "**/*.fasl" (asdf:apply-output-translations dir))))
+                        (uiop:symbol-call :sb-posix :utimes
+                                          (namestring fasl) future future)))))
+             (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)
+             (ensure-directories-exist src-dir)
+             (with-open-file (out (merge-pathnames (format nil "~A.asd" name) dir)
+                                  :direction :output :if-exists :supersede)
+               (format out "(asdf:defsystem ~S :class :package-inferred-system~%~
+                             :depends-on (~S))~%"
+                       name (format nil "~A/src/impl" name)))
+             (with-open-file (out (merge-pathnames "contracts.lisp" src-dir)
+                                  :direction :output :if-exists :supersede)
+               (format out "(defpackage #:~A/src/contracts (:use #:cl)~%~
+                             (:import-from #:~A/src/impl #:twice))~%~
+                            (in-package #:~A/src/contracts)~%"
+                       name name name))
+             (write-impl "(+ x x 1)")
+             (asdf:load-asd (merge-pathnames (format nil "~A.asd" name) dir))
+             (let ((subsystem (format nil "~A/src/contracts" name)))
+               (ok (string= "loaded" (gethash "status" (load-system subsystem))))
+               (ok (= 7 (twice 3)) "precondition: the wrong definition is loaded")
+               (write-impl "(* 2 x)")
+               (date-fasls-ahead)
+               (let ((ht (load-system subsystem :clear-fasls t)))
+                 (ok (string= "loaded" (gethash "status" ht)))
+                 (ok (plusp (gethash "fasls_deleted" ht 0))
+                     "the FASLs of the tree were deleted")
+                 (ok (equal name (gethash "fasls_cleared_from" ht))
+                     "from the primary system's directory")
+                 (ok (search "clear_fasls: deleted"
+                             (gethash "text"
+                                      (aref (gethash "content"
+                                                     (build-load-system-response
+                                                      subsystem ht))
+                                            0)))
+                     "and the response says how many"))
+               (ok (= 6 (twice 3)) "the edited dependency was recompiled")))
+        (ignore-errors (asdf:clear-system name))
+        (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
+
+(deftest load-system-response-says-when-clear-fasls-deleted-nothing
+  (testing "a clear_fasls that deleted nothing is not silent"
+    (let* ((ht (make-hash-table :test #'equal)))
+      (setf (gethash "status" ht) "loaded"
+            (gethash "duration_ms" ht) 5
+            (gethash "warnings" ht) 0
+            (gethash "fasls_deleted" ht) 0)
+      (let ((text (gethash "text" (aref (gethash "content"
+                                                 (build-load-system-response "nowhere" ht))
+                                        0))))
+        (ok (search "clear_fasls deleted no FASLs" text) text)
+        (ok (search "no source directory found for nowhere" text) text)))))

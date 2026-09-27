@@ -216,7 +216,10 @@ Load an ASDF system with structured output and reload support. Preferred over
 Input:
 - `system` (string, required): ASDF system name (e.g., `"cl-mcp"`, `"my-project/tests"`)
 - `force` (boolean, default `true`): clear loaded state before loading to pick up file changes
-- `clear_fasls` (boolean, default `false`): force full recompilation from source
+- `clear_fasls` (boolean, default `false`): force full recompilation from source by
+  deleting the cached FASLs under the system's source directory. A package-inferred
+  subsystem (`my-app/src/contracts`) has no directory of its own, so its primary system's
+  (`my-app`) is cleared, which holds every FASL in the tree
 - `timeout_seconds` (number, default `120`): timeout for the load operation
 
 Output fields:
@@ -226,7 +229,11 @@ Output fields:
 - `warnings` (integer): number of compiler warnings (when loaded)
 - `warning_details` (string|null): warning text (when warnings > 0)
 - `forced` (boolean): whether force-reload was applied
-- `clear_fasls` (boolean): whether full recompilation was done
+- `clear_fasls` (boolean): whether `clear_fasls` was requested
+- `fasls_deleted` (integer, with `clear_fasls`): how many cached FASLs were deleted. `0` means
+  nothing was forced to recompile, and the text says so
+- `fasls_cleared_from` (string, with `clear_fasls`): the system whose directory was cleared —
+  the primary system when a subsystem was named
 - `message` (string|null): error or timeout message
 
 Solves three problems with using `ql:quickload` via `repl-eval`:
