@@ -20,6 +20,8 @@
   (:import-from #:cl-mcp/src/frame-inspector #:capture-error-context)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/utils/nesting
+                #:check-lisp-nesting)
   (:export #:repl-eval #:*default-eval-package* #:*default-max-output-length*))
 
 (in-package #:cl-mcp/src/repl-core)
@@ -35,7 +37,9 @@ Prevents unbounded output from consuming excessive memory or bandwidth.")
 
 (defun %read-all (string allow-read-eval)
   "Read all top-level forms from STRING and return them as a list.
-Uses a gensym sentinel to avoid collision with user input of :eof."
+Uses a gensym sentinel to avoid collision with user input of :eof.
+Text nested too deeply to read safely is refused first (CHECK-LISP-NESTING)."
+  (check-lisp-nesting string)
   (let ((*readtable* (copy-readtable))
         (*read-eval* allow-read-eval)
         (eof-sentinel (gensym "EOF")))

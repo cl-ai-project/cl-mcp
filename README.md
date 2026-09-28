@@ -311,5 +311,24 @@ full system privileges. Do not expose the endpoint beyond localhost. File
 operation restrictions (project root enforcement) are convenience guardrails
 to prevent accidental mistakes, not security boundaries.
 
+Because a request that reaches it is code execution, the HTTP transport refuses
+what a web page could send it, as the MCP Streamable HTTP transport requires:
+a request whose `Origin` is not a loopback origin (403), a request whose `Host`
+does not name the loopback interface while the server listens only on it
+(403; this is what stops DNS rebinding), and a `POST` that is not
+`Content-Type: application/json` (415). Clients that are not browsers send no
+`Origin` and are unaffected. A server started on a non-loopback address was
+exposed on purpose, and its `Host` is not checked; its `Origin` still is, since
+a page rebound to its LAN address sends an `Origin` matching that `Host`.
+
+Input that would drive a recursive parser off the end of a thread's stack is
+refused before any parser sees it. SBCL cannot always recover from an exhausted
+stack, and when it cannot, the whole server stops. A JSON message nested more
+than 1000 levels deep is a parse error (-32700). A worker's answer that deep
+comes back as an error instead of being read: ask for a shallower `preview_max_depth` or `max_depth`. Lisp source
+that would make the reader recurse more than 500 levels is refused by the tools
+that read it, whether it is a file, tool content or `repl-eval` code. That
+covers nested lists and also chains of prefixes such as `'`, `#'` and `#+`.
+
 ## License
 MIT

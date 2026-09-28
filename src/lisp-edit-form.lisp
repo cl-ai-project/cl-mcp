@@ -44,6 +44,8 @@
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/utils/strings
                 #:ensure-trailing-newline)
+  (:import-from #:cl-mcp/src/utils/nesting
+                #:check-lisp-nesting)
   (:import-from #:cl-mcp/src/package-context
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
@@ -819,6 +821,9 @@ reparented forms as \"repair_reparented\" and that number as \"forms\"."
                 (t (error "Unsupported operation: ~A" operation)))))
     (unless (or (eq op-key :delete) (stringp content))
       (error "content is required for ~A operation" operation))
+    ;; Content is read, and repaired, by recursive readers.
+    (when (stringp content)
+      (check-lisp-nesting content))
     (with-file-lock ((%normalize-paths file-path))
       (multiple-value-bind
           (abs rel original nodes target target-snippet _ file-package-name)

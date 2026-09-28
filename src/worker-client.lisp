@@ -18,6 +18,8 @@
   (:import-from #:usocket)
   (:import-from #:yason)
   (:import-from #:cl-mcp/src/utils/random #:generate-random-hex-string)
+  (:import-from #:cl-mcp/src/utils/nesting #:json-too-deep-p #:+max-json-nesting+)
+  (:import-from #:cl-mcp/src/utils/sanitize #:replace-lone-surrogates)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:*retired-leaked-thread-reason*
                 #:+leaked-thread-exit-code+)
@@ -393,7 +395,9 @@ depending on *parse-json-null-as-keyword*."
         unless line do
           (error 'worker-spawn-failed
                  :message "Worker closed stdout before handshake")
-        do (let ((json (ignore-errors (yason:parse line))))
+        ;; A line nested too deeply to parse safely is not the handshake.
+        do (let ((json (and (not (json-too-deep-p line))
+                            (ignore-errors (yason:parse line)))))
              (when (and (hash-table-p json) (gethash "tcp_port" json))
                (let ((tcp-port (gethash "tcp_port" json))
                      (swank-port (gethash "swank_port" json))
@@ -458,15 +462,18 @@ either issue."
 ;;; ---------------------------------------------------------------------------
 
 (defun %send-json-rpc (stream id method params)
-  "Write a JSON-RPC 2.0 request to STREAM as a single line."
+  "Write a JSON-RPC 2.0 request to STREAM as a single line, lone surrogates
+replaced (REPLACE-LONE-SURROGATES): a client's \\uDFFF decodes to one, yason
+writes it raw, and the UTF-8 write failing was taken for the worker crashing."
   (let ((req (make-hash-table :test 'equal)))
     (setf (gethash "jsonrpc" req) "2.0"
           (gethash "id" req) id
           (gethash "method" req) method)
     (when params
       (setf (gethash "params" req) params))
-    (let ((json-line (with-output-to-string (s)
-                       (yason:encode req s))))
+    (let ((json-line (replace-lone-surrogates
+                      (with-output-to-string (s)
+                        (yason:encode req s)))))
       (write-line json-line stream)
       (force-output stream))))
 
@@ -488,6 +495,17 @@ corruption."
            (let ((line (%read-line-limited stream nil +max-json-line-bytes+)))
              (unless line
                (error 'end-of-file :stream stream))
+             ;; The worker encodes what a client asked it to build, and the
+             ;; parse below recurses per level; an exhausted stack here is the
+             ;; parent's.  The line was read whole, so the stream is still in
+             ;; step and the worker keeps serving: an ordinary error answer.
+             (when (json-too-deep-p line)
+               (error 'worker-rpc-error
+                      :code -32603
+                      :message (format nil "The worker's answer nests more than ~D levels ~
+deep, too deep for this server to read; ask for a shallower result (a lower ~
+preview_max_depth or max_depth)."
+                                       +max-json-nesting+)))
              (let ((json (if preserve-json-types
                              (yason:parse line
                                           :json-arrays-as-vectors t

@@ -15,6 +15,8 @@
                 #:call-with-lenient-packages
                 #:call-with-managed-packages
                 #:record-homeless-on-teardown)
+  (:import-from #:cl-mcp/src/utils/nesting
+                #:lisp-too-deep-p)
   (:import-from #:uiop
                 #:directory-files
                 #:ensure-directory-pathname
@@ -154,7 +156,10 @@ have begun, to avoid descending into the rest of the file. Extraction is
 best-effort: a read error or premature end of file (a malformed later form,
 custom reader syntax) ends the scan and the forms read so far are returned,
 so callers such as PARSE-TOP-LEVEL-FORMS can report the breakage themselves
-instead of failing here first."
+instead of failing here first.  Text nested too deeply to read safely
+(LISP-TOO-DEEP-P) yields no forms."
+  (when (lisp-too-deep-p text)
+    (return-from %read-header-forms-from-text nil))
   (call-with-lenient-packages
    (lambda ()
      (let ((*read-eval* nil))

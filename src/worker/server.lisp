@@ -8,7 +8,9 @@
 (defpackage #:cl-mcp/src/worker/server
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
-  (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-error-message)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:sanitize-error-message #:replace-lone-surrogates)
+  (:import-from #:cl-mcp/src/utils/nesting #:json-too-deep-p)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:leaked-threads
                 #:+leaked-thread-exit-code+)
@@ -82,8 +84,9 @@ that returns a hash-table to be used as the JSON-RPC result."
   (log-event :debug "worker.method.registered" "method" method-name))
 
 (defun %encode-response (obj)
-  "Encode OBJ as a single-line JSON string."
-  (with-output-to-string (s) (yason:encode obj s)))
+  "Encode OBJ as a single-line JSON string, lone surrogates replaced (see
+REPLACE-LONE-SURROGATES): written raw, one killed the worker."
+  (replace-lone-surrogates (with-output-to-string (s) (yason:encode obj s))))
 
 (defparameter *retire-action*
   (lambda (leaked)
@@ -261,6 +264,14 @@ Returns a JSON string response, or NIL for notifications."
   (let ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return) line)))
     (when (string= trimmed "")
       (return-from %process-line nil))
+    ;; Counted before parsing: an exhausted stack is not always catchable,
+    ;; and one that is not ends the worker.
+    (when (json-too-deep-p trimmed)
+      (log-event :warn "worker.parse.error" "error" "nested too deeply")
+      (return-from %process-line
+        (%encode-response
+         (%make-error nil -32700 "Parse error: nested too deeply"
+                      (worker-server-authenticated-p server)))))
     (let ((msg (handler-case
                    (yason:parse trimmed)
                  (error (e)

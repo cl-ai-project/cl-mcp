@@ -35,9 +35,10 @@
           (ignore-errors (usocket:socket-close sock))))
     (error () nil)))
 
-(defun send-http-request (port method path &key body headers)
+(defun send-http-request (port method path &key body headers host-header)
   "Send a simple HTTP request and return (status-code header-string body-string).
-Uses Connection: close to avoid keep-alive hanging."
+Uses Connection: close to avoid keep-alive hanging.  HOST-HEADER replaces the
+Host header's value, which is 127.0.0.1:PORT otherwise."
   (let* ((sock (usocket:socket-connect "127.0.0.1" port
                                        :element-type 'character))
          (stream (usocket:socket-stream sock)))
@@ -45,7 +46,9 @@ Uses Connection: close to avoid keep-alive hanging."
          (progn
            ;; Send request
            (format stream "~A ~A HTTP/1.1~C~C" method path #\Return #\Newline)
-           (format stream "Host: 127.0.0.1:~D~C~C" port #\Return #\Newline)
+           (format stream "Host: ~A~C~C"
+                   (or host-header (format nil "127.0.0.1:~D" port))
+                   #\Return #\Newline)
            (format stream "Connection: close~C~C" #\Return #\Newline)
            (dolist (h headers)
              (format stream "~A: ~A~C~C" (car h) (cdr h) #\Return #\Newline))
@@ -157,6 +160,98 @@ Uses Connection: close to avoid keep-alive hanging."
                  (when status
                    (ok (eql status 400)))))
           (stop-http-server)))))
+
+(deftest http-refuses-what-a-browser-page-could-send
+  ;; A request that reaches repl-eval is code execution, and a page on a DNS
+  ;; rebinding domain resolves to 127.0.0.1: with no Origin, Host or
+  ;; Content-Type check it initialized a session and ran repl-eval, sending
+  ;; text/plain with its own Host and Origin.
+  (if (not (http-port-available-p))
+      (ok t "port unavailable")
+      (unwind-protect
+           (multiple-value-bind (acceptor port)
+               (start-http-server :host "127.0.0.1" :port 0 :token nil)
+             (declare (ignore acceptor))
+             (sleep 0.1d0)
+             (let ((init "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}"))
+               (flet ((status (&rest args)
+                        (handler-case (apply #'send-http-request port "POST" "/mcp"
+                                             :body init args)
+                          (error () nil))))
+                 (testing "a foreign Origin is refused"
+                   (ok (eql 403 (status :headers '(("Content-Type" . "application/json")
+                                                   ("Origin" . "http://rebind.evil.example:3000")))))
+                   (ok (eql 403 (status :headers '(("Content-Type" . "application/json")
+                                                   ("Origin" . "null"))))
+                       "an opaque origin too"))
+                 (testing "a foreign Host is refused while the server listens on loopback"
+                   (ok (eql 403 (status :headers '(("Content-Type" . "application/json"))
+                                        :host-header "rebind.evil.example:3000"))))
+                 (testing "a POST that is not application/json is refused"
+                   (ok (eql 415 (status :headers '(("Content-Type" . "text/plain")))))
+                   (ok (eql 415 (status :headers '()))
+                       "and one with no Content-Type")
+                   ;; From review: the media type was searched for, so a header
+                   ;; merely containing it passed.
+                   (ok (eql 415 (status :headers '(("Content-Type" . "text/plain; x=application/json"))))
+                       "a parameter spelling application/json is not the media type")
+                   (ok (eql 415 (status :headers '(("Content-Type" . "application/jsonp"))))
+                       "nor is a longer media type that starts with it"))
+                 (testing "a loopback client is still served"
+                   (ok (eql 200 (status :headers '(("Content-Type" . "application/json; charset=utf-8")
+                                                   ("Origin" . "http://localhost:3000")))))
+                   (ok (eql 200 (status :headers '(("Content-Type" . "application/json"))
+                                        :host-header (format nil "localhost:~D" port))))))))
+        (stop-http-server))))
+
+(deftest http-answers-a-deeply-nested-body
+  ;; A body nested past the parser's stack signalled STORAGE-CONDITION, which
+  ;; the parse's ERROR clause does not catch, and the request's thread stopped.
+  (if (not (http-port-available-p))
+      (ok t "port unavailable")
+      (unwind-protect
+           (multiple-value-bind (acceptor port)
+               (start-http-server :host "127.0.0.1" :port 0 :token nil)
+             (declare (ignore acceptor))
+             (sleep 0.1d0)
+             (let ((deep (concatenate 'string
+                                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":"
+                                      (make-string 200000 :initial-element #\[)
+                                      (make-string 200000 :initial-element #\])
+                                      "}"))
+                   (init "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
+                   (json '(("Content-Type" . "application/json"))))
+               (testing "the deep body gets an HTTP answer"
+                 (let ((status (handler-case (send-http-request port "POST" "/mcp"
+                                                                :body deep :headers json)
+                                 (error () nil))))
+                   (ok (and status (<= 400 status 499)) "a client error, not a dropped connection")))
+               (testing "the server still serves the next request"
+                 (ok (eql 200 (send-http-request port "POST" "/mcp" :body init :headers json))))))
+        (stop-http-server))))
+
+(deftest loopback-host-recognizes-this-machine
+  (let ((host-p #'cl-mcp/src/http::%loopback-host-p))
+    (ok (funcall host-p "127.0.0.1:3000"))
+    (ok (funcall host-p "localhost"))
+    (ok (funcall host-p "LOCALHOST:80"))
+    (ok (funcall host-p "[::1]:3000"))
+    (ok (not (funcall host-p "localhost.evil.example")))
+    (ok (not (funcall host-p "127.0.0.1.evil.example:3000")))
+    (ok (not (funcall host-p "")))
+    (ok (not (funcall host-p nil)))))
+
+(deftest json-media-type-is-compared-whole
+  (let ((json-p #'cl-mcp/src/http::%json-media-type-p))
+    (ok (funcall json-p "application/json"))
+    (ok (funcall json-p "Application/JSON"))
+    (ok (funcall json-p "application/json; charset=utf-8"))
+    (ok (funcall json-p " application/json ;charset=utf-8"))
+    (ok (not (funcall json-p "text/plain; x=application/json")))
+    (ok (not (funcall json-p "application/jsonp")))
+    (ok (not (funcall json-p "application/json-seq")))
+    (ok (not (funcall json-p "")))
+    (ok (not (funcall json-p nil)))))
 
 ;;; Session timeout tests
 

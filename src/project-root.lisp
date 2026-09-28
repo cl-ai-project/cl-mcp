@@ -78,8 +78,11 @@ of its request when this thread is running one; the global default and every
 other session keep their roots.  With a NIL SESSION-ID -- a call from outside
 any transport -- the global default changes, as it always has.
 
-Either way the process changes its working directory to ROOT.  The working
-directory is shared by the whole process; no path is resolved against it."
+Only the global default moves the process's working directory.  The working
+directory is one for the whole process, so a session's root set there became
+visible to every other session: a session with no root of its own resolved a
+relative fs-set-project-root (\".\", the documented first call) against it,
+and error messages and fs-get-project-info printed it."
   (let ((dir (uiop:ensure-directory-pathname root)))
     (bt:with-lock-held (*project-root-lock*)
       (cond
@@ -91,8 +94,8 @@ directory is shared by the whole process; no path is resolved against it."
                  *default-pathname-defaults* dir)))
         (t
          (setf *project-root* dir
-               *default-pathname-defaults* dir)))
-      (uiop:chdir dir))
+               *default-pathname-defaults* dir)
+         (uiop:chdir dir))))
     dir))
 
 (defun call-with-session-project-root (thunk &key (session-id *current-session-id*))

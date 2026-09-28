@@ -30,6 +30,9 @@
                 #:native-path-namestring)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-error-message)
+  (:import-from #:cl-mcp/src/utils/nesting
+                #:lisp-too-deep-p
+                #:+max-lisp-nesting+)
   (:export #:lisp-check-parens
            #:*check-parens-max-bytes*))
 
@@ -157,6 +160,16 @@ syntax error in the file itself."
   ;; Skip reader check for files using custom readtables.
   (when (%custom-readtable-p text)
     (return-from %try-reader-check nil))
+  ;; The reader recurses once per level, and an exhausted stack can take the
+  ;; server down with it: text this deep is reported, not read.
+  (when (lisp-too-deep-p text)
+    (return-from %try-reader-check
+      (list :kind    "reader-error"
+            :message (format nil "nested more than ~D levels deep; not read"
+                             +max-lisp-nesting+)
+            :offset  base-offset
+            :line    nil
+            :column  nil)))
   (with-input-from-string (stream text)
     (handler-case
         (let ((*read-eval* nil))

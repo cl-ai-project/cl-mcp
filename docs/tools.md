@@ -330,9 +330,15 @@ resolve that session's paths against it, and only that session's worker is told.
 sessions on the same server keep their roots, and a session that never sets one works under
 the server default (`MCP_PROJECT_ROOT`, or a root set outside any session). `initialize`'s
 `rootPath`/`rootUri` sets the connecting session's root the same way. A session's root is
-dropped when the session ends (TCP connection closed, HTTP session deleted or expired). The
-process working directory is shared by all sessions and follows the last root set; no path is
-resolved against it.
+dropped when the session ends (TCP connection closed, HTTP session deleted or expired).
+A root given as a symbolic link (by either route) is resolved to what it names, and the
+"too broad" check applies to that.
+
+A session's root does not move the process working directory, which belongs to the server:
+only a root set outside any session moves it. So a session with no root of its own that
+passes a relative `path` (`"."`) resolves it against the server's directory — never against
+another session's root — and `cwd` in `fs-get-project-info` never shows another session's
+root.
 
 Output:
 - `project_root` (string): new project root path

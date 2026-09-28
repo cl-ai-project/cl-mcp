@@ -32,7 +32,11 @@
   (:import-from #:cl-mcp/src/proxy
                 #:cancel-request)
   (:import-from #:cl-mcp/src/utils/sanitize
-                #:sanitize-for-json)
+                #:sanitize-for-json
+                #:replace-lone-surrogates)
+  (:import-from #:cl-mcp/src/utils/nesting
+                #:json-too-deep-p
+                #:+max-json-nesting+)
   (:import-from #:cl-mcp/src/utils/paths
                 #:broad-root-p
                 #:native-path-namestring)
@@ -140,8 +144,8 @@ cyclic or extremely large structures."
          (t (or (ignore-errors (princ-to-string obj))
                 "#<unrepresentable>"))))))
 
-(defun %encode-json (obj)
-  "Encode OBJ as a JSON string with resilient error handling.
+(defun %encode-json-unchecked (obj)
+  "Encode OBJ as a JSON string with resilient error handling; see %ENCODE-JSON.
 Fast path: try normal yason:encode. On failure, sanitize all strings and retry.
 On second failure, return a hardcoded valid JSON-RPC error response."
   (handler-case
@@ -193,6 +197,14 @@ On second failure, return a hardcoded valid JSON-RPC error response."
             (format nil "{\"jsonrpc\":\"2.0\",\"id\":~A,\"error\":{\"code\":-32603,\"message\":\"Response JSON encoding failed\"}}"
                     id-json)))))))
 
+(defun %encode-json (obj)
+  "Encode OBJ as a JSON string with resilient error handling.
+Fast path: try normal yason:encode. On failure, sanitize all strings and retry.
+On second failure, return a hardcoded valid JSON-RPC error response.
+Every path's result has its lone surrogates replaced (REPLACE-LONE-SURROGATES):
+yason writes one raw, and the UTF-8 transport then cannot send the line."
+  (replace-lone-surrogates (%encode-json-unchecked obj)))
+
 ;;; Response builders are imported from cl-mcp/src/tools/helpers:
 ;;;   result, rpc-error, text-content, tool-error
 
@@ -217,6 +229,10 @@ On second failure, return a hardcoded valid JSON-RPC error response."
             ;; keep cl-mcp's own default root.
             (let ((root-dir (uiop:parse-unix-namestring root :ensure-directory t)))
               (when (uiop/filesystem:directory-exists-p root-dir)
+                ;; Resolved, as fs-set-project-root resolves its path: kept as
+                ;; spelled, a link such as /proc/self/cwd was re-resolved by
+                ;; every later guard and followed whatever it came to name.
+                (setf root-dir (uiop:ensure-directory-pathname (truename root-dir)))
                 (let ((broad-p (broad-root-p root-dir)))
                   (cond
                     ;; Reject overly broad roots (same policy as fs.lisp)
@@ -366,6 +382,12 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
     (when (string= trimmed "")
       (log-event :debug "rpc.skip-empty")
       (return-from process-json-line nil))
+    ;; Counted before parsing: an exhausted stack is not always catchable.
+    (when (json-too-deep-p trimmed)
+      (ignore-errors (log-event :warn "rpc.parse-error" "error" "nested too deeply"))
+      (return-from process-json-line
+        (%encode-json (rpc-error nil -32700 (format nil "Parse error: nested deeper than ~D levels"
+                                                    +max-json-nesting+)))))
     (let ((msg (handler-case
                    (%decode-json trimmed)
                  (error (e)
@@ -374,7 +396,15 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
                                 "line" trimmed
                                 "error" (princ-to-string e)))
                    (return-from process-json-line
-                     (%encode-json (rpc-error nil -32700 "Parse error")))))))
+                     (%encode-json (rpc-error nil -32700 "Parse error"))))
+                 ;; Not an ERROR: without this, a line nested past the
+                 ;; parser's stack would stop the connection's thread.
+                 (storage-condition ()
+                   (ignore-errors
+                     (log-event :warn "rpc.parse-error" "error" "nested too deeply"))
+                   (return-from process-json-line
+                     (%encode-json
+                      (rpc-error nil -32700 "Parse error: nested too deeply")))))))
       (unless (hash-table-p msg)
         (log-event :warn "rpc.invalid" "reason" "message not object")
         (return-from process-json-line
@@ -416,4 +446,12 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
             (let ((safe-id (typecase id
                              ((or null string integer) id)
                              (t nil))))
-              (%encode-json (rpc-error safe-id -32603 "Internal error")))))))))
+              (%encode-json (rpc-error safe-id -32603 "Internal error"))))
+          (storage-condition ()
+            (ignore-errors
+              (log-event :error "rpc.internal" "method" method "error" "storage exhausted"))
+            (%encode-json (rpc-error (typecase id
+                                       ((or null string integer) id)
+                                       (t nil))
+                                     -32603
+                                     "Internal error: the server ran out of stack or heap"))))))))

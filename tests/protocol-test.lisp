@@ -42,6 +42,47 @@
           (ok (stringp (gethash "version" server)))
           (ok (gethash "tools" caps)))))))
 
+(defun %surrogate-free-p (string)
+  (not (find-if (lambda (c) (<= #xD800 (char-code c) #xDFFF)) string)))
+
+(deftest a-deeply-nested-line-answers-a-parse-error
+  (testing "a line nested past the parser's stack is a -32700, not a stopped thread"
+    (let* ((depth 200000)
+           (line (concatenate 'string
+                              "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":"
+                              (make-string depth :initial-element #\[)
+                              (make-string depth :initial-element #\])
+                              "}"))
+           (resp (process-json-line line)))
+      (ok (stringp resp) "a response came back")
+      (ok (eql -32700 (gethash "code" (gethash "error" (parse resp))))
+          "it is a parse error")
+      (ok (stringp (process-json-line *init-req*)) "the next line is still served"))))
+
+(deftest a-lone-surrogate-echoed-by-a-parent-tool-is-replaced
+  (testing "a parent tool echoing \\uDFFF from its arguments writes U+FFFD in its place"
+    (let* ((*use-worker-pool* nil)
+           (*project-root* (uiop:getcwd))
+           (line (concatenate 'string
+                              "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
+                              "\"params\":{\"name\":\"clgrep-search\",\"arguments\":"
+                              "{\"pattern\":\"zzqq\\uDFFFxx\",\"path\":\"src/utils\"}}}"))
+           (resp (process-json-line line)))
+      (ok (%surrogate-free-p resp) "no surrogate reaches the transport")
+      (ok (search (string (code-char #xFFFD)) resp) "the replacement is visible")
+      (ok (gethash "result" (parse resp)) "the call itself still succeeded"))))
+
+(deftest encode-json-replaces-a-lone-surrogate-on-every-path
+  (testing "the normal path and the hardcoded fallback both come out surrogate-free"
+    (let ((h (make-hash-table :test 'equal)))
+      (setf (gethash "x" h) (string (code-char #xD800)))
+      (ok (%surrogate-free-p (cl-mcp/src/protocol::%encode-json h))))
+    (let ((h (make-hash-table :test 'equal)))
+      ;; A value yason cannot encode forces the fallback, which writes the id itself.
+      (setf (gethash "id" h) (string (code-char #xDFFF))
+            (gethash "bad" h) (make-condition 'simple-error))
+      (ok (%surrogate-free-p (cl-mcp/src/protocol::%encode-json h))))))
+
 (deftest initialized-notification
   (testing "notifications/initialized returns no response"
     (let ((line (concatenate

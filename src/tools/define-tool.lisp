@@ -179,6 +179,25 @@ Example:
            (arg-validation-error (e)
              (tool-error ,id-sym (validation-message e)
                          :protocol-version (protocol-version ,state-sym)))
+           ;; Not an ERROR, so it passed every handler below: a form nested a
+           ;; few thousand deep exhausted the reader's control stack, and the
+           ;; condition reached the debugger of the server's own REPL,
+           ;; leaving the request thread stopped and the client without an
+           ;; answer.  Caught here, after the stack has unwound, it is an
+           ;; answer about the input.
+           (storage-condition (e)
+             (tool-error ,id-sym
+                         (format nil "~A stopped: ~A while processing this ~
+input -- a form nested too deeply, for instance.  The call was abandoned; ~
+split or flatten the input and try again."
+                                 ,name
+                                 (typecase e
+                                   (sb-kernel::control-stack-exhausted
+                                    "the server ran out of control stack")
+                                   (sb-kernel::heap-exhausted-error
+                                    "the server ran out of heap")
+                                   (t (string-downcase (princ-to-string (type-of e))))))
+                         :protocol-version (protocol-version ,state-sym)))
            (error (e)
              (rpc-error ,id-sym -32603
                         (sanitize-for-json
