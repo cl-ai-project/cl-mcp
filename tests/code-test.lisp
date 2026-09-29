@@ -24,6 +24,11 @@
                 #:place-references-in-source)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
+  ;; Loaded for the tool-call tests, which run the real worker handler and
+  ;; the protocol entry point in this image.
+  (:import-from #:cl-mcp/src/worker/handlers)
+  (:import-from #:cl-mcp/src/protocol)
+  (:import-from #:cl-mcp/src/proxy)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht))
 
@@ -562,6 +567,74 @@ fixture directory."
             (ok (find "target-is-reached-through-the-macro" (gethash "tests" report)
                       :key (lambda (test) (gethash "name" test)) :test #'equal)))))))
 
+(defun %write-stale-refs-fixture (file insert-test-p)
+  "Write FILE: a target, a macro calling it, and a function reaching it only
+through that macro -- with, when INSERT-TEST-P, an unrelated test inserted just
+before that function, as an edit made after the file was loaded would."
+  (with-open-file (out file :direction :output :if-exists :supersede)
+    (format out "(defpackage #:cl-mcp-refs-stale-fixture (:use #:cl)~%  ~
+(:import-from #:rove #:deftest #:ok))~%~
+(in-package #:cl-mcp-refs-stale-fixture)~%~%~
+(defun stale-target (x) x)~%~%~
+(defmacro with-stale-target (&body body) `(progn (stale-target 1) ,@body))~%~%~
+~:[~;(deftest unrelated-test (ok t))~%~%~]~
+(defun stale-caller () (with-stale-target :done))~%"
+            insert-test-p)))
+
+(defun %stale-refs-report (file)
+  "Return the placed code-find-references report for the fixture's target,
+scanning FILE's directory."
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp))
+        (designator "cl-mcp-refs-stale-fixture::stale-target"))
+    (place-references-in-source
+     (code-find-references-report
+      designator
+      :limit nil
+      :scan (scan-project designator :root (uiop:pathname-directory-pathname file)))
+     #'top-level-forms-at
+     :limit 50)))
+
+(deftest code-find-references-does-not-place-a-stale-reference-in-a-new-form
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let ((file (asdf:system-relative-pathname
+                   :cl-mcp "tests/tmp/refs-stale/refs-stale-fixture.lisp")))
+        (ensure-directories-exist file)
+        (unwind-protect
+             (flet ((caller-ref (report)
+                      (find-if (lambda (ref) (equal "xref" (gethash "origin" ref)))
+                               (gethash "refs" report)))
+                    (test-names (report)
+                      (map 'list (lambda (test) (gethash "name" test))
+                           (gethash "tests" report))))
+               (%write-stale-refs-fixture file nil)
+               (%compile-and-load-under-own-name file)
+               ;; An unrelated test inserted before the caller, not reloaded.
+               ;; utimes takes Unix time; FILE-WRITE-DATE is universal time.
+               (%write-stale-refs-fixture file t)
+               (let ((later (+ (- (file-write-date file) 2208988800) 100)))
+                 (uiop:symbol-call :sb-posix :utimes (namestring (truename file)) later later))
+               (testing "unreloaded: the stale line names no form and no test"
+                 (let* ((report (%stale-refs-report file))
+                        (ref (caller-ref report)))
+                   (ok ref "the xref-only reference is still listed")
+                   (ok (and ref (eq t (gethash "stale" ref))))
+                   (ok (and ref (null (gethash "form_type" ref))))
+                   (ok (and ref (null (gethash "form_name" ref))))
+                   (ok (and ref (null (gethash "test" ref))))
+                   (ok (null (member "unrelated-test" (test-names report) :test #'equal)))
+                   (ok (and ref (search "reload" (gethash "note" ref)))
+                       "the note still asks for a reload")))
+               (testing "after a reload the reference is placed in its own form"
+                 (%compile-and-load-under-own-name file)
+                 (let* ((report (%stale-refs-report file))
+                        (ref (caller-ref report)))
+                   (ok (and ref (not (eq t (gethash "stale" ref)))))
+                   (ok (and ref (equal "defun" (gethash "form_type" ref))))
+                   (ok (and ref (equal "stale-caller" (gethash "form_name" ref))))
+                   (ok (null (member "unrelated-test" (test-names report) :test #'equal))))))
+          (ignore-errors (delete-file file))))))
+
 (deftest code-find-references-reads-a-preserved-worker-answer-as-inline
   (testing "JSON nulls from a worker become NIL, falses stay false"
     (let* ((ref (make-ht "form_type" :null "test" :null "stale" 'yason:false
@@ -576,6 +649,87 @@ fixture directory."
       (ok (null (gethash "scan_skipped" report)))
       (ok (eq 'yason:false (gethash "stale" ref)))
       (ok (eq 'yason:false (gethash "truncated" report))))))
+
+(defun %json-round-trip (value &key preserve)
+  "Return VALUE encoded as JSON and parsed back: the way a worker reads its
+params (plain YASON:PARSE), or, when PRESERVE, the way the parent reads a
+worker's answer with its JSON types kept."
+  (let ((text (with-output-to-string (out) (yason:encode value out))))
+    (if preserve
+        (yason:parse text :json-arrays-as-vectors t
+                          :json-booleans-as-symbols t
+                          :json-nulls-as-keyword t)
+        (yason:parse text))))
+
+(defun %call-references-tool (symbol &key pooled worker)
+  "Call the code-find-references tool for SYMBOL through process-json-line and
+return the JSON-RPC result.  When POOLED, the worker pool path is taken with
+PROXY-TO-WORKER standing in for the pool: it calls WORKER (by default the real
+worker handler, across both JSON boundaries) instead of a worker process."
+  (let* ((request (format nil "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",~
+\"params\":{\"name\":\"code-find-references\",\"arguments\":{\"symbol\":~S}}}"
+                          symbol))
+         (proxy 'cl-mcp/src/proxy:proxy-to-worker)
+         (original (fdefinition proxy))
+         (worker (or worker
+                     (lambda (params)
+                       (cl-mcp/src/worker/handlers::%handle-code-find-references params)))))
+    (unwind-protect
+         (progn
+           (when pooled
+             (setf (fdefinition proxy)
+                   (lambda (id method params &key preserve-json-types)
+                     (declare (ignore id))
+                     (assert (equal method "worker/code-find-references"))
+                     (%json-round-trip (funcall worker (%json-round-trip params))
+                                       :preserve preserve-json-types))))
+           (let ((cl-mcp/src/proxy:*use-worker-pool* pooled))
+             (gethash "result" (yason:parse (cl-mcp/src/protocol:process-json-line request)))))
+      (setf (fdefinition proxy) original))))
+
+(deftest code-find-references-tool-answers-the-same-inline-and-through-a-worker
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let ((*project-root* (asdf:system-relative-pathname :cl-mcp "tests/fixtures/")))
+        (%load-xref-fixture)
+        (let* ((designator "cl-mcp-xref-fixture:target")
+               (inline (%call-references-tool designator))
+               (pooled (%call-references-tool designator :pooled t))
+               (text (gethash "text" (aref (gethash "content" pooled) 0))))
+          (flet ((names (result key field)
+                   (map 'list (lambda (entry) (gethash field entry)) (gethash key result))))
+            (testing "both paths give the same text and fields"
+              (ok (equal (gethash "text" (aref (gethash "content" inline) 0)) text))
+              (ok (equal (gethash "count" inline) (gethash "count" pooled)))
+              (ok (equal (names inline "refs" "form_name") (names pooled "refs" "form_name")))
+              (ok (equal (names inline "tests" "name") (names pooled "tests" "name")))
+              (ok (eq (gethash "truncated" inline) (gethash "truncated" pooled))
+                  "a false stays false across the worker boundary"))
+            (testing "the macro-reached test is placed in the text and in tests"
+              (ok (search "(deftest target-is-reached-through-the-macro)" text))
+              (ok (member "target-is-reached-through-the-macro" (names pooled "tests" "name")
+                          :test #'equal))
+              (ok (search "target-is-reached-through-the-macro"
+                          (subseq text (search "Tests:" text)))))
+            (testing "the default limit still applies to what is listed"
+              (ok (= 50 (gethash "limit" pooled)))
+              (ok (= (min 50 (gethash "count" pooled)) (length (gethash "refs" pooled))))))))))
+
+(deftest code-find-references-tool-relays-a-worker-failure-untouched
+  (let* ((notice "The worker this session was using ended; its state is gone.")
+         (result (%call-references-tool
+                  "cl:car"
+                  :pooled t
+                  :worker (lambda (params)
+                            (declare (ignore params))
+                            (make-ht "isError" t
+                                     "content" (vector (make-ht "type" "text"
+                                                                "text" notice))
+                                     "execution_status" "not-executed")))))
+    (ok (eq t (gethash "isError" result)))
+    (ok (equal notice (gethash "text" (aref (gethash "content" result) 0))))
+    (ok (equal "not-executed" (gethash "execution_status" result)))
+    (ok (null (gethash "refs" result)) "no report was built around it")))
 
 (deftest code-find-references-report-flags-xref-kinds-no-site-shows
   (if (uiop:os-macosx-p)

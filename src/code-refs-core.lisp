@@ -596,7 +596,11 @@ table from each line to the forms starting on it, plists carrying :FORM-TYPE,
 CL-MCP/SRC/CODE-REFS-SCAN:TOP-LEVEL-FORMS-AT does.  It runs where the source can
 be parsed, which this image may not be.  A reference is placed only when
 exactly one form starts on its line; otherwise it is left as it was, since a
-guessed form_name would be passed straight to lisp-edit-form.
+guessed form_name would be passed straight to lisp-edit-form.  A stale
+reference -- its file changed after it was compiled -- is never placed: its
+line was worked out from the compiled form's position among the file's forms
+as they are NOW, so after an edit it can name a different form, a test the
+symbol has nothing to do with, say.  It keeps its reload note instead.
 
 A placed reference gains form_type, form_name and, for a test form, test; its
 note still says the call is not visible in source.  tests is recomputed over
@@ -606,6 +610,7 @@ it, and limit and truncated are set for the list that remains."
         (by-file (make-hash-table :test #'equal)))
     (dolist (ref refs)
       (when (and (null (gethash "form_type" ref))
+                 (not (member (gethash "stale" ref) '(t yason:true)))
                  (stringp (gethash "abs_path" ref))
                  (integerp (gethash "line" ref)))
         (push ref (gethash (gethash "abs_path" ref) by-file))))

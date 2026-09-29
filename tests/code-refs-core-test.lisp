@@ -532,3 +532,41 @@ and recording each call it gets in the list it returns second."
     (testing "without LIMIT every reference is kept"
       (ok (= 2 (length (gethash "refs" report))))
       (ok (eq 'yason:false (gethash "truncated" report))))))
+
+(deftest place-references-in-source-never-places-a-stale-reference
+  (let ((report (build-references-report
+                 :symbol "p:target" :status :found :limit nil
+                 :refs (merge-references
+                        (list (%xref "/abs/t.lisp" 7 :caller "(lambda)" :line 55 :stale t))
+                        '()))))
+    (multiple-value-bind (forms-at calls)
+        (%forms-at-table '(("/abs/t.lisp" 55 (:form-type "deftest" :form-name "unrelated"
+                                              :test-name "unrelated" :test-framework "rove"))))
+      (place-references-in-source report forms-at)
+      (let ((ref (aref (gethash "refs" report) 0)))
+        (testing "the form now on that line is not taken for the one xref saw"
+          (ok (null (gethash "form_type" ref)))
+          (ok (null (gethash "test" ref)))
+          (ok (zerop (length (gethash "tests" report)))))
+        (testing "the source is not even read for it, and the reload note stays"
+          (ok (null (funcall calls)))
+          (ok (search "reload" (gethash "note" ref))))))))
+
+(deftest place-references-in-source-keeps-tests-that-limit-cuts-from-refs
+  (let ((report (build-references-report
+                 :symbol "p:target" :status :found :limit nil
+                 :refs (merge-references
+                        (list (%xref "/abs/a.lisp" 1 :caller "placed" :caller-symbol "P::PLACED")
+                              (%xref "/abs/t.lisp" 7 :caller "(lambda)" :line 55))
+                        (list (%resolved "/abs/a.lisp" 1 :form-name "placed"))))))
+    (place-references-in-source
+     report
+     (%forms-at-table '(("/abs/t.lisp" 55 (:form-type "deftest" :form-name "via-macro"
+                                           :test-name "via-macro" :test-framework "rove"))))
+     :limit 1)
+    (testing "the macro-reached test is cut from refs"
+      (ok (= 1 (length (gethash "refs" report))))
+      (ok (equal "placed" (gethash "form_name" (aref (gethash "refs" report) 0)))))
+    (testing "but tests still names it"
+      (ok (equal '("via-macro")
+                 (map 'list (lambda (test) (gethash "name" test)) (gethash "tests" report)))))))

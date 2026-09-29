@@ -1083,7 +1083,9 @@ Cleans up server and socket on exit. AUTHENTICATED selects post-auth tests."
                 "more than the default limit of 50 came back")
             (ok (every (lambda (ref) (stringp (gethash "abs_path" ref)))
                        (coerce (gethash "refs" result) 'list))
-                "each reference names its file absolutely")))))))
+                "each reference names its file absolutely")
+            (ok (null (gethash "content" result))
+                "no text is rendered for a list the parent will cut and render")))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Handshake parser noise tolerance tests (Issue #9, Major)
