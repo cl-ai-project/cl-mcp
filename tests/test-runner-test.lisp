@@ -423,7 +423,9 @@
   (testing "run-tests runs only the specified single test"
     (let ((result (run-tests "cl-mcp/tests/clhs-test"
                              :test "cl-mcp/tests/clhs-test::clhs-lookup-symbol-with-hyphen")))
-      (ok (= 1 (gethash "passed" result)))
+      ;; The target skips where the :clhs library is missing (CI), and a test
+      ;; that only skips counts as pending, not passed: count what ran.
+      (ok (= 1 (+ (gethash "passed" result) (gethash "pending" result 0))))
       (ok (= 0 (gethash "failed" result))))))
 
 (deftest run-tests-single-test-loads-target-system-package
@@ -441,7 +443,9 @@
     (let ((result (run-tests "cl-mcp/tests/clhs-test"
                              :tests '("cl-mcp/tests/clhs-test::clhs-lookup-symbol-with-hyphen"
                                       "cl-mcp/tests/clhs-test::clhs-lookup-format-as-symbol"))))
-      (ok (= 2 (gethash "passed" result)))
+      ;; Both targets skip where the :clhs library is missing (CI): count
+      ;; what ran, passed or only skipped.
+      (ok (= 2 (+ (gethash "passed" result) (gethash "pending" result 0))))
       (ok (= 0 (gethash "failed" result))))))
 
 (deftest run-tests-framework-auto-detects
