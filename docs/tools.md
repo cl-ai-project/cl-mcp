@@ -995,8 +995,10 @@ Input:
 - `tests` (array of strings, optional): Run only the listed fully qualified tests
 
 Output:
-- `passed` (integer): Number of passed tests
-- `failed` (integer): Number of failed tests
+- `passed` (integer): Number of passed tests. Rove and FiveAM count tests, not assertions, and
+  count them the same way whether the whole system or a `test`/`tests` selection ran; prove
+  counts assertions (a prove test file has no named tests)
+- `failed` (integer): Number of failed tests, in the same unit as `passed`
 - `pending` (integer): Number of pending/skipped tests (when reported by the framework)
 - `framework` (string): Framework or outcome category used (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, `"load-error"`, `"unresolved"`, or `"timeout"`)
 - `counts_available` (boolean, ASDF fallback only): `false` — `asdf:test-system` reports no counts

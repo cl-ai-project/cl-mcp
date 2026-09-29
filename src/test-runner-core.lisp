@@ -967,9 +967,8 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
          (reporter-pkg (find-package :rove/reporter))
          (rove-pkg (find-package :rove))
          (run-tests-fn (fdefinition (find-symbol "RUN-TESTS" rove-pkg)))
-         (passed-tests-fn (fdefinition (find-symbol "PASSED-TESTS" result-pkg)))
-         (failed-tests-fn (fdefinition (find-symbol "FAILED-TESTS" result-pkg)))
-         (pending-tests-fn (fdefinition (find-symbol "PENDING-TESTS" result-pkg)))
+         (failed-class (find-symbol "FAILED" result-pkg))
+         (pending-class (find-symbol "PENDING" result-pkg))
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
          (_ (unless report-stream-sym
               (error "Rove internal symbol *REPORT-STREAM* not found; incompatible Rove version?")))
@@ -1020,11 +1019,14 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
               (setf (gethash "debug_output" ht) debug-output))
             ht)
           ;; Normal path
+          ;; RESULTS holds one node per selected test, so count the nodes:
+          ;; their PASSED-TESTS are assertions (or TESTING blocks), a unit the
+          ;; whole-system run in RUN-ROVE-TESTS never reports.
           (let ((passed 0) (failed 0) (pending 0))
             (dolist (test-result results)
-              (incf passed (length (funcall passed-tests-fn test-result)))
-              (incf failed (length (funcall failed-tests-fn test-result)))
-              (incf pending (length (funcall pending-tests-fn test-result))))
+              (cond ((typep test-result failed-class) (incf failed))
+                    ((typep test-result pending-class) (incf pending))
+                    (t (incf passed))))
             (let ((ht (make-test-result
                        :passed passed :failed failed :pending pending
                        :failed-tests

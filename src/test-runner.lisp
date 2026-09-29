@@ -38,8 +38,9 @@ Supports multiple test frameworks with automatic detection:
 
 Returns:
 - content (summary text, backward compatible)
-- passed (integer)
-- failed (integer)
+- passed (integer) -- tests, not assertions (Rove and FiveAM, whether the whole
+  system or a test/tests selection ran); prove counts assertions
+- failed (integer) -- same unit as passed
 - pending (integer)
 - framework (string)
 - duration_ms (integer)

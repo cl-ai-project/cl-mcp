@@ -208,6 +208,28 @@
                    (format nil "the note reports the real total (~A)"
                            total))))))))))
 
+(deftest run-tests-selected-counts-tests-not-assertions
+  (testing "a selected Rove run counts tests, as a whole-system run does"
+    (let* ((pkg "cl-mcp/tests/test-runner-test-counts::")
+           (selected (run-tests "cl-mcp/tests/test-runner-test-counts"
+                                :tests (list (concatenate 'string pkg "three-passing-assertions")
+                                             (concatenate 'string pkg "two-passing-assertions")
+                                             (concatenate 'string pkg
+                                                          "one-of-three-assertions-fails"))))
+           (single (run-tests "cl-mcp/tests/test-runner-test-counts"
+                              :test (concatenate 'string pkg "three-passing-assertions")))
+           (whole (run-tests "cl-mcp/tests/test-runner-test-counts")))
+      (ok (= 2 (gethash "passed" selected)) "two of the three selected tests passed")
+      (ok (= 1 (gethash "failed" selected)) "one selected test failed")
+      (ok (= 1 (gethash "passed" single)) "one test, however many assertions it holds")
+      (ok (= 0 (gethash "failed" single)) "the single test did not fail")
+      (ok (= (gethash "passed" whole) (gethash "passed" selected))
+          "selecting every test reports what the whole-system run reports")
+      (ok (= (gethash "failed" whole) (gethash "failed" selected))
+          "and the same failure count")
+      (ok (= 1 (length (gethash "failed_tests" selected)))
+          "failure details still name the failing assertion"))))
+
 (deftest run-tests-selected-captures-stdout
  (testing "run-tests with :test captures stdout"
   (let ((result
