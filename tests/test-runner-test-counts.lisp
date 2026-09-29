@@ -32,3 +32,12 @@
 
 (deftest only-skipped
   (skip "nothing to check yet"))
+
+(deftest skip-inside-testing
+  (testing "outer"
+    (testing "inner"
+      (skip "needs a fixture that is not written yet"))))
+
+(deftest passes-and-skips
+  (ok (= 1 1) "checked")
+  (skip "the rest needs a network"))

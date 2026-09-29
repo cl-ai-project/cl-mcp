@@ -212,31 +212,65 @@
   (let ((system "cl-mcp/tests/test-runner-test-counts")
         (pkg "cl-mcp/tests/test-runner-test-counts::")
         (names '("three-passing-assertions" "two-passing-assertions"
-                 "one-of-three-assertions-fails" "nested-testing-blocks" "only-skipped")))
+                 "one-of-three-assertions-fails" "nested-testing-blocks" "only-skipped"
+                 "skip-inside-testing" "passes-and-skips")))
     (flet ((selected (&rest names)
              (run-tests system :tests (mapcar (lambda (name) (concatenate 'string pkg name))
                                               names)))
            (counts (result)
              (list (gethash "passed" result) (gethash "failed" result)
-                   (or (gethash "pending" result) 0))))
+                   (or (gethash "pending" result) 0)))
+           (skipped (result)
+             (map 'list (lambda (entry) (string-downcase (gethash "test_name" entry)))
+                  (or (gethash "skipped_tests" result) #()))))
       (let ((all (apply #'selected names))
             (whole (run-tests system)))
         (testing "a selected Rove run counts tests, as a whole-system run does"
-          (ok (equal '(4 1 0) (counts all))
-              "five tests, one failing, whatever their assertions and testing blocks")
+          (ok (equal '(4 1 2) (counts all))
+              "seven tests: four checked something, one failed, two only skipped")
           (ok (equal (counts whole) (counts all))
               "selecting every test reports what the whole-system run reports")
+          (ok (equal (sort (skipped whole) #'string<) (sort (skipped all) #'string<))
+              "and the same skipped tests")
           (ok (= 1 (length (gethash "failed_tests" all)))
               "failure details still name the failing assertion"))
         (testing "one test is one, however it is built"
           (ok (equal '(1 0 0) (counts (selected "three-passing-assertions")))
               "several assertions")
           (ok (equal '(1 0 0) (counts (selected "nested-testing-blocks")))
-              "nested testing blocks")
-          ;; Rove's own result for it is a PASSED-TEST: nothing failed.  The
-          ;; whole-system run counts it the same way, which is what matters.
-          (ok (equal '(1 0 0) (counts (selected "only-skipped")))
-              "a test that only skips, as Rove's result object classifies it"))))))
+              "nested testing blocks"))
+        (testing "a skip is never reported as a check that passed"
+          (let ((only (selected "only-skipped")))
+            (ok (equal '(0 0 1) (counts only)) "a test that only skips is pending")
+            (ok (equal '("only-skipped") (skipped only)))
+            (ok (equalp #("nothing to check yet")
+                        (gethash "reasons" (aref (gethash "skipped_tests" only) 0)))
+                "with the reason it gave"))
+          (ok (equal '(0 0 1) (counts (selected "skip-inside-testing")))
+              "however deep inside testing blocks the skip is")
+          (let ((mixed (selected "passes-and-skips")))
+            (ok (equal '(1 0 0) (counts mixed))
+                "a test that checked something and skipped the rest passed")
+            (ok (equal '("passes-and-skips") (skipped mixed))
+                "but its skip is still reported")))))))
+
+(deftest run-tests-response-says-when-everything-was-skipped
+  (let ((only (build-run-tests-response
+               (run-tests "cl-mcp/tests/test-runner-test-counts"
+                          :test "cl-mcp/tests/test-runner-test-counts::only-skipped")))
+        (mixed (build-run-tests-response
+                (run-tests "cl-mcp/tests/test-runner-test-counts"
+                           :test "cl-mcp/tests/test-runner-test-counts::passes-and-skips"))))
+    (flet ((text (response) (gethash "text" (aref (gethash "content" response) 0))))
+      (testing "nothing checked is not a pass"
+        (ok (null (search "✓ PASS" (text only))))
+        (ok (search "SKIPPED" (text only)))
+        (ok (search "nothing to check yet" (text only)) "the reason is in the text"))
+      (testing "a pass that skipped something says so"
+        (ok (search "✓ PASS" (text mixed)))
+        (ok (search "Skipped" (text mixed)))
+        (ok (search "the rest needs a network" (text mixed)))
+        (ok (= 1 (length (gethash "skipped_tests" mixed))))))))
 
 (deftest run-tests-selected-captures-stdout
  (testing "run-tests with :test captures stdout"

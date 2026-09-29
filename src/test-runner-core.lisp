@@ -218,8 +218,10 @@ Order of evidence:
 ;;; ---------------------------------------------------------------------------
 
 (defun make-test-result (&key passed failed pending passed-tests failed-tests
-                           framework duration)
-  "Create a unified test result hash table."
+                           skipped-tests framework duration)
+  "Create a unified test result hash table.
+SKIPPED-TESTS, when non-empty, becomes skipped_tests: one {test_name, reasons}
+per test that skipped anything, whether it passed or checked nothing."
   (let* ((normalized-failed-tests (if (vectorp failed-tests)
                                       failed-tests
                                       (coerce (or failed-tests '()) 'vector)))
@@ -232,6 +234,8 @@ Order of evidence:
       (setf (gethash "pending" ht) pending))
     (when passed-tests
       (setf (gethash "passed_tests" ht) (coerce passed-tests 'vector)))
+    (when skipped-tests
+      (setf (gethash "skipped_tests" ht) (coerce skipped-tests 'vector)))
     ht))
 
 (defun %source-text (object)
@@ -923,6 +927,79 @@ COMPILE-FILE-ERROR."
               (error "~A"
                      (%format-load-error system-name c combined))))))))
 
+(defun %rove-result-symbol (name)
+  "Return Rove's ROVE/CORE/RESULT symbol NAME, resolved at run time since Rove
+need not be loaded when this file is compiled."
+  (find-symbol name (find-package :rove/core/result)))
+
+(defun %rove-node-children (node)
+  "Return everything Rove recorded under NODE: its assertions and the tests
+(TESTING blocks, nested deftests) inside it."
+  (flet ((children (name)
+           (funcall (fdefinition (%rove-result-symbol name)) node)))
+    (append (children "PASSED-TESTS") (children "FAILED-TESTS") (children "PENDING-TESTS"))))
+
+(defun %rove-tally (node)
+  "Return (values CHECKS SKIP-REASONS FAILURES) over NODE, a Rove test result,
+and every test nested in it however deep: the passed assertions, the
+descriptions of the skips (pending assertions) and the failed assertions or
+nested tests.
+
+Rove records (SKIP ...) as a pending assertion and still makes the test that
+holds only skips a PASSED-TEST, so the node's class cannot tell a test that
+checked something from one that checked nothing."
+  (let ((test-class (%rove-result-symbol "TEST"))
+        (pending-class (%rove-result-symbol "PENDING"))
+        (failed-class (%rove-result-symbol "FAILED"))
+        (description (fdefinition (%rove-result-symbol "ASSERTION-DESCRIPTION")))
+        (checks 0)
+        (reasons '())
+        (failures 0))
+    (labels ((walk (node)
+               (dolist (child (%rove-node-children node))
+                 (cond ((typep child test-class)
+                        (when (typep child failed-class) (incf failures))
+                        (walk child))
+                       ((typep child pending-class)
+                        (push (let ((text (ignore-errors (funcall description child))))
+                                (if (stringp text) text "(no reason given)"))
+                              reasons))
+                       ((typep child failed-class) (incf failures))
+                       (t (incf checks))))))
+      (walk node))
+    (values checks (nreverse reasons) failures)))
+
+(defun %rove-count-tests (entries)
+  "Count ENTRIES, the results Rove kept for a run's tests, one per test.
+Returns (values PASSED FAILED PENDING SKIPPED).
+
+A test fails when it or anything nested in it failed.  A test whose only
+results are skips, however deep in TESTING blocks, is PENDING: it checked
+nothing, and a pass would say it had.  Every other test passed.  SKIPPED holds
+one entry per test that skipped anything -- those counted as pending, and
+those that passed but left part unchecked -- as a hash-table with test_name
+and reasons, so a skip is never lost inside a pass.  An entry that is not a
+test result (an assertion Rove left at the top) counts by its own class."
+  (let ((test-class (%rove-result-symbol "TEST"))
+        (failed-class (%rove-result-symbol "FAILED"))
+        (pending-class (%rove-result-symbol "PENDING"))
+        (test-name (fdefinition (%rove-result-symbol "TEST-NAME")))
+        (passed 0) (failed 0) (pending 0) (skipped '()))
+    (dolist (entry entries)
+      (if (typep entry test-class)
+          (multiple-value-bind (checks reasons failures) (%rove-tally entry)
+            (cond ((or (typep entry failed-class) (plusp failures)) (incf failed))
+                  ((and reasons (zerop checks)) (incf pending))
+                  (t (incf passed)))
+            (when reasons
+              (push (make-ht "test_name" (princ-to-string (%safe-test-name test-name entry))
+                             "reasons" (coerce reasons 'vector))
+                    skipped)))
+          (cond ((typep entry failed-class) (incf failed))
+                ((typep entry pending-class) (incf pending))
+                (t (incf passed)))))
+    (values passed failed pending (nreverse skipped))))
+
 (defun %rove-extract-selected-failures (results)
   "Extract failure details from selected test RESULTS returned by rove:run-tests.
 Handles test nodes (with TEST-NAME) containing (testing ...) blocks.
@@ -963,12 +1040,9 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
   (%ensure-rove-test-name-method)
   (log-event :info "test.runner" "framework" "rove" "selected_tests"
              (format nil "~{~A~^, ~}" test-symbols))
-  (let* ((result-pkg (find-package :rove/core/result))
-         (reporter-pkg (find-package :rove/reporter))
+  (let* ((reporter-pkg (find-package :rove/reporter))
          (rove-pkg (find-package :rove))
          (run-tests-fn (fdefinition (find-symbol "RUN-TESTS" rove-pkg)))
-         (failed-class (find-symbol "FAILED" result-pkg))
-         (pending-class (find-symbol "PENDING" result-pkg))
          (report-stream-sym (find-symbol "*REPORT-STREAM*" reporter-pkg))
          (_ (unless report-stream-sym
               (error "Rove internal symbol *REPORT-STREAM* not found; incompatible Rove version?")))
@@ -1018,17 +1092,14 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
             (when (plusp (length debug-output))
               (setf (gethash "debug_output" ht) debug-output))
             ht)
-          ;; Normal path
-          ;; RESULTS holds one node per selected test, so count the nodes:
-          ;; their PASSED-TESTS are assertions (or TESTING blocks), a unit the
-          ;; whole-system run in RUN-ROVE-TESTS never reports.
-          (let ((passed 0) (failed 0) (pending 0))
-            (dolist (test-result results)
-              (cond ((typep test-result failed-class) (incf failed))
-                    ((typep test-result pending-class) (incf pending))
-                    (t (incf passed))))
+          ;; Normal path: RESULTS holds one node per selected test, counted as
+          ;; the whole-system run in RUN-ROVE-TESTS counts them
+          ;; (%ROVE-COUNT-TESTS).
+          (multiple-value-bind (passed failed pending skipped)
+              (%rove-count-tests results)
             (let ((ht (make-test-result
                        :passed passed :failed failed :pending pending
+                       :skipped-tests skipped
                        :failed-tests
                        (when (plusp failed)
                          (%rove-extract-selected-failures results))
@@ -1134,28 +1205,27 @@ detects test sub-systems from ASDF dependencies and runs each individually."
                 (passed 0)
                 (failed 0)
                 (pending 0)
+                (skipped '())
                 (failure-details nil))
             (labels
                 ((%extract-suites (suites)
                    "Extract counts and failure details from SUITES into
-the surrounding passed/failed/pending/failure-details bindings."
+the surrounding passed/failed/pending/skipped/failure-details bindings."
                    (dolist (suite-result suites)
+                     ;; Each package's results are its tests, counted as a
+                     ;; selected run counts them (%ROVE-COUNT-TESTS).
                      (dolist
-                         (pkg-result (funcall passed-tests-fn suite-result))
-                       (incf passed
-                             (length (funcall passed-tests-fn pkg-result)))
-                       (incf failed
-                             (length (funcall failed-tests-fn pkg-result)))
-                       (incf pending
-                             (length (funcall pending-tests-fn pkg-result))))
-                     (dolist
-                         (pkg-result (funcall failed-tests-fn suite-result))
-                       (incf passed
-                             (length (funcall passed-tests-fn pkg-result)))
-                       (incf failed
-                             (length (funcall failed-tests-fn pkg-result)))
-                       (incf pending
-                             (length (funcall pending-tests-fn pkg-result))))
+                         (pkg-result (append (funcall passed-tests-fn suite-result)
+                                             (funcall failed-tests-fn suite-result)))
+                       (multiple-value-bind (p f s skips)
+                           (%rove-count-tests
+                            (append (funcall passed-tests-fn pkg-result)
+                                    (funcall failed-tests-fn pkg-result)
+                                    (funcall pending-tests-fn pkg-result)))
+                         (incf passed p)
+                         (incf failed f)
+                         (incf pending s)
+                         (setf skipped (append skipped skips))))
                      (dolist
                          (pkg-result
                           (append (funcall passed-tests-fn suite-result)
@@ -1230,7 +1300,7 @@ the surrounding passed/failed/pending/failure-details bindings."
                            (symbol-value last-report-sym)))))))))
             (let ((ht
                    (make-test-result :passed passed :failed failed :pending
-                                     pending :failed-tests
+                                     pending :skipped-tests skipped :failed-tests
                                      (nreverse failure-details) :framework
                                      :rove :duration duration-ms)))
               (when (plusp (length stdout))

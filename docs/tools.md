@@ -1009,14 +1009,19 @@ Output:
   count them the same way whether the whole system or a `test`/`tests` selection ran; prove
   counts assertions (a prove test file has no named tests)
 - `failed` (integer): Number of failed tests, in the same unit as `passed`
-- `pending` (integer): Number of pending/skipped tests (when reported by the framework)
+- `pending` (integer): Number of tests that only skipped and so checked nothing (when reported by the framework).
+  With Rove, a test whose only results are `(skip ...)`, however deep inside `testing` blocks, is pending,
+  not passed, although Rove's own result object calls it passed
+- `skipped_tests` (array, Rove, present when any test skipped): `test_name` and `reasons` of every test that
+  skipped anything, including one that passed on what it did check, so a skip is never hidden inside a
+  pass; the summary text lists them under `Skipped`
 - `framework` (string): Framework or outcome category used (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, `"load-error"`, `"unresolved"`, or `"timeout"`)
 - `counts_available` (boolean, ASDF fallback only): `false` — `asdf:test-system` reports no counts
 - `success` (boolean|null, ASDF fallback only): `false` when `asdf:test-system` signalled; `null` when it
   returned normally, which says nothing about whether the tests passed
 - `duration_ms` (integer): Execution time in milliseconds
 
-The summary line in `content[].text` is `✓ PASS`, `✗ FAIL`, `✗ LOAD FAILED`, `✗ UNRESOLVED`, `✗ TIMEOUT`, `⚠ NO TESTS RAN`, or `⚠ RAN, RESULT UNKNOWN`. `⚠ NO TESTS RAN` means the run completed but executed nothing — a system with no tests, or a selection that matched none. It is not a failure, but it is not a pass either. `⚠ RAN, RESULT UNKNOWN` is the ASDF fallback's: `asdf:test-system` returned without signalling, but it reports no counts, and a runner that reports failures by its return value (prove, `rove:run`) returns normally from a failing suite too. The text shows the last lines of the runner's `stdout` under that headline, since the runner's own summary is the only verdict there is.
+The summary line in `content[].text` is `✓ PASS`, `✗ FAIL`, `✗ LOAD FAILED`, `✗ UNRESOLVED`, `✗ TIMEOUT`, `⚠ NO TESTS RAN`, `⚠ ALL SKIPPED`, or `⚠ RAN, RESULT UNKNOWN`. `⚠ ALL SKIPPED` means every test that ran only skipped: nothing was checked, so it is not a pass. `⚠ NO TESTS RAN` means the run completed but executed nothing — a system with no tests, or a selection that matched none. It is not a failure, but it is not a pass either. `⚠ RAN, RESULT UNKNOWN` is the ASDF fallback's: `asdf:test-system` returned without signalling, but it reports no counts, and a runner that reports failures by its return value (prove, `rove:run`) returns normally from a failing suite too. The text shows the last lines of the runner's `stdout` under that headline, since the runner's own summary is the only verdict there is.
 
 Prove is supported for prove-asdf test systems (`:defsystem-depends-on ("prove-asdf")` and `(:test-file ...)` components): each test file is run and every assertion counted, a `subtest`'s one by one, with a failure detail per failed assertion (`description`, the tested `form`, `values` got and expected, `reason`). A prove system that runs its tests some other way falls back to ASDF. `test`/`tests` selection is not supported for prove.
 

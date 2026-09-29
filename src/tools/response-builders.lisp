@@ -394,6 +394,7 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
           (if (vectorp failed-tests)
               failed-tests
               (coerce (or failed-tests 'nil) 'vector)))
+         (skipped-tests (coerce (or (gethash "skipped_tests" test-result) #()) 'vector))
          (debug-output-str (gethash "debug_output" test-result))
          (summary
           (with-output-to-string (s)
@@ -423,11 +424,23 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                           ((and (string= framework-name "asdf")
                                 (zerop failed) (zerop passed))
                            "⚠ RAN, RESULT UNKNOWN (the ASDF fallback counts nothing; read its stdout below)")
+                          ;; Every test only skipped: nothing was checked,
+                          ;; and a pass would say something had been.
+                          ((and (zerop failed) (zerop passed) (plusp pending))
+                           "⚠ ALL SKIPPED (no test checked anything)")
                           ((zerop failed) "✓ PASS")
                           (t "✗ FAIL")))
             (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%" passed
                     failed (when (plusp pending) pending))
             (format s "Duration: ~Dms~%" duration)
+            ;; A skip is what a pass must not hide: list each test that
+            ;; skipped anything, with the reasons it gave.
+            (when (plusp (length skipped-tests))
+              (format s "~%Skipped (~D test~:P):~%" (length skipped-tests))
+              (loop for entry across skipped-tests
+                    do (format s "  ~A — ~{~A~^; ~}~%"
+                               (gethash "test_name" entry)
+                               (coerce (gethash "reasons" entry) 'list))))
             (when (plusp (length failed-tests-vector))
               (format s "~%Failures:~%")
               (loop for fail across failed-tests-vector
@@ -464,7 +477,7 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                     failed "pending" pending "framework" framework-name
                     "duration_ms" duration "failed_tests" failed-tests-vector)))
       (dolist (field '("success" "stdout" "stderr" "debug_output" "passed_tests"
-                       "counts_available"))
+                       "counts_available" "skipped_tests"))
         (multiple-value-bind (value presentp)
             (gethash field test-result)
           (when presentp (setf (gethash field response) value))))
