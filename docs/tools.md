@@ -501,7 +501,11 @@ insert_after operations with automatic parinfer repair for missing closing paren
 
 Input:
 - `file_path` (string, required): absolute path or project-relative path
-- `form_type` (string, required): form constructor to match, e.g., `defun`, `defmacro`, `defmethod`
+- `form_type` (string, required): form constructor to match, e.g., `defun`, `defmacro`, `defmethod`; a package
+  prefix is ignored, so `asdf:defsystem` and `defsystem` both match `(asdf:defsystem ...)`; a colon inside
+  the name itself still matches as written (`def:thing`, or `|def:thing|`, for `(|DEF:THING| ...)`), and
+  when those two readings name different forms the call is refused as ambiguous. When nothing
+  matches, the error lists the file's forms of that type (or all its top-level forms when it has none)
 - `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`
 - `operation` (string, required): one of `replace`, `insert_before`, `insert_after`
 - `content` (string, required): full form text to insert or replace with
@@ -685,7 +689,11 @@ does not parse, the error names the line to fix and the recovery path
 
 Input:
 - `file_path` (string, required): absolute path or project-relative path
-- `form_type` (string, required): form constructor to match, e.g., `defun`, `defmacro`, `defmethod`
+- `form_type` (string, required): form constructor to match, e.g., `defun`, `defmacro`, `defmethod`; a package
+  prefix is ignored, so `asdf:defsystem` and `defsystem` both match `(asdf:defsystem ...)`; a colon inside
+  the name itself still matches as written (`def:thing`, or `|def:thing|`, for `(|DEF:THING| ...)`), and
+  when those two readings name different forms the call is refused as ambiguous. When nothing
+  matches, the error lists the file's forms of that type (or all its top-level forms when it has none)
 - `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`
 - `old_text` (string, required): exact text to find within the matched form (whitespace-sensitive, must match exactly once)
 - `new_text` (string, required): replacement text
@@ -773,15 +781,17 @@ Output (the content text carries everything that matters for a decision):
 - `symbol_status`: `found`, `not_found` or `package_not_found`; nothing is interned either way
 - `resolved_symbol`, `symbol_kind` (`function`, `macro`, `generic-function`, `special-operator`, `variable`, `constant`, `unbound`), `lookup_package`, `lookup_name`
 - `refs` (array): one element per top-level form, sorted by path and line
-  - `path`, `line` (start of the form), `type` (first of `types`), `types`
+  - `path`, `line` (start of the form), `abs_path` (the file's truename), `type` (first of `types`), `types`
   - `caller`, `caller_symbol` (package-qualified; null for lambdas and for forms xref did not see)
-  - `form_type`, `form_name`: pass them straight to `lisp-edit-form` (`form_type` / `form_name`); for `lisp-read-file`'s `name_pattern`, a CL-PPCRE regex, regex-quote the name first (a `defmethod` name such as `area ((s integer))` does not match itself)
+  - `form_type`, `form_name`: also given for an `xref`-only form whose source never writes the name --
+    a function or test that reaches the symbol only through a macro's expansion -- by reading the form
+    that starts on its line (left null when no single form starts there); pass them straight to `lisp-edit-form` (`form_type` / `form_name`); for `lisp-read-file`'s `name_pattern`, a CL-PPCRE regex, regex-quote the name first (a `defmethod` name such as `area ((s integer))` does not match itself)
   - `origin`: `xref+source`; `xref` (the call exists only in a macro expansion, or the source was not scanned); `source` (a top-level use xref never records, or code not compiled since it was written; no note when every site is `quoted`, `template` or `method`, which xref usually does not record -- `WHO-CALLS` does record a function passed by name such as `(mapcar 'name xs)`, but then the form is not source-only)
   - `call_sites` (array): `line`, `column`, `kind` (`call`, `macro`, `function`, `quoted`, `template`, `bind`, `set`, `method`, `reference`), `context`, `shadowed_by`; `function` is `#'name` or a quoted `'name` passed as the function to `funcall`, `apply` or `multiple-value-call`; `set` is a `setf`/`setq` place or the variable `incf`, `decf`, `pop`, `push` or `pushnew` changes
   - `test`: `{name, framework}` when the form is a `deftest` (rove), `test`/`def-test` (fiveam) or `define-test` (parachute)
   - `stale`: the file changed after it was compiled; `note`: why a form lacks call sites or xref, or, on an `xref+source` form, which xref types (`call`, `set`, ...) no listed site shows -- say a call made by a macro expansion or through a function passed by name such as `(mapcar 'name xs)`; the sites are still listed with their own kind, and the form is not split
 - `count`, `file_count`, `limit`, `truncated`
-- `tests` (array): `name`, `path`, `line` of every test among the references
+- `tests` (array): `name`, `path`, `line` of every test among the references, including a test that reaches the symbol only through a macro, and those `limit` left out of `refs`
 - `unresolved` (array): `path`, `package`, `count`, `tests` for matches in files whose package is not loaded
 - `notes` (array), `xref_count`, `files_scanned`, `name_matches`, `scan_skipped`, `project_only`, `symbol`
 
@@ -995,16 +1005,23 @@ Input:
 - `tests` (array of strings, optional): Run only the listed fully qualified tests
 
 Output:
-- `passed` (integer): Number of passed tests
-- `failed` (integer): Number of failed tests
-- `pending` (integer): Number of pending/skipped tests (when reported by the framework)
+- `passed` (integer): Number of passed tests. Rove and FiveAM count tests, not assertions, and
+  count them the same way whether the whole system or a `test`/`tests` selection ran; prove
+  counts assertions (a prove test file has no named tests)
+- `failed` (integer): Number of failed tests, in the same unit as `passed`
+- `pending` (integer): Number of tests that only skipped and so checked nothing (when reported by the framework).
+  With Rove, a test whose only results are `(skip ...)`, however deep inside `testing` blocks, is pending,
+  not passed, although Rove's own result object calls it passed
+- `skipped_tests` (array, Rove, present when any test skipped): `test_name` and `reasons` of every test that
+  skipped anything, including one that passed on what it did check, so a skip is never hidden inside a
+  pass; the summary text lists them under `Skipped`
 - `framework` (string): Framework or outcome category used (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, `"load-error"`, `"unresolved"`, or `"timeout"`)
 - `counts_available` (boolean, ASDF fallback only): `false` — `asdf:test-system` reports no counts
 - `success` (boolean|null, ASDF fallback only): `false` when `asdf:test-system` signalled; `null` when it
   returned normally, which says nothing about whether the tests passed
 - `duration_ms` (integer): Execution time in milliseconds
 
-The summary line in `content[].text` is `✓ PASS`, `✗ FAIL`, `✗ LOAD FAILED`, `✗ UNRESOLVED`, `✗ TIMEOUT`, `⚠ NO TESTS RAN`, or `⚠ RAN, RESULT UNKNOWN`. `⚠ NO TESTS RAN` means the run completed but executed nothing — a system with no tests, or a selection that matched none. It is not a failure, but it is not a pass either. `⚠ RAN, RESULT UNKNOWN` is the ASDF fallback's: `asdf:test-system` returned without signalling, but it reports no counts, and a runner that reports failures by its return value (prove, `rove:run`) returns normally from a failing suite too. The text shows the last lines of the runner's `stdout` under that headline, since the runner's own summary is the only verdict there is.
+The summary line in `content[].text` is `✓ PASS`, `✗ FAIL`, `✗ LOAD FAILED`, `✗ UNRESOLVED`, `✗ TIMEOUT`, `⚠ NO TESTS RAN`, `⚠ ALL SKIPPED`, or `⚠ RAN, RESULT UNKNOWN`. `⚠ ALL SKIPPED` means every test that ran only skipped: nothing was checked, so it is not a pass. `⚠ NO TESTS RAN` means the run completed but executed nothing — a system with no tests, or a selection that matched none. It is not a failure, but it is not a pass either. `⚠ RAN, RESULT UNKNOWN` is the ASDF fallback's: `asdf:test-system` returned without signalling, but it reports no counts, and a runner that reports failures by its return value (prove, `rove:run`) returns normally from a failing suite too. The text shows the last lines of the runner's `stdout` under that headline, since the runner's own summary is the only verdict there is.
 
 Prove is supported for prove-asdf test systems (`:defsystem-depends-on ("prove-asdf")` and `(:test-file ...)` components): each test file is run and every assertion counted, a `subtest`'s one by one, with a failure detail per failed assertion (`description`, the tested `form`, `values` got and expected, `reason`). A prove system that runs its tests some other way falls back to ASDF. `test`/`tests` selection is not supported for prove.
 

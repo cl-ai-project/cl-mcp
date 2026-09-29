@@ -112,7 +112,7 @@ Use `fs-write-file` for **new** files, `lisp-edit-form` / `lisp-patch-form` for 
 - `lisp-edit-form` / `lisp-patch-form` use `file_path`, NOT `path`. Reading tools (`lisp-read-file`, `fs-read-file`) use `path`.
 - `lisp-edit-form content`: `replace` takes **exactly one top-level form**; `insert_before`/`insert_after` take one or more, inserted in order as one block. To replace one form with several, `replace` with the first and `insert_after` the rest in one call.
 - `code-find` requires `symbol`, NOT `name`. When the symbol is not in `CL-USER`, also pass `package`.
-- `lisp-edit-form` / `lisp-patch-form` accept `form_type: "defsystem"` for `.asd` files, NOT `"asdf:defsystem"`.
+- `lisp-edit-form` / `lisp-patch-form` ignore a package prefix on `form_type`, so `"defsystem"` and `"asdf:defsystem"` both address an `.asd`'s `(asdf:defsystem ...)`.
 
 **Working in a FiveAM project** (skip if you scaffolded with Rove):
 - Each new test file needs **two** things, and skipping either fails quietly:
@@ -257,7 +257,7 @@ These are documented pitfalls that have tripped previous dogfooding runs. If you
 | `run-tests` on aggregate `<name>/tests` reports `Passed: 0, Failed: 0` with `✓ PASS` despite tests actually running | Fixed in PR #98: fallback now purges Rove suites and clears ASDF state before sub-system runs | Resolved. Zero-count case is handled. See next row for non-zero undercount variant |
 | `run-tests` aggregate reports partial counts (e.g., 6 instead of 13) after individual sub-packages were run first in the same worker session | Individual runs left Rove suites registered; `%ensure-system-loaded` only cleared the aggregate ASDF system, so ASDF skipped reloading sub-systems and deftest forms didn't re-register | Fixed: `%ensure-system-loaded` now also clears ASDF state for test sub-systems |
 | `run-tests` fails with opaque `COMPILE-FILE-ERROR while compiling ...` after you edited a `defpackage` | SBCL package-variance warning escalated to error; cached worker state | `pool-kill-worker` then `load-system` to get a fresh image |
-| `lisp-edit-form` or `lisp-patch-form` on a `.asd` file rejects `form_type: "asdf:defsystem"` | Tool matches on unqualified symbol name | Use `form_type: "defsystem"` |
+| `lisp-edit-form` or `lisp-patch-form` on a `.asd` file rejects `form_type: "asdf:defsystem"` | Tool matched on the unqualified symbol name only | Fixed: a package prefix on `form_type` is ignored, and a "not found" error lists the file's forms |
 | `code-find` returns `symbol is required` when you pass `name:` | Parameter name is `symbol`, not `name` | Check the tool schema: the required key is `symbol` |
 | `fs-list-directory` hides `.gitignore` and other dotfiles | Default behavior filters `*hidden-prefixes*` | Pass `show_hidden: true` (added in PR #94) |
 | `lisp-edit-form` on a defmethod with `#:` specializers says "not found" with plain `form_name` | Was a bug before PR #94; fixed by `%strip-hash-colon` normalization | Should work now; if it still fails, file a new issue |

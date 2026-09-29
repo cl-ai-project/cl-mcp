@@ -291,24 +291,33 @@ caller is answered at the deadline even while the suite is still blocked."
 ;;; ---------------------------------------------------------------------------
 
 (defun %handle-code-find-references (params)
-  "Find symbol references.  Returns the same structure as define-tool
-\"code-find-references\".
+  "Find symbol references.
 
 PARAMS carries the parent's source scan under \"scan\"; this handler resolves
-its sites against the symbols loaded in this image and merges them with xref."
+its sites against the symbols loaded in this image and merges them with xref.
+
+A null \"limit\", which the parent sends, keeps every reference and returns
+the report alone, without content text: the parent places the references the
+scan could not see (it can parse source; this image cannot), cuts the list and
+only then renders the text, so rendering every reference here would be thrown
+away.  With a limit, the answer is the same structure as define-tool
+\"code-find-references\"."
   (let ((symbol (gethash "symbol" params))
         (package (gethash "package" params))
         (project-only (%bool-default params "project_only" t))
-        (limit (or (gethash "limit" params) 50))
+        (limit (multiple-value-bind (limit presentp) (gethash "limit" params)
+                 (if presentp limit 50)))
         (scan (gethash "scan" params)))
     (unless symbol
       (error "symbol is required"))
-    (build-code-find-references-response
-     (code-find-references-report symbol
-                                  :package package
-                                  :project-only project-only
-                                  :limit limit
-                                  :scan scan))))
+    (let ((report (code-find-references-report symbol
+                                               :package package
+                                               :project-only project-only
+                                               :limit limit
+                                               :scan scan)))
+      (if limit
+          (build-code-find-references-response report)
+          report))))
 
 (defun %handle-clos-describe (params)
   "Describe a class or generic function.  Returns the clos-describe report

@@ -391,7 +391,11 @@ Use 'lisp-edit-form' instead when replacing or inserting entire forms."
   :args ((file_path :type :string :required t
                     :description "Target file path (absolute recommended)")
          (form_type :type :string :required t
-                    :description "Form type to search, e.g., \"defun\", \"defmacro\", \"defmethod\"")
+                    :description "Form type to search, e.g., \"defun\", \"defmacro\", \"defmethod\".
+A package prefix is ignored: \"asdf:defsystem\" and \"defsystem\" both match
+(asdf:defsystem ...). A colon inside the name itself still matches as written
+(\"def:thing\" or \"|def:thing|\" for (|DEF:THING| ...)); when the two readings
+name different forms, the call is refused as ambiguous.")
          (form_name :type :string :required t
                     :description "Form name to match; for defmethod include specializers,
 e.g., \"print-object ((obj my-class) stream)\". For defstruct with

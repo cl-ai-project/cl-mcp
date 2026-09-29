@@ -151,7 +151,8 @@ in-root material failed to show.
    treat disambiguating the guards as an edit to the **contract** (the digest
    moves — say so in the report), not as turning a red run green.
 4. Adding the contracts file to the `.asd`: `lisp-patch-form` /
-   `lisp-edit-form` match `form_type: "defsystem"`, never `"asdf:defsystem"`.
+   `lisp-edit-form` match `form_type: "defsystem"` (`"asdf:defsystem"` works too;
+   a package prefix is ignored).
 
 Authoring these declarations is the most expensive phase of a first cycle
 (measured: ~20 of ~60 tool calls). When `load-system` reports a compile failure

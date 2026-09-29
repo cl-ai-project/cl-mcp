@@ -973,9 +973,9 @@ to describe."
 Returns (values TABLE FAILURE).  TABLE maps each line in LINES on which one
 or more top-level forms start to the list of those forms -- more than one
 when two top-level forms begin on the same line -- each a plist (:FORM-TYPE
-:FORM-NAME :SIGNATURE :START :END).  FORM-TYPE and FORM-NAME are what
-%FORM-METADATA gives code-find-references, with the package from the file's
-IN-PACKAGE forms.  SIGNATURE is %DEFINITION-SOURCE-SIGNATURE's token-based
+:FORM-NAME :TEST-NAME :TEST-FRAMEWORK :SIGNATURE :START :END).  The first four
+are what %FORM-METADATA gives code-find-references, with the package from the
+file's IN-PACKAGE forms.  SIGNATURE is %DEFINITION-SOURCE-SIGNATURE's token-based
 source_signature (spec 3.2) for a DEFMETHOD, DEFGENERIC, DEFCLASS,
 DEFINE-CONDITION or DEFSTRUCT, and (:KIND :OTHER) for any other form.  START
 and END are character offsets into the file's text, END exclusive, spanning
@@ -1011,9 +1011,11 @@ read or does not parse; TABLE is empty in both cases."
                                 (wanted1 (member line1 wanted))
                                 (wanted2 (member line2 wanted)))
                            (when (or wanted1 wanted2)
-                             (multiple-value-bind (form-type form-name)
+                             (multiple-value-bind (form-type form-name test-name framework)
                                  (%form-metadata value in-package)
                                (let ((entry (list :form-type form-type :form-name form-name
+                                                  :test-name test-name
+                                                  :test-framework framework
                                                   :signature (%definition-source-signature
                                                               unwrapped file-text in-package)
                                                   :start (cst-node-start unwrapped)

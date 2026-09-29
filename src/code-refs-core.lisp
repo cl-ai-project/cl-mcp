@@ -24,6 +24,7 @@
            #:resolve-scan-forms
            #:merge-references
            #:build-references-report
+           #:place-references-in-source
            #:%status-string
            #:*note-stale*))
 
@@ -412,6 +413,7 @@ when several xref entries share the form."
                                (mapcar (lambda (site) (getf site :kind)) sites))))
          (stale (some (lambda (entry) (getf entry :stale)) xrefs)))
     (make-ht "path" (if form (getf form :path) (getf primary :path))
+             "abs_path" (if form (getf form :truename) (getf primary :truename))
              "line" (if form (getf form :start-line) (getf primary :line))
              "type" (first types)
              "types" (coerce types 'vector)
@@ -544,10 +546,12 @@ Returns JSON-ready hash-tables, one per top-level form, in first-seen order."
 
 REFS are MERGE-REFERENCES' objects.  They are sorted by path and line and at
 most LIMIT are kept, while count, file_count and tests describe all of them.
+A LIMIT of NIL keeps every one, for PLACE-REFERENCES-IN-SOURCE to cut later.
 UNRESOLVED is RESOLVE-SCAN-FORMS' second value and NOTES are plain sentences.
 docs/tools.md describes every field."
   (let* ((sorted (sort (copy-list refs) #'%reference<))
-         (count (length sorted)))
+         (count (length sorted))
+         (limit (or limit count)))
     (make-ht "symbol" symbol
              "resolved_symbol" resolved-symbol
              "symbol_status" (%status-string status)
@@ -574,3 +578,61 @@ docs/tools.md describes every field."
              "files_scanned" files-scanned
              "name_matches" name-matches
              "scan_skipped" scan-skipped)))
+
+(defun place-references-in-source (report forms-at &key limit)
+  "Name the top-level form each unplaced reference in REPORT sits in, then keep
+at most LIMIT references.  Returns REPORT, changed in place.
+
+REPORT is BUILD-REFERENCES-REPORT's payload built with a LIMIT of NIL, so it
+holds every reference.  A reference is unplaced when no scanned form met its
+xref entry: the call exists only in a macro expansion, inside a form that never
+writes the symbol's name -- a test using a macro that calls the function, say
+-- or in a file the scan did not parse.  Its line is then the line that form
+starts on, which SBCL's source path records.
+
+FORMS-AT is called once per file as (FORMS-AT abs-path lines) and returns a
+table from each line to the forms starting on it, plists carrying :FORM-TYPE,
+:FORM-NAME, :TEST-NAME and :TEST-FRAMEWORK, as
+CL-MCP/SRC/CODE-REFS-SCAN:TOP-LEVEL-FORMS-AT does.  It runs where the source can
+be parsed, which this image may not be.  A reference is placed only when
+exactly one form starts on its line; otherwise it is left as it was, since a
+guessed form_name would be passed straight to lisp-edit-form.  A stale
+reference -- its file changed after it was compiled -- is never placed: its
+line was worked out from the compiled form's position among the file's forms
+as they are NOW, so after an edit it can name a different form, a test the
+symbol has nothing to do with, say.  It keeps its reload note instead.
+
+A placed reference gains form_type, form_name and, for a test form, test; its
+note still says the call is not visible in source.  tests is recomputed over
+every reference before LIMIT cuts the list, as BUILD-REFERENCES-REPORT counts
+it, and limit and truncated are set for the list that remains."
+  (let ((refs (sequence->list (gethash "refs" report)))
+        (by-file (make-hash-table :test #'equal)))
+    (dolist (ref refs)
+      (when (and (null (gethash "form_type" ref))
+                 (not (member (gethash "stale" ref) '(t yason:true)))
+                 (stringp (gethash "abs_path" ref))
+                 (integerp (gethash "line" ref)))
+        (push ref (gethash (gethash "abs_path" ref) by-file))))
+    (maphash
+     (lambda (abs-path file-refs)
+       (let ((table (funcall forms-at abs-path
+                             (mapcar (lambda (ref) (gethash "line" ref)) file-refs))))
+         (dolist (ref file-refs)
+           (let ((forms (gethash (gethash "line" ref) table)))
+             (when (and (= 1 (length forms)) (getf (first forms) :form-type))
+               (let ((form (first forms)))
+                 (setf (gethash "form_type" ref) (getf form :form-type)
+                       (gethash "form_name" ref) (getf form :form-name))
+                 (when (getf form :test-name)
+                   (setf (gethash "test" ref)
+                         (make-ht "name" (getf form :test-name)
+                                  "framework" (getf form :test-framework))))))))))
+     by-file)
+    (let* ((count (length refs))
+           (limit (or limit count)))
+      (setf (gethash "tests" report) (coerce (%tests-of refs) 'vector)
+            (gethash "refs" report) (coerce (subseq refs 0 (min count limit)) 'vector)
+            (gethash "limit" report) limit
+            (gethash "truncated" report) (json-bool (> count limit))))
+    report))

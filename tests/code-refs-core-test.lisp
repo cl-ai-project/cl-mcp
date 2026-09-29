@@ -19,7 +19,8 @@
                 #:resolve-site-token
                 #:resolve-scan-forms
                 #:merge-references
-                #:build-references-report))
+                #:build-references-report
+                #:place-references-in-source))
 
 (in-package #:cl-mcp/tests/code-refs-core-test)
 
@@ -456,3 +457,116 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
                (gethash "symbol_status"
                         (build-references-report :symbol "x" :status :package-not-found))))
     (ok (eq yason:false (gethash "truncated" (build-references-report :symbol "x"))))))
+
+(defun %forms-at-table (entries)
+  "Return a FORMS-AT function answering from ENTRIES, ((abs-path line . forms) ...),
+and recording each call it gets in the list it returns second."
+  (let ((calls '()))
+    (values (lambda (abs-path lines)
+              (push (list abs-path lines) calls)
+              (let ((table (make-hash-table)))
+                (dolist (entry entries table)
+                  (destructuring-bind (path line . forms) entry
+                    (when (and (equal path abs-path) (member line lines))
+                      (setf (gethash line table) forms))))))
+            (lambda () calls))))
+
+(deftest place-references-in-source-names-the-form-an-xref-line-starts
+  (let* ((refs (merge-references
+                (list (%xref "/abs/a.lisp" 1 :caller "placed" :caller-symbol "P::PLACED")
+                      (%xref "/abs/t.lisp" 7 :caller "(lambda)" :line 55)
+                      (%xref "/abs/t.lisp" 8 :caller "(lambda)" :line 63)
+                      (%xref "/abs/t.lisp" 9 :caller "(lambda)" :line 70)
+                      (%xref "/abs/t.lisp" 10 :caller "(lambda)" :line 80))
+                (list (%resolved "/abs/a.lisp" 1 :form-name "placed"))))
+         (report (build-references-report :symbol "p:target" :status :found :limit nil
+                                          :refs refs)))
+    (multiple-value-bind (forms-at calls)
+        (%forms-at-table
+         '(("/abs/t.lisp" 55 (:form-type "deftest" :form-name "via-macro"
+                              :test-name "via-macro" :test-framework "rove"))
+           ("/abs/t.lisp" 63 (:form-type "defun" :form-name "helper"))
+           ("/abs/t.lisp" 70 (:form-type "defun" :form-name "one")
+                             (:form-type "defun" :form-name "two"))))
+      (place-references-in-source report forms-at :limit 3)
+      (let ((all (coerce (gethash "refs" report) 'list)))
+        (testing "each reference carries its file's absolute path"
+          (ok (every (lambda (ref) (stringp (gethash "abs_path" ref))) all)))
+        (testing "the source is read once per file, for the unplaced lines only"
+          (ok (equal '(("/abs/t.lisp" (55 63 70 80)))
+                     (mapcar (lambda (call) (list (first call) (sort (copy-list (second call)) #'<)))
+                             (funcall calls)))))
+        (testing "a macro-expansion reference gains the form and the test it sits in"
+          (let ((ref (find 55 all :key (lambda (ref) (gethash "line" ref)))))
+            (ok (equal "deftest" (gethash "form_type" ref)))
+            (ok (equal "via-macro" (gethash "form_name" ref)))
+            (ok (equal "via-macro" (gethash "name" (gethash "test" ref))))
+            (ok (search "macro expansion" (gethash "note" ref))
+                "the note still says the call is not visible in source")))
+        (testing "a plain form is named without becoming a test"
+          (let ((ref (find 63 all :key (lambda (ref) (gethash "line" ref)))))
+            (ok (equal "helper" (gethash "form_name" ref)))
+            (ok (null (gethash "test" ref))))))
+      (testing "LIMIT cuts the list after the tests were counted over every reference"
+        (ok (= 3 (length (gethash "refs" report))))
+        (ok (= 5 (gethash "count" report)))
+        (ok (= 3 (gethash "limit" report)))
+        (ok (eq t (gethash "truncated" report)))
+        (ok (equal '("via-macro")
+                   (map 'list (lambda (test) (gethash "name" test)) (gethash "tests" report))))))))
+
+(deftest place-references-in-source-leaves-ambiguous-and-unknown-lines-alone
+  (let ((report (build-references-report
+                 :symbol "p:target" :status :found :limit nil
+                 :refs (merge-references
+                        (list (%xref "/abs/t.lisp" 9 :caller "(lambda)" :line 70)
+                              (%xref "/abs/t.lisp" 10 :caller "(lambda)" :line 80))
+                        '()))))
+    (place-references-in-source
+     report
+     (%forms-at-table '(("/abs/t.lisp" 70 (:form-type "defun" :form-name "one")
+                                          (:form-type "defun" :form-name "two")))))
+    (testing "two forms on the line, or none, and nothing is guessed"
+      (ok (every (lambda (ref) (null (gethash "form_type" ref)))
+                 (coerce (gethash "refs" report) 'list))))
+    (testing "without LIMIT every reference is kept"
+      (ok (= 2 (length (gethash "refs" report))))
+      (ok (eq 'yason:false (gethash "truncated" report))))))
+
+(deftest place-references-in-source-never-places-a-stale-reference
+  (let ((report (build-references-report
+                 :symbol "p:target" :status :found :limit nil
+                 :refs (merge-references
+                        (list (%xref "/abs/t.lisp" 7 :caller "(lambda)" :line 55 :stale t))
+                        '()))))
+    (multiple-value-bind (forms-at calls)
+        (%forms-at-table '(("/abs/t.lisp" 55 (:form-type "deftest" :form-name "unrelated"
+                                              :test-name "unrelated" :test-framework "rove"))))
+      (place-references-in-source report forms-at)
+      (let ((ref (aref (gethash "refs" report) 0)))
+        (testing "the form now on that line is not taken for the one xref saw"
+          (ok (null (gethash "form_type" ref)))
+          (ok (null (gethash "test" ref)))
+          (ok (zerop (length (gethash "tests" report)))))
+        (testing "the source is not even read for it, and the reload note stays"
+          (ok (null (funcall calls)))
+          (ok (search "reload" (gethash "note" ref))))))))
+
+(deftest place-references-in-source-keeps-tests-that-limit-cuts-from-refs
+  (let ((report (build-references-report
+                 :symbol "p:target" :status :found :limit nil
+                 :refs (merge-references
+                        (list (%xref "/abs/a.lisp" 1 :caller "placed" :caller-symbol "P::PLACED")
+                              (%xref "/abs/t.lisp" 7 :caller "(lambda)" :line 55))
+                        (list (%resolved "/abs/a.lisp" 1 :form-name "placed"))))))
+    (place-references-in-source
+     report
+     (%forms-at-table '(("/abs/t.lisp" 55 (:form-type "deftest" :form-name "via-macro"
+                                           :test-name "via-macro" :test-framework "rove"))))
+     :limit 1)
+    (testing "the macro-reached test is cut from refs"
+      (ok (= 1 (length (gethash "refs" report))))
+      (ok (equal "placed" (gethash "form_name" (aref (gethash "refs" report) 0)))))
+    (testing "but tests still names it"
+      (ok (equal '("via-macro")
+                 (map 'list (lambda (test) (gethash "name" test)) (gethash "tests" report)))))))

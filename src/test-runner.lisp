@@ -38,9 +38,15 @@ Supports multiple test frameworks with automatic detection:
 
 Returns:
 - content (summary text, backward compatible)
-- passed (integer)
-- failed (integer)
-- pending (integer)
+- passed (integer) -- tests, not assertions (Rove and FiveAM, whether the whole
+  system or a test/tests selection ran); prove counts assertions
+- failed (integer) -- same unit as passed
+- pending (integer) -- tests that only skipped, so checked nothing (Rove: a
+  test whose only results are (skip ...), however deep in testing blocks)
+- skipped_tests (array, Rove, present when any test skipped) -- test_name and
+  reasons of every test that skipped anything, including one that passed on
+  what it did check; also listed under 'Skipped' in the summary text.  When
+  every test only skipped, the summary says ALL SKIPPED, not PASS
 - framework (string)
 - duration_ms (integer)
 - stdout (string, present when non-empty) — captured test standard output

@@ -9,7 +9,10 @@
                 #:code-find-references-report
                 #:generic-function-method-count)
   (:import-from #:cl-mcp/src/code-refs-scan
-                #:scan-project)
+                #:scan-project
+                #:top-level-forms-at)
+  (:import-from #:cl-mcp/src/code-refs-core
+                #:place-references-in-source)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:arg-validation-error)
   (:import-from #:cl-mcp/src/tools/define-tool
@@ -19,6 +22,8 @@
                 #:build-code-describe-response
                 #:build-code-find-references-response)
   (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*
+                #:proxy-to-worker
                 #:with-proxy-dispatch)
   (:export
    #:code-find-definition
@@ -71,6 +76,24 @@ and is loaded"))
                   name type arglist doc path line
                   :method-count (generic-function-method-count symbol :package package))))))
 
+(defun %json-nulls->nil (value)
+  "Return VALUE, a worker's answer parsed with its JSON types kept, with every
+:NULL inside it turned into NIL -- the value an inline report holds there, and
+what the report's text builder reads as absent.  Hash-tables and vectors are
+changed in place.  Falses stay YASON:FALSE, which encodes as the false the
+worker wrote."
+  (typecase value
+    (hash-table
+     (maphash (lambda (key child)
+                (setf (gethash key value) (%json-nulls->nil child)))
+              value)
+     value)
+    (string value)
+    (vector
+     (dotimes (i (length value) value)
+       (setf (aref value i) (%json-nulls->nil (aref value i)))))
+    (t (if (eq value :null) nil value))))
+
 (define-tool "code-find-references"
   :description "Find who calls or references a symbol - its callers, the exact call sites
 inside them, and the tests that exercise it - to see what a change would affect
@@ -81,7 +104,8 @@ the project's source, so it also reports:
 - the exact line of every call site inside each caller ('call_sites')
 - top-level uses xref never records, such as a defparameter initform or a macro
   used at top level (origin 'source')
-- calls that exist only inside a macro expansion (origin 'xref')
+- calls that exist only inside a macro expansion (origin 'xref'), still named
+  by the form they sit in, and counted as tests when that form is one
 - the deftest a reference sits in, and a 'Tests:' line listing them
 Each result is one top-level form; its form_type and form_name can be passed
 straight to lisp-edit-form.  lisp-read-file's name_pattern is a regex, so
@@ -117,18 +141,30 @@ For plain text search without loading anything, use 'clgrep-search'."
              :arg-name "limit"
              :message "limit must be a positive integer"))
     ;; The scan runs in this (parent) process on both paths: it needs eclector,
-    ;; which the worker image does not load.  It also validates SYMBOL.
-    (let ((scan (scan-project symbol)))
-      (with-proxy-dispatch (id "worker/code-find-references"
-                              (make-ht "symbol" symbol
-                                       "package" package
-                                       "project_only" project-only
-                                       "limit" (or limit 50)
-                                       "scan" scan))
-        (result id
-                (build-code-find-references-response
-                 (code-find-references-report symbol
-                                              :package package
-                                              :project-only project-only
-                                              :limit (or limit 50)
-                                              :scan scan)))))))
+    ;; which the worker image does not load.  It also validates SYMBOL.  So
+    ;; does placing the references the scan could not see (a call made by a
+    ;; macro expansion in a form that never names the symbol): the report
+    ;; comes back with every reference, is placed here, and only then cut
+    ;; to LIMIT, so tests covers all of them.
+    (let* ((scan (scan-project symbol))
+           (report (if *use-worker-pool*
+                       (proxy-to-worker id "worker/code-find-references"
+                                        (make-ht "symbol" symbol
+                                                 "package" package
+                                                 "project_only" project-only
+                                                 "limit" nil
+                                                 "scan" scan)
+                                        :preserve-json-types t)
+                       (code-find-references-report symbol
+                                                    :package package
+                                                    :project-only project-only
+                                                    :limit nil
+                                                    :scan scan))))
+      (result id
+              (if (member (gethash "isError" report) '(t yason:true))
+                  ;; A proxy failure or a reset notice: relayed untouched.
+                  report
+                  (build-code-find-references-response
+                   (place-references-in-source (%json-nulls->nil report)
+                                               #'top-level-forms-at
+                                               :limit (or limit 50))))))))
