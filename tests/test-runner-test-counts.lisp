@@ -5,7 +5,7 @@
 (defpackage #:cl-mcp/tests/test-runner-test-counts
   (:use #:cl)
   (:import-from #:rove
-                #:deftest #:ok))
+                #:deftest #:testing #:ok #:skip))
 
 (in-package #:cl-mcp/tests/test-runner-test-counts)
 
@@ -22,3 +22,13 @@
   (ok (= 1 1) "passes")
   (ok (= 1 2) "fails on purpose")
   (ok (= 3 3) "passes too"))
+
+(deftest nested-testing-blocks
+  (testing "outer"
+    (ok (= 1 1) "outer assertion")
+    (testing "inner"
+      (ok (= 2 2) "inner assertion")
+      (ok (= 3 3) "another inner assertion"))))
+
+(deftest only-skipped
+  (skip "nothing to check yet"))
