@@ -459,6 +459,46 @@ on."
   (multiple-value-bind (node reason) (locate-form-in-nodes nodes form-type form-name)
     (if reason (error "~A" reason) node)))
 
+(defun %bare-form-type (form-type)
+  "Return FORM-TYPE lower-cased, without any package prefix.  Forms are matched
+on their head's symbol name, so \"asdf:defsystem\" -- the head as an .asd
+writes it -- means the same as \"defsystem\"."
+  (let* ((text (string-downcase form-type))
+         (colon (position #\: text :from-end t)))
+    (if colon (subseq text (1+ colon)) text)))
+
+(defparameter *not-found-forms-listed* 30
+  "Most top-level forms a \"not found\" error lists to choose from.")
+
+(defun %forms-listing (nodes form-type)
+  "Return the sentence a \"not found\" error ends with: the top-level forms of
+FORM-TYPE among NODES, each written as \"(type name)\" -- or, when there is none
+of that type, every top-level form -- so the caller can pick the right
+form_type and form_name instead of guessing again."
+  (let* ((forms (loop for node in nodes
+                      for value = (and (typep node 'cst-node)
+                                       (eq (cst-node-kind node) :expr)
+                                       (cst-node-value node))
+                      when (and (consp value) (symbolp (car value)))
+                        collect (let* ((type (%normalize-string (car value)))
+                                       (name (and (consp (cdr value))
+                                                  (car (last (ignore-errors
+                                                              (%definition-candidates
+                                                               value type)))))))
+                                  (cons type (format nil "(~A~@[ ~A~])" type name)))))
+         (same-type (remove form-type forms :key #'car :test-not #'string=))
+         (shown (mapcar #'cdr (or same-type forms)))
+         (extra (max 0 (- (length shown) *not-found-forms-listed*))))
+    (if (null forms)
+        "The file holds no top-level forms."
+        (format nil "~A: ~{~A~^, ~}~:[~;, … ~D more~]."
+                (if same-type
+                    (format nil "Its ~A forms are" form-type)
+                    (format nil "There is no ~A form here; its top-level forms are" form-type))
+                (subseq shown 0 (min (length shown) *not-found-forms-listed*))
+                (plusp extra)
+                extra))))
+
 (defun %detect-readtable-before-node (nodes target)
   "Return the readtable designator active before TARGET, or NIL.
 Scans NODES in order and only considers IN-READTABLE forms that appear
@@ -1127,9 +1167,9 @@ Returns eight values:
   NODES — parsed CST nodes
   TARGET — matched CST node
   TARGET-SNIPPET — text of the matched form
-  FORM-TYPE-STR — downcased form-type string
+  FORM-TYPE-STR — form-type downcased, without a package prefix (%BARE-FORM-TYPE)
   FILE-PACKAGE-NAME — package named by the file's first IN-PACKAGE form"
-  (let ((form-type-str (string-downcase form-type))
+  (let ((form-type-str (%bare-form-type form-type))
         (guard (normalize-edit-guard guard)))
     (multiple-value-bind (abs rel)
         (%normalize-paths file-path)
@@ -1202,8 +1242,9 @@ Returns eight values:
                 (signal-file-unparseable abs original swallowed
                                         :readtable readtable
                                         :editable-prefix (and nodes t)))
-              (error "Form ~A ~A not found in ~A" form-type form-name
-                     (native-path-namestring abs)))
+              (error "Form ~A ~A not found in ~A~%~A" form-type form-name
+                     (native-path-namestring abs)
+                     (%forms-listing nodes form-type-str)))
             (when guard
               (multiple-value-bind (ok-p conflict)
                   (check-edit-guard guard (native-path-namestring abs) snapshot target)

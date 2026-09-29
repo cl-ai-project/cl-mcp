@@ -970,7 +970,9 @@ safety and structure preservation."
   :args ((file_path :type :string :required t
                     :description "Target file path (absolute recommended)")
          (form_type :type :string :required t
-                    :description "Form type to search, e.g., \"defun\", \"defmacro\", \"defmethod\"")
+                    :description "Form type to search, e.g., \"defun\", \"defmacro\", \"defmethod\".
+A package prefix is ignored: \"asdf:defsystem\" and \"defsystem\" both match
+(asdf:defsystem ...).")
          (form_name :type :string :required t
                     :description "Form name to match; for defmethod include specializers,
 e.g., \"print-object ((obj my-class) stream)\". For defstruct with

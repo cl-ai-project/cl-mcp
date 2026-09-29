@@ -206,8 +206,8 @@ Four rules, each of which otherwise costs a compile-error round trip:
 When `:pre` refuses most generated inputs, write an `:args-generator` that produces admissible ones instead of raising `trials`.
 For the full clause grammar, run `code-describe` on the macro once cl-spec is loaded (`cl-spec:defspec-function`, `cl-spec:defproperty`, `cl-spec:defspec`, `cl-spec:defgenerator`): each docstring lists its clauses. Existing declarations in the project are the next best reference. cl-spec's own README and examples are usually outside the project root, where the file tools refuse to read.
 
-Edit declarations with `lisp-edit-form` or `lisp-patch-form` like any other form. `form_type` is the macro name without a package prefix (`defspec-function`, `defproperty`, `defspec`, `defgenerator`), even when the source writes `cl-spec:defspec-function`, and `form_name` is the defined name; for `defspec-function` that is the target function's name.
-In an `.asd`, `form_type` is `"defsystem"`, never `"asdf:defsystem"`.
+Edit declarations with `lisp-edit-form` or `lisp-patch-form` like any other form. `form_type` is the macro name (`defspec-function`, `defproperty`, `defspec`, `defgenerator`); a package prefix is ignored, so `cl-spec:defspec-function` works as well, and `form_name` is the defined name; for `defspec-function` that is the target function's name.
+In an `.asd`, `form_type` is `"defsystem"` (or `"asdf:defsystem"`).
 
 ## 4. Recording the Baseline
 
