@@ -377,11 +377,12 @@ is kept."
                      (write-char c out)
                      (incf i)))))))))))
 
-(defun locate-form-in-nodes (nodes form-type form-name)
+(defun %locate-form-of-type (nodes form-type form-name)
   "Find the CST node among NODES -- top-level nodes as PARSE-TOP-LEVEL-FORMS
-returns them -- matching FORM-TYPE and FORM-NAME, the same rules %FIND-TARGET
-documents (the [N] index suffix, defmethod's normalized signature matching,
-reader-prefix stripping).  Returns (VALUES NODE ERROR-STRING).
+returns them -- whose head's lower-cased symbol name is FORM-TYPE and which
+matches FORM-NAME (the [N] index suffix, defmethod's normalized signature
+matching, reader-prefix stripping).  Returns (VALUES NODE ERROR-STRING).
+LOCATE-FORM-IN-NODES decides which FORM-TYPE strings to try.
 
 NODE is the sole matching node, or NIL when it cannot be resolved to exactly
 one: zero matches, an [N] index out of range, or more than one match without
@@ -389,12 +390,7 @@ a disambiguating index.  ERROR-STRING is NIL for zero matches -- a plain,
 non-exceptional absence -- and a descriptive message for the other two: an
 out-of-range index, or an ambiguous set of matches (naming each candidate's
 own signature and its [N] index).  A FORM-NAME that strips down to the empty
-string is also reported this way, before any node is searched.
-
-%FIND-TARGET re-signals ERROR-STRING as a Lisp error, preserving its own
-contract for lisp-edit-form/lisp-patch-form.  The clos-describe observer
-calls this directly instead, to decide a round trip failed (spec 3.5)
-without installing a condition handler around every candidate it checks."
+string is also reported this way, before any node is searched."
   (multiple-value-bind (base-name index)
       (let ((match (nth-value 1 (scan-to-strings "^(.+?)\\[(\\d+)\\]$" form-name))))
         (if match
@@ -449,23 +445,95 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
                  (values nil (format nil "Multiple matches for ~A ~A. Specify an index:~%~{  ~A~%~}"
                                      form-type form-name descriptions))))))))))
 
+(defun %form-type-readings (form-type)
+  "Return the ways FORM-TYPE can name a form's head, as (values WHOLE UNQUALIFIED).
+
+WHOLE is FORM-TYPE lower-cased, compared as it always was with the head's
+lower-cased symbol name -- so \"def:thing\" still names (|DEF:THING| ...).
+UNQUALIFIED is FORM-TYPE read as a symbol token: a | ... | stretch or a
+backslash escapes what it covers, an unescaped colon is a package marker and
+everything up to the last one is dropped, and the rest is lower-cased -- so
+\"asdf:defsystem\" names (asdf:defsystem ...) and \"|def:thing|\" names
+(|DEF:THING| ...).  Only the head's name is compared, never its package.
+UNQUALIFIED is NIL when the token holds no marker and no escape, or reads the
+same as WHOLE."
+  (let ((whole (string-downcase form-type))
+        (name (make-string-output-stream))
+        (in-bar nil)
+        (marked nil)
+        (escaped nil)
+        (length (length form-type))
+        (i 0))
+    (loop while (< i length)
+          do (let ((ch (char form-type i)))
+               (cond ((char= ch #\\)
+                      (incf i)
+                      (setf escaped t)
+                      (when (< i length)
+                        (write-char (char form-type i) name)))
+                     ((char= ch #\|)
+                      (setf in-bar (not in-bar)
+                            escaped t))
+                     ((and (char= ch #\:) (not in-bar))
+                      (setf marked t)
+                      (get-output-stream-string name))
+                     (t (write-char ch name))))
+             (incf i))
+    (let ((unqualified (string-downcase (get-output-stream-string name))))
+      (values whole
+              (and (or marked escaped)
+                   (plusp (length unqualified))
+                   (string/= unqualified whole)
+                   unqualified)))))
+
+(defun locate-form-in-nodes (nodes form-type form-name)
+  "Find the CST node among NODES -- top-level nodes as PARSE-TOP-LEVEL-FORMS
+returns them -- matching FORM-TYPE and FORM-NAME.  Returns (VALUES NODE
+ERROR-STRING TYPE), TYPE being the lower-cased head name that matched (or, on
+no match, the one tried last, which a \"not found\" message lists forms of).
+
+FORM-TYPE is tried both ways %FORM-TYPE-READINGS gives: whole, then without a
+package prefix.  When only one reading finds anything, it is used.  When both
+do and they do not land on the same form, neither is picked: ERROR-STRING says
+FORM-TYPE is ambiguous and how to spell each reading, since editing the other
+form would be a silent wrong edit.  %LOCATE-FORM-OF-TYPE documents the rest of
+the matching and the other ERROR-STRINGs: an [N] index out of range, several
+matches, an empty FORM-NAME.
+
+%FIND-TARGET re-signals ERROR-STRING as a Lisp error, preserving its own
+contract for lisp-edit-form/lisp-patch-form.  The clos-describe observer
+calls this directly instead, to decide a round trip failed (spec 3.5)
+without installing a condition handler around every candidate it checks."
+  (multiple-value-bind (whole unqualified) (%form-type-readings form-type)
+    (multiple-value-bind (node reason) (%locate-form-of-type nodes whole form-name)
+      (if (null unqualified)
+          (values node reason whole)
+          (multiple-value-bind (other other-reason)
+              (%locate-form-of-type nodes unqualified form-name)
+            (let ((whole-found (or node reason))
+                  (other-found (or other other-reason)))
+              (cond
+                ((and whole-found other-found (not (and node (eq node other))))
+                 (values nil
+                         (format nil "form_type ~S is ambiguous here: taken whole it names a ~
+~A form, and without its package prefix a ~A form. Pass \"|~A|\" for the first or ~S for ~
+the second."
+                                 form-type whole unqualified whole unqualified)
+                         nil))
+                (whole-found (values node reason whole))
+                (other-found (values other other-reason unqualified))
+                (t (values nil nil unqualified)))))))))
+
 (defun %find-target (nodes form-type form-name)
   "Find a target node matching FORM-TYPE and FORM-NAME (LOCATE-FORM-IN-NODES
-documents the matching rules in full).  Returns the node, or NIL when
-nothing matches; signals a Lisp error when LOCATE-FORM-IN-NODES reports one
-instead (an out-of-range [N] index, ambiguous matches, or an empty
-FORM-NAME) -- the contract lisp-edit-form and lisp-patch-form already rely
-on."
-  (multiple-value-bind (node reason) (locate-form-in-nodes nodes form-type form-name)
-    (if reason (error "~A" reason) node)))
-
-(defun %bare-form-type (form-type)
-  "Return FORM-TYPE lower-cased, without any package prefix.  Forms are matched
-on their head's symbol name, so \"asdf:defsystem\" -- the head as an .asd
-writes it -- means the same as \"defsystem\"."
-  (let* ((text (string-downcase form-type))
-         (colon (position #\: text :from-end t)))
-    (if colon (subseq text (1+ colon)) text)))
+documents the matching rules in full).  Returns (values NODE TYPE): the node,
+or NIL when nothing matches, and the lower-cased head name that matched (the
+one a \"not found\" message should list forms of when nothing did).  Signals a
+Lisp error when LOCATE-FORM-IN-NODES reports one instead (an out-of-range [N]
+index, ambiguous matches or form_type, or an empty FORM-NAME) -- the contract
+lisp-edit-form and lisp-patch-form already rely on."
+  (multiple-value-bind (node reason type) (locate-form-in-nodes nodes form-type form-name)
+    (if reason (error "~A" reason) (values node type))))
 
 (defparameter *not-found-forms-listed* 30
   "Most top-level forms a \"not found\" error lists to choose from.")
@@ -1167,9 +1235,9 @@ Returns eight values:
   NODES — parsed CST nodes
   TARGET — matched CST node
   TARGET-SNIPPET — text of the matched form
-  FORM-TYPE-STR — form-type downcased, without a package prefix (%BARE-FORM-TYPE)
+  FORM-TYPE-STR — the lower-cased head name FORM-TYPE matched (%FORM-TYPE-READINGS)
   FILE-PACKAGE-NAME — package named by the file's first IN-PACKAGE form"
-  (let ((form-type-str (%bare-form-type form-type))
+  (let ((form-type-str (string-downcase form-type))
         (guard (normalize-edit-guard guard)))
     (multiple-value-bind (abs rel)
         (%normalize-paths file-path)
@@ -1234,7 +1302,11 @@ Returns eight values:
                                        :source-path abs)
               (error (e)
                 (signal-file-unparseable abs original e :readtable readtable)))
-          (let ((target (%find-target nodes form-type-str form-name)))
+          (multiple-value-bind (target matched-type)
+              (%find-target nodes form-type form-name)
+            ;; The reading of FORM-TYPE that matched (or was tried last),
+            ;; which callers compare with "defmethod" and the like.
+            (setf form-type-str matched-type)
             (unless target
               (when swallowed
                 ;; The lenient pass returned the forms before the breakage,

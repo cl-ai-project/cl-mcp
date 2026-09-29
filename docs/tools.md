@@ -502,7 +502,9 @@ insert_after operations with automatic parinfer repair for missing closing paren
 Input:
 - `file_path` (string, required): absolute path or project-relative path
 - `form_type` (string, required): form constructor to match, e.g., `defun`, `defmacro`, `defmethod`; a package
-  prefix is ignored, so `asdf:defsystem` and `defsystem` both match `(asdf:defsystem ...)`. When nothing
+  prefix is ignored, so `asdf:defsystem` and `defsystem` both match `(asdf:defsystem ...)`; a colon inside
+  the name itself still matches as written (`def:thing`, or `|def:thing|`, for `(|DEF:THING| ...)`), and
+  when those two readings name different forms the call is refused as ambiguous. When nothing
   matches, the error lists the file's forms of that type (or all its top-level forms when it has none)
 - `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`
 - `operation` (string, required): one of `replace`, `insert_before`, `insert_after`
@@ -688,7 +690,9 @@ does not parse, the error names the line to fix and the recovery path
 Input:
 - `file_path` (string, required): absolute path or project-relative path
 - `form_type` (string, required): form constructor to match, e.g., `defun`, `defmacro`, `defmethod`; a package
-  prefix is ignored, so `asdf:defsystem` and `defsystem` both match `(asdf:defsystem ...)`. When nothing
+  prefix is ignored, so `asdf:defsystem` and `defsystem` both match `(asdf:defsystem ...)`; a colon inside
+  the name itself still matches as written (`def:thing`, or `|def:thing|`, for `(|DEF:THING| ...)`), and
+  when those two readings name different forms the call is refused as ambiguous. When nothing
   matches, the error lists the file's forms of that type (or all its top-level forms when it has none)
 - `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`
 - `old_text` (string, required): exact text to find within the matched form (whitespace-sensitive, must match exactly once)

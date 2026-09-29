@@ -195,6 +195,34 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                         :content "(asdf:defsystem \"demo\"\n  :version \"0.2.0\")")
         (ok (search "\"0.2.0\"" (fs-read-file path)) "any case, either separator")))))
 
+(deftest locate-form-in-nodes-keeps-a-colon-inside-the-head-name
+  (let ((nodes (parse-top-level-forms
+                (format nil "(|DEF:THING| sample 1)~%~%(defsystem other)~%"))))
+    (testing "a head whose name holds a colon still matches its whole name"
+      (ok (locate-form-in-nodes nodes "def:thing" "sample"))
+      (ok (locate-form-in-nodes nodes "DEF:THING" "sample")))
+    (testing "the escaped spellings name the same head"
+      (ok (locate-form-in-nodes nodes "|DEF:THING|" "sample"))
+      (ok (locate-form-in-nodes nodes "def\\:thing" "sample")))
+    (testing "an escaped colon is not a package marker"
+      (ok (null (locate-form-in-nodes nodes "|def:thing|" "other")))
+      (ok (null (locate-form-in-nodes nodes "|asdf:defsystem|" "other"))))
+    (testing "a real package marker is still dropped"
+      (ok (locate-form-in-nodes nodes "asdf:defsystem" "other"))
+      (ok (locate-form-in-nodes nodes "asdf::defsystem" "other")))))
+
+(deftest locate-form-in-nodes-refuses-a-form-type-read-two-ways
+  (testing "raw name and package-qualified name matching different forms is ambiguous"
+    (let ((nodes (parse-top-level-forms
+                  (format nil "(|DEF:THING| sample 1)~%~%(thing sample 2)~%"))))
+      (multiple-value-bind (node reason) (locate-form-in-nodes nodes "def:thing" "sample")
+        (ok (null node) "neither reading is chosen")
+        (ok (and reason (search "ambiguous" reason)))
+        (ok (and reason (search "|def:thing|" reason))
+            "the reason says how to ask for the name with the colon")
+        (ok (and reason (search "\"thing\"" reason))
+            "and how to ask for the unqualified one")))))
+
 (deftest lisp-edit-form-not-found-names-the-forms-that-are-there
   (testing "an unmatched form_type/form_name lists the file's forms to choose from"
     (with-temp-file "tests/tmp/edit-form-not-found.lisp"
