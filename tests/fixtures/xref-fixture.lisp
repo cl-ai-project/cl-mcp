@@ -72,6 +72,12 @@
 (deftest target-is-called-from-a-test
   (ok (= 8 (target 7))))
 
+;; Reaches TARGET only through WITH-TARGET's expansion: the name never appears
+;; in this form, so only xref sees the call, and code-find-references has to
+;; read the source to say which test it sits in.
+(deftest target-is-reached-through-the-macro
+  (ok (eq :through (with-target :through))))
+
 (in-package #:cl-mcp-xref-fixture-other)
 
 (defun target (x)

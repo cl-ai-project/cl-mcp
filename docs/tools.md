@@ -773,15 +773,17 @@ Output (the content text carries everything that matters for a decision):
 - `symbol_status`: `found`, `not_found` or `package_not_found`; nothing is interned either way
 - `resolved_symbol`, `symbol_kind` (`function`, `macro`, `generic-function`, `special-operator`, `variable`, `constant`, `unbound`), `lookup_package`, `lookup_name`
 - `refs` (array): one element per top-level form, sorted by path and line
-  - `path`, `line` (start of the form), `type` (first of `types`), `types`
+  - `path`, `line` (start of the form), `abs_path` (the file's truename), `type` (first of `types`), `types`
   - `caller`, `caller_symbol` (package-qualified; null for lambdas and for forms xref did not see)
-  - `form_type`, `form_name`: pass them straight to `lisp-edit-form` (`form_type` / `form_name`); for `lisp-read-file`'s `name_pattern`, a CL-PPCRE regex, regex-quote the name first (a `defmethod` name such as `area ((s integer))` does not match itself)
+  - `form_type`, `form_name`: also given for an `xref`-only form whose source never writes the name --
+    a function or test that reaches the symbol only through a macro's expansion -- by reading the form
+    that starts on its line (left null when no single form starts there); pass them straight to `lisp-edit-form` (`form_type` / `form_name`); for `lisp-read-file`'s `name_pattern`, a CL-PPCRE regex, regex-quote the name first (a `defmethod` name such as `area ((s integer))` does not match itself)
   - `origin`: `xref+source`; `xref` (the call exists only in a macro expansion, or the source was not scanned); `source` (a top-level use xref never records, or code not compiled since it was written; no note when every site is `quoted`, `template` or `method`, which xref usually does not record -- `WHO-CALLS` does record a function passed by name such as `(mapcar 'name xs)`, but then the form is not source-only)
   - `call_sites` (array): `line`, `column`, `kind` (`call`, `macro`, `function`, `quoted`, `template`, `bind`, `set`, `method`, `reference`), `context`, `shadowed_by`; `function` is `#'name` or a quoted `'name` passed as the function to `funcall`, `apply` or `multiple-value-call`; `set` is a `setf`/`setq` place or the variable `incf`, `decf`, `pop`, `push` or `pushnew` changes
   - `test`: `{name, framework}` when the form is a `deftest` (rove), `test`/`def-test` (fiveam) or `define-test` (parachute)
   - `stale`: the file changed after it was compiled; `note`: why a form lacks call sites or xref, or, on an `xref+source` form, which xref types (`call`, `set`, ...) no listed site shows -- say a call made by a macro expansion or through a function passed by name such as `(mapcar 'name xs)`; the sites are still listed with their own kind, and the form is not split
 - `count`, `file_count`, `limit`, `truncated`
-- `tests` (array): `name`, `path`, `line` of every test among the references
+- `tests` (array): `name`, `path`, `line` of every test among the references, including a test that reaches the symbol only through a macro, and those `limit` left out of `refs`
 - `unresolved` (array): `path`, `package`, `count`, `tests` for matches in files whose package is not loaded
 - `notes` (array), `xref_count`, `files_scanned`, `name_matches`, `scan_skipped`, `project_only`, `symbol`
 

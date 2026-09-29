@@ -299,7 +299,10 @@ its sites against the symbols loaded in this image and merges them with xref."
   (let ((symbol (gethash "symbol" params))
         (package (gethash "package" params))
         (project-only (%bool-default params "project_only" t))
-        (limit (or (gethash "limit" params) 50))
+        ;; A null limit, which the parent sends, keeps every reference: the
+        ;; parent places the ones the scan could not see and cuts the list.
+        (limit (multiple-value-bind (limit presentp) (gethash "limit" params)
+                 (if presentp limit 50)))
         (scan (gethash "scan" params)))
     (unless symbol
       (error "symbol is required"))

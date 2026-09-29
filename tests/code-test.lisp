@@ -18,7 +18,10 @@
                 #:%offset->line
                 #:generic-function-method-count)
   (:import-from #:cl-mcp/src/code-refs-scan
-                #:scan-project)
+                #:scan-project
+                #:top-level-forms-at)
+  (:import-from #:cl-mcp/src/code-refs-core
+                #:place-references-in-source)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -527,6 +530,52 @@ fixture directory."
                                 (gethash "name" (gethash "test" ref)))))
             (ok (find "target-is-called-from-a-test" (gethash "tests" report)
                       :key (lambda (test) (gethash "name" test)) :test #'equal)))))))
+
+(deftest code-find-references-places-macro-expansion-calls-in-their-forms
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let* ((designator "cl-mcp-xref-fixture:target")
+             (report (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+                       (%load-xref-fixture)
+                       (place-references-in-source
+                        (code-find-references-report
+                         designator
+                         :limit nil
+                         :scan (scan-project designator
+                                             :root (uiop:pathname-directory-pathname
+                                                    *xref-fixture*)))
+                        #'top-level-forms-at
+                        :limit 1000))))
+        (testing "a defun that reaches the target only through a macro is named"
+          (let ((ref (%ref-named report "macro-hidden-caller")))
+            (ok ref)
+            (ok (and ref (equal "defun" (gethash "form_type" ref))))
+            (ok (and ref (equal "xref" (gethash "origin" ref))))
+            (ok (and ref (= (%fixture-line "(defun macro-hidden-caller") (gethash "line" ref))))
+            (ok (and ref (search "macro expansion" (gethash "note" ref))))))
+        (testing "a test that reaches it only through a macro is listed as a test"
+          (let ((ref (%ref-named report "target-is-reached-through-the-macro")))
+            (ok ref)
+            (ok (and ref (equal "deftest" (gethash "form_type" ref))))
+            (ok (and ref (equal "target-is-reached-through-the-macro"
+                                (gethash "name" (gethash "test" ref)))))
+            (ok (find "target-is-reached-through-the-macro" (gethash "tests" report)
+                      :key (lambda (test) (gethash "name" test)) :test #'equal)))))))
+
+(deftest code-find-references-reads-a-preserved-worker-answer-as-inline
+  (testing "JSON nulls from a worker become NIL, falses stay false"
+    (let* ((ref (make-ht "form_type" :null "test" :null "stale" 'yason:false
+                         "call_sites" (vector (make-ht "shadowed_by" :null))))
+           (report (make-ht "refs" (vector ref) "scan_skipped" :null
+                            "truncated" 'yason:false))
+           (result (cl-mcp/src/code::%json-nulls->nil report)))
+      (ok (eq report result) "changed in place")
+      (ok (null (gethash "form_type" ref)))
+      (ok (null (gethash "test" ref)))
+      (ok (null (gethash "shadowed_by" (aref (gethash "call_sites" ref) 0))))
+      (ok (null (gethash "scan_skipped" report)))
+      (ok (eq 'yason:false (gethash "stale" ref)))
+      (ok (eq 'yason:false (gethash "truncated" report))))))
 
 (deftest code-find-references-report-flags-xref-kinds-no-site-shows
   (if (uiop:os-macosx-p)

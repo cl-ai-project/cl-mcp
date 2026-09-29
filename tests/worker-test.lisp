@@ -1066,6 +1066,25 @@ Cleans up server and socket on exit. AUTHENTICATED selects post-auth tests."
                 (ok (equal "source" (gethash "origin" ref)))
                 (ok (= 3 (gethash "line" (elt (gethash "call_sites" ref) 0))))))))))))
 
+(deftest worker-code-find-references-null-limit-keeps-every-reference
+  (testing "a null limit, which the parent sends, keeps every reference"
+    (with-handler-server (stream :authenticated t)
+      (let ((params (make-hash-table :test 'equal)))
+        (setf (gethash "symbol" params) "cl-mcp/src/log:log-event"
+              (gethash "project_only" params) nil
+              (gethash "limit" params) nil)
+        (let* ((response (%send-and-receive stream 304 "worker/code-find-references" params))
+               (result (%result-of response)))
+          (ok result "handler returns a result")
+          (when result
+            (ok (= (gethash "count" result) (length (gethash "refs" result)))
+                "no reference is cut")
+            (ok (< 50 (gethash "count" result))
+                "more than the default limit of 50 came back")
+            (ok (every (lambda (ref) (stringp (gethash "abs_path" ref)))
+                       (coerce (gethash "refs" result) 'list))
+                "each reference names its file absolutely")))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Handshake parser noise tolerance tests (Issue #9, Major)
 ;;; ---------------------------------------------------------------------------
