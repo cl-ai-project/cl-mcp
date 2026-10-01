@@ -1018,6 +1018,38 @@ tests run from there."
                                                                 "STALE-PROBE" :class))))))
         (ignore-errors (delete-file file))))))
 
+(deftest code-find-definition-says-when-its-line-predates-the-file
+  ;; After an edit that is not reloaded, the line comes from positions the
+  ;; image recorded for the old text: code-find reported it as if exact.
+  (let ((file (asdf/system:system-relative-pathname
+               :cl-mcp "tests/tmp/code-find-stale-fixture.lisp")))
+    (ensure-directories-exist file)
+    (with-open-file (out file :direction :output :if-exists :supersede)
+      (format out "(defpackage #:cl-mcp-code-find-stale-fixture (:use #:cl))~%~
+(in-package #:cl-mcp-code-find-stale-fixture)~%~
+(defun stale-target () 1)~%"))
+    (unwind-protect
+         (progn
+           (%compile-and-load-under-own-name file)
+           (testing "a file unchanged since it was compiled is not stale"
+             (ok (null (nth-value 3 (code-find-definition
+                                     "cl-mcp-code-find-stale-fixture::stale-target"))))
+             (ok (null (nth-value 6 (code-describe-symbol
+                                     "cl-mcp-code-find-stale-fixture::stale-target")))))
+           ;; utimes takes Unix time; FILE-WRITE-DATE is universal time.
+           (let ((later (+ (- (file-write-date file) 2208988800) 100)))
+             (uiop:symbol-call :sb-posix :utimes (namestring (truename file)) later later))
+           (testing "a file written after it was compiled is reported stale"
+             (multiple-value-bind (path line on-disk stale)
+                 (code-find-definition "cl-mcp-code-find-stale-fixture::stale-target")
+               (ok (search "code-find-stale-fixture.lisp" path))
+               (ok (integerp line))
+               (ok on-disk)
+               (ok stale))
+             (ok (nth-value 6 (code-describe-symbol
+                               "cl-mcp-code-find-stale-fixture::stale-target")))))
+      (ignore-errors (delete-file file)))))
+
 (deftest read-form-starts-counts-forms-as-the-compiler-does
   (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
     (testing "a form a reader conditional excludes leaves no position"

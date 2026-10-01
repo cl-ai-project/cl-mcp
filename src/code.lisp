@@ -49,9 +49,9 @@ and is loaded"))
   :body
   (with-proxy-dispatch (id "worker/code-find"
                           (make-ht "symbol" symbol "package" package))
-    (multiple-value-bind (path line on-disk)
+    (multiple-value-bind (path line on-disk stale)
         (code-find-definition symbol :package package)
-      (result id (build-code-find-response symbol path line on-disk)))))
+      (result id (build-code-find-response symbol path line on-disk stale)))))
 
 (define-tool "code-describe"
   :description "Describe a symbol: type, arglist, and documentation.
@@ -70,11 +70,12 @@ and is loaded"))
   :body
   (with-proxy-dispatch (id "worker/code-describe"
                           (make-ht "symbol" symbol "package" package))
-    (multiple-value-bind (name type arglist doc path line)
+    (multiple-value-bind (name type arglist doc path line stale)
         (code-describe-symbol symbol :package package)
       (result id (build-code-describe-response
                   name type arglist doc path line
-                  :method-count (generic-function-method-count symbol :package package))))))
+                  :method-count (generic-function-method-count symbol :package package)
+                  :stale stale)))))
 
 (defun %json-nulls->nil (value)
   "Return VALUE, a worker's answer parsed with its JSON types kept, with every

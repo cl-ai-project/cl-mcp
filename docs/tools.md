@@ -750,6 +750,9 @@ Output:
 - `path` (relative when inside project, absolute otherwise)
 - `line` (integer or null if unknown): classes, conditions, structures and methods get one too,
   the line of the top-level form defining them
+- `stale` (`true`, present only then): the file was written after the definition was compiled,
+  so `line` comes from the text the image compiled and may point anywhere in the file as it is
+  now; the text says so and names `load-system`
 
 ## `code-describe`
 Return symbol metadata (name, type, arglist, documentation).
@@ -763,6 +766,7 @@ Output:
 - `arglist` (string; for a class, its direct slot names)
 - `documentation` (string|null)
 - `path`, `line`: where it is defined; a class, condition or structure gets its line too
+- `stale` (`true`, present only then): as for `code-find`; the `Defined at` line says so
 
 The text ends with a pointer to `clos-describe` for a generic function (with its method count) or a class.
 

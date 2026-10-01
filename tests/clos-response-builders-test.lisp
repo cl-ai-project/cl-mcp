@@ -581,9 +581,9 @@ so arrays are lists and false is NIL."
 
 (deftest annotate-report-forms-explains-a-missing-form
   (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
-    (flet ((annotated (abs-path line)
+    (flet ((annotated (abs-path line &optional stale)
              (let ((entry (make-ht "abs_path" abs-path "path" "x.lisp" "line" line
-                                   "stale" yason:false
+                                   "stale" (if stale t yason:false)
                                    "form_type" nil "form_name" nil "note" nil)))
                (annotate-report-forms
                 (make-ht "symbol_status" "found" "generic_functions" (vector)
@@ -598,6 +598,14 @@ so arrays are lists and false is NIL."
           (ok (null (gethash "form_name" entry)))
           (ok (equal "unverified" (gethash "source_match" entry)))
           (ok (equal *note-no-form-at-line* (gethash "source_match_reason" entry)))))
+      (testing "a line that starts no form in a file changed since load names the reload"
+        ;; The image's line came from the text it compiled; after an edit it
+        ;; points between forms, and "no top-level form starts at this line"
+        ;; would read as a fact about the definition rather than the file.
+        (let ((entry (annotated (namestring (truename *fixture*)) 2 t)))
+          (ok (null (gethash "form_name" entry)))
+          (ok (equal "unverified" (gethash "source_match" entry)))
+          (ok (equal *note-stale* (gethash "source_match_reason" entry)))))
       (testing "a file that does not parse"
         (let ((file (asdf/system:system-relative-pathname
                      :cl-mcp "tests/tmp/clos-unparseable.lisp")))

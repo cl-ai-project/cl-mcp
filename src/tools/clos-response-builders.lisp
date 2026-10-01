@@ -394,7 +394,9 @@ or UNVERIFIED, never a silent fallback to MATCHED.
 
 A line with no candidates at all -- the file could not be read
 (*REASON-NOT-READABLE*) or parsed (*NOTE-UNPARSEABLE*), or simply starts no
-top-level form (*NOTE-NO-FORM-AT-LINE*) -- is decided locally, without a
+top-level form (*NOTE-NO-FORM-AT-LINE*, or *NOTE-STALE* when the file changed
+after the image recorded the line, which is then not where the form is) -- is
+decided locally, without a
 VERIFY-FN round trip: there is nothing to send.  An entry with a source file
 but no LINE at all (*REASON-NO-SOURCE-LINE*: DEFINITION-SOURCE-LOCATION
 computes them independently, spec src/code-core.lisp) is decided the same
@@ -452,6 +454,11 @@ assert a state (or its absence) the JSON disagrees with."
                  (failure
                   (%set-source-match entry "unverified"
                                      (format nil "~A: ~A" *note-unparseable* failure)))
+                 ;; A stale entry's line was computed from the text the image
+                 ;; compiled, so finding no form there says the file moved,
+                 ;; not that the definition has no form: name the reload.
+                 ((%true-p (gethash "stale" entry))
+                  (%set-source-match entry "unverified" *note-stale*))
                  (t (%set-source-match entry "unverified" *note-no-form-at-line*))))))))
      by-file)
     (let* ((batch (coerce (nreverse entries-json) 'vector))

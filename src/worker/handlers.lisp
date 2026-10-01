@@ -265,9 +265,9 @@ caller is answered at the deadline even while the suite is still blocked."
         (package (gethash "package" params)))
     (unless symbol
       (error "symbol is required"))
-    (multiple-value-bind (path line on-disk)
+    (multiple-value-bind (path line on-disk stale)
         (code-find-definition symbol :package package)
-      (build-code-find-response symbol path line on-disk))))
+      (build-code-find-response symbol path line on-disk stale))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/code-describe
@@ -280,11 +280,12 @@ caller is answered at the deadline even while the suite is still blocked."
         (package (gethash "package" params)))
     (unless symbol
       (error "symbol is required"))
-    (multiple-value-bind (name type arglist doc path line)
+    (multiple-value-bind (name type arglist doc path line stale)
         (code-describe-symbol symbol :package package)
       (build-code-describe-response
        name type arglist doc path line
-       :method-count (generic-function-method-count symbol :package package)))))
+       :method-count (generic-function-method-count symbol :package package)
+       :stale stale))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/code-find-references
