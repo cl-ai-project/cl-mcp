@@ -657,7 +657,10 @@ BUILD-CODE-FIND-RESPONSE, annotates the Defined at line and sets \"stale\"."
                    (- count (length refs))))
          (when tests
            (format s "Tests: ~{~A~^, ~}~%"
-                   (mapcar (lambda (test) (gethash "name" test)) tests)))))
+                   (mapcar (lambda (test)
+                             (format nil "~A~:[~; (may reach)~]"
+                                     (gethash "name" test) (gethash "may_reach" test)))
+                           tests)))))
       (when (and (member status '("not_found" "package_not_found") :test #'equal)
                  (plusp matches))
         (format s "~D textual match~:[es~;~] for that name in project files.~%"

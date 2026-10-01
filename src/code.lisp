@@ -97,9 +97,10 @@ worker wrote."
        (setf (aref value i) (%json-nulls->nil (aref value i)))))
     (t (if (eq value :null) nil value))))
 
-(defparameter *via-macros-followed* 5
+(defparameter *via-macros-followed* 20
   "Most macros whose expansion names the symbol code-find-references follows to
-the forms using them; each one costs a source scan and a worker call.")
+the forms using them; each one costs a source scan and a worker call.  Any past
+it are named in a note.")
 
 (defun %error-report-p (report)
   "True when REPORT is a proxy failure or reset notice rather than a payload."
@@ -202,7 +203,18 @@ For plain text search without loading anything, use 'clgrep-search'."
                       (add-macro-reached-references
                        report macro
                        (place-references-in-source (%json-nulls->nil macro-report)
-                                                   #'top-level-forms-at :limit nil)))))
+                                                   #'top-level-forms-at :limit nil))))
+                  ;; A cap that cut the list says so: a Tests: line missing
+                  ;; the tests of an unfollowed macro must not read as whole.
+                  (when (> (length macros) *via-macros-followed*)
+                    (setf (gethash "notes" report)
+                          (concatenate
+                           'vector (gethash "notes" report)
+                           (list (format nil "followed ~D of ~D macros whose expansion names ~
+                                              the symbol; not followed: ~{~A~^, ~} -- ask ~
+                                              about them for the forms using them"
+                                         *via-macros-followed* (length macros)
+                                         (nthcdr *via-macros-followed* macros)))))))
                 (build-code-find-references-response
                  (place-references-in-source report
                                              #'top-level-forms-at

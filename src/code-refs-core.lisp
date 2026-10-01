@@ -546,19 +546,28 @@ Returns JSON-ready hash-tables, one per top-level form, in first-seen order."
         (string< path-a path-b))))
 
 (defun %tests-of (refs)
-  "Return one JSON object (name, path, line) per distinct test among REFS."
+  "Return one JSON object (name, path, line) per distinct test among REFS.
+A test known only from a macro use xref could not confirm (origin \"macro\")
+also carries may_reach true, unless another reference confirms it."
   (let ((tests '()))
     (dolist (ref refs (nreverse tests))
-      (let ((test (gethash "test" ref)))
-        (when (and test
-                   (not (find-if (lambda (seen)
-                                   (and (equal (gethash "name" seen) (gethash "name" test))
-                                        (equal (gethash "path" seen) (gethash "path" ref))))
-                                 tests)))
-          (push (make-ht "name" (gethash "name" test)
-                         "path" (gethash "path" ref)
-                         "line" (gethash "line" ref))
-                tests))))))
+      (let ((test (gethash "test" ref))
+            (maybe (equal (gethash "origin" ref) "macro")))
+        (when test
+          (let ((seen (find-if (lambda (seen)
+                                 (and (equal (gethash "name" seen) (gethash "name" test))
+                                      (equal (gethash "path" seen) (gethash "path" ref))))
+                               tests)))
+            (cond
+              ((null seen)
+               (let ((entry (make-ht "name" (gethash "name" test)
+                                     "path" (gethash "path" ref)
+                                     "line" (gethash "line" ref))))
+                 (when maybe
+                   (setf (gethash "may_reach" entry) t))
+                 (push entry tests)))
+              ((not maybe)
+               (remhash "may_reach" seen)))))))))
 
 (defun %status-string (status)
   "Return the JSON spelling of a RESOLVE-TARGET status keyword."

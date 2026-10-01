@@ -606,7 +606,8 @@ debug source.  Without either date STALE is false."
 Values are PATH (string), LINE (integer), ON-DISK (boolean) and STALE
 (boolean), or NILs when not found.  STALE is true when the file was written
 after the definition was compiled (DEFINITION-SOURCE-LOCATION): LINE then comes
-from positions recorded for the old text and may point anywhere in the new one.  Searches multiple SB-INTROSPECT definition kinds so that classes,
+from positions recorded for the old text and may point anywhere in the new one.
+Searches multiple SB-INTROSPECT definition kinds so that classes,
 structures, conditions, generic functions, macros, and variables are
 all locatable, not only ordinary functions.
 

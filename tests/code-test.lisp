@@ -812,6 +812,30 @@ compiles a test's body: while the file loads, keeping no source location.")
                      (ok (= (length refs) (gethash "count" result)))))))
           (ignore-errors (delete-file same-line))))))
 
+(deftest code-find-references-says-what-it-did-not-follow-and-what-only-may-reach
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let ((*project-root* (uiop:pathname-directory-pathname *via-macro-fixture*)))
+        (%load-xref-fixture *via-macro-fixture*)
+        (testing "macros past the cap are named, not silently dropped"
+          (let* ((result (let ((cl-mcp/src/code::*via-macros-followed* 1))
+                           (%call-references-tool "cl-mcp-via-macro-fixture::probe-target")))
+                 (text (gethash "text" (aref (gethash "content" result) 0)))
+                 (notes (coerce (gethash "notes" result) 'list)))
+            (ok (find-if (lambda (note) (search "followed 1 of 2 macros" note)) notes) notes)
+            (ok (search "not followed: CL-MCP-VIA-MACRO-FIXTURE::" text) text)))
+        (testing "a test that only may reach the symbol says so in tests and in the text"
+          (let* ((result (%call-references-tool "cl-mcp-via-macro-fixture::probe-target"))
+                 (text (gethash "text" (aref (gethash "content" result) 0)))
+                 (tests (coerce (gethash "tests" result) 'list))
+                 (maybe (find "probe-maybe-off" tests
+                              :key (lambda (test) (gethash "name" test)) :test #'equal))
+                 (direct (find "probe-same-line-direct" tests
+                               :key (lambda (test) (gethash "name" test)) :test #'equal)))
+            (ok (and maybe (eq t (gethash "may_reach" maybe))))
+            (ok (or (null direct) (not (gethash "may_reach" direct))))
+            (ok (search "probe-maybe-off (may reach)" text) text))))))
+
 (deftest code-find-references-tool-relays-a-worker-failure-untouched
   (let* ((notice "The worker this session was using ended; its state is gone.")
          (result (%call-references-tool
