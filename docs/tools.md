@@ -552,7 +552,8 @@ in package (`((w a:widget))` and `((w b:widget))`) match the same `form_name`; t
 `Multiple matches` error lists them, and a `[N]` suffix (`"render ((w widget))[1]"`, 0-based)
 picks one. A list-valued name -- a `declaim`'s declaration, a `(setf name)` function -- is
 matched the same way, keywords kept: the "not found" listing writes it on one line, and that
-text, or the same name broken over lines, addresses the form. Other form types compare
+text, or the same name broken over lines, addresses the form. A name longer than 1000 characters
+(a data form's quoted list or vector, say) is matched only by the text the listing shows for it. Other form types compare
 `form_name` as written, so a string name such as `"/users/:id"` keeps its colon and spaces.
 
 Operations:

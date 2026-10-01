@@ -193,8 +193,10 @@ turn (SETF |foo:bar|) into (setf bar), another function's name."
       ((and (string= form-type "defstruct") (listp name) (symbolp (car name)))
        (list (%normalize-string (car name))))
       ((consp name)
+       ;; Measured whitespace-collapsed, so the printer's indentation does
+       ;; not decide which side of the gate a name falls on.
        (let ((princ-text (%normalize-string name)))
-         (if (> (length princ-text) *signature-text-max-chars*)
+         (if (> (length (%collapse-whitespace princ-text)) *signature-text-max-chars*)
              ;; Too large to be a name -- a data form's quoted list, vector
              ;; or array: the pretty printer would spend seconds on it for
              ;; every "not found" listing of the file, so PRINC text only.
