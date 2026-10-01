@@ -707,7 +707,8 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                        (error (e) (princ-to-string e)))))
         (ok (search "Multiple matches" listing)
             "leading whitespace does not hide a list-valued name")
-        (ok (search "form_name \"(setf foo)[1]\"" listing) listing)))))
+        (ok (search "form_name \"  (setf foo)[1]\"" listing)
+            "the hint is the caller's own text, so it is the same query")))))
 
 (deftest lisp-edit-form-whitespace-in-names-is-kept-where-it-names-something
   (flet ((original (path type name)
@@ -739,9 +740,39 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                                    (read-from-string listing t nil
                                                      :start (+ start (length "(form_name "))))))
                 (ok (stringp spelled) listing)
-                (ok (and (stringp spelled) (null (find #\Newline spelled))) spelled)
                 (ok (and (stringp spelled) (search expected (original path type spelled)))
-                    spelled)))))))))
+                    spelled)))))))
+    (testing "a name matching a form as written wins over forms it matches only normalized"
+      (with-temp-file "tests/tmp/edit-form-verbatim-first.lisp"
+          (format nil "(defmacro defthing (name &body body) `(list ',name ,@body))~%~%~
+                       (defthing \" (x)\" :string)~%~%(defthing (x) :list)~%~%~
+                       (defun (setf foo) (v x) :plain)~%~%(defun (setf |a:foo|) (v x) :escaped)~%")
+        (lambda (path)
+          (ok (search ":string" (original path "defthing" " (x)")))
+          (ok (search ":list" (original path "defthing" "(x)")))
+          (ok (search ":escaped" (original path "defun" "(setf a:foo)"))
+              "the PRINC text an earlier listing showed still selects its own form"))))
+    (testing "every hint in a mixed string/list listing selects the form on its line"
+      (with-temp-file "tests/tmp/edit-form-mixed-hints.lisp"
+          (format nil "(defmacro defthing (name &body body) `(list ',name ,@body))~%~%~
+                       (defthing \"(a b)\" :string)~%~%(defthing (a b) :list-1)~%~%~
+                       (defthing (a  b) :list-2)~%")
+        (lambda (path)
+          (let* ((listing (original path "defthing" "(a  b)"))
+                 (hints (let ((found '()) (start 0))
+                          (loop for pos = (search "(form_name " listing :start2 start)
+                                while pos
+                                do (multiple-value-bind (hint end)
+                                       (read-from-string listing t nil
+                                                         :start (+ pos (length "(form_name ")))
+                                     (push hint found)
+                                     (setf start end)))
+                          (nreverse found))))
+            (ok (= 2 (length hints)) listing)
+            (when (= 2 (length hints))
+              (ok (search ":list-1" (original path "defthing" (first hints))) (first hints))
+              (ok (search ":list-2" (original path "defthing" (second hints)))
+                  (second hints)))))))))
 
 (deftest lisp-edit-form-read-eval-disabled
   (testing "read-time evaluation is disabled when parsing source"

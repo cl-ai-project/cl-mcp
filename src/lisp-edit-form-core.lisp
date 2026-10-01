@@ -482,11 +482,11 @@ string is also reported this way, before any node is searched."
                                     (%normalize-form-name-text trimmed))
                               :test #'string=)
                              (list target)))
-           ;; The form_name a "Multiple matches" listing spells for [N]: on
-           ;; one line where whitespace does not matter, as given elsewhere.
-           (listed-name (if (or list-reading-p (string= form-type "defmethod"))
-                            (%collapse-whitespace base-name)
-                            base-name))
+           ;; The form_name a "Multiple matches" listing spells for [N] is the
+           ;; caller's own text: the same query, so the same list, whatever
+           ;; mix of string, symbol and list names the file holds.  The [N]
+           ;; regex above reads it back across line breaks.
+           (listed-name base-name)
            (plain-targets (list target))
            (matches nil))
       (if (zerop (length target))
@@ -507,6 +507,18 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
                                             (%definition-candidates value form-type))))
                            (push (cons node value) matches))))
             (setf matches (nreverse matches))
+            ;; A form the name matches as written outranks forms it matches
+            ;; only once normalized: " (x)" is the string " (x)" before it is
+            ;; the list (x), and "(setf a:foo)" -- an earlier listing's text
+            ;; for (setf |a:foo|) -- is that form before it is (setf foo).
+            (unless (string= form-type "defmethod")
+              (let ((verbatim (remove-if-not
+                               (lambda (match)
+                                 (member stripped (%definition-candidates (cdr match) form-type)
+                                         :test #'string=))
+                               matches)))
+                (when verbatim
+                  (setf matches verbatim))))
             ;; A method's candidates include its lambda list without its
             ;; qualifiers, so "area ((s circle))" names both the primary
             ;; method and the :around one.  A form whose full signature is
