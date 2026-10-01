@@ -627,17 +627,26 @@ line."
   (list (gethash "abs_path" ref) (gethash "line" ref)
         (gethash "form_type" ref) (gethash "form_name" ref)))
 
-(defun %unconfirmed-macro-use-p (ref)
-  "True when REF, a reference to a macro, is a use of the global macro that only
-the source can show.
+(defparameter *xref-decided-kinds* '("function" "generic-function" "macro" "variable")
+  "Symbol kinds (SYMBOL-KIND) whose uses xref records: calls, macroexpansions,
+and a special variable's bindings, references and sets.  For any other -- a
+class name, a constant the compiler may inline, an unbound symbol -- xref's
+silence about a form says nothing.")
 
-A use xref located (origin xref or xref+source) is left to xref: that form's
-code was compiled from its file, so the target's own xref already says whether
-the expansion reaches the target there -- and a template naming the target
-shows only that some expansion may.  Of the rest, only a site of kind macro
-that no flet, labels or macrolet shadows is a use of the global macro; a
-quoted name or a backquote template expands nothing."
-  (and (equal (gethash "origin" ref) "source")
+(defun %unconfirmed-macro-use-p (ref xref-decides-p)
+  "True when REF, a reference to a macro, is a use of the global macro that
+nothing else confirms or rules out as reaching the target.
+
+When XREF-DECIDES-P (the target's kind is in *XREF-DECIDED-KINDS*), a use xref
+located (origin xref or xref+source) is left to xref: that form's code was
+compiled from its file, so the target's own xref already says whether the
+expansion reaches the target there -- and a template naming the target shows
+only that some expansion may.  Otherwise xref cannot say, and a located use
+counts as well.  Either way only a site of kind macro that no flet, labels or
+macrolet shadows is a use of the global macro; a quoted name or a backquote
+template expands nothing."
+  (and (or (not xref-decides-p)
+           (equal (gethash "origin" ref) "source"))
        (some (lambda (site)
                (and (equal (gethash "kind" site) "macro")
                     (null (gethash "shadowed_by" site))))
@@ -657,10 +666,10 @@ location.  Such a form is added with type \"via-macro\", origin \"macro\", a
 note naming the macro, and the macro's own call sites of kind macro, which say
 where the expansion happens.
 
-Only an unshadowed use that xref could not locate counts
-(%UNCONFIRMED-MACRO-USE-P): a quoted name or a macrolet's local macro expands
-nothing of MACRO-NAME's, and a use xref located is decided by the target's own
-xref.  A template naming the symbol shows only that some expansion may reach it
+Only an unshadowed use nothing else decides counts (%UNCONFIRMED-MACRO-USE-P):
+a quoted name or a macrolet's local macro expands nothing of MACRO-NAME's, and
+for a target whose uses xref records (*XREF-DECIDED-KINDS*) a use xref located
+is decided by the target's own xref.  A template naming the symbol shows only that some expansion may reach it
 -- (if flag `(target) `(other)) -- so each added form says \"may reach\", not
 that it does.  A form REPORT already holds -- the same file,
 line, form_type and form_name (%REFERENCE-KEY), since two forms can start on
@@ -673,17 +682,19 @@ PLACE-REFERENCES-IN-SOURCE, which runs after this."
         (short-name (string-downcase
                      (subseq macro-name (1+ (or (position #\: macro-name :from-end t) -1)))))
         (note (format nil "may reach ~A through macro ~A, whose expansion names it ~
-                           (no xref record of this use to confirm it)"
+                           (nothing confirms this use does)"
                       (gethash "resolved_symbol" report) macro-name))
+        (xref-decides-p (member (gethash "symbol_kind" report) *xref-decided-kinds*
+                                :test #'equal))
         (added '()))
     (dolist (ref refs)
       (setf (gethash (%reference-key ref) seen) t))
     (dolist (ref (sequence->list (gethash "refs" macro-report)))
       (let ((key (%reference-key ref)))
         (unless (or (gethash key seen)
-                    (not (%unconfirmed-macro-use-p ref))
+                    (not (%unconfirmed-macro-use-p ref xref-decides-p))
                     (and (equal (gethash "form_type" ref) "defmacro")
-                         (equal (gethash "form_name" ref) short-name)))
+                         (string-equal (gethash "form_name" ref) short-name)))
           (setf (gethash key seen) t)
           (let ((copy (make-hash-table :test #'equal)))
             (maphash (lambda (k v) (setf (gethash k copy) v)) ref)

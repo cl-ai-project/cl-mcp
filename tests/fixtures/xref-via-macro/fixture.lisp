@@ -54,3 +54,15 @@
 ;; Compiled from the file: xref says this use does not reach the target.
 (defun probe-maybe-caller ()
   (maybe-probe nil))
+
+;; A class: xref records no use of a class name, so even a file-compiled use
+;; of a macro naming it is only known from the source.
+(defclass probe-class () ())
+
+(defmacro with-probe-instance ((var) &body body)
+  `(let ((,var (make-instance 'probe-class)))
+     ,@body))
+
+(defun probe-class-user ()
+  (with-probe-instance (p)
+    p))

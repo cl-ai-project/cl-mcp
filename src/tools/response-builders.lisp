@@ -557,9 +557,12 @@ The text ends with %CLOS-DESCRIBE-HINT's line for a generic function (with
 METHOD-COUNT, its number of methods) or a class, since code-describe shows
 neither methods nor more than a class's direct slot names.  STALE, as in
 BUILD-CODE-FIND-RESPONSE, annotates the Defined at line and sets \"stale\"."
-  (let ((text (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A~@[:~D~]~]~A"
-                      name type arglist doc path line
-                      (if (and path stale) (%stale-location-note line) "")))
+  (let ((text (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~A~]"
+                      name type arglist doc
+                      ;; Built apart so a missing PATH consumes LINE with it.
+                      (and path
+                           (format nil "~%Defined at ~A~@[:~D~]~A" path line
+                                   (if stale (%stale-location-note line) "")))))
         (hint (%clos-describe-hint type method-count)))
     (let ((r (make-ht "name" name
                       "type" type

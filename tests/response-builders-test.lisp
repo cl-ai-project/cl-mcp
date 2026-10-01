@@ -202,7 +202,13 @@
     (ok (eq t (gethash "stale" r))))
   (let ((r (build-code-describe-response "FOO" "function" "(X)" nil "src/core.lisp" 10)))
     (ok (not (search "changed since" (first-text r))))
-    (ok (not (nth-value 1 (gethash "stale" r))))))
+    (ok (not (nth-value 1 (gethash "stale" r)))))
+  (testing "no path leaves nothing behind where the location would be"
+    (ok (equal (format nil "*X* :: variable~%")
+               (first-text (build-code-describe-response "*X*" "variable" nil nil nil nil))))
+    (ok (equal (format nil "X :: function (a)~%doc")
+               (first-text (build-code-describe-response "X" "function" "(a)" "doc" nil 12)))
+        "a line without a path is not printed after the documentation")))
 
 (deftest build-code-find-response-not-found
  (testing "NIL path produces an isError payload"

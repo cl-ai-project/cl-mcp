@@ -836,6 +836,25 @@ compiles a test's body: while the file loads, keeping no source location.")
             (ok (or (null direct) (not (gethash "may_reach" direct))))
             (ok (search "probe-maybe-off (may reach)" text) text))))))
 
+(deftest code-find-references-keeps-macro-uses-xref-cannot-judge
+  ;; xref records calls, macroexpansions and variable uses, never a class
+  ;; name, so a file-compiled use of a macro naming a class is not something
+  ;; the class's own xref can decide.
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let ((*project-root* (uiop:pathname-directory-pathname *via-macro-fixture*)))
+        (%load-xref-fixture *via-macro-fixture*)
+        (dolist (pooled '(nil t))
+          (let* ((result (%call-references-tool "cl-mcp-via-macro-fixture::probe-class"
+                                                :pooled pooled))
+                 (ref (find "probe-class-user" (gethash "refs" result)
+                            :key (lambda (ref) (gethash "form_name" ref)) :test #'equal)))
+            (testing (format nil "the file-compiled use is listed as may reach (~:[inline~;pooled~])"
+                             pooled)
+              (ok ref)
+              (ok (and ref (equal "via-macro" (gethash "type" ref))))
+              (ok (and ref (search "may reach" (gethash "note" ref))))))))))
+
 (deftest code-find-references-tool-relays-a-worker-failure-untouched
   (let* ((notice "The worker this session was using ended; its state is gone.")
          (result (%call-references-tool
