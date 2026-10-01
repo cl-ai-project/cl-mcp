@@ -580,6 +580,232 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (null (search "multiple forms are not supported in a single call" err-msg)))
           (ok (string= before (fs-read-file path))))))))
 
+(deftest lisp-edit-form-addresses-a-long-declaim-by-the-name-it-lists
+  ;; A list-valued name was matched against its PRINC text, which the pretty
+  ;; printer broke over several lines and wrote :PACKAGE as PACKAGE, while the
+  ;; "not found" listing showed it flattened: the name the error offered never
+  ;; matched.
+  (let ((source (format nil "(declaim (ftype (function (string &key (:package (or null package symbol string)))~%~
+                          (values (or null string) (or null integer) t &optional))~%~
+                code-find-definition))~%~%(defun code-find-definition (s &key package)~%  ~
+                (declare (ignore package))~%  (values s 1 t))~%")))
+    (with-temp-file "tests/tmp/edit-form-long-declaim.lisp" source
+      (lambda (path)
+        (let ((listed nil))
+          (testing "the not-found listing gives the name on one line, keywords kept"
+            (handler-case
+                (lisp-edit-form :file-path path :form-type "declaim" :form-name "nope"
+                                :operation "replace" :content "(declaim (optimize speed))"
+                                :dry-run t)
+              (error (e)
+                (let* ((text (princ-to-string e))
+                       (start (search "(declaim (ftype" text))
+                       (end (and start (search "code-find-definition))" text :start2 start))))
+                  (setf listed (and end (subseq text (+ start (length "(declaim "))
+                                                (+ end (length "code-find-definition)"))))))))
+            (ok listed)
+            (ok (and listed (null (find #\Newline listed))) listed)
+            (ok (and listed (search "&key (:package" listed)) listed))
+          (testing "that name, and the same name with other whitespace, both address the form"
+            (dolist (name (list listed
+                                ;; As earlier versions listed it: PRINC text, no colon.
+                                "(ftype (function (string &key (package (or null package symbol string))) (values (or null string) (or null integer) t &optional)) code-find-definition)"
+                                (format nil "(ftype~%  (function (string &key (:package (or null package symbol string)))~%    (values (or null string) (or null integer) t &optional))~%  code-find-definition)")))
+              (ok (handler-case
+                      (progn
+                        (lisp-edit-form :file-path path :form-type "declaim" :form-name name
+                                        :operation "replace" :dry-run t
+                                        :content "(declaim (ftype function code-find-definition))")
+                        t)
+                    (error (e) (princ-to-string e)))
+                  name)))
+          (ok (string= source (fs-read-file path)) "dry runs wrote nothing"))))))
+
+(deftest lisp-edit-form-list-name-normalization-keeps-strings-and-escapes
+  (flet ((addresses-p (path form-type form-name)
+           (handler-case
+               (progn
+                 (lisp-edit-form :file-path path :form-type form-type :form-name form-name
+                                 :operation "replace" :dry-run t
+                                 :content "(defun replaced () nil)")
+                 t)
+             (error (e) (princ-to-string e)))))
+    (testing "a string name that starts with ( is compared as written"
+      (with-temp-file "tests/tmp/edit-form-paren-string-name.lisp"
+          (format nil "(defmacro defthing (name &body body) `(list ,name ,@body))~%~%~
+                       (defthing \"(pkg:value)\" 1)~%")
+        (lambda (path)
+          (ok (eq t (addresses-p path "defthing" "(pkg:value)"))))))
+    (testing "a string name is never matched by another string's normalized text"
+      (with-temp-file "tests/tmp/edit-form-paren-string-names.lisp"
+          (format nil "(defmacro defthing (name &body body) `(list ,name ,@body))~%~%~
+                       (defthing \"(value)\" :short)~%~%~
+                       (defthing \"(pkg:value)\" :qualified)~%")
+        (lambda (path)
+          (let ((preview (lisp-edit-form :file-path path :form-type "defthing"
+                                         :form-name "(pkg:value)" :operation "replace"
+                                         :dry-run t :content "(defthing \"x\" 1)")))
+            (ok (search ":qualified" (gethash "original" preview))
+                "(pkg:value) picks its own form, without an ambiguity error")))))
+      (with-temp-file "tests/tmp/edit-form-paren-string-name-only-short.lisp"
+          (format nil "(defmacro defthing (name &body body) `(list ,name ,@body))~%~%~
+                       (defthing \"(value)\" :short)~%")
+        (lambda (path)
+          (ok (stringp (addresses-p path "defthing" "(pkg:value)"))
+              "\"(value)\" is not \"(pkg:value)\"")))
+    (testing "a name the listing writes with |...| escapes addresses its form"
+      (with-temp-file "tests/tmp/edit-form-escaped-setf-name.lisp"
+          (format nil "(defun (setf |foo:bar|) (new x) (list new x))~%~%~
+                       (defun (setf bar) (new x) (list x new))~%")
+        (lambda (path)
+          (let ((listed (handler-case
+                            (progn (lisp-edit-form :file-path path :form-type "defun"
+                                                   :form-name "nope" :operation "replace"
+                                                   :dry-run t :content "(defun nope () nil)")
+                                   nil)
+                          (error (e) (princ-to-string e)))))
+            (ok (search "(defun (setf |foo:bar|))" listed) listed))
+          (ok (eq t (addresses-p path "defun" "(setf |foo:bar|)")))
+          (let ((preview (lisp-edit-form :file-path path :form-type "defun"
+                                         :form-name "(setf bar)" :operation "replace"
+                                         :dry-run t :content "(defun (setf bar) (new x) x)")))
+            (ok (search "(list x new)" (gethash "original" preview))
+                "(setf bar) is the plain one, never the |foo:bar| one")))))))
+
+(deftest lisp-edit-form-index-counts-the-forms-the-ambiguity-listing-shows
+  ;; [N] used to count every match while the listing counted only the exact
+  ;; ones, so [0] could edit a form the listing never showed.
+  (with-temp-file "tests/tmp/edit-form-index-listing.lisp"
+      (format nil "(defun (setf |Foo|) (v) :escaped)~%~%~
+                   (defun (setf foo) (v) :first)~%~%~
+                   (defun (setf foo) (v) :second)~%")
+    (lambda (path)
+      (flet ((original (name)
+               (gethash "original"
+                        (lisp-edit-form :file-path path :form-type "defun" :form-name name
+                                        :operation "replace" :dry-run t
+                                        :content "(defun (setf foo) (v) v)"))))
+        (let ((listing (handler-case (progn (original "(setf foo)") nil)
+                         (error (e) (princ-to-string e)))))
+          (ok (search "[0] (setf foo)" listing) listing)
+          (ok (search "[1] (setf foo)" listing) listing)
+          (ok (null (search "[2]" listing)) listing))
+        (ok (search ":first" (original "(setf foo)[0]")))
+        (ok (search ":second" (original "(setf foo)[1]")))))))
+
+(deftest lisp-edit-form-ambiguity-listing-names-the-exact-form-name-to-pass
+  ;; An index is relative to the form_name it was listed for; the listing
+  ;; now spells the whole string, so it cannot be paired with another name.
+  (with-temp-file "tests/tmp/edit-form-ambiguity-form-names.lisp"
+      (format nil "(defun (setf foo) (v) :first)~%~%(defun (setf foo) (v) :second)~%")
+    (lambda (path)
+      (let ((listing (handler-case
+                         (progn (lisp-edit-form :file-path path :form-type "defun"
+                                                :form-name "  (setf foo)" :operation "replace"
+                                                :dry-run t :content "(defun (setf foo) (v) v)")
+                                nil)
+                       (error (e) (princ-to-string e)))))
+        (ok (search "Multiple matches" listing)
+            "leading whitespace does not hide a list-valued name")
+        (ok (search "form_name \"  (setf foo)[1]\"" listing)
+            "the hint is the caller's own text, so it is the same query")))))
+
+(deftest lisp-edit-form-whitespace-in-names-is-kept-where-it-names-something
+  (flet ((original (path type name)
+           (handler-case
+               (gethash "original"
+                        (lisp-edit-form :file-path path :form-type type :form-name name
+                                        :operation "replace" :dry-run t
+                                        :content "(defthing \"x\" 1)"))
+             (error (e) (princ-to-string e)))))
+    (testing "a string name's own spaces still tell it apart"
+      (with-temp-file "tests/tmp/edit-form-spaced-string-names.lisp"
+          (format nil "(defmacro defthing (name &body body) `(list ,name ,@body))~%~%~
+                       (defthing \"foo\" :a)~%~%(defthing \"foo \" :b)~%~%(defthing \" /x \" :c)~%")
+        (lambda (path)
+          (ok (search ":b" (original path "defthing" "foo ")))
+          (ok (search ":a" (original path "defthing" "foo")))
+          (ok (search ":c" (original path "defthing" " /x "))))))
+    (testing "the form_name a listing spells round-trips for a multi-line name"
+      (with-temp-file "tests/tmp/edit-form-multiline-index.lisp"
+          (format nil "(defmethod foo ((x t)) :first)~%~%(defmethod foo ((x t)) :second)~%~%~
+                       (defun (setf bar) (v) :one)~%~%(defun (setf bar) (v) :two)~%")
+        (lambda (path)
+          (dolist (case (list (list "defmethod" (format nil "foo~%  ((x t))") ":second")
+                              (list "defun" (format nil "(setf~%  bar)") ":two")))
+            (destructuring-bind (type name expected) case
+              (let* ((listing (original path type name))
+                     (start (search "(form_name \"" listing :from-end t))
+                     (spelled (and start
+                                   (read-from-string listing t nil
+                                                     :start (+ start (length "(form_name "))))))
+                (ok (stringp spelled) listing)
+                (ok (and (stringp spelled) (search expected (original path type spelled)))
+                    spelled)))))))
+    (testing "a name matching a form as written wins over forms it matches only normalized"
+      (with-temp-file "tests/tmp/edit-form-verbatim-first.lisp"
+          (format nil "(defmacro defthing (name &body body) `(list ',name ,@body))~%~%~
+                       (defthing \" (x)\" :string)~%~%(defthing (x) :list)~%~%~
+                       (defun (setf foo) (v x) :plain)~%~%(defun (setf |a:foo|) (v x) :escaped)~%")
+        (lambda (path)
+          (ok (search ":string" (original path "defthing" " (x)")))
+          (ok (search ":list" (original path "defthing" "(x)")))
+          (ok (search ":escaped" (original path "defun" "(setf a:foo)"))
+              "the PRINC text an earlier listing showed still selects its own form"))))
+    (testing "every hint in a mixed string/list listing selects the form on its line"
+      (with-temp-file "tests/tmp/edit-form-mixed-hints.lisp"
+          (format nil "(defmacro defthing (name &body body) `(list ',name ,@body))~%~%~
+                       (defthing \"(a b)\" :string)~%~%(defthing (a b) :list-1)~%~%~
+                       (defthing (a  b) :list-2)~%")
+        (lambda (path)
+          (let* ((listing (original path "defthing" "(a  b)"))
+                 (hints (let ((found '()) (start 0))
+                          (loop for pos = (search "(form_name " listing :start2 start)
+                                while pos
+                                do (multiple-value-bind (hint end)
+                                       (read-from-string listing t nil
+                                                         :start (+ pos (length "(form_name ")))
+                                     (push hint found)
+                                     (setf start end)))
+                          (nreverse found))))
+            (ok (= 2 (length hints)) listing)
+            (when (= 2 (length hints))
+              (ok (search ":list-1" (original path "defthing" (first hints))) (first hints))
+              (ok (search ":list-2" (original path "defthing" (second hints)))
+                  (second hints)))))))))
+
+(deftest lisp-edit-form-not-found-listing-survives-a-long-literal-list
+  ;; %NAMES-ONLY recursed on the cdr, so a top-level form whose second
+  ;; element is a long list exhausted the stack while the "not found"
+  ;; listing was built.
+  (with-temp-file "tests/tmp/edit-form-long-literal-list.lisp"
+      (format nil "(defun foo () 1)~%~%(register-data '(~{~D~^ ~}))~%"
+              (loop for i below 100000 collect i))
+    (lambda (path)
+      (let ((message (handler-case
+                         (progn (lisp-edit-form :file-path path :form-type "defun"
+                                                :form-name "bar" :operation "replace"
+                                                :dry-run t :content "(defun bar () 2)")
+                                nil)
+                       (error (e) (princ-to-string e)))))
+        (ok (and message (search "Its defun forms are: (defun foo)." message)) message))))
+  (testing "a long vector literal is no slower to list than a long list"
+    (with-temp-file "tests/tmp/edit-form-long-literal-vector.lisp"
+        (format nil "(defun foo () 1)~%~%(register-data '#(~{~D~^ ~}))~%"
+                (loop for i below 100000 collect i))
+      (lambda (path)
+        (let* ((start (get-internal-real-time))
+               (message (handler-case
+                            (progn (lisp-edit-form :file-path path :form-type "defun"
+                                                   :form-name "bar" :operation "replace"
+                                                   :dry-run t :content "(defun bar () 2)")
+                                   nil)
+                          (error (e) (princ-to-string e))))
+               (seconds (/ (- (get-internal-real-time) start)
+                           internal-time-units-per-second)))
+          (ok (and message (search "Its defun forms are: (defun foo)." message)) message)
+          (ok (< seconds 5) (format nil "listing took ~,1Fs" seconds)))))))
+
 (deftest lisp-edit-form-read-eval-disabled
   (testing "read-time evaluation is disabled when parsing source"
     (let* ((flag-path (project-path "tests/tmp/read-eval-flag"))

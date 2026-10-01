@@ -97,12 +97,22 @@ Uses SYMBOL-NAME for symbols to avoid package prefix in the output."
   "Return TREE with each symbol outside COMMON-LISP and KEYWORD replaced by an
 uninterned symbol of the same name, so %SIGNATURE-TEXT prints it bare.
 COMMON-LISP symbols are kept so the pretty printer still writes (QUOTE X) as
-'X; they print without a prefix from COMMON-LISP-USER anyway."
+'X; they print without a prefix from COMMON-LISP-USER anyway.
+A list's spine is walked iteratively, so a long literal list -- a data form's
+quoted table, say -- costs no stack depth; only nesting does."
   (let ((cl (find-package "COMMON-LISP"))
         (keyword (find-package "KEYWORD")))
     (labels ((walk (node)
                (cond
-                 ((consp node) (cons (walk (car node)) (walk (cdr node))))
+                 ((consp node)
+                  (let* ((head (list (walk (car node))))
+                         (tail head))
+                    (loop for rest = (cdr node) then (cdr rest)
+                          while (consp rest)
+                          do (setf (cdr tail) (list (walk (car rest)))
+                                   tail (cdr tail))
+                          finally (setf (cdr tail) (and rest (walk rest))))
+                    head))
                  ((and (symbolp node)
                        (not (member (symbol-package node) (list cl keyword))))
                   (make-symbol (symbol-name node)))
@@ -158,8 +168,21 @@ was read in."
                            (format nil "~A ~A ~A" name-str qual-str
                                    lambda-str))))))))
 
+(defparameter *signature-text-max-chars* 1000
+  "Longest PRINC text a list-valued name may have for %DEFINITION-CANDIDATES to
+write it with %SIGNATURE-TEXT, whose pretty printer is slow on large input.
+A real name -- a declaration, (SETF NAME) -- is far shorter; a longer one is a
+data form (a quoted list, vector or array), given only its PRINC text.")
+
 (defun %definition-candidates (form form-type)
-  "Return candidate strings that identify FORM with FORM-TYPE."
+  "Return candidate strings that identify FORM with FORM-TYPE.
+The last one is the name a \"not found\" listing shows.  A list-valued name --
+a DECLAIM's declaration, a (SETF NAME) function -- is written as
+%SIGNATURE-TEXT writes it, on one line and keywords kept, so the listed name
+can be passed back as form_name; its PRINC text, whitespace collapsed, is
+accepted too, as earlier versions listed it.  That text is not otherwise
+normalized: PRINC drops |...| escapes, so stripping its package prefixes could
+turn (SETF |foo:bar|) into (setf bar), another function's name."
   (let ((name (second form)))
     (cond
       ((string= form-type "defmethod")
@@ -167,11 +190,34 @@ was read in."
       ((symbolp name)
        (list (%normalize-string name)))
       ;; defstruct: (defstruct (name &rest options) ...) — first element is the name
-      ((string= form-type "defstruct")
-       (if (and (listp name) (symbolp (car name)))
-           (list (%normalize-string (car name)))
-           (list (%normalize-string name))))
+      ((and (string= form-type "defstruct") (listp name) (symbolp (car name)))
+       (list (%normalize-string (car name))))
+      ((consp name)
+       ;; Measured whitespace-collapsed, so the printer's indentation does
+       ;; not decide which side of the gate a name falls on.
+       (let ((princ-text (%normalize-string name)))
+         (if (> (length (%collapse-whitespace princ-text)) *signature-text-max-chars*)
+             ;; Too large to be a name -- a data form's quoted list, vector
+             ;; or array: the pretty printer would spend seconds on it for
+             ;; every "not found" listing of the file, so PRINC text only.
+             (list (%collapse-whitespace princ-text))
+             (remove-duplicates
+              ;; %SIGNATURE-TEXT's pretty printer can still break a
+              ;; code-shaped name over lines; the listed name must be one
+              ;; line to round-trip.
+              (list (%collapse-whitespace princ-text)
+                    (%collapse-whitespace (%signature-text name)))
+              :test #'string=))))
       (t (list (%normalize-string name))))))
+
+(defun %list-valued-name-p (form form-type)
+  "True when FORM's name is a list %DEFINITION-CANDIDATES writes with
+%SIGNATURE-TEXT -- a DECLAIM's declaration, a (SETF NAME) function -- rather
+than a symbol, a string, a method signature or a DEFSTRUCT's (NAME OPTIONS...)."
+  (let ((name (second form)))
+    (and (consp name)
+         (string/= form-type "defmethod")
+         (not (and (string= form-type "defstruct") (symbolp (car name)))))))
 
 (defun %whitespace-char-p (ch)
   (member ch '(#\Space #\Tab #\Newline #\Return)))
@@ -326,6 +372,48 @@ remain distinguishable."
              (write-char c out)
              (incf i))))))))
 
+(defun %token-end-and-colon (s start)
+  "Return (values END COLON) for the token of S starting at START: END is where
+it stops (whitespace or a delimiter outside |...|, or the end of S) and COLON
+the position of its last package colon outside |...|, or NIL."
+  (let ((len (length s))
+        (in-bars nil)
+        (colon nil)
+        (i start))
+    (loop while (< i len) do
+      (let ((ch (char s i)))
+        (cond
+          ((char= ch #\|) (setf in-bars (not in-bars)))
+          (in-bars)
+          ((char= ch #\\) (incf i))
+          ((or (%whitespace-char-p ch) (find ch "()\"'`,")) (loop-finish))
+          ((char= ch #\:) (setf colon i))))
+      (incf i))
+    (values (min i len) colon)))
+
+(defun %collapse-whitespace (s)
+  "Return S with each run of whitespace outside string literals and |...|
+escapes made one space, and none at either end."
+  (string-trim
+   " "
+   (with-output-to-string (out)
+     (let ((quote-char nil)
+           (escaped nil)
+           (pending nil))
+       (loop for ch across s
+             do (cond
+                  ((and (null quote-char) (%whitespace-char-p ch))
+                   (setf pending t))
+                  (t
+                   (when pending (write-char #\Space out) (setf pending nil))
+                   (write-char ch out)
+                   (cond
+                     (escaped (setf escaped nil))
+                     ((char= ch #\\) (setf escaped t))
+                     ((and quote-char (char= ch quote-char)) (setf quote-char nil))
+                     ((and (null quote-char) (member ch '(#\" #\|)))
+                      (setf quote-char ch))))))))))
+
 (defun %normalize-form-name-text (s)
   "Return S, a form_name a caller wrote, as the candidates are written.
 Outside string literals, each run of whitespace becomes one space and a
@@ -363,13 +451,10 @@ is kept."
                  (write-char #\Space out)
                  (setf pending-space nil))
                (if (and (token-start-p) (not (find c "():\"'`,#")))
-                   ;; Copy the token from just past its last colon.
-                   (let* ((end (or (position-if (lambda (ch)
-                                                  (or (%whitespace-char-p ch)
-                                                      (find ch "()\"'`,")))
-                                                s :start i)
-                                   len))
-                          (colon (position #\: s :start i :end end :from-end t)))
+                   ;; Copy the token from just past its last colon.  A colon
+                   ;; between |...| escapes is part of the name, not a
+                   ;; package marker, and whitespace there does not end it.
+                   (multiple-value-bind (end colon) (%token-end-and-colon s i)
                      (write-string s out :start (if colon (1+ colon) i) :end end)
                      (setf i end))
                    (progn
@@ -392,14 +477,42 @@ out-of-range index, or an ambiguous set of matches (naming each candidate's
 own signature and its [N] index).  A FORM-NAME that strips down to the empty
 string is also reported this way, before any node is searched."
   (multiple-value-bind (base-name index)
-      (let ((match (nth-value 1 (scan-to-strings "^(.+?)\\[(\\d+)\\]$" form-name))))
+      ;; (?s): a name broken over lines still carries its [N] suffix.
+      (let ((match (nth-value 1 (scan-to-strings "(?s)^(.+?)\\[(\\d+)\\]$" form-name))))
         (if match
             (values (aref match 0) (parse-integer (aref match 1)))
             (values form-name nil)))
     (let* ((stripped (%strip-hash-colon (string-downcase (%strip-name-prefix base-name))))
+           ;; A method's signature and a list-valued name are compared as
+           ;; %DEFINITION-CANDIDATES writes them: whitespace collapsed, no
+           ;; package prefixes; the text with only its whitespace collapsed
+           ;; is an earlier listing's form.  Those readings are offered to a
+           ;; form whose name IS a list only: a string name such as
+           ;; "(pkg:value)" is compared as written, so "(pkg:value)" never
+           ;; selects (defthing "(value)").
+           ;; Whitespace around a symbol or string name is part of it ("foo "
+           ;; is not "foo"); only the method and list readings, which
+           ;; collapse whitespace anyway, see the name trimmed.
+           (trimmed (string-trim '(#\Space #\Tab #\Newline #\Return #\Page) stripped))
+           (list-reading-p (and (string/= form-type "defmethod")
+                                (plusp (length trimmed))
+                                (char= (char trimmed 0) #\()))
            (target (if (string= form-type "defmethod")
-                       (%normalize-form-name-text stripped)
+                       (%normalize-form-name-text trimmed)
                        stripped))
+           (list-targets (if list-reading-p
+                             (remove-duplicates
+                              (list stripped
+                                    (%collapse-whitespace stripped)
+                                    (%normalize-form-name-text trimmed))
+                              :test #'string=)
+                             (list target)))
+           ;; The form_name a "Multiple matches" listing spells for [N] is the
+           ;; caller's own text: the same query, so the same list, whatever
+           ;; mix of string, symbol and list names the file holds.  The [N]
+           ;; regex above reads it back across line breaks.
+           (listed-name base-name)
+           (plain-targets (list target))
            (matches nil))
       (if (zerop (length target))
           (values nil (format nil "form_name resolved to empty string after prefix stripping; ~
@@ -411,23 +524,43 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
                     do (let ((value (cst-node-value node)))
                          (when (and (consp value)
                                     (string= (string-downcase (symbol-name (car value))) form-type)
-                                    (some (lambda (cand) (string= cand target))
-                                          (%definition-candidates value form-type)))
+                                    (let ((targets (if (%list-valued-name-p value form-type)
+                                                       list-targets
+                                                       plain-targets)))
+                                      (some (lambda (cand)
+                                              (member cand targets :test #'string=))
+                                            (%definition-candidates value form-type))))
                            (push (cons node value) matches))))
             (setf matches (nreverse matches))
+            ;; A form the name matches as written outranks forms it matches
+            ;; only once normalized: " (x)" is the string " (x)" before it is
+            ;; the list (x), and "(setf a:foo)" -- an earlier listing's text
+            ;; for (setf |a:foo|) -- is that form before it is (setf foo).
+            (unless (string= form-type "defmethod")
+              (let ((verbatim (remove-if-not
+                               (lambda (match)
+                                 (member stripped (%definition-candidates (cdr match) form-type)
+                                         :test #'string=))
+                               matches)))
+                (when verbatim
+                  (setf matches verbatim))))
             ;; A method's candidates include its lambda list without its
             ;; qualifiers, so "area ((s circle))" names both the primary
-            ;; method and the :around one.  When no index was given, a form
-            ;; whose full signature is exactly FORM-NAME wins over forms it
-            ;; only abbreviates.
-            (unless index
-              (let ((exact (remove-if-not
-                            (lambda (match)
-                              (string= target
-                                       (car (last (%definition-candidates (cdr match) form-type)))))
-                            matches)))
-                (when exact
-                  (setf matches exact))))
+            ;; method and the :around one.  A form whose full signature is
+            ;; exactly FORM-NAME wins over forms it only abbreviates -- with
+            ;; an [N] index too: the "Multiple matches" listing numbers the
+            ;; list this leaves, so [N] must count that same list, or it
+            ;; picks a form the listing never showed.
+            (let ((exact (remove-if-not
+                          (lambda (match)
+                            (member (car (last (%definition-candidates (cdr match) form-type)))
+                                    (if (%list-valued-name-p (cdr match) form-type)
+                                        list-targets
+                                        plain-targets)
+                                    :test #'string=))
+                          matches)))
+              (when exact
+                (setf matches exact)))
             (cond
               ((null matches) (values nil nil))
               ((and index (< index (length matches))) (values (car (nth index matches)) nil))
@@ -440,8 +573,11 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
                        (loop for (node . form) in matches
                              for i from 0
                              collect (let ((candidates (%definition-candidates form form-type)))
-                                       (format nil "[~D] ~A" i
-                                               (or (car (last candidates)) (first candidates)))))))
+                                       ;; The index is relative to this form_name,
+                                       ;; so the whole string to pass is spelled out.
+                                       (format nil "[~D] ~A  (form_name ~S)" i
+                                               (or (car (last candidates)) (first candidates))
+                                               (format nil "~A[~D]" listed-name i))))))
                  (values nil (format nil "Multiple matches for ~A ~A. Specify an index:~%~{  ~A~%~}"
                                      form-type form-name descriptions))))))))))
 
