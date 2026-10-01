@@ -168,23 +168,11 @@ was read in."
                            (format nil "~A ~A ~A" name-str qual-str
                                    lambda-str))))))))
 
-(defparameter *signature-text-max-conses* 2000
-  "Most conses a list-valued name may hold for %DEFINITION-CANDIDATES to write
-it with %SIGNATURE-TEXT.  A real name -- a declaration, (SETF NAME) -- is far
-smaller; a larger one is a data form, given only its PRINC text.")
-
-(defun %conses-within-p (tree limit)
-  "True when TREE holds at most LIMIT conses, counted without recursing on a
-list's spine and stopping as soon as LIMIT is passed."
-  (let ((count 0))
-    (labels ((walk (node)
-               (loop while (consp node)
-                     do (when (> (incf count) limit)
-                          (return-from %conses-within-p nil))
-                        (walk (car node))
-                        (setf node (cdr node)))))
-      (walk tree)
-      t)))
+(defparameter *signature-text-max-chars* 1000
+  "Longest PRINC text a list-valued name may have for %DEFINITION-CANDIDATES to
+write it with %SIGNATURE-TEXT, whose pretty printer is slow on large input.
+A real name -- a declaration, (SETF NAME) -- is far shorter; a longer one is a
+data form (a quoted list, vector or array), given only its PRINC text.")
 
 (defun %definition-candidates (form form-type)
   "Return candidate strings that identify FORM with FORM-TYPE.
@@ -204,18 +192,20 @@ turn (SETF |foo:bar|) into (setf bar), another function's name."
       ;; defstruct: (defstruct (name &rest options) ...) — first element is the name
       ((and (string= form-type "defstruct") (listp name) (symbolp (car name)))
        (list (%normalize-string (car name))))
-      ;; A name too large to be one -- a data form's quoted table -- gets
-      ;; only the PRINC text: the pretty printer would spend seconds on it
-      ;; for every "not found" listing of the file.
-      ((and (consp name) (not (%conses-within-p name *signature-text-max-conses*)))
-       (list (%collapse-whitespace (%normalize-string name))))
       ((consp name)
-       (remove-duplicates
-        ;; %SIGNATURE-TEXT's pretty printer can still break a code-shaped
-        ;; name over lines; the listed name must be one line to round-trip.
-        (list (%collapse-whitespace (%normalize-string name))
-              (%collapse-whitespace (%signature-text name)))
-        :test #'string=))
+       (let ((princ-text (%normalize-string name)))
+         (if (> (length princ-text) *signature-text-max-chars*)
+             ;; Too large to be a name -- a data form's quoted list, vector
+             ;; or array: the pretty printer would spend seconds on it for
+             ;; every "not found" listing of the file, so PRINC text only.
+             (list (%collapse-whitespace princ-text))
+             (remove-duplicates
+              ;; %SIGNATURE-TEXT's pretty printer can still break a
+              ;; code-shaped name over lines; the listed name must be one
+              ;; line to round-trip.
+              (list (%collapse-whitespace princ-text)
+                    (%collapse-whitespace (%signature-text name)))
+              :test #'string=))))
       (t (list (%normalize-string name))))))
 
 (defun %list-valued-name-p (form form-type)

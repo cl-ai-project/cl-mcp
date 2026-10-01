@@ -788,7 +788,23 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                                                 :dry-run t :content "(defun bar () 2)")
                                 nil)
                        (error (e) (princ-to-string e)))))
-        (ok (and message (search "Its defun forms are: (defun foo)." message)) message)))))
+        (ok (and message (search "Its defun forms are: (defun foo)." message)) message))))
+  (testing "a long vector literal is no slower to list than a long list"
+    (with-temp-file "tests/tmp/edit-form-long-literal-vector.lisp"
+        (format nil "(defun foo () 1)~%~%(register-data '#(~{~D~^ ~}))~%"
+                (loop for i below 100000 collect i))
+      (lambda (path)
+        (let* ((start (get-internal-real-time))
+               (message (handler-case
+                            (progn (lisp-edit-form :file-path path :form-type "defun"
+                                                   :form-name "bar" :operation "replace"
+                                                   :dry-run t :content "(defun bar () 2)")
+                                   nil)
+                          (error (e) (princ-to-string e))))
+               (seconds (/ (- (get-internal-real-time) start)
+                           internal-time-units-per-second)))
+          (ok (and message (search "Its defun forms are: (defun foo)." message)) message)
+          (ok (< seconds 5) (format nil "listing took ~,1Fs" seconds)))))))
 
 (deftest lisp-edit-form-read-eval-disabled
   (testing "read-time evaluation is disabled when parsing source"
