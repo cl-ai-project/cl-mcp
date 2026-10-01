@@ -693,6 +693,22 @@ Used to prove that a dry-run summary does not grow with the size of the file."
         (ok (search ":first" (original "(setf foo)[0]")))
         (ok (search ":second" (original "(setf foo)[1]")))))))
 
+(deftest lisp-edit-form-ambiguity-listing-names-the-exact-form-name-to-pass
+  ;; An index is relative to the form_name it was listed for; the listing
+  ;; now spells the whole string, so it cannot be paired with another name.
+  (with-temp-file "tests/tmp/edit-form-ambiguity-form-names.lisp"
+      (format nil "(defun (setf foo) (v) :first)~%~%(defun (setf foo) (v) :second)~%")
+    (lambda (path)
+      (let ((listing (handler-case
+                         (progn (lisp-edit-form :file-path path :form-type "defun"
+                                                :form-name "  (setf foo)" :operation "replace"
+                                                :dry-run t :content "(defun (setf foo) (v) v)")
+                                nil)
+                       (error (e) (princ-to-string e)))))
+        (ok (search "Multiple matches" listing)
+            "leading whitespace does not hide a list-valued name")
+        (ok (search "form_name \"(setf foo)[1]\"" listing) listing)))))
+
 (deftest lisp-edit-form-read-eval-disabled
   (testing "read-time evaluation is disabled when parsing source"
     (let* ((flag-path (project-path "tests/tmp/read-eval-flag"))

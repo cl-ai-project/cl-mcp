@@ -454,8 +454,9 @@ string is also reported this way, before any node is searched."
   (multiple-value-bind (base-name index)
       (let ((match (nth-value 1 (scan-to-strings "^(.+?)\\[(\\d+)\\]$" form-name))))
         (if match
-            (values (aref match 0) (parse-integer (aref match 1)))
-            (values form-name nil)))
+            (values (string-trim '(#\Space #\Tab #\Newline #\Return) (aref match 0))
+                    (parse-integer (aref match 1)))
+            (values (string-trim '(#\Space #\Tab #\Newline #\Return) form-name) nil)))
     (let* ((stripped (%strip-hash-colon (string-downcase (%strip-name-prefix base-name))))
            ;; A method's signature and a list-valued name are compared as
            ;; %DEFINITION-CANDIDATES writes them: whitespace collapsed, no
@@ -525,8 +526,11 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
                        (loop for (node . form) in matches
                              for i from 0
                              collect (let ((candidates (%definition-candidates form form-type)))
-                                       (format nil "[~D] ~A" i
-                                               (or (car (last candidates)) (first candidates)))))))
+                                       ;; The index is relative to this form_name,
+                                       ;; so the whole string to pass is spelled out.
+                                       (format nil "[~D] ~A  (form_name ~S)" i
+                                               (or (car (last candidates)) (first candidates))
+                                               (format nil "~A[~D]" base-name i))))))
                  (values nil (format nil "Multiple matches for ~A ~A. Specify an index:~%~{  ~A~%~}"
                                      form-type form-name descriptions))))))))))
 
