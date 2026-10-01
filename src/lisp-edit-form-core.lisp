@@ -164,7 +164,9 @@ The last one is the name a \"not found\" listing shows.  A list-valued name --
 a DECLAIM's declaration, a (SETF NAME) function -- is written as
 %SIGNATURE-TEXT writes it, on one line and keywords kept, so the listed name
 can be passed back as form_name; its PRINC text, whitespace collapsed, is
-accepted too, as earlier versions listed it."
+accepted too, as earlier versions listed it.  That text is not otherwise
+normalized: PRINC drops |...| escapes, so stripping its package prefixes could
+turn (SETF |foo:bar|) into (setf bar), another function's name."
   (let ((name (second form)))
     (cond
       ((string= form-type "defmethod")
@@ -176,7 +178,7 @@ accepted too, as earlier versions listed it."
        (list (%normalize-string (car name))))
       ((consp name)
        (remove-duplicates
-        (list (%normalize-form-name-text (%normalize-string name))
+        (list (%collapse-whitespace (%normalize-string name))
               (%signature-text name))
         :test #'string=))
       (t (list (%normalize-string name))))))
@@ -334,6 +336,48 @@ remain distinguishable."
              (write-char c out)
              (incf i))))))))
 
+(defun %token-end-and-colon (s start)
+  "Return (values END COLON) for the token of S starting at START: END is where
+it stops (whitespace or a delimiter outside |...|, or the end of S) and COLON
+the position of its last package colon outside |...|, or NIL."
+  (let ((len (length s))
+        (in-bars nil)
+        (colon nil)
+        (i start))
+    (loop while (< i len) do
+      (let ((ch (char s i)))
+        (cond
+          ((char= ch #\|) (setf in-bars (not in-bars)))
+          (in-bars)
+          ((char= ch #\\) (incf i))
+          ((or (%whitespace-char-p ch) (find ch "()\"'`,")) (loop-finish))
+          ((char= ch #\:) (setf colon i))))
+      (incf i))
+    (values (min i len) colon)))
+
+(defun %collapse-whitespace (s)
+  "Return S with each run of whitespace outside string literals and |...|
+escapes made one space, and none at either end."
+  (string-trim
+   " "
+   (with-output-to-string (out)
+     (let ((quote-char nil)
+           (escaped nil)
+           (pending nil))
+       (loop for ch across s
+             do (cond
+                  ((and (null quote-char) (%whitespace-char-p ch))
+                   (setf pending t))
+                  (t
+                   (when pending (write-char #\Space out) (setf pending nil))
+                   (write-char ch out)
+                   (cond
+                     (escaped (setf escaped nil))
+                     ((char= ch #\\) (setf escaped t))
+                     ((and quote-char (char= ch quote-char)) (setf quote-char nil))
+                     ((and (null quote-char) (member ch '(#\" #\|)))
+                      (setf quote-char ch))))))))))
+
 (defun %normalize-form-name-text (s)
   "Return S, a form_name a caller wrote, as the candidates are written.
 Outside string literals, each run of whitespace becomes one space and a
@@ -371,13 +415,10 @@ is kept."
                  (write-char #\Space out)
                  (setf pending-space nil))
                (if (and (token-start-p) (not (find c "():\"'`,#")))
-                   ;; Copy the token from just past its last colon.
-                   (let* ((end (or (position-if (lambda (ch)
-                                                  (or (%whitespace-char-p ch)
-                                                      (find ch "()\"'`,")))
-                                                s :start i)
-                                   len))
-                          (colon (position #\: s :start i :end end :from-end t)))
+                   ;; Copy the token from just past its last colon.  A colon
+                   ;; between |...| escapes is part of the name, not a
+                   ;; package marker, and whitespace there does not end it.
+                   (multiple-value-bind (end colon) (%token-end-and-colon s i)
                      (write-string s out :start (if colon (1+ colon) i) :end end)
                      (setf i end))
                    (progn
@@ -407,11 +448,22 @@ string is also reported this way, before any node is searched."
     (let* ((stripped (%strip-hash-colon (string-downcase (%strip-name-prefix base-name))))
            ;; A method's signature and a list-valued name are compared as
            ;; %DEFINITION-CANDIDATES writes them: whitespace collapsed, no
-           ;; package prefixes.
-           (target (if (or (string= form-type "defmethod")
-                           (and (plusp (length stripped)) (char= (char stripped 0) #\()))
+           ;; package prefixes.  A name that only looks like a list -- a
+           ;; string such as "(pkg:value)" -- must still match as written, so
+           ;; for those the text as given is tried too, and so is the text
+           ;; with only its whitespace collapsed (an earlier listing's form).
+           (target (if (string= form-type "defmethod")
                        (%normalize-form-name-text stripped)
                        stripped))
+           (targets (if (and (string/= form-type "defmethod")
+                             (plusp (length stripped))
+                             (char= (char stripped 0) #\())
+                        (remove-duplicates
+                         (list stripped
+                               (%collapse-whitespace stripped)
+                               (%normalize-form-name-text stripped))
+                         :test #'string=)
+                        (list target)))
            (matches nil))
       (if (zerop (length target))
           (values nil (format nil "form_name resolved to empty string after prefix stripping; ~
@@ -423,7 +475,8 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
                     do (let ((value (cst-node-value node)))
                          (when (and (consp value)
                                     (string= (string-downcase (symbol-name (car value))) form-type)
-                                    (some (lambda (cand) (string= cand target))
+                                    (some (lambda (cand)
+                                            (member cand targets :test #'string=))
                                           (%definition-candidates value form-type)))
                            (push (cons node value) matches))))
             (setf matches (nreverse matches))
@@ -435,8 +488,8 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
             (unless index
               (let ((exact (remove-if-not
                             (lambda (match)
-                              (string= target
-                                       (car (last (%definition-candidates (cdr match) form-type)))))
+                              (member (car (last (%definition-candidates (cdr match) form-type)))
+                                      targets :test #'string=))
                             matches)))
                 (when exact
                   (setf matches exact))))

@@ -621,6 +621,40 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                   name)))
           (ok (string= source (fs-read-file path)) "dry runs wrote nothing"))))))
 
+(deftest lisp-edit-form-list-name-normalization-keeps-strings-and-escapes
+  (flet ((addresses-p (path form-type form-name)
+           (handler-case
+               (progn
+                 (lisp-edit-form :file-path path :form-type form-type :form-name form-name
+                                 :operation "replace" :dry-run t
+                                 :content "(defun replaced () nil)")
+                 t)
+             (error (e) (princ-to-string e)))))
+    (testing "a string name that starts with ( is compared as written"
+      (with-temp-file "tests/tmp/edit-form-paren-string-name.lisp"
+          (format nil "(defmacro defthing (name &body body) `(list ,name ,@body))~%~%~
+                       (defthing \"(pkg:value)\" 1)~%")
+        (lambda (path)
+          (ok (eq t (addresses-p path "defthing" "(pkg:value)"))))))
+    (testing "a name the listing writes with |...| escapes addresses its form"
+      (with-temp-file "tests/tmp/edit-form-escaped-setf-name.lisp"
+          (format nil "(defun (setf |foo:bar|) (new x) (list new x))~%~%~
+                       (defun (setf bar) (new x) (list x new))~%")
+        (lambda (path)
+          (let ((listed (handler-case
+                            (progn (lisp-edit-form :file-path path :form-type "defun"
+                                                   :form-name "nope" :operation "replace"
+                                                   :dry-run t :content "(defun nope () nil)")
+                                   nil)
+                          (error (e) (princ-to-string e)))))
+            (ok (search "(defun (setf |foo:bar|))" listed) listed))
+          (ok (eq t (addresses-p path "defun" "(setf |foo:bar|)")))
+          (let ((preview (lisp-edit-form :file-path path :form-type "defun"
+                                         :form-name "(setf bar)" :operation "replace"
+                                         :dry-run t :content "(defun (setf bar) (new x) x)")))
+            (ok (search "(list x new)" (gethash "original" preview))
+                "(setf bar) is the plain one, never the |foo:bar| one")))))))
+
 (deftest lisp-edit-form-read-eval-disabled
   (testing "read-time evaluation is disabled when parsing source"
     (let* ((flag-path (project-path "tests/tmp/read-eval-flag"))
