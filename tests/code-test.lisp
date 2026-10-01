@@ -855,6 +855,44 @@ compiles a test's body: while the file loads, keeping no source location.")
               (ok (and ref (equal "via-macro" (gethash "type" ref))))
               (ok (and ref (search "may reach" (gethash "note" ref))))))))))
 
+(deftest code-find-references-adds-no-macro-uses-from-a-stale-file
+  ;; After an edit that is not reloaded, a file-compiled use's xref entry and
+  ;; its source form no longer meet, so it looked source-only: listed twice,
+  ;; and a use xref had ruled out came back as "may reach".
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let* ((dir (uiop:ensure-directory-pathname
+                   (asdf:system-relative-pathname :cl-mcp "tests/tmp/via-macro-stale/")))
+             (copy (merge-pathnames "fixture.lisp" dir))
+             (*project-root* dir))
+        (ensure-directories-exist dir)
+        (unwind-protect
+             (progn
+               (uiop:copy-file *via-macro-fixture* copy)
+               (%load-xref-fixture copy)
+               (let ((text (uiop:read-file-string copy)))
+                 (with-open-file (out copy :direction :output :if-exists :supersede)
+                   (format out ";; one~%;; two~%;; three~%~A" text)))
+               ;; utimes takes Unix time; FILE-WRITE-DATE is universal time.
+               (let ((later (+ (- (file-write-date copy) 2208988800) 100)))
+                 (uiop:symbol-call :sb-posix :utimes (namestring (truename copy)) later later))
+               (dolist (pooled '(nil t))
+                 (let ((refs (coerce (gethash "refs" (%call-references-tool
+                                                      "cl-mcp-via-macro-fixture::probe-target"
+                                                      :pooled pooled))
+                                     'list)))
+                   (testing (format nil "no via-macro row from the stale file (~:[inline~;pooled~])"
+                                    pooled)
+                     (ok (notany (lambda (ref)
+                                   (and (equal "via-macro" (gethash "type" ref))
+                                        (member (gethash "form_name" ref)
+                                                '("probe-macro-caller" "probe-maybe-caller")
+                                                :test #'equal)))
+                                 refs))))))
+          (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)
+          ;; Put the fixture's own definitions back where they were.
+          (%load-xref-fixture *via-macro-fixture*)))))
+
 (deftest code-find-references-tool-relays-a-worker-failure-untouched
   (let* ((notice "The worker this session was using ended; its state is gone.")
          (result (%call-references-tool

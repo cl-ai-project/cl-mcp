@@ -620,6 +620,12 @@ docs/tools.md describes every field."
              "scan_skipped" scan-skipped
              "via_macros" (coerce via-macros 'vector))))
 
+(defun %true-json-p (value)
+  "True when VALUE, a JSON boolean as read here, is true: T or YASON:TRUE.
+A false arrives as NIL, :FALSE or YASON:FALSE depending on how it was parsed."
+  (or (eq value t)
+      (and (symbolp value) value (string= (symbol-name value) "TRUE"))))
+
 (defun %reference-key (ref)
   "Return the key telling REF's form apart from every other: its file, the line
 it starts on, and its form_type and form_name -- two forms can start on one
@@ -689,9 +695,17 @@ PLACE-REFERENCES-IN-SOURCE, which runs after this."
         (added '()))
     (dolist (ref refs)
       (setf (gethash (%reference-key ref) seen) t))
+    ;; In a file changed since load, a use xref located no longer meets its
+    ;; source form, so it would look source-only: the form listed twice, and
+    ;; a use xref ruled out listed as may reach.  Such files add nothing;
+    ;; their stale references already say to reload.
+    (dolist (ref (sequence->list (gethash "refs" macro-report)))
+      (when (%true-json-p (gethash "stale" ref))
+        (setf (gethash (list :stale (gethash "abs_path" ref)) seen) t)))
     (dolist (ref (sequence->list (gethash "refs" macro-report)))
       (let ((key (%reference-key ref)))
         (unless (or (gethash key seen)
+                    (gethash (list :stale (gethash "abs_path" ref)) seen)
                     (not (%unconfirmed-macro-use-p ref xref-decides-p))
                     (and (equal (gethash "form_type" ref) "defmacro")
                          (string-equal (gethash "form_name" ref) short-name)))
