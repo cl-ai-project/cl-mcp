@@ -580,6 +580,47 @@ Used to prove that a dry-run summary does not grow with the size of the file."
           (ok (null (search "multiple forms are not supported in a single call" err-msg)))
           (ok (string= before (fs-read-file path))))))))
 
+(deftest lisp-edit-form-addresses-a-long-declaim-by-the-name-it-lists
+  ;; A list-valued name was matched against its PRINC text, which the pretty
+  ;; printer broke over several lines and wrote :PACKAGE as PACKAGE, while the
+  ;; "not found" listing showed it flattened: the name the error offered never
+  ;; matched.
+  (let ((source (format nil "(declaim (ftype (function (string &key (:package (or null package symbol string)))~%~
+                          (values (or null string) (or null integer) t &optional))~%~
+                code-find-definition))~%~%(defun code-find-definition (s &key package)~%  ~
+                (declare (ignore package))~%  (values s 1 t))~%")))
+    (with-temp-file "tests/tmp/edit-form-long-declaim.lisp" source
+      (lambda (path)
+        (let ((listed nil))
+          (testing "the not-found listing gives the name on one line, keywords kept"
+            (handler-case
+                (lisp-edit-form :file-path path :form-type "declaim" :form-name "nope"
+                                :operation "replace" :content "(declaim (optimize speed))"
+                                :dry-run t)
+              (error (e)
+                (let* ((text (princ-to-string e))
+                       (start (search "(declaim (ftype" text))
+                       (end (and start (search "code-find-definition))" text :start2 start))))
+                  (setf listed (and end (subseq text (+ start (length "(declaim "))
+                                                (+ end (length "code-find-definition)"))))))))
+            (ok listed)
+            (ok (and listed (null (find #\Newline listed))) listed)
+            (ok (and listed (search "&key (:package" listed)) listed))
+          (testing "that name, and the same name with other whitespace, both address the form"
+            (dolist (name (list listed
+                                ;; As earlier versions listed it: PRINC text, no colon.
+                                "(ftype (function (string &key (package (or null package symbol string))) (values (or null string) (or null integer) t &optional)) code-find-definition)"
+                                (format nil "(ftype~%  (function (string &key (:package (or null package symbol string)))~%    (values (or null string) (or null integer) t &optional))~%  code-find-definition)")))
+              (ok (handler-case
+                      (progn
+                        (lisp-edit-form :file-path path :form-type "declaim" :form-name name
+                                        :operation "replace" :dry-run t
+                                        :content "(declaim (ftype function code-find-definition))")
+                        t)
+                    (error (e) (princ-to-string e)))
+                  name)))
+          (ok (string= source (fs-read-file path)) "dry runs wrote nothing"))))))
+
 (deftest lisp-edit-form-read-eval-disabled
   (testing "read-time evaluation is disabled when parsing source"
     (let* ((flag-path (project-path "tests/tmp/read-eval-flag"))

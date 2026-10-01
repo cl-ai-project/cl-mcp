@@ -550,8 +550,10 @@ signature picks that method over others it only abbreviates: `"area ((s circle))
 primary method, not `area :around ((s circle))`. Same-name methods whose specializers differ only
 in package (`((w a:widget))` and `((w b:widget))`) match the same `form_name`; the
 `Multiple matches` error lists them, and a `[N]` suffix (`"render ((w widget))[1]"`, 0-based)
-picks one. Other form types compare `form_name` as written, so a string name such as
-`"/users/:id"` keeps its colon and spaces.
+picks one. A list-valued name -- a `declaim`'s declaration, a `(setf name)` function -- is
+matched the same way, keywords kept: the "not found" listing writes it on one line, and that
+text, or the same name broken over lines, addresses the form. Other form types compare
+`form_name` as written, so a string name such as `"/users/:id"` keeps its colon and spaces.
 
 Operations:
 - **replace**: Replace the entire matched form with `content`

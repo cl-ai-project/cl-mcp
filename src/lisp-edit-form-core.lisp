@@ -159,7 +159,12 @@ was read in."
                                    lambda-str))))))))
 
 (defun %definition-candidates (form form-type)
-  "Return candidate strings that identify FORM with FORM-TYPE."
+  "Return candidate strings that identify FORM with FORM-TYPE.
+The last one is the name a \"not found\" listing shows.  A list-valued name --
+a DECLAIM's declaration, a (SETF NAME) function -- is written as
+%SIGNATURE-TEXT writes it, on one line and keywords kept, so the listed name
+can be passed back as form_name; its PRINC text, whitespace collapsed, is
+accepted too, as earlier versions listed it."
   (let ((name (second form)))
     (cond
       ((string= form-type "defmethod")
@@ -167,10 +172,13 @@ was read in."
       ((symbolp name)
        (list (%normalize-string name)))
       ;; defstruct: (defstruct (name &rest options) ...) — first element is the name
-      ((string= form-type "defstruct")
-       (if (and (listp name) (symbolp (car name)))
-           (list (%normalize-string (car name)))
-           (list (%normalize-string name))))
+      ((and (string= form-type "defstruct") (listp name) (symbolp (car name)))
+       (list (%normalize-string (car name))))
+      ((consp name)
+       (remove-duplicates
+        (list (%normalize-form-name-text (%normalize-string name))
+              (%signature-text name))
+        :test #'string=))
       (t (list (%normalize-string name))))))
 
 (defun %whitespace-char-p (ch)
@@ -397,7 +405,11 @@ string is also reported this way, before any node is searched."
             (values (aref match 0) (parse-integer (aref match 1)))
             (values form-name nil)))
     (let* ((stripped (%strip-hash-colon (string-downcase (%strip-name-prefix base-name))))
-           (target (if (string= form-type "defmethod")
+           ;; A method's signature and a list-valued name are compared as
+           ;; %DEFINITION-CANDIDATES writes them: whitespace collapsed, no
+           ;; package prefixes.
+           (target (if (or (string= form-type "defmethod")
+                           (and (plusp (length stripped)) (char= (char stripped 0) #\()))
                        (%normalize-form-name-text stripped)
                        stripped))
            (matches nil))
