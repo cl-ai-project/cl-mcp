@@ -62,6 +62,7 @@
   (:import-from #:cl-mcp/tests/utils-sanitize-test)
   (:import-from #:cl-mcp/tests/utils-system-test)
   (:import-from #:cl-mcp/tests/utils-random-test)
+  (:import-from #:cl-mcp/tests/yason-compat-test)
   (:import-from #:cl-mcp/tests/system-loader-test)
   (:import-from #:cl-mcp/tests/worker-test)
   (:import-from #:cl-mcp/tests/worker-init-hook-test)
