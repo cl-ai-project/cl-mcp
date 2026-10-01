@@ -18,6 +18,7 @@
                 #:qualified-symbol-name
                 #:symbol-kind
                 #:resolve-scan-forms
+                #:macros-expanding-to
                 #:merge-references
                 #:build-references-report)
   (:export #:code-find-definition
@@ -597,13 +598,16 @@ debug source.  Without either date STALE is false."
                   (and (%source-stale-p pathname recorded) t))))))
 
 (declaim (ftype (function (string &key (:package (or null package symbol string)))
-                          (values (or null string) (or null integer) t &optional))
+                          (values (or null string) (or null integer) t t &optional))
                 code-find-definition))
 
 (defun code-find-definition (symbol-name &key package)
   "Return the definition location for SYMBOL-NAME.
-Values are PATH (string), LINE (integer) and ON-DISK (boolean), or NILs when
-not found.  Searches multiple SB-INTROSPECT definition kinds so that classes,
+Values are PATH (string), LINE (integer), ON-DISK (boolean) and STALE
+(boolean), or NILs when not found.  STALE is true when the file was written
+after the definition was compiled (DEFINITION-SOURCE-LOCATION): LINE then comes
+from positions recorded for the old text and may point anywhere in the new one.
+Searches multiple SB-INTROSPECT definition kinds so that classes,
 structures, conditions, generic functions, macros, and variables are
 all locatable, not only ordinary functions.
 
@@ -646,20 +650,22 @@ downstream therefore failed for every file that does exist."
                (on-disk (and pathname
                              (ignore-errors (probe-file pathname))
                              t))
-               (path (normalize-path-for-display pathname)))
-          (return-from code-find-definition (values path line on-disk))))
+               (path (normalize-path-for-display pathname))
+               (stale (and on-disk (nth-value 3 (definition-source-location source)))))
+          (return-from code-find-definition (values path line on-disk stale))))
       (log-event :warn "code.find.not-found" "symbol" symbol-name)
-      (values nil nil nil))
+      (values nil nil nil nil))
     #-sbcl
     (error "code-find-definition requires SBCL")))
 
 (declaim (ftype (function (string &key (:package (or null package symbol string)))
                           (values string string (or null string) (or null string)
-                                  (or null string) (or null integer) &optional))
+                                  (or null string) (or null integer) t &optional))
                 code-describe-symbol))
 
 (defun code-describe-symbol (symbol-name &key package)
-  "Return NAME, TYPE, ARGLIST, DOCUMENTATION, PATH, and LINE for SYMBOL-NAME.
+  "Return NAME, TYPE, ARGLIST, DOCUMENTATION, PATH, LINE and STALE for SYMBOL-NAME.
+STALE is CODE-FIND-DEFINITION's: the file changed after it was compiled.
 Handles functions, macros, generic functions, variables, classes,
 condition types, and structure types. Signals an error only when none
 of those bindings resolve. PATH/LINE may be NIL when unknown.
@@ -736,9 +742,10 @@ TYPE is one of:
               ((boundp sym) (documentation sym 'variable))
               (class (documentation sym 'type))
               (t nil))))
-      (multiple-value-bind (path line)
+      (multiple-value-bind (path line on-disk stale)
           (code-find-definition symbol-name :package package)
-        (values name type arglist doc path line)))))
+        (declare (ignore on-disk))
+        (values name type arglist doc path line stale)))))
 
 (defun generic-function-method-count (symbol-name &key package)
   "Return how many methods the generic function SYMBOL-NAME names has, or NIL
@@ -1047,6 +1054,8 @@ CL-MCP/SRC/CODE-REFS-CORE:BUILD-REFERENCES-REPORT."
                      :unresolved unresolved
                      :xref-count (length entries)
                      :notes (%scan-notes scan)
+                     :via-macros (macros-expanding-to forms)
+                     :names-class (and (find-class symbol nil) t)
                      common)))))))
 
 (declaim (ftype (function (string &key (:package (or null package symbol string))

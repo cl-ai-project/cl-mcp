@@ -22,6 +22,8 @@
            #:symbol-kind
            #:resolve-site-token
            #:resolve-scan-forms
+           #:macros-expanding-to
+           #:add-macro-reached-references
            #:merge-references
            #:build-references-report
            #:place-references-in-source
@@ -228,9 +230,13 @@ interned."
   "Note for an xref entry in a file the source scan did not cover.")
 
 (defparameter *note-not-in-xref*
-  "not in xref (top-level form, or not compiled since it was written)"
+  (concatenate 'string
+               "not in xref (top-level form, code compiled while loading such as "
+               "a FiveAM test, or not compiled since it was written)")
   "Note for a form only the source scan found, holding a site of a kind xref
-records (see *SITE-KINDS-XREF-SELDOM-RECORDS*).")
+records (see *SITE-KINDS-XREF-SELDOM-RECORDS*).  Code COMPILEd while its file
+loads -- a FiveAM test's body -- is in xref, but with no source location, so
+it cannot meet its form.")
 
 (defparameter *xref-type-site-kinds*
   '(("call" "call" "function")
@@ -283,7 +289,7 @@ Returns (values RESOLVED UNRESOLVED).
 
 RESOLVED lists, in input order, one plist per form that kept a site:
   (:truename :path :index :start-line :end-line :form-type :form-name
-   :test-name :test-framework :context :sites)
+   :test-name :test-framework :context :in-package :sites)
 with :SITES plists (:line :column :kind :context :shadowed-by).  When MACRO-P a
 \"call\" site becomes \"macro\", the type WHO-MACROEXPANDS entries carry.
 
@@ -329,9 +335,32 @@ missing package, counting the sites that could not be judged."
                       :test-name (gethash "test_name" form)
                       :test-framework (gethash "test_framework" form)
                       :context (gethash "context" form)
+                      :in-package (gethash "in_package" form)
                       :sites (nreverse kept))
                 resolved))))
     (values (nreverse resolved) (nreverse unresolved))))
+
+(defun macros-expanding-to (forms)
+  "Return the qualified names of the macros whose expansion writes the target.
+
+FORMS are RESOLVE-SCAN-FORMS' first value.  A DEFMACRO form holding a
+\"template\" site names the target inside a backquote, so every use of that
+macro expands into a reference to it.  Those uses never write the target's
+name, and xref records them only when the code is compiled from a file it can
+name: a FiveAM test, whose body is compiled while its fasl loads, keeps no
+source location at all.  The macro's name is resolved in the package its
+DEFMACRO was read in; one that does not resolve to a macro in this image is
+left out.  Names are distinct, in the order the forms came."
+  (let ((names '()))
+    (dolist (form forms (nreverse names))
+      (when (and (equal (getf form :form-type) "defmacro")
+                 (stringp (getf form :form-name))
+                 (some (lambda (site) (equal (getf site :kind) "template"))
+                       (getf form :sites)))
+        (multiple-value-bind (symbol status)
+            (resolve-target (getf form :form-name) :package (getf form :in-package))
+          (when (and (eq status :found) (macro-function symbol))
+            (pushnew (qualified-symbol-name symbol) names :test #'equal)))))))
 
 (defun %distinct (strings)
   "Return STRINGS without duplicates, keeping the first occurrence of each."
@@ -517,19 +546,28 @@ Returns JSON-ready hash-tables, one per top-level form, in first-seen order."
         (string< path-a path-b))))
 
 (defun %tests-of (refs)
-  "Return one JSON object (name, path, line) per distinct test among REFS."
+  "Return one JSON object (name, path, line) per distinct test among REFS.
+A test known only from a macro use xref could not confirm (origin \"macro\")
+also carries may_reach true, unless another reference confirms it."
   (let ((tests '()))
     (dolist (ref refs (nreverse tests))
-      (let ((test (gethash "test" ref)))
-        (when (and test
-                   (not (find-if (lambda (seen)
-                                   (and (equal (gethash "name" seen) (gethash "name" test))
-                                        (equal (gethash "path" seen) (gethash "path" ref))))
-                                 tests)))
-          (push (make-ht "name" (gethash "name" test)
-                         "path" (gethash "path" ref)
-                         "line" (gethash "line" ref))
-                tests))))))
+      (let ((test (gethash "test" ref))
+            (maybe (equal (gethash "origin" ref) "macro")))
+        (when test
+          (let ((seen (find-if (lambda (seen)
+                                 (and (equal (gethash "name" seen) (gethash "name" test))
+                                      (equal (gethash "path" seen) (gethash "path" ref))))
+                               tests)))
+            (cond
+              ((null seen)
+               (let ((entry (make-ht "name" (gethash "name" test)
+                                     "path" (gethash "path" ref)
+                                     "line" (gethash "line" ref))))
+                 (when maybe
+                   (setf (gethash "may_reach" entry) t))
+                 (push entry tests)))
+              ((not maybe)
+               (remhash "may_reach" seen)))))))))
 
 (defun %status-string (status)
   "Return the JSON spelling of a RESOLVE-TARGET status keyword."
@@ -541,13 +579,16 @@ Returns JSON-ready hash-tables, one per top-level form, in first-seen order."
 (defun build-references-report (&key symbol resolved-symbol (status :found) kind
                                   lookup-package lookup-name project-only (limit 50)
                                   refs unresolved notes (xref-count 0)
-                                  (files-scanned 0) (name-matches 0) scan-skipped)
+                                  (files-scanned 0) (name-matches 0) scan-skipped
+                                  via-macros names-class)
   "Return the code-find-references payload, everything but its content text.
 
 REFS are MERGE-REFERENCES' objects.  They are sorted by path and line and at
 most LIMIT are kept, while count, file_count and tests describe all of them.
 A LIMIT of NIL keeps every one, for PLACE-REFERENCES-IN-SOURCE to cut later.
 UNRESOLVED is RESOLVE-SCAN-FORMS' second value and NOTES are plain sentences.
+VIA-MACROS is MACROS-EXPANDING-TO's list, for ADD-MACRO-REACHED-REFERENCES, and
+NAMES-CLASS whether the symbol also names a class, which xref never records.
 docs/tools.md describes every field."
   (let* ((sorted (sort (copy-list refs) #'%reference<))
          (count (length sorted))
@@ -577,7 +618,126 @@ docs/tools.md describes every field."
              "xref_count" xref-count
              "files_scanned" files-scanned
              "name_matches" name-matches
-             "scan_skipped" scan-skipped)))
+             "scan_skipped" scan-skipped
+             "via_macros" (coerce via-macros 'vector)
+             "names_class" (json-bool names-class))))
+
+(defun %true-json-p (value)
+  "True when VALUE, a JSON boolean as read here, is true: T or YASON:TRUE.
+A false arrives as NIL, :FALSE or YASON:FALSE depending on how it was parsed."
+  (or (eq value t)
+      (and (symbolp value) value (string= (symbol-name value) "TRUE"))))
+
+(defun %reference-key (ref)
+  "Return the key telling REF's form apart from every other: its file, the line
+it starts on, and its form_type and form_name -- two forms can start on one
+line."
+  (list (gethash "abs_path" ref) (gethash "line" ref)
+        (gethash "form_type" ref) (gethash "form_name" ref)))
+
+(defparameter *xref-decided-kinds* '("function" "generic-function" "macro" "variable")
+  "Symbol kinds (SYMBOL-KIND) whose uses xref records: calls, macroexpansions,
+and a special variable's bindings, references and sets.  For any other -- a
+class name, a constant the compiler may inline, an unbound symbol -- xref's
+silence about a form says nothing.")
+
+(defun %unconfirmed-macro-use-p (ref xref-decides-p)
+  "True when REF, a reference to a macro, is a use of the global macro that
+nothing else confirms or rules out as reaching the target.
+
+When XREF-DECIDES-P (the target's kind is in *XREF-DECIDED-KINDS*), a use xref
+located (origin xref or xref+source) is left to xref: that form's code was
+compiled from its file, so the target's own xref already says whether the
+expansion reaches the target there -- and a template naming the target shows
+only that some expansion may.  Otherwise xref cannot say, and a located use
+counts as well.  Either way only a site of kind macro that no flet, labels or
+macrolet shadows is a use of the global macro; a quoted name or a backquote
+template expands nothing."
+  (and (or (not xref-decides-p)
+           (equal (gethash "origin" ref) "source"))
+       (some (lambda (site)
+               (and (equal (gethash "kind" site) "macro")
+                    (null (gethash "shadowed_by" site))))
+             (sequence->list (gethash "call_sites" ref)))))
+
+(defun add-macro-reached-references (report macro-name macro-report)
+  "Add to REPORT the forms that may reach its symbol only by using MACRO-NAME.
+Returns REPORT, changed in place.
+
+REPORT and MACRO-REPORT are BUILD-REFERENCES-REPORT payloads built with a LIMIT
+of NIL and already placed (PLACE-REFERENCES-IN-SOURCE), the second about
+MACRO-NAME, one of REPORT's via_macros.  Each form using the macro expands
+into a reference to REPORT's symbol without writing its name, so the source
+scan never meets it, and xref meets it only when its code was compiled from a
+file: a FiveAM test's body is compiled while its fasl loads and keeps no source
+location.  Such a form is added with type \"via-macro\", origin \"macro\", a
+note naming the macro, and the macro's own call sites of kind macro, which say
+where the expansion happens.
+
+Only an unshadowed use nothing else decides counts (%UNCONFIRMED-MACRO-USE-P):
+a quoted name or a macrolet's local macro expands nothing of MACRO-NAME's, and
+for a target whose uses xref records (*XREF-DECIDED-KINDS*) a use xref located
+is decided by the target's own xref.  A template naming the symbol shows only that some expansion may reach it
+-- (if flag `(target) `(other)) -- so each added form says \"may reach\", not
+that it does.  A form REPORT already holds -- the same file,
+line, form_type and form_name (%REFERENCE-KEY), since two forms can start on
+one line -- is left as it is, and so is the macro's own DEFMACRO.
+
+count and file_count are recomputed; tests, the order and LIMIT are left to
+PLACE-REFERENCES-IN-SOURCE, which runs after this."
+  (let ((refs (sequence->list (gethash "refs" report)))
+        (seen (make-hash-table :test #'equal))
+        (short-name (string-downcase
+                     (subseq macro-name (1+ (or (position #\: macro-name :from-end t) -1)))))
+        (note (format nil "may reach ~A through macro ~A, whose expansion names it ~
+                           (nothing confirms this use does)"
+                      (gethash "resolved_symbol" report) macro-name))
+        ;; A name that is also a class (DEFCLASS POINT beside DEFUN POINT)
+        ;; can be used as one in the template, which xref never records.
+        (xref-decides-p (and (member (gethash "symbol_kind" report) *xref-decided-kinds*
+                                     :test #'equal)
+                             (not (%true-json-p (gethash "names_class" report)))))
+        (added '()))
+    (dolist (ref refs)
+      (setf (gethash (%reference-key ref) seen) t))
+    ;; In a file changed since load, a use xref located no longer meets its
+    ;; source form and looks source-only, so it can come out twice, or as may
+    ;; reach where xref ruled it out.  A FiveAM test there is still known only
+    ;; from the source, so the forms are kept, flagged stale and told to
+    ;; reload, rather than dropped without a word.
+    (dolist (ref (sequence->list (gethash "refs" macro-report)))
+      (when (and (%true-json-p (gethash "stale" ref))
+                 (stringp (gethash "abs_path" ref)))
+        (setf (gethash (list :stale (gethash "abs_path" ref)) seen) t)))
+    (dolist (ref (sequence->list (gethash "refs" macro-report)))
+      (let ((key (%reference-key ref))
+            (stale (gethash (list :stale (gethash "abs_path" ref)) seen)))
+        (unless (or (gethash key seen)
+                    (not (%unconfirmed-macro-use-p ref xref-decides-p))
+                    (and (equal (gethash "form_type" ref) "defmacro")
+                         (string-equal (gethash "form_name" ref) short-name)))
+          (setf (gethash key seen) t)
+          (let ((copy (make-hash-table :test #'equal)))
+            (maphash (lambda (k v) (setf (gethash k copy) v)) ref)
+            (setf (gethash "type" copy) "via-macro"
+                  (gethash "types" copy) (vector "via-macro")
+                  (gethash "origin" copy) "macro"
+                  (gethash "via_macro" copy) macro-name
+                  (gethash "call_sites" copy)
+                  (remove "macro" (coerce (or (gethash "call_sites" ref) #()) 'vector)
+                          :key (lambda (site) (gethash "kind" site)) :test-not #'equal)
+                  (gethash "stale" copy) (if stale t (gethash "stale" ref))
+                  (gethash "note" copy) (if stale
+                                            (format nil "~A; ~A" note *note-stale*)
+                                            note))
+            (push copy added)))))
+    (when added
+      (let ((all (sort (append refs (nreverse added)) #'%reference<)))
+        (setf (gethash "refs" report) (coerce all 'vector)
+              (gethash "count" report) (length all)
+              (gethash "file_count" report)
+              (length (%distinct (mapcar (lambda (ref) (gethash "path" ref)) all))))))
+    report))
 
 (defun place-references-in-source (report forms-at &key limit)
   "Name the top-level form each unplaced reference in REPORT sits in, then keep

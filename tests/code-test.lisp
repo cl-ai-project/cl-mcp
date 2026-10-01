@@ -715,6 +715,199 @@ worker handler, across both JSON boundaries) instead of a worker process."
               (ok (= 50 (gethash "limit" pooled)))
               (ok (= (min 50 (gethash "count" pooled)) (length (gethash "refs" pooled))))))))))
 
+(defparameter *via-macro-fixture*
+  (asdf:system-relative-pathname :cl-mcp "tests/fixtures/xref-via-macro/fixture.lisp")
+  "A test reaching its target only through a macro, compiled the way FiveAM
+compiles a test's body: while the file loads, keeping no source location.")
+
+(deftest code-find-references-follows-a-macro-to-the-tests-using-it
+  ;; A FiveAM test using a macro whose expansion calls the function was
+  ;; missing from refs and from Tests:: xref records the call, but the body
+  ;; was compiled with COMPILE while its fasl loaded, so it has no location.
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let ((*project-root* (uiop:pathname-directory-pathname *via-macro-fixture*)))
+        (%load-xref-fixture *via-macro-fixture*)
+        (dolist (pooled '(nil t))
+          (let* ((result (%call-references-tool "cl-mcp-via-macro-fixture::probe-target"
+                                                :pooled pooled))
+                 (text (gethash "text" (aref (gethash "content" result) 0)))
+                 (ref (find "probe-reached-through-the-macro" (gethash "refs" result)
+                            :key (lambda (ref) (gethash "form_name" ref)) :test #'equal)))
+            (testing (format nil "the test is listed as reached through the macro (~:[inline~;pooled~])"
+                             pooled)
+              (ok ref)
+              (ok (and ref (equal "test" (gethash "form_type" ref))))
+              (ok (and ref (equal "via-macro" (gethash "type" ref))))
+              (ok (and ref (equal "macro" (gethash "origin" ref))))
+              (ok (and ref (equal "CL-MCP-VIA-MACRO-FIXTURE::WITH-PROBE"
+                                  (gethash "via_macro" ref))))
+              (ok (and ref (search "through macro" (gethash "note" ref))))
+              (ok (search "(test probe-reached-through-the-macro) [via-macro] TEST" text) text))
+            (testing (format nil "and counted among the tests (~:[inline~;pooled~])" pooled)
+              (ok (find "probe-reached-through-the-macro" (gethash "tests" result)
+                        :key (lambda (test) (gethash "name" test)) :test #'equal))
+              (ok (search "probe-reached-through-the-macro"
+                          (subseq text (or (search "Tests:" text) 0)))))
+            (testing (format nil "direct references are unchanged (~:[inline~;pooled~])" pooled)
+              (ok (find "probe-direct-caller" (gethash "refs" result)
+                        :key (lambda (ref) (gethash "form_name" ref)) :test #'equal))
+              (ok (not (find-if (lambda (ref)
+                                  (and (equal "defmacro" (gethash "form_type" ref))
+                                       (equal "via-macro" (gethash "type" ref))))
+                                (gethash "refs" result)))
+                  "the macro's own definition is not listed as reached through itself")
+              (ok (= (length (gethash "refs" result)) (gethash "count" result)))))))))
+
+(deftest code-find-references-follows-only-real-macro-uses
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let* ((*project-root* (uiop:pathname-directory-pathname *via-macro-fixture*))
+             ;; Forms sharing a line are written here: lisp-edit-form puts each
+             ;; form it inserts on a line of its own, so the fixture cannot hold them.
+             (same-line (merge-pathnames "same-line.lisp" *project-root*)))
+        (with-open-file (out same-line :direction :output :if-exists :supersede)
+          (format out "(in-package #:cl-mcp-via-macro-fixture)~%~%~
+(test probe-same-line-direct (probe-target 1)) (test probe-same-line-via (with-probe (v 1) v))~%~%~
+(test probe-pair-a (with-probe (v 1) v)) (test probe-pair-b (with-probe (v 2) v))~%"))
+        (unwind-protect
+             (progn
+               (%load-xref-fixture *via-macro-fixture*)
+               (%load-xref-fixture same-line)
+               (dolist (pooled '(nil t))
+                 (let* ((result (%call-references-tool "cl-mcp-via-macro-fixture::probe-target"
+                                                       :pooled pooled))
+                        (refs (coerce (gethash "refs" result) 'list))
+                        (tests (map 'list (lambda (test) (gethash "name" test))
+                                    (gethash "tests" result))))
+                   (flet ((named (name)
+                            (remove name refs :key (lambda (ref) (gethash "form_name" ref))
+                                              :test-not #'equal)))
+                     (testing (format nil "a test that only quotes the macro is not a reference ~
+                                           (~:[inline~;pooled~])" pooled)
+                       (ok (null (named "probe-only-quotes-the-macro")))
+                       (ok (not (member "probe-only-quotes-the-macro" tests :test #'equal))))
+                     (testing (format nil "forms sharing a line are each listed (~:[inline~;pooled~])"
+                                      pooled)
+                       (dolist (name '("probe-same-line-direct" "probe-same-line-via"
+                                       "probe-pair-a" "probe-pair-b"))
+                         (ok (= 1 (length (named name))) name)
+                         (ok (member name tests :test #'equal) name)))
+                     (testing (format nil "a form xref also locates is listed once ~
+                                           (~:[inline~;pooled~])" pooled)
+                       (ok (= 1 (length (named "probe-macro-caller")))))
+                     (testing (format nil "a use a macrolet shadows is not followed ~
+                                           (~:[inline~;pooled~])" pooled)
+                       (ok (null (named "probe-shadowed-by-macrolet")))
+                       (ok (not (member "probe-shadowed-by-macrolet" tests :test #'equal))))
+                     (testing (format nil "xref decides for a file-compiled use; without it the ~
+                                           form is only said to maybe reach (~:[inline~;pooled~])"
+                                      pooled)
+                       (ok (null (named "probe-maybe-caller"))
+                           "xref records no call there, so the use is not listed")
+                       (let ((ref (first (named "probe-maybe-off"))))
+                         (ok ref)
+                         (ok (and ref (search "may reach" (gethash "note" ref)))
+                             (and ref (gethash "note" ref)))))
+                     (ok (= (length refs) (gethash "count" result)))))))
+          (ignore-errors (delete-file same-line))))))
+
+(deftest code-find-references-says-what-it-did-not-follow-and-what-only-may-reach
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let ((*project-root* (uiop:pathname-directory-pathname *via-macro-fixture*)))
+        (%load-xref-fixture *via-macro-fixture*)
+        (testing "macros past the cap are named, not silently dropped"
+          (let* ((result (let ((cl-mcp/src/code::*via-macros-followed* 1))
+                           (%call-references-tool "cl-mcp-via-macro-fixture::probe-target")))
+                 (text (gethash "text" (aref (gethash "content" result) 0)))
+                 (notes (coerce (gethash "notes" result) 'list)))
+            (ok (find-if (lambda (note) (search "followed 1 of 2 macros" note)) notes) notes)
+            (ok (search "not followed: CL-MCP-VIA-MACRO-FIXTURE::" text) text)))
+        (testing "a test that only may reach the symbol says so in tests and in the text"
+          (let* ((result (%call-references-tool "cl-mcp-via-macro-fixture::probe-target"))
+                 (text (gethash "text" (aref (gethash "content" result) 0)))
+                 (tests (coerce (gethash "tests" result) 'list))
+                 (maybe (find "probe-maybe-off" tests
+                              :key (lambda (test) (gethash "name" test)) :test #'equal))
+                 (direct (find "probe-same-line-direct" tests
+                               :key (lambda (test) (gethash "name" test)) :test #'equal)))
+            (ok (and maybe (eq t (gethash "may_reach" maybe))))
+            (ok (or (null direct) (not (gethash "may_reach" direct))))
+            (ok (search "probe-maybe-off (may reach)" text) text))))))
+
+(deftest code-find-references-keeps-macro-uses-xref-cannot-judge
+  ;; xref records calls, macroexpansions and variable uses, never a class
+  ;; name, so a file-compiled use of a macro naming a class is not something
+  ;; the class's own xref can decide.
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let ((*project-root* (uiop:pathname-directory-pathname *via-macro-fixture*)))
+        (%load-xref-fixture *via-macro-fixture*)
+        (dolist (pooled '(nil t))
+          (let* ((result (%call-references-tool "cl-mcp-via-macro-fixture::probe-class"
+                                                :pooled pooled))
+                 (ref (find "probe-class-user" (gethash "refs" result)
+                            :key (lambda (ref) (gethash "form_name" ref)) :test #'equal)))
+            (testing (format nil "the file-compiled use is listed as may reach (~:[inline~;pooled~])"
+                             pooled)
+              (ok ref)
+              (ok (and ref (equal "via-macro" (gethash "type" ref))))
+              (ok (and ref (search "may reach" (gethash "note" ref)))))
+            (testing (format nil "and a name that is both a function and a class ~
+                                  (~:[inline~;pooled~])" pooled)
+              (ok (find "probe-point-user"
+                        (gethash "refs" (%call-references-tool
+                                         "cl-mcp-via-macro-fixture::probe-point" :pooled pooled))
+                        :key (lambda (ref) (gethash "form_name" ref)) :test #'equal))))))))
+
+(deftest code-find-references-flags-macro-uses-from-a-stale-file
+  ;; After an edit that is not reloaded, a file-compiled use's xref entry and
+  ;; its source form no longer meet, so source and xref cannot be told apart.
+  ;; Macro-reached forms from such a file are kept -- a FiveAM test is known
+  ;; from the source alone -- but flagged stale and told to reload.
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let* ((dir (uiop:ensure-directory-pathname
+                   (asdf:system-relative-pathname :cl-mcp "tests/tmp/via-macro-stale/")))
+             (copy (merge-pathnames "fixture.lisp" dir))
+             (*project-root* dir))
+        (ensure-directories-exist dir)
+        (unwind-protect
+             (progn
+               (uiop:copy-file *via-macro-fixture* copy)
+               (%load-xref-fixture copy)
+               (let ((text (uiop:read-file-string copy)))
+                 (with-open-file (out copy :direction :output :if-exists :supersede)
+                   (format out ";; one~%;; two~%;; three~%~A" text)))
+               ;; utimes takes Unix time; FILE-WRITE-DATE is universal time.
+               (let ((later (+ (- (file-write-date copy) 2208988800) 100)))
+                 (uiop:symbol-call :sb-posix :utimes (namestring (truename copy)) later later))
+               (dolist (pooled '(nil t))
+                 (dolist (case '(("cl-mcp-via-macro-fixture::probe-target"
+                                  "probe-reached-through-the-macro")
+                                 ("cl-mcp-via-macro-fixture::probe-class" "probe-class-user")))
+                   (destructuring-bind (symbol expected) case
+                     (let* ((refs (coerce (gethash "refs" (%call-references-tool
+                                                           symbol :pooled pooled))
+                                          'list))
+                            (via (remove "via-macro" refs :key (lambda (ref) (gethash "type" ref))
+                                                          :test-not #'equal)))
+                       (testing (format nil "~A: the source-only use is kept (~:[inline~;pooled~])"
+                                        symbol pooled)
+                         (ok (find expected via :key (lambda (ref) (gethash "form_name" ref))
+                                                :test #'equal)))
+                       (testing (format nil "~A: every via-macro row from it says to reload ~
+                                             (~:[inline~;pooled~])" symbol pooled)
+                         (ok via)
+                         (ok (every (lambda (ref)
+                                      (and (eq t (gethash "stale" ref))
+                                           (search "reload" (gethash "note" ref))))
+                                    via))))))))
+          (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)
+          ;; Put the fixture's own definitions back where they were.
+          (%load-xref-fixture *via-macro-fixture*)))))
+
 (deftest code-find-references-tool-relays-a-worker-failure-untouched
   (let* ((notice "The worker this session was using ended; its state is gone.")
          (result (%call-references-tool
@@ -1017,6 +1210,38 @@ tests run from there."
                                (first (%find-definition-sources "CL-MCP-CLOS-STALE-FIXTURE"
                                                                 "STALE-PROBE" :class))))))
         (ignore-errors (delete-file file))))))
+
+(deftest code-find-definition-says-when-its-line-predates-the-file
+  ;; After an edit that is not reloaded, the line comes from positions the
+  ;; image recorded for the old text: code-find reported it as if exact.
+  (let ((file (asdf/system:system-relative-pathname
+               :cl-mcp "tests/tmp/code-find-stale-fixture.lisp")))
+    (ensure-directories-exist file)
+    (with-open-file (out file :direction :output :if-exists :supersede)
+      (format out "(defpackage #:cl-mcp-code-find-stale-fixture (:use #:cl))~%~
+(in-package #:cl-mcp-code-find-stale-fixture)~%~
+(defun stale-target () 1)~%"))
+    (unwind-protect
+         (progn
+           (%compile-and-load-under-own-name file)
+           (testing "a file unchanged since it was compiled is not stale"
+             (ok (null (nth-value 3 (code-find-definition
+                                     "cl-mcp-code-find-stale-fixture::stale-target"))))
+             (ok (null (nth-value 6 (code-describe-symbol
+                                     "cl-mcp-code-find-stale-fixture::stale-target")))))
+           ;; utimes takes Unix time; FILE-WRITE-DATE is universal time.
+           (let ((later (+ (- (file-write-date file) 2208988800) 100)))
+             (uiop:symbol-call :sb-posix :utimes (namestring (truename file)) later later))
+           (testing "a file written after it was compiled is reported stale"
+             (multiple-value-bind (path line on-disk stale)
+                 (code-find-definition "cl-mcp-code-find-stale-fixture::stale-target")
+               (ok (search "code-find-stale-fixture.lisp" path))
+               (ok (integerp line))
+               (ok on-disk)
+               (ok stale))
+             (ok (nth-value 6 (code-describe-symbol
+                               "cl-mcp-code-find-stale-fixture::stale-target")))))
+      (ignore-errors (delete-file file)))))
 
 (deftest read-form-starts-counts-forms-as-the-compiler-does
   (let ((*project-root* (asdf:system-source-directory :cl-mcp)))

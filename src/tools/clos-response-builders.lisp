@@ -338,7 +338,9 @@ than \"matched\"/\"mismatched\"/\"unverified\" -- a future verifier version skew
 -- is clamped to \"unverified\" naming the unexpected value, never passed
 through as-is: the three-word contract holds regardless of what the worker
 sends.  A stale ENTRY (spec 3.1) never keeps a MATCHED verdict, and loses
-EDIT_GUARD along with FORM_TYPE/FORM_NAME/EDIT_UNIT when it does."
+EDIT_GUARD along with FORM_TYPE/FORM_NAME/EDIT_UNIT when it does; any other
+verdict on it is reported as UNVERIFIED with *NOTE-STALE* too, since its line
+may now point at a different form."
   (if (null result)
       (%set-source-match entry "unverified" *reason-verification-unavailable*)
       (let ((status (gethash "status" result))
@@ -364,8 +366,11 @@ EDIT_GUARD along with FORM_TYPE/FORM_NAME/EDIT_UNIT when it does."
           (t
            (%set-source-match entry "unverified"
                                (format nil "unexpected verifier status ~S" status))))))
-  (when (and (%true-p (gethash "stale" entry))
-             (equal (gethash "source_match" entry) "matched"))
+  ;; A stale entry's line was recorded for the text the image compiled, so
+  ;; whatever the verifier found there -- the same definition, another one,
+  ;; nothing it could confirm -- says more about the edit than about this
+  ;; definition: every verdict on it becomes "unverified" naming the reload.
+  (when (%true-p (gethash "stale" entry))
     (setf (gethash "form_type" entry) nil (gethash "form_name" entry) nil)
     (remhash "edit_unit" entry)
     (remhash "edit_guard" entry)
@@ -394,7 +399,9 @@ or UNVERIFIED, never a silent fallback to MATCHED.
 
 A line with no candidates at all -- the file could not be read
 (*REASON-NOT-READABLE*) or parsed (*NOTE-UNPARSEABLE*), or simply starts no
-top-level form (*NOTE-NO-FORM-AT-LINE*) -- is decided locally, without a
+top-level form (*NOTE-NO-FORM-AT-LINE*, or *NOTE-STALE* when the file changed
+after the image recorded the line, which is then not where the form is) -- is
+decided locally, without a
 VERIFY-FN round trip: there is nothing to send.  An entry with a source file
 but no LINE at all (*REASON-NO-SOURCE-LINE*: DEFINITION-SOURCE-LOCATION
 computes them independently, spec src/code-core.lisp) is decided the same
@@ -452,6 +459,11 @@ assert a state (or its absence) the JSON disagrees with."
                  (failure
                   (%set-source-match entry "unverified"
                                      (format nil "~A: ~A" *note-unparseable* failure)))
+                 ;; A stale entry's line was computed from the text the image
+                 ;; compiled, so finding no form there says the file moved,
+                 ;; not that the definition has no form: name the reload.
+                 ((%true-p (gethash "stale" entry))
+                  (%set-source-match entry "unverified" *note-stale*))
                  (t (%set-source-match entry "unverified" *note-no-form-at-line*))))))))
      by-file)
     (let* ((batch (coerce (nreverse entries-json) 'vector))

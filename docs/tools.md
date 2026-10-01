@@ -753,6 +753,9 @@ Output:
 - `path` (relative when inside project, absolute otherwise)
 - `line` (integer or null if unknown): classes, conditions, structures and methods get one too,
   the line of the top-level form defining them
+- `stale` (`true`, present only then): the file was written after the definition was compiled,
+  so `line` comes from the text the image compiled and may point anywhere in the file as it is
+  now; the text says so and names `load-system`
 
 ## `code-describe`
 Return symbol metadata (name, type, arglist, documentation).
@@ -766,6 +769,7 @@ Output:
 - `arglist` (string; for a class, its direct slot names)
 - `documentation` (string|null)
 - `path`, `line`: where it is defined; a class, condition or structure gets its line too
+- `stale` (`true`, present only then): as for `code-find`; the `Defined at` line says so
 
 The text ends with a pointer to `clos-describe` for a generic function (with its method count) or a class.
 
@@ -789,12 +793,14 @@ Output (the content text carries everything that matters for a decision):
   - `form_type`, `form_name`: also given for an `xref`-only form whose source never writes the name --
     a function or test that reaches the symbol only through a macro's expansion -- by reading the form
     that starts on its line (left null when no single form starts there); pass them straight to `lisp-edit-form` (`form_type` / `form_name`); for `lisp-read-file`'s `name_pattern`, a CL-PPCRE regex, regex-quote the name first (a `defmethod` name such as `area ((s integer))` does not match itself)
-  - `origin`: `xref+source`; `xref` (the call exists only in a macro expansion, or the source was not scanned); `source` (a top-level use xref never records, or code not compiled since it was written; no note when every site is `quoted`, `template` or `method`, which xref usually does not record -- `WHO-CALLS` does record a function passed by name such as `(mapcar 'name xs)`, but then the form is not source-only)
+  - `origin`: `xref+source`; `xref` (the call exists only in a macro expansion, or the source was not scanned); `macro` (the form uses a project macro whose backquoted expansion names the symbol, so it may reach it -- see `via_macro`); `source` (a top-level use xref never records, code compiled while its file loads such as a FiveAM test's body, which xref keeps without a source location, or code not compiled since it was written; no note when every site is `quoted`, `template` or `method`, which xref usually does not record -- `WHO-CALLS` does record a function passed by name such as `(mapcar 'name xs)`, but then the form is not source-only)
   - `call_sites` (array): `line`, `column`, `kind` (`call`, `macro`, `function`, `quoted`, `template`, `bind`, `set`, `method`, `reference`), `context`, `shadowed_by`; `function` is `#'name` or a quoted `'name` passed as the function to `funcall`, `apply` or `multiple-value-call`; `set` is a `setf`/`setq` place or the variable `incf`, `decf`, `pop`, `push` or `pushnew` changes
+  - `via_macro`: on an `origin` `macro` form (whose `type` is `via-macro`), the macro it uses; its `call_sites` are that macro's uses. Such forms are found from the source alone, by following each macro in `via_macros` to the forms using it, so they appear even where xref keeps no location -- a FiveAM test using the macro, say. Such a form only *may* reach the symbol, and its note says so: a template naming the symbol does not mean every expansion does (`(if flag `(target) `(other))`). Only an unshadowed use of the global macro that xref could not locate is listed: a quoted name or a `macrolet`'s local macro is not, and, for a function, generic function, macro or special variable that does not also name a class -- the kinds whose uses xref records -- a use xref located is left to the symbol's own xref, which says whether it reaches it. For other kinds (a class name, a constant) xref cannot say, so a located use is listed as may reach too. In a file changed since it was loaded, where the macro's xref still holds an entry, xref and source no longer meet, so such forms are listed with `stale: true` and a note to reload; a form may then appear twice until `load-system` runs. (A file whose only uses are FiveAM test bodies leaves xref no entry, so its forms come from the current source and carry no stale flag.) One level is followed, for at most twenty macros; any past that are named in `notes`
   - `test`: `{name, framework}` when the form is a `deftest` (rove), `test`/`def-test` (fiveam) or `define-test` (parachute)
   - `stale`: the file changed after it was compiled; `note`: why a form lacks call sites or xref, or, on an `xref+source` form, which xref types (`call`, `set`, ...) no listed site shows -- say a call made by a macro expansion or through a function passed by name such as `(mapcar 'name xs)`; the sites are still listed with their own kind, and the form is not split
 - `count`, `file_count`, `limit`, `truncated`
-- `tests` (array): `name`, `path`, `line` of every test among the references, including a test that reaches the symbol only through a macro, and those `limit` left out of `refs`
+- `tests` (array): `name`, `path`, `line` of every test among the references, including a test that reaches the symbol only through a macro, and those `limit` left out of `refs`; `may_reach: true` on a test known only from a `via-macro` reference (the text adds `(may reach)` after its name)
+- `via_macros` (array): the project macros whose backquoted expansion names the symbol (a `defmacro` holding a `template` site), package-qualified; `names_class`: whether the symbol also names a class
 - `unresolved` (array): `path`, `package`, `count`, `tests` for matches in files whose package is not loaded
 - `notes` (array), `xref_count`, `files_scanned`, `name_matches`, `scan_skipped`, `project_only`, `symbol`
 
@@ -863,7 +869,9 @@ are not "matched" (null when it is):
   candidate at the line, or more than one of a `defgeneric`'s inline methods matching), a file
   that could not be read, or a file whose modification time is newer than what the image
   recorded (`stale`: true) — staleness never lets a would-be `matched` verdict stand, since the
-  form the image last saw and the form on disk now may no longer be the same one.
+  form the image last saw and the form on disk now may no longer be the same one; a stale entry is reported
+  `unverified` with "file changed since load; reload for accurate results" whatever the verifier found at
+  its line, which may now hold a different form.
 
 When no form starts on the recorded line at all, `note` says why (the file changed since it was
 loaded, or does not parse); that case is `unverified` too, with its own `source_match_reason`.

@@ -483,7 +483,14 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
           (when presentp (setf (gethash field response) value))))
       response)))
 
-(defun build-code-find-response (symbol path line &optional (on-disk t on-disk-supplied-p))
+(defun %stale-location-note (line)
+  "Return the sentence appended to a location whose file changed after it was
+compiled: LINE was computed from the old text, so it is named as unreliable."
+  (format nil " -- the file changed since it was loaded, so ~:[the location~;this line~] ~
+may be off; run load-system for an accurate one" line))
+
+(defun build-code-find-response (symbol path line &optional (on-disk t on-disk-supplied-p)
+                                                     stale)
   "Build the standard code-find response hash-table.
 PATH is the source file path, LINE the line number.  When PATH is
 NIL the symbol was not found and an isError payload is returned.
@@ -500,25 +507,35 @@ The argument is optional; when it is omitted the builder falls back to probing
 PATH itself, so a caller that has not been updated keeps exactly its old
 behaviour rather than silently claiming every file is present.  Do not
 \"simplify\" this into a plain default of T: that is the direction that turns a
-missing file into a reported one."
+missing file into a reported one.
+
+STALE (CODE-FIND-DEFINITION's fourth value) says the file was written after the
+definition was compiled.  LINE then still comes from the old text, so the text
+says so and names the reload, and the JSON carries \"stale\": true."
   (if path
-      (make-ht "path" path "line" line "content"
-               (text-content
-                (let ((on-disk (if on-disk-supplied-p
-                                   on-disk
-                                   (ignore-errors (probe-file path)))))
-                  (cond
-                   ((and line on-disk)
-                    (format nil "~A defined in ~A at line ~D" symbol path
-                            line))
-                   (line
-                    (format nil
-                            "~A defined in ~A at line ~D (source not on disk)"
-                            symbol path line))
-                   (on-disk (format nil "~A defined in ~A" symbol path))
-                   (t
-                    (format nil "~A defined in ~A (source not on disk)" symbol
-                            path))))))
+      (let ((r (make-ht "path" path "line" line "content"
+                        (text-content
+                         (let ((on-disk (if on-disk-supplied-p
+                                            on-disk
+                                            (ignore-errors (probe-file path)))))
+                           (concatenate
+                            'string
+                            (cond
+                              ((and line on-disk)
+                               (format nil "~A defined in ~A at line ~D" symbol path
+                                       line))
+                              (line
+                               (format nil
+                                       "~A defined in ~A at line ~D (source not on disk)"
+                                       symbol path line))
+                              (on-disk (format nil "~A defined in ~A" symbol path))
+                              (t
+                               (format nil "~A defined in ~A (source not on disk)" symbol
+                                       path)))
+                            (if stale (%stale-location-note line) "")))))))
+        (when stale
+          (setf (gethash "stale" r) t))
+        r)
       (make-ht "isError" t "content"
                (text-content
                 (format nil "Definition not found for ~A" symbol)))))
@@ -534,21 +551,29 @@ with their specializers and source lines."
     ((member type '("class" "condition" "structure") :test #'equal)
      "clos-describe shows its slots, superclasses, subclasses and methods.")))
 
-(defun build-code-describe-response (name type arglist doc path line &key method-count)
+(defun build-code-describe-response (name type arglist doc path line &key method-count stale)
   "Build the standard code-describe response hash-table.
 The text ends with %CLOS-DESCRIBE-HINT's line for a generic function (with
 METHOD-COUNT, its number of methods) or a class, since code-describe shows
-neither methods nor more than a class's direct slot names."
-  (let ((text (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~%Defined at ~A~@[:~D~]~]"
-                      name type arglist doc path line))
+neither methods nor more than a class's direct slot names.  STALE, as in
+BUILD-CODE-FIND-RESPONSE, annotates the Defined at line and sets \"stale\"."
+  (let ((text (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~A~]"
+                      name type arglist doc
+                      ;; Built apart so a missing PATH consumes LINE with it.
+                      (and path
+                           (format nil "~%Defined at ~A~@[:~D~]~A" path line
+                                   (if stale (%stale-location-note line) "")))))
         (hint (%clos-describe-hint type method-count)))
-    (make-ht "name" name
-             "type" type
-             "arglist" arglist
-             "documentation" doc
-             "path" path
-             "line" line
-             "content" (text-content (format nil "~A~@[~%~A~]" text hint)))))
+    (let ((r (make-ht "name" name
+                      "type" type
+                      "arglist" arglist
+                      "documentation" doc
+                      "path" path
+                      "line" line
+                      "content" (text-content (format nil "~A~@[~%~A~]" text hint)))))
+      (when (and path stale)
+        (setf (gethash "stale" r) t))
+      r)))
 
 (defparameter *references-sites-shown* 5
   "Call sites listed per form in code-find-references' text; the rest are counted.")
@@ -635,7 +660,10 @@ neither methods nor more than a class's direct slot names."
                    (- count (length refs))))
          (when tests
            (format s "Tests: ~{~A~^, ~}~%"
-                   (mapcar (lambda (test) (gethash "name" test)) tests)))))
+                   (mapcar (lambda (test)
+                             (format nil "~A~:[~; (may reach)~]"
+                                     (gethash "name" test) (gethash "may_reach" test)))
+                           tests)))))
       (when (and (member status '("not_found" "package_not_found") :test #'equal)
                  (plusp matches))
         (format s "~D textual match~:[es~;~] for that name in project files.~%"
