@@ -580,14 +580,15 @@ also carries may_reach true, unless another reference confirms it."
                                   lookup-package lookup-name project-only (limit 50)
                                   refs unresolved notes (xref-count 0)
                                   (files-scanned 0) (name-matches 0) scan-skipped
-                                  via-macros)
+                                  via-macros names-class)
   "Return the code-find-references payload, everything but its content text.
 
 REFS are MERGE-REFERENCES' objects.  They are sorted by path and line and at
 most LIMIT are kept, while count, file_count and tests describe all of them.
 A LIMIT of NIL keeps every one, for PLACE-REFERENCES-IN-SOURCE to cut later.
 UNRESOLVED is RESOLVE-SCAN-FORMS' second value and NOTES are plain sentences.
-VIA-MACROS is MACROS-EXPANDING-TO's list, for ADD-MACRO-REACHED-REFERENCES.
+VIA-MACROS is MACROS-EXPANDING-TO's list, for ADD-MACRO-REACHED-REFERENCES, and
+NAMES-CLASS whether the symbol also names a class, which xref never records.
 docs/tools.md describes every field."
   (let* ((sorted (sort (copy-list refs) #'%reference<))
          (count (length sorted))
@@ -618,7 +619,8 @@ docs/tools.md describes every field."
              "files_scanned" files-scanned
              "name_matches" name-matches
              "scan_skipped" scan-skipped
-             "via_macros" (coerce via-macros 'vector))))
+             "via_macros" (coerce via-macros 'vector)
+             "names_class" (json-bool names-class))))
 
 (defun %true-json-p (value)
   "True when VALUE, a JSON boolean as read here, is true: T or YASON:TRUE.
@@ -690,22 +692,27 @@ PLACE-REFERENCES-IN-SOURCE, which runs after this."
         (note (format nil "may reach ~A through macro ~A, whose expansion names it ~
                            (nothing confirms this use does)"
                       (gethash "resolved_symbol" report) macro-name))
-        (xref-decides-p (member (gethash "symbol_kind" report) *xref-decided-kinds*
-                                :test #'equal))
+        ;; A name that is also a class (DEFCLASS POINT beside DEFUN POINT)
+        ;; can be used as one in the template, which xref never records.
+        (xref-decides-p (and (member (gethash "symbol_kind" report) *xref-decided-kinds*
+                                     :test #'equal)
+                             (not (%true-json-p (gethash "names_class" report)))))
         (added '()))
     (dolist (ref refs)
       (setf (gethash (%reference-key ref) seen) t))
     ;; In a file changed since load, a use xref located no longer meets its
-    ;; source form, so it would look source-only: the form listed twice, and
-    ;; a use xref ruled out listed as may reach.  Such files add nothing;
-    ;; their stale references already say to reload.
+    ;; source form and looks source-only, so it can come out twice, or as may
+    ;; reach where xref ruled it out.  A FiveAM test there is still known only
+    ;; from the source, so the forms are kept, flagged stale and told to
+    ;; reload, rather than dropped without a word.
     (dolist (ref (sequence->list (gethash "refs" macro-report)))
-      (when (%true-json-p (gethash "stale" ref))
+      (when (and (%true-json-p (gethash "stale" ref))
+                 (stringp (gethash "abs_path" ref)))
         (setf (gethash (list :stale (gethash "abs_path" ref)) seen) t)))
     (dolist (ref (sequence->list (gethash "refs" macro-report)))
-      (let ((key (%reference-key ref)))
+      (let ((key (%reference-key ref))
+            (stale (gethash (list :stale (gethash "abs_path" ref)) seen)))
         (unless (or (gethash key seen)
-                    (gethash (list :stale (gethash "abs_path" ref)) seen)
                     (not (%unconfirmed-macro-use-p ref xref-decides-p))
                     (and (equal (gethash "form_type" ref) "defmacro")
                          (string-equal (gethash "form_name" ref) short-name)))
@@ -719,7 +726,10 @@ PLACE-REFERENCES-IN-SOURCE, which runs after this."
                   (gethash "call_sites" copy)
                   (remove "macro" (coerce (or (gethash "call_sites" ref) #()) 'vector)
                           :key (lambda (site) (gethash "kind" site)) :test-not #'equal)
-                  (gethash "note" copy) note)
+                  (gethash "stale" copy) (if stale t (gethash "stale" ref))
+                  (gethash "note" copy) (if stale
+                                            (format nil "~A; ~A" note *note-stale*)
+                                            note))
             (push copy added)))))
     (when added
       (let ((all (sort (append refs (nreverse added)) #'%reference<)))

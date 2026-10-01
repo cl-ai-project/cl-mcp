@@ -66,3 +66,18 @@
 (defun probe-class-user ()
   (with-probe-instance (p)
     p))
+
+;; A name that is both a function and a class: the template uses the class,
+;; which xref does not record even though the function's calls are recorded.
+(defun probe-point (x)
+  x)
+
+(defclass probe-point () ())
+
+(defmacro with-probe-point ((var) &body body)
+  `(let ((,var (make-instance 'probe-point)))
+     ,@body))
+
+(defun probe-point-user ()
+  (with-probe-point (p)
+    p))

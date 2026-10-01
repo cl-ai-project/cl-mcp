@@ -853,12 +853,19 @@ compiles a test's body: while the file loads, keeping no source location.")
                              pooled)
               (ok ref)
               (ok (and ref (equal "via-macro" (gethash "type" ref))))
-              (ok (and ref (search "may reach" (gethash "note" ref))))))))))
+              (ok (and ref (search "may reach" (gethash "note" ref)))))
+            (testing (format nil "and a name that is both a function and a class ~
+                                  (~:[inline~;pooled~])" pooled)
+              (ok (find "probe-point-user"
+                        (gethash "refs" (%call-references-tool
+                                         "cl-mcp-via-macro-fixture::probe-point" :pooled pooled))
+                        :key (lambda (ref) (gethash "form_name" ref)) :test #'equal))))))))
 
-(deftest code-find-references-adds-no-macro-uses-from-a-stale-file
+(deftest code-find-references-flags-macro-uses-from-a-stale-file
   ;; After an edit that is not reloaded, a file-compiled use's xref entry and
-  ;; its source form no longer meet, so it looked source-only: listed twice,
-  ;; and a use xref had ruled out came back as "may reach".
+  ;; its source form no longer meet, so source and xref cannot be told apart.
+  ;; Macro-reached forms from such a file are kept -- a FiveAM test is known
+  ;; from the source alone -- but flagged stale and told to reload.
   (if (uiop:os-macosx-p)
       (skip "XREF tests are unstable on macOS")
       (let* ((dir (uiop:ensure-directory-pathname
@@ -877,18 +884,26 @@ compiles a test's body: while the file loads, keeping no source location.")
                (let ((later (+ (- (file-write-date copy) 2208988800) 100)))
                  (uiop:symbol-call :sb-posix :utimes (namestring (truename copy)) later later))
                (dolist (pooled '(nil t))
-                 (let ((refs (coerce (gethash "refs" (%call-references-tool
-                                                      "cl-mcp-via-macro-fixture::probe-target"
-                                                      :pooled pooled))
-                                     'list)))
-                   (testing (format nil "no via-macro row from the stale file (~:[inline~;pooled~])"
-                                    pooled)
-                     (ok (notany (lambda (ref)
-                                   (and (equal "via-macro" (gethash "type" ref))
-                                        (member (gethash "form_name" ref)
-                                                '("probe-macro-caller" "probe-maybe-caller")
+                 (dolist (case '(("cl-mcp-via-macro-fixture::probe-target"
+                                  "probe-reached-through-the-macro")
+                                 ("cl-mcp-via-macro-fixture::probe-class" "probe-class-user")))
+                   (destructuring-bind (symbol expected) case
+                     (let* ((refs (coerce (gethash "refs" (%call-references-tool
+                                                           symbol :pooled pooled))
+                                          'list))
+                            (via (remove "via-macro" refs :key (lambda (ref) (gethash "type" ref))
+                                                          :test-not #'equal)))
+                       (testing (format nil "~A: the source-only use is kept (~:[inline~;pooled~])"
+                                        symbol pooled)
+                         (ok (find expected via :key (lambda (ref) (gethash "form_name" ref))
                                                 :test #'equal)))
-                                 refs))))))
+                       (testing (format nil "~A: every via-macro row from it says to reload ~
+                                             (~:[inline~;pooled~])" symbol pooled)
+                         (ok via)
+                         (ok (every (lambda (ref)
+                                      (and (eq t (gethash "stale" ref))
+                                           (search "reload" (gethash "note" ref))))
+                                    via))))))))
           (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)
           ;; Put the fixture's own definitions back where they were.
           (%load-xref-fixture *via-macro-fixture*)))))

@@ -1055,6 +1055,7 @@ CL-MCP/SRC/CODE-REFS-CORE:BUILD-REFERENCES-REPORT."
                      :xref-count (length entries)
                      :notes (%scan-notes scan)
                      :via-macros (macros-expanding-to forms)
+                     :names-class (and (find-class symbol nil) t)
                      common)))))))
 
 (declaim (ftype (function (string &key (:package (or null package symbol string))
