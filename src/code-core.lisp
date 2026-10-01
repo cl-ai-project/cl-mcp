@@ -18,6 +18,7 @@
                 #:qualified-symbol-name
                 #:symbol-kind
                 #:resolve-scan-forms
+                #:macros-expanding-to
                 #:merge-references
                 #:build-references-report)
   (:export #:code-find-definition
@@ -1052,6 +1053,7 @@ CL-MCP/SRC/CODE-REFS-CORE:BUILD-REFERENCES-REPORT."
                      :unresolved unresolved
                      :xref-count (length entries)
                      :notes (%scan-notes scan)
+                     :via-macros (macros-expanding-to forms)
                      common)))))))
 
 (declaim (ftype (function (string &key (:package (or null package symbol string))

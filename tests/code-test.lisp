@@ -715,6 +715,50 @@ worker handler, across both JSON boundaries) instead of a worker process."
               (ok (= 50 (gethash "limit" pooled)))
               (ok (= (min 50 (gethash "count" pooled)) (length (gethash "refs" pooled))))))))))
 
+(defparameter *via-macro-fixture*
+  (asdf:system-relative-pathname :cl-mcp "tests/fixtures/xref-via-macro/fixture.lisp")
+  "A test reaching its target only through a macro, compiled the way FiveAM
+compiles a test's body: while the file loads, keeping no source location.")
+
+(deftest code-find-references-follows-a-macro-to-the-tests-using-it
+  ;; A FiveAM test using a macro whose expansion calls the function was
+  ;; missing from refs and from Tests:: xref records the call, but the body
+  ;; was compiled with COMPILE while its fasl loaded, so it has no location.
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let ((*project-root* (uiop:pathname-directory-pathname *via-macro-fixture*)))
+        (%load-xref-fixture *via-macro-fixture*)
+        (dolist (pooled '(nil t))
+          (let* ((result (%call-references-tool "cl-mcp-via-macro-fixture::probe-target"
+                                                :pooled pooled))
+                 (text (gethash "text" (aref (gethash "content" result) 0)))
+                 (ref (find "probe-reached-through-the-macro" (gethash "refs" result)
+                            :key (lambda (ref) (gethash "form_name" ref)) :test #'equal)))
+            (testing (format nil "the test is listed as reached through the macro (~:[inline~;pooled~])"
+                             pooled)
+              (ok ref)
+              (ok (and ref (equal "test" (gethash "form_type" ref))))
+              (ok (and ref (equal "via-macro" (gethash "type" ref))))
+              (ok (and ref (equal "macro" (gethash "origin" ref))))
+              (ok (and ref (equal "CL-MCP-VIA-MACRO-FIXTURE::WITH-PROBE"
+                                  (gethash "via_macro" ref))))
+              (ok (and ref (search "through macro" (gethash "note" ref))))
+              (ok (search "(test probe-reached-through-the-macro) [via-macro] TEST" text) text))
+            (testing (format nil "and counted among the tests (~:[inline~;pooled~])" pooled)
+              (ok (find "probe-reached-through-the-macro" (gethash "tests" result)
+                        :key (lambda (test) (gethash "name" test)) :test #'equal))
+              (ok (search "probe-reached-through-the-macro"
+                          (subseq text (or (search "Tests:" text) 0)))))
+            (testing (format nil "direct references are unchanged (~:[inline~;pooled~])" pooled)
+              (ok (find "probe-direct-caller" (gethash "refs" result)
+                        :key (lambda (ref) (gethash "form_name" ref)) :test #'equal))
+              (ok (not (find-if (lambda (ref)
+                                  (and (equal "defmacro" (gethash "form_type" ref))
+                                       (equal "via-macro" (gethash "type" ref))))
+                                (gethash "refs" result)))
+                  "the macro's own definition is not listed as reached through itself")
+              (ok (= (length (gethash "refs" result)) (gethash "count" result)))))))))
+
 (deftest code-find-references-tool-relays-a-worker-failure-untouched
   (let* ((notice "The worker this session was using ended; its state is gone.")
          (result (%call-references-tool

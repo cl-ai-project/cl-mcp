@@ -12,7 +12,9 @@
                 #:scan-project
                 #:top-level-forms-at)
   (:import-from #:cl-mcp/src/code-refs-core
-                #:place-references-in-source)
+                #:sequence->list
+                #:place-references-in-source
+                #:add-macro-reached-references)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result #:arg-validation-error)
   (:import-from #:cl-mcp/src/tools/define-tool
@@ -95,6 +97,38 @@ worker wrote."
        (setf (aref value i) (%json-nulls->nil (aref value i)))))
     (t (if (eq value :null) nil value))))
 
+(defparameter *via-macros-followed* 5
+  "Most macros whose expansion names the symbol code-find-references follows to
+the forms using them; each one costs a source scan and a worker call.")
+
+(defun %error-report-p (report)
+  "True when REPORT is a proxy failure or reset notice rather than a payload."
+  (member (gethash "isError" report) '(t yason:true)))
+
+(defun %references-report (id symbol package project-only)
+  "Return the code-find-references payload for SYMBOL with every reference kept.
+The scan runs in this (parent) process on both paths: it needs eclector, which
+the worker image does not load.  It also validates SYMBOL.  So does placing the
+references the scan could not see (a call made by a macro expansion in a form
+that never names the symbol): the report comes back with every reference, is
+placed by the caller, and only then cut to its limit, so tests covers all of
+them.  With the worker pool the answer is the worker's, JSON types kept, or a
+proxy failure the caller relays."
+  (let ((scan (scan-project symbol)))
+    (if *use-worker-pool*
+        (proxy-to-worker id "worker/code-find-references"
+                         (make-ht "symbol" symbol
+                                  "package" package
+                                  "project_only" project-only
+                                  "limit" nil
+                                  "scan" scan)
+                         :preserve-json-types t)
+        (code-find-references-report symbol
+                                     :package package
+                                     :project-only project-only
+                                     :limit nil
+                                     :scan scan))))
+
 (define-tool "code-find-references"
   :description "Find who calls or references a symbol - its callers, the exact call sites
 inside them, and the tests that exercise it - to see what a change would affect
@@ -107,6 +141,9 @@ the project's source, so it also reports:
   used at top level (origin 'source')
 - calls that exist only inside a macro expansion (origin 'xref'), still named
   by the form they sit in, and counted as tests when that form is one
+- forms that use a project macro whose backquoted expansion names the symbol
+  (origin 'macro', type 'via-macro', 'via_macro' naming it), found from the
+  source even where xref keeps no location, as for a FiveAM test's body
 - the deftest a reference sits in, and a 'Tests:' line listing them
 Each result is one top-level form; its form_type and form_name can be passed
 straight to lisp-edit-form.  lisp-read-file's name_pattern is a regex, so
@@ -141,31 +178,24 @@ For plain text search without loading anything, use 'clgrep-search'."
       (error 'arg-validation-error
              :arg-name "limit"
              :message "limit must be a positive integer"))
-    ;; The scan runs in this (parent) process on both paths: it needs eclector,
-    ;; which the worker image does not load.  It also validates SYMBOL.  So
-    ;; does placing the references the scan could not see (a call made by a
-    ;; macro expansion in a form that never names the symbol): the report
-    ;; comes back with every reference, is placed here, and only then cut
-    ;; to LIMIT, so tests covers all of them.
-    (let* ((scan (scan-project symbol))
-           (report (if *use-worker-pool*
-                       (proxy-to-worker id "worker/code-find-references"
-                                        (make-ht "symbol" symbol
-                                                 "package" package
-                                                 "project_only" project-only
-                                                 "limit" nil
-                                                 "scan" scan)
-                                        :preserve-json-types t)
-                       (code-find-references-report symbol
-                                                    :package package
-                                                    :project-only project-only
-                                                    :limit nil
-                                                    :scan scan))))
-      (result id
-              (if (member (gethash "isError" report) '(t yason:true))
-                  ;; A proxy failure or a reset notice: relayed untouched.
-                  report
-                  (build-code-find-references-response
-                   (place-references-in-source (%json-nulls->nil report)
-                                               #'top-level-forms-at
-                                               :limit (or limit 50))))))))
+    ;; A form that reaches SYMBOL only by using a macro whose expansion names
+    ;; it is found the same way, by asking about each such macro in turn.  A
+    ;; proxy failure or a reset notice from any of those calls is relayed
+    ;; untouched: a reset is told by the call that met it, never dropped.
+    (result id
+            (block report
+              (let ((report (%references-report id symbol package project-only)))
+                (when (%error-report-p report)
+                  (return-from report report))
+                (setf report (%json-nulls->nil report))
+                (let ((macros (sequence->list (gethash "via_macros" report))))
+                  (dolist (macro (subseq macros 0 (min *via-macros-followed* (length macros))))
+                    (let ((macro-report (%references-report id macro nil project-only)))
+                      (when (%error-report-p macro-report)
+                        (return-from report macro-report))
+                      (add-macro-reached-references
+                       report macro (%json-nulls->nil macro-report)))))
+                (build-code-find-references-response
+                 (place-references-in-source report
+                                             #'top-level-forms-at
+                                             :limit (or limit 50))))))))
