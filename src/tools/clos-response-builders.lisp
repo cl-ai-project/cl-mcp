@@ -338,7 +338,9 @@ than \"matched\"/\"mismatched\"/\"unverified\" -- a future verifier version skew
 -- is clamped to \"unverified\" naming the unexpected value, never passed
 through as-is: the three-word contract holds regardless of what the worker
 sends.  A stale ENTRY (spec 3.1) never keeps a MATCHED verdict, and loses
-EDIT_GUARD along with FORM_TYPE/FORM_NAME/EDIT_UNIT when it does."
+EDIT_GUARD along with FORM_TYPE/FORM_NAME/EDIT_UNIT when it does; any other
+verdict on it is reported as UNVERIFIED with *NOTE-STALE* too, since its line
+may now point at a different form."
   (if (null result)
       (%set-source-match entry "unverified" *reason-verification-unavailable*)
       (let ((status (gethash "status" result))
@@ -364,8 +366,11 @@ EDIT_GUARD along with FORM_TYPE/FORM_NAME/EDIT_UNIT when it does."
           (t
            (%set-source-match entry "unverified"
                                (format nil "unexpected verifier status ~S" status))))))
-  (when (and (%true-p (gethash "stale" entry))
-             (equal (gethash "source_match" entry) "matched"))
+  ;; A stale entry's line was recorded for the text the image compiled, so
+  ;; whatever the verifier found there -- the same definition, another one,
+  ;; nothing it could confirm -- says more about the edit than about this
+  ;; definition: every verdict on it becomes "unverified" naming the reload.
+  (when (%true-p (gethash "stale" entry))
     (setf (gethash "form_type" entry) nil (gethash "form_name" entry) nil)
     (remhash "edit_unit" entry)
     (remhash "edit_guard" entry)

@@ -407,6 +407,31 @@ so arrays are lists and false is NIL."
       (ok (not (nth-value 1 (gethash "edit_guard" class)))
           "the edit_guard its matched verdict had is removed, not left behind"))))
 
+(deftest annotate-report-forms-names-the-reload-for-any-stale-entry
+  (testing "a stale entry whose line now holds another definition says to reload"
+    ;; After an edit that is not reloaded, a method's recorded line can land
+    ;; on a different form; the verifier's own reason ("no inline method
+    ;; matches", a mismatch) then describes the shift, not the definition.
+    (%load-fixture)
+    (let* ((*project-root* (asdf:system-source-directory :cl-mcp))
+           (report (clos-describe-report "cl-mcp-clos-fixture:area"))
+           (gf (aref (gethash "generic_functions" report) 0))
+           (text (uiop:read-file-string *fixture*))
+           (circle (1+ (count #\Newline text
+                              :end (search "(defmethod area ((shape circle))" text))))
+           (square (1+ (count #\Newline text
+                              :end (search "(defmethod area ((shape square))" text))))
+           (method (find circle (gethash "methods" gf)
+                         :key (lambda (m) (gethash "line" m)))))
+      ;; The square method's line: a different definition starts there.
+      (setf (gethash "stale" method) t
+            (gethash "line" method) square)
+      (annotate-report-forms report #'%verify-inline)
+      (ok (equal "unverified" (gethash "source_match" method)))
+      (ok (equal *note-stale* (gethash "source_match_reason" method))
+          (gethash "source_match_reason" method))
+      (ok (null (gethash "form_type" method))))))
+
 (deftest annotate-report-forms-falls-back-when-verify-fn-is-unavailable
   (testing "a verify-fn that signals never blocks the report"
     (%load-fixture)

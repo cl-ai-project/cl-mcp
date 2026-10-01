@@ -866,7 +866,9 @@ are not "matched" (null when it is):
   candidate at the line, or more than one of a `defgeneric`'s inline methods matching), a file
   that could not be read, or a file whose modification time is newer than what the image
   recorded (`stale`: true) — staleness never lets a would-be `matched` verdict stand, since the
-  form the image last saw and the form on disk now may no longer be the same one.
+  form the image last saw and the form on disk now may no longer be the same one; a stale entry is reported
+  `unverified` with "file changed since load; reload for accurate results" whatever the verifier found at
+  its line, which may now hold a different form.
 
 When no form starts on the recorded line at all, `note` says why (the file changed since it was
 loaded, or does not parse); that case is `unverified` too, with its own `source_match_reason`.
