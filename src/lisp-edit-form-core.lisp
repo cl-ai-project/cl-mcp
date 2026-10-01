@@ -178,8 +178,10 @@ turn (SETF |foo:bar|) into (setf bar), another function's name."
        (list (%normalize-string (car name))))
       ((consp name)
        (remove-duplicates
+        ;; %SIGNATURE-TEXT's pretty printer can still break a code-shaped
+        ;; name over lines; the listed name must be one line to round-trip.
         (list (%collapse-whitespace (%normalize-string name))
-              (%signature-text name))
+              (%collapse-whitespace (%signature-text name)))
         :test #'string=))
       (t (list (%normalize-string name))))))
 
@@ -496,20 +498,21 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
             (setf matches (nreverse matches))
             ;; A method's candidates include its lambda list without its
             ;; qualifiers, so "area ((s circle))" names both the primary
-            ;; method and the :around one.  When no index was given, a form
-            ;; whose full signature is exactly FORM-NAME wins over forms it
-            ;; only abbreviates.
-            (unless index
-              (let ((exact (remove-if-not
-                            (lambda (match)
-                              (member (car (last (%definition-candidates (cdr match) form-type)))
-                                      (if (%list-valued-name-p (cdr match) form-type)
-                                          list-targets
-                                          plain-targets)
-                                      :test #'string=))
-                            matches)))
-                (when exact
-                  (setf matches exact))))
+            ;; method and the :around one.  A form whose full signature is
+            ;; exactly FORM-NAME wins over forms it only abbreviates -- with
+            ;; an [N] index too: the "Multiple matches" listing numbers the
+            ;; list this leaves, so [N] must count that same list, or it
+            ;; picks a form the listing never showed.
+            (let ((exact (remove-if-not
+                          (lambda (match)
+                            (member (car (last (%definition-candidates (cdr match) form-type)))
+                                    (if (%list-valued-name-p (cdr match) form-type)
+                                        list-targets
+                                        plain-targets)
+                                    :test #'string=))
+                          matches)))
+              (when exact
+                (setf matches exact)))
             (cond
               ((null matches) (values nil nil))
               ((and index (< index (length matches))) (values (car (nth index matches)) nil))

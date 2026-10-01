@@ -672,6 +672,27 @@ Used to prove that a dry-run summary does not grow with the size of the file."
             (ok (search "(list x new)" (gethash "original" preview))
                 "(setf bar) is the plain one, never the |foo:bar| one")))))))
 
+(deftest lisp-edit-form-index-counts-the-forms-the-ambiguity-listing-shows
+  ;; [N] used to count every match while the listing counted only the exact
+  ;; ones, so [0] could edit a form the listing never showed.
+  (with-temp-file "tests/tmp/edit-form-index-listing.lisp"
+      (format nil "(defun (setf |Foo|) (v) :escaped)~%~%~
+                   (defun (setf foo) (v) :first)~%~%~
+                   (defun (setf foo) (v) :second)~%")
+    (lambda (path)
+      (flet ((original (name)
+               (gethash "original"
+                        (lisp-edit-form :file-path path :form-type "defun" :form-name name
+                                        :operation "replace" :dry-run t
+                                        :content "(defun (setf foo) (v) v)"))))
+        (let ((listing (handler-case (progn (original "(setf foo)") nil)
+                         (error (e) (princ-to-string e)))))
+          (ok (search "[0] (setf foo)" listing) listing)
+          (ok (search "[1] (setf foo)" listing) listing)
+          (ok (null (search "[2]" listing)) listing))
+        (ok (search ":first" (original "(setf foo)[0]")))
+        (ok (search ":second" (original "(setf foo)[1]")))))))
+
 (deftest lisp-edit-form-read-eval-disabled
   (testing "read-time evaluation is disabled when parsing source"
     (let* ((flag-path (project-path "tests/tmp/read-eval-flag"))
