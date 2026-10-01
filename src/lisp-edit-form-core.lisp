@@ -452,11 +452,11 @@ out-of-range index, or an ambiguous set of matches (naming each candidate's
 own signature and its [N] index).  A FORM-NAME that strips down to the empty
 string is also reported this way, before any node is searched."
   (multiple-value-bind (base-name index)
-      (let ((match (nth-value 1 (scan-to-strings "^(.+?)\\[(\\d+)\\]$" form-name))))
+      ;; (?s): a name broken over lines still carries its [N] suffix.
+      (let ((match (nth-value 1 (scan-to-strings "(?s)^(.+?)\\[(\\d+)\\]$" form-name))))
         (if match
-            (values (string-trim '(#\Space #\Tab #\Newline #\Return) (aref match 0))
-                    (parse-integer (aref match 1)))
-            (values (string-trim '(#\Space #\Tab #\Newline #\Return) form-name) nil)))
+            (values (aref match 0) (parse-integer (aref match 1)))
+            (values form-name nil)))
     (let* ((stripped (%strip-hash-colon (string-downcase (%strip-name-prefix base-name))))
            ;; A method's signature and a list-valued name are compared as
            ;; %DEFINITION-CANDIDATES writes them: whitespace collapsed, no
@@ -465,18 +465,28 @@ string is also reported this way, before any node is searched."
            ;; form whose name IS a list only: a string name such as
            ;; "(pkg:value)" is compared as written, so "(pkg:value)" never
            ;; selects (defthing "(value)").
+           ;; Whitespace around a symbol or string name is part of it ("foo "
+           ;; is not "foo"); only the method and list readings, which
+           ;; collapse whitespace anyway, see the name trimmed.
+           (trimmed (string-trim '(#\Space #\Tab #\Newline #\Return #\Page) stripped))
+           (list-reading-p (and (string/= form-type "defmethod")
+                                (plusp (length trimmed))
+                                (char= (char trimmed 0) #\()))
            (target (if (string= form-type "defmethod")
-                       (%normalize-form-name-text stripped)
+                       (%normalize-form-name-text trimmed)
                        stripped))
-           (list-targets (if (and (string/= form-type "defmethod")
-                                  (plusp (length stripped))
-                                  (char= (char stripped 0) #\())
+           (list-targets (if list-reading-p
                              (remove-duplicates
                               (list stripped
                                     (%collapse-whitespace stripped)
-                                    (%normalize-form-name-text stripped))
+                                    (%normalize-form-name-text trimmed))
                               :test #'string=)
                              (list target)))
+           ;; The form_name a "Multiple matches" listing spells for [N]: on
+           ;; one line where whitespace does not matter, as given elsewhere.
+           (listed-name (if (or list-reading-p (string= form-type "defmethod"))
+                            (%collapse-whitespace base-name)
+                            base-name))
            (plain-targets (list target))
            (matches nil))
       (if (zerop (length target))
@@ -530,7 +540,7 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
                                        ;; so the whole string to pass is spelled out.
                                        (format nil "[~D] ~A  (form_name ~S)" i
                                                (or (car (last candidates)) (first candidates))
-                                               (format nil "~A[~D]" base-name i))))))
+                                               (format nil "~A[~D]" listed-name i))))))
                  (values nil (format nil "Multiple matches for ~A ~A. Specify an index:~%~{  ~A~%~}"
                                      form-type form-name descriptions))))))))))
 

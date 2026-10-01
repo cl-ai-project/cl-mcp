@@ -709,6 +709,40 @@ Used to prove that a dry-run summary does not grow with the size of the file."
             "leading whitespace does not hide a list-valued name")
         (ok (search "form_name \"(setf foo)[1]\"" listing) listing)))))
 
+(deftest lisp-edit-form-whitespace-in-names-is-kept-where-it-names-something
+  (flet ((original (path type name)
+           (handler-case
+               (gethash "original"
+                        (lisp-edit-form :file-path path :form-type type :form-name name
+                                        :operation "replace" :dry-run t
+                                        :content "(defthing \"x\" 1)"))
+             (error (e) (princ-to-string e)))))
+    (testing "a string name's own spaces still tell it apart"
+      (with-temp-file "tests/tmp/edit-form-spaced-string-names.lisp"
+          (format nil "(defmacro defthing (name &body body) `(list ,name ,@body))~%~%~
+                       (defthing \"foo\" :a)~%~%(defthing \"foo \" :b)~%~%(defthing \" /x \" :c)~%")
+        (lambda (path)
+          (ok (search ":b" (original path "defthing" "foo ")))
+          (ok (search ":a" (original path "defthing" "foo")))
+          (ok (search ":c" (original path "defthing" " /x "))))))
+    (testing "the form_name a listing spells round-trips for a multi-line name"
+      (with-temp-file "tests/tmp/edit-form-multiline-index.lisp"
+          (format nil "(defmethod foo ((x t)) :first)~%~%(defmethod foo ((x t)) :second)~%~%~
+                       (defun (setf bar) (v) :one)~%~%(defun (setf bar) (v) :two)~%")
+        (lambda (path)
+          (dolist (case (list (list "defmethod" (format nil "foo~%  ((x t))") ":second")
+                              (list "defun" (format nil "(setf~%  bar)") ":two")))
+            (destructuring-bind (type name expected) case
+              (let* ((listing (original path type name))
+                     (start (search "(form_name \"" listing :from-end t))
+                     (spelled (and start
+                                   (read-from-string listing t nil
+                                                     :start (+ start (length "(form_name "))))))
+                (ok (stringp spelled) listing)
+                (ok (and (stringp spelled) (null (find #\Newline spelled))) spelled)
+                (ok (and (stringp spelled) (search expected (original path type spelled)))
+                    spelled)))))))))
+
 (deftest lisp-edit-form-read-eval-disabled
   (testing "read-time evaluation is disabled when parsing source"
     (let* ((flag-path (project-path "tests/tmp/read-eval-flag"))
