@@ -759,6 +759,46 @@ compiles a test's body: while the file loads, keeping no source location.")
                   "the macro's own definition is not listed as reached through itself")
               (ok (= (length (gethash "refs" result)) (gethash "count" result)))))))))
 
+(deftest code-find-references-follows-only-real-macro-uses
+  (if (uiop:os-macosx-p)
+      (skip "XREF tests are unstable on macOS")
+      (let* ((*project-root* (uiop:pathname-directory-pathname *via-macro-fixture*))
+             ;; Forms sharing a line are written here: lisp-edit-form puts each
+             ;; form it inserts on a line of its own, so the fixture cannot hold them.
+             (same-line (merge-pathnames "same-line.lisp" *project-root*)))
+        (with-open-file (out same-line :direction :output :if-exists :supersede)
+          (format out "(in-package #:cl-mcp-via-macro-fixture)~%~%~
+(test probe-same-line-direct (probe-target 1)) (test probe-same-line-via (with-probe (v 1) v))~%~%~
+(test probe-pair-a (with-probe (v 1) v)) (test probe-pair-b (with-probe (v 2) v))~%"))
+        (unwind-protect
+             (progn
+               (%load-xref-fixture *via-macro-fixture*)
+               (%load-xref-fixture same-line)
+               (dolist (pooled '(nil t))
+                 (let* ((result (%call-references-tool "cl-mcp-via-macro-fixture::probe-target"
+                                                       :pooled pooled))
+                        (refs (coerce (gethash "refs" result) 'list))
+                        (tests (map 'list (lambda (test) (gethash "name" test))
+                                    (gethash "tests" result))))
+                   (flet ((named (name)
+                            (remove name refs :key (lambda (ref) (gethash "form_name" ref))
+                                              :test-not #'equal)))
+                     (testing (format nil "a test that only quotes the macro is not a reference ~
+                                           (~:[inline~;pooled~])" pooled)
+                       (ok (null (named "probe-only-quotes-the-macro")))
+                       (ok (not (member "probe-only-quotes-the-macro" tests :test #'equal))))
+                     (testing (format nil "forms sharing a line are each listed (~:[inline~;pooled~])"
+                                      pooled)
+                       (dolist (name '("probe-same-line-direct" "probe-same-line-via"
+                                       "probe-pair-a" "probe-pair-b"))
+                         (ok (= 1 (length (named name))) name)
+                         (ok (member name tests :test #'equal) name)))
+                     (testing (format nil "a form xref also locates is listed once ~
+                                           (~:[inline~;pooled~])" pooled)
+                       (ok (= 1 (length (named "probe-macro-caller")))))
+                     (ok (= (length refs) (gethash "count" result)))))))
+          (ignore-errors (delete-file same-line))))))
+
 (deftest code-find-references-tool-relays-a-worker-failure-untouched
   (let* ((notice "The worker this session was using ended; its state is gone.")
          (result (%call-references-tool

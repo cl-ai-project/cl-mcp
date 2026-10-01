@@ -27,3 +27,11 @@
 
 (defun probe-direct-caller ()
   (probe-target 3))
+
+;; Only quotes the macro's name: nothing expands, so nothing reaches the target.
+(test probe-only-quotes-the-macro
+  (equal '(with-probe (v 1) v) (list 'with-probe)))
+
+;; Compiled from the file, so xref locates its call too: listed once.
+(defun probe-macro-caller ()
+  (with-probe (v 5) v))

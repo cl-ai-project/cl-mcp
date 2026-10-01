@@ -189,12 +189,19 @@ For plain text search without loading anything, use 'clgrep-search'."
                   (return-from report report))
                 (setf report (%json-nulls->nil report))
                 (let ((macros (sequence->list (gethash "via_macros" report))))
+                  (when macros
+                    ;; Both sides are placed before they are compared, so a
+                    ;; form xref found but did not name meets the same form
+                    ;; found through the macro instead of being listed twice.
+                    (place-references-in-source report #'top-level-forms-at :limit nil))
                   (dolist (macro (subseq macros 0 (min *via-macros-followed* (length macros))))
                     (let ((macro-report (%references-report id macro nil project-only)))
                       (when (%error-report-p macro-report)
                         (return-from report macro-report))
                       (add-macro-reached-references
-                       report macro (%json-nulls->nil macro-report)))))
+                       report macro
+                       (place-references-in-source (%json-nulls->nil macro-report)
+                                                   #'top-level-forms-at :limit nil)))))
                 (build-code-find-references-response
                  (place-references-in-source report
                                              #'top-level-forms-at

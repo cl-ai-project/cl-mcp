@@ -611,19 +611,38 @@ docs/tools.md describes every field."
              "scan_skipped" scan-skipped
              "via_macros" (coerce via-macros 'vector))))
 
+(defun %reference-key (ref)
+  "Return the key telling REF's form apart from every other: its file, the line
+it starts on, and its form_type and form_name -- two forms can start on one
+line."
+  (list (gethash "abs_path" ref) (gethash "line" ref)
+        (gethash "form_type" ref) (gethash "form_name" ref)))
+
+(defun %uses-macro-p (ref)
+  "True when REF, a reference to a macro, is a use of it that expands: xref
+recorded a macroexpansion there, or the source holds a site of kind macro.  A
+form that only quotes the macro's name, or names it in a backquote template,
+does not."
+  (find "macro" (sequence->list (gethash "types" ref)) :test #'equal))
+
 (defun add-macro-reached-references (report macro-name macro-report)
   "Add to REPORT the forms that reach its symbol only by using MACRO-NAME.
 Returns REPORT, changed in place.
 
 REPORT and MACRO-REPORT are BUILD-REFERENCES-REPORT payloads built with a LIMIT
-of NIL, the second about MACRO-NAME, one of REPORT's via_macros.  Each form
-using the macro expands into a reference to REPORT's symbol without writing
-its name, so the source scan never meets it, and xref meets it only when its
-code was compiled from a file: a FiveAM test's body is compiled while its fasl
-loads and keeps no source location.  Such a form is added with type
-\"via-macro\", origin \"macro\", a note naming the macro, and the macro's own
-call sites, which say where the expansion happens.  A form REPORT already holds
-(same abs_path and line) is left as it is, and so is the macro's own DEFMACRO.
+of NIL and already placed (PLACE-REFERENCES-IN-SOURCE), the second about
+MACRO-NAME, one of REPORT's via_macros.  Each form using the macro expands
+into a reference to REPORT's symbol without writing its name, so the source
+scan never meets it, and xref meets it only when its code was compiled from a
+file: a FiveAM test's body is compiled while its fasl loads and keeps no source
+location.  Such a form is added with type \"via-macro\", origin \"macro\", a
+note naming the macro, and the macro's own call sites of kind macro, which say
+where the expansion happens.
+
+Only uses that expand count (%USES-MACRO-P): a form that merely quotes the
+macro's name reaches nothing.  A form REPORT already holds -- the same file,
+line, form_type and form_name (%REFERENCE-KEY), since two forms can start on
+one line -- is left as it is, and so is the macro's own DEFMACRO.
 
 count and file_count are recomputed; tests, the order and LIMIT are left to
 PLACE-REFERENCES-IN-SOURCE, which runs after this."
@@ -635,10 +654,11 @@ PLACE-REFERENCES-IN-SOURCE, which runs after this."
                       (gethash "resolved_symbol" report) macro-name))
         (added '()))
     (dolist (ref refs)
-      (setf (gethash (list (gethash "abs_path" ref) (gethash "line" ref)) seen) t))
+      (setf (gethash (%reference-key ref) seen) t))
     (dolist (ref (sequence->list (gethash "refs" macro-report)))
-      (let ((key (list (gethash "abs_path" ref) (gethash "line" ref))))
+      (let ((key (%reference-key ref)))
         (unless (or (gethash key seen)
+                    (not (%uses-macro-p ref))
                     (and (equal (gethash "form_type" ref) "defmacro")
                          (equal (gethash "form_name" ref) short-name)))
           (setf (gethash key seen) t)
@@ -648,6 +668,9 @@ PLACE-REFERENCES-IN-SOURCE, which runs after this."
                   (gethash "types" copy) (vector "via-macro")
                   (gethash "origin" copy) "macro"
                   (gethash "via_macro" copy) macro-name
+                  (gethash "call_sites" copy)
+                  (remove "macro" (coerce (or (gethash "call_sites" ref) #()) 'vector)
+                          :key (lambda (site) (gethash "kind" site)) :test-not #'equal)
                   (gethash "note" copy) note)
             (push copy added)))))
     (when added
