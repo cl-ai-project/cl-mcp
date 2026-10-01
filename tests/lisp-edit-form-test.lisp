@@ -636,6 +636,23 @@ Used to prove that a dry-run summary does not grow with the size of the file."
                        (defthing \"(pkg:value)\" 1)~%")
         (lambda (path)
           (ok (eq t (addresses-p path "defthing" "(pkg:value)"))))))
+    (testing "a string name is never matched by another string's normalized text"
+      (with-temp-file "tests/tmp/edit-form-paren-string-names.lisp"
+          (format nil "(defmacro defthing (name &body body) `(list ,name ,@body))~%~%~
+                       (defthing \"(value)\" :short)~%~%~
+                       (defthing \"(pkg:value)\" :qualified)~%")
+        (lambda (path)
+          (let ((preview (lisp-edit-form :file-path path :form-type "defthing"
+                                         :form-name "(pkg:value)" :operation "replace"
+                                         :dry-run t :content "(defthing \"x\" 1)")))
+            (ok (search ":qualified" (gethash "original" preview))
+                "(pkg:value) picks its own form, without an ambiguity error")))))
+      (with-temp-file "tests/tmp/edit-form-paren-string-name-only-short.lisp"
+          (format nil "(defmacro defthing (name &body body) `(list ,name ,@body))~%~%~
+                       (defthing \"(value)\" :short)~%")
+        (lambda (path)
+          (ok (stringp (addresses-p path "defthing" "(pkg:value)"))
+              "\"(value)\" is not \"(pkg:value)\"")))
     (testing "a name the listing writes with |...| escapes addresses its form"
       (with-temp-file "tests/tmp/edit-form-escaped-setf-name.lisp"
           (format nil "(defun (setf |foo:bar|) (new x) (list new x))~%~%~

@@ -183,6 +183,15 @@ turn (SETF |foo:bar|) into (setf bar), another function's name."
         :test #'string=))
       (t (list (%normalize-string name))))))
 
+(defun %list-valued-name-p (form form-type)
+  "True when FORM's name is a list %DEFINITION-CANDIDATES writes with
+%SIGNATURE-TEXT -- a DECLAIM's declaration, a (SETF NAME) function -- rather
+than a symbol, a string, a method signature or a DEFSTRUCT's (NAME OPTIONS...)."
+  (let ((name (second form)))
+    (and (consp name)
+         (string/= form-type "defmethod")
+         (not (and (string= form-type "defstruct") (symbolp (car name)))))))
+
 (defun %whitespace-char-p (ch)
   (member ch '(#\Space #\Tab #\Newline #\Return)))
 
@@ -448,22 +457,24 @@ string is also reported this way, before any node is searched."
     (let* ((stripped (%strip-hash-colon (string-downcase (%strip-name-prefix base-name))))
            ;; A method's signature and a list-valued name are compared as
            ;; %DEFINITION-CANDIDATES writes them: whitespace collapsed, no
-           ;; package prefixes.  A name that only looks like a list -- a
-           ;; string such as "(pkg:value)" -- must still match as written, so
-           ;; for those the text as given is tried too, and so is the text
-           ;; with only its whitespace collapsed (an earlier listing's form).
+           ;; package prefixes; the text with only its whitespace collapsed
+           ;; is an earlier listing's form.  Those readings are offered to a
+           ;; form whose name IS a list only: a string name such as
+           ;; "(pkg:value)" is compared as written, so "(pkg:value)" never
+           ;; selects (defthing "(value)").
            (target (if (string= form-type "defmethod")
                        (%normalize-form-name-text stripped)
                        stripped))
-           (targets (if (and (string/= form-type "defmethod")
-                             (plusp (length stripped))
-                             (char= (char stripped 0) #\())
-                        (remove-duplicates
-                         (list stripped
-                               (%collapse-whitespace stripped)
-                               (%normalize-form-name-text stripped))
-                         :test #'string=)
-                        (list target)))
+           (list-targets (if (and (string/= form-type "defmethod")
+                                  (plusp (length stripped))
+                                  (char= (char stripped 0) #\())
+                             (remove-duplicates
+                              (list stripped
+                                    (%collapse-whitespace stripped)
+                                    (%normalize-form-name-text stripped))
+                              :test #'string=)
+                             (list target)))
+           (plain-targets (list target))
            (matches nil))
       (if (zerop (length target))
           (values nil (format nil "form_name resolved to empty string after prefix stripping; ~
@@ -475,9 +486,12 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
                     do (let ((value (cst-node-value node)))
                          (when (and (consp value)
                                     (string= (string-downcase (symbol-name (car value))) form-type)
-                                    (some (lambda (cand)
-                                            (member cand targets :test #'string=))
-                                          (%definition-candidates value form-type)))
+                                    (let ((targets (if (%list-valued-name-p value form-type)
+                                                       list-targets
+                                                       plain-targets)))
+                                      (some (lambda (cand)
+                                              (member cand targets :test #'string=))
+                                            (%definition-candidates value form-type))))
                            (push (cons node value) matches))))
             (setf matches (nreverse matches))
             ;; A method's candidates include its lambda list without its
@@ -489,7 +503,10 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
               (let ((exact (remove-if-not
                             (lambda (match)
                               (member (car (last (%definition-candidates (cdr match) form-type)))
-                                      targets :test #'string=))
+                                      (if (%list-valued-name-p (cdr match) form-type)
+                                          list-targets
+                                          plain-targets)
+                                      :test #'string=))
                             matches)))
                 (when exact
                   (setf matches exact))))
