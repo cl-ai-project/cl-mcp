@@ -9,6 +9,9 @@
                 #:make-string-hash-table)
   (:import-from #:yason
                 #:false)
+  ;; Every tool response passes through this module, parent and worker alike,
+  ;; so loading the shim here covers all yason:true/false and :null uses.
+  (:import-from #:cl-mcp/src/yason-compat)
   (:export #:make-ht
            #:result
            #:rpc-error
