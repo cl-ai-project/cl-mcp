@@ -35,3 +35,22 @@
 ;; Compiled from the file, so xref locates its call too: listed once.
 (defun probe-macro-caller ()
   (with-probe (v 5) v))
+
+;; Uses a local WITH-PROBE whose expansion never names the target.
+(test probe-shadowed-by-macrolet
+  (macrolet ((with-probe ((var value) &body body)
+               `(let ((,var ,value)) ,@body)))
+    (with-probe (v 1) v)))
+
+;; Names the target in one branch of its expansion only.
+(defmacro maybe-probe (enabled)
+  (if enabled `(probe-target 1) `(identity 1)))
+
+;; Compiled while loading: no xref location, so it can only be listed as a
+;; form that may reach the target.
+(test probe-maybe-off
+  (maybe-probe nil))
+
+;; Compiled from the file: xref says this use does not reach the target.
+(defun probe-maybe-caller ()
+  (maybe-probe nil))

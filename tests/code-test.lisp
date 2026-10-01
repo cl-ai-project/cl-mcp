@@ -796,6 +796,19 @@ compiles a test's body: while the file loads, keeping no source location.")
                      (testing (format nil "a form xref also locates is listed once ~
                                            (~:[inline~;pooled~])" pooled)
                        (ok (= 1 (length (named "probe-macro-caller")))))
+                     (testing (format nil "a use a macrolet shadows is not followed ~
+                                           (~:[inline~;pooled~])" pooled)
+                       (ok (null (named "probe-shadowed-by-macrolet")))
+                       (ok (not (member "probe-shadowed-by-macrolet" tests :test #'equal))))
+                     (testing (format nil "xref decides for a file-compiled use; without it the ~
+                                           form is only said to maybe reach (~:[inline~;pooled~])"
+                                      pooled)
+                       (ok (null (named "probe-maybe-caller"))
+                           "xref records no call there, so the use is not listed")
+                       (let ((ref (first (named "probe-maybe-off"))))
+                         (ok ref)
+                         (ok (and ref (search "may reach" (gethash "note" ref)))
+                             (and ref (gethash "note" ref)))))
                      (ok (= (length refs) (gethash "count" result)))))))
           (ignore-errors (delete-file same-line))))))
 

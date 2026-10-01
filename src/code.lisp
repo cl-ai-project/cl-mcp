@@ -141,9 +141,10 @@ the project's source, so it also reports:
   used at top level (origin 'source')
 - calls that exist only inside a macro expansion (origin 'xref'), still named
   by the form they sit in, and counted as tests when that form is one
-- forms that use a project macro whose backquoted expansion names the symbol
-  (origin 'macro', type 'via-macro', 'via_macro' naming it), found from the
-  source even where xref keeps no location, as for a FiveAM test's body
+- forms that use a project macro whose backquoted expansion names the symbol,
+  where xref keeps no location to say whether this use reaches it (a FiveAM
+  test's body): origin 'macro', type 'via-macro', 'via_macro' naming it, and a
+  note saying the form MAY reach the symbol
 - the deftest a reference sits in, and a 'Tests:' line listing them
 Each result is one top-level form; its form_type and form_name can be passed
 straight to lisp-edit-form.  lisp-read-file's name_pattern is a regex, so

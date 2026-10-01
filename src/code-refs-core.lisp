@@ -618,15 +618,24 @@ line."
   (list (gethash "abs_path" ref) (gethash "line" ref)
         (gethash "form_type" ref) (gethash "form_name" ref)))
 
-(defun %uses-macro-p (ref)
-  "True when REF, a reference to a macro, is a use of it that expands: xref
-recorded a macroexpansion there, or the source holds a site of kind macro.  A
-form that only quotes the macro's name, or names it in a backquote template,
-does not."
-  (find "macro" (sequence->list (gethash "types" ref)) :test #'equal))
+(defun %unconfirmed-macro-use-p (ref)
+  "True when REF, a reference to a macro, is a use of the global macro that only
+the source can show.
+
+A use xref located (origin xref or xref+source) is left to xref: that form's
+code was compiled from its file, so the target's own xref already says whether
+the expansion reaches the target there -- and a template naming the target
+shows only that some expansion may.  Of the rest, only a site of kind macro
+that no flet, labels or macrolet shadows is a use of the global macro; a
+quoted name or a backquote template expands nothing."
+  (and (equal (gethash "origin" ref) "source")
+       (some (lambda (site)
+               (and (equal (gethash "kind" site) "macro")
+                    (null (gethash "shadowed_by" site))))
+             (sequence->list (gethash "call_sites" ref)))))
 
 (defun add-macro-reached-references (report macro-name macro-report)
-  "Add to REPORT the forms that reach its symbol only by using MACRO-NAME.
+  "Add to REPORT the forms that may reach its symbol only by using MACRO-NAME.
 Returns REPORT, changed in place.
 
 REPORT and MACRO-REPORT are BUILD-REFERENCES-REPORT payloads built with a LIMIT
@@ -639,8 +648,12 @@ location.  Such a form is added with type \"via-macro\", origin \"macro\", a
 note naming the macro, and the macro's own call sites of kind macro, which say
 where the expansion happens.
 
-Only uses that expand count (%USES-MACRO-P): a form that merely quotes the
-macro's name reaches nothing.  A form REPORT already holds -- the same file,
+Only an unshadowed use that xref could not locate counts
+(%UNCONFIRMED-MACRO-USE-P): a quoted name or a macrolet's local macro expands
+nothing of MACRO-NAME's, and a use xref located is decided by the target's own
+xref.  A template naming the symbol shows only that some expansion may reach it
+-- (if flag `(target) `(other)) -- so each added form says \"may reach\", not
+that it does.  A form REPORT already holds -- the same file,
 line, form_type and form_name (%REFERENCE-KEY), since two forms can start on
 one line -- is left as it is, and so is the macro's own DEFMACRO.
 
@@ -650,7 +663,8 @@ PLACE-REFERENCES-IN-SOURCE, which runs after this."
         (seen (make-hash-table :test #'equal))
         (short-name (string-downcase
                      (subseq macro-name (1+ (or (position #\: macro-name :from-end t) -1)))))
-        (note (format nil "reaches ~A through macro ~A"
+        (note (format nil "may reach ~A through macro ~A, whose expansion names it ~
+                           (no xref record of this use to confirm it)"
                       (gethash "resolved_symbol" report) macro-name))
         (added '()))
     (dolist (ref refs)
@@ -658,7 +672,7 @@ PLACE-REFERENCES-IN-SOURCE, which runs after this."
     (dolist (ref (sequence->list (gethash "refs" macro-report)))
       (let ((key (%reference-key ref)))
         (unless (or (gethash key seen)
-                    (not (%uses-macro-p ref))
+                    (not (%unconfirmed-macro-use-p ref))
                     (and (equal (gethash "form_type" ref) "defmacro")
                          (equal (gethash "form_name" ref) short-name)))
           (setf (gethash key seen) t)
