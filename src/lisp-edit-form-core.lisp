@@ -97,12 +97,22 @@ Uses SYMBOL-NAME for symbols to avoid package prefix in the output."
   "Return TREE with each symbol outside COMMON-LISP and KEYWORD replaced by an
 uninterned symbol of the same name, so %SIGNATURE-TEXT prints it bare.
 COMMON-LISP symbols are kept so the pretty printer still writes (QUOTE X) as
-'X; they print without a prefix from COMMON-LISP-USER anyway."
+'X; they print without a prefix from COMMON-LISP-USER anyway.
+A list's spine is walked iteratively, so a long literal list -- a data form's
+quoted table, say -- costs no stack depth; only nesting does."
   (let ((cl (find-package "COMMON-LISP"))
         (keyword (find-package "KEYWORD")))
     (labels ((walk (node)
                (cond
-                 ((consp node) (cons (walk (car node)) (walk (cdr node))))
+                 ((consp node)
+                  (let* ((head (list (walk (car node))))
+                         (tail head))
+                    (loop for rest = (cdr node) then (cdr rest)
+                          while (consp rest)
+                          do (setf (cdr tail) (list (walk (car rest)))
+                                   tail (cdr tail))
+                          finally (setf (cdr tail) (and rest (walk rest))))
+                    head))
                  ((and (symbolp node)
                        (not (member (symbol-package node) (list cl keyword))))
                   (make-symbol (symbol-name node)))
@@ -158,6 +168,24 @@ was read in."
                            (format nil "~A ~A ~A" name-str qual-str
                                    lambda-str))))))))
 
+(defparameter *signature-text-max-conses* 2000
+  "Most conses a list-valued name may hold for %DEFINITION-CANDIDATES to write
+it with %SIGNATURE-TEXT.  A real name -- a declaration, (SETF NAME) -- is far
+smaller; a larger one is a data form, given only its PRINC text.")
+
+(defun %conses-within-p (tree limit)
+  "True when TREE holds at most LIMIT conses, counted without recursing on a
+list's spine and stopping as soon as LIMIT is passed."
+  (let ((count 0))
+    (labels ((walk (node)
+               (loop while (consp node)
+                     do (when (> (incf count) limit)
+                          (return-from %conses-within-p nil))
+                        (walk (car node))
+                        (setf node (cdr node)))))
+      (walk tree)
+      t)))
+
 (defun %definition-candidates (form form-type)
   "Return candidate strings that identify FORM with FORM-TYPE.
 The last one is the name a \"not found\" listing shows.  A list-valued name --
@@ -176,6 +204,11 @@ turn (SETF |foo:bar|) into (setf bar), another function's name."
       ;; defstruct: (defstruct (name &rest options) ...) — first element is the name
       ((and (string= form-type "defstruct") (listp name) (symbolp (car name)))
        (list (%normalize-string (car name))))
+      ;; A name too large to be one -- a data form's quoted table -- gets
+      ;; only the PRINC text: the pretty printer would spend seconds on it
+      ;; for every "not found" listing of the file.
+      ((and (consp name) (not (%conses-within-p name *signature-text-max-conses*)))
+       (list (%collapse-whitespace (%normalize-string name))))
       ((consp name)
        (remove-duplicates
         ;; %SIGNATURE-TEXT's pretty printer can still break a code-shaped

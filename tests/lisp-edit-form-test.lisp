@@ -774,6 +774,22 @@ Used to prove that a dry-run summary does not grow with the size of the file."
               (ok (search ":list-2" (original path "defthing" (second hints)))
                   (second hints)))))))))
 
+(deftest lisp-edit-form-not-found-listing-survives-a-long-literal-list
+  ;; %NAMES-ONLY recursed on the cdr, so a top-level form whose second
+  ;; element is a long list exhausted the stack while the "not found"
+  ;; listing was built.
+  (with-temp-file "tests/tmp/edit-form-long-literal-list.lisp"
+      (format nil "(defun foo () 1)~%~%(register-data '(~{~D~^ ~}))~%"
+              (loop for i below 100000 collect i))
+    (lambda (path)
+      (let ((message (handler-case
+                         (progn (lisp-edit-form :file-path path :form-type "defun"
+                                                :form-name "bar" :operation "replace"
+                                                :dry-run t :content "(defun bar () 2)")
+                                nil)
+                       (error (e) (princ-to-string e)))))
+        (ok (and message (search "Its defun forms are: (defun foo)." message)) message)))))
+
 (deftest lisp-edit-form-read-eval-disabled
   (testing "read-time evaluation is disabled when parsing source"
     (let* ((flag-path (project-path "tests/tmp/read-eval-flag"))
