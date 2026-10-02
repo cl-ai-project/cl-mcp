@@ -10,5 +10,7 @@
 (in-package #:cl-mcp/tests/test-runner-test-direct-assertion)
 
 (deftest direct-assertion-failure
-  ;; No (testing ...) wrapper — assertion lives directly in deftest body
-  (ok (= 3 4) "3 should equal 4"))
+  ;; No (testing ...) wrapper — assertion lives directly in deftest body.
+  ;; FOUR is this package's own symbol: the report prints it unqualified.
+  (let ((four 4))
+    (ok (= 3 four) "3 should equal 4")))

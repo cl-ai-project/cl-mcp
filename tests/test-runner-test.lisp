@@ -516,7 +516,20 @@
     ;; function exists to avoid.
     (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
                    :test-name "t" :form "truthy")))
-      (ok (equal "\"truthy\"" (gethash "form" detail))))))
+      (ok (equal "\"truthy\"" (gethash "form" detail)))))
+  (testing "symbols print as the test's own package reads them"
+    ;; Printed from CL-USER, a test's local came out as PKG::NAME.
+    (let* ((package (find-package '#:cl-mcp/tests/test-runner-test))
+           (local (intern "PROBE-LOCAL" package))
+           (detail (cl-mcp/src/test-runner-core::make-failure-detail
+                    :test-name "t" :form (list '= 1 local) :values (list local)
+                    :package package)))
+      (ok (equal "(= 1 PROBE-LOCAL)" (gethash "form" detail)))
+      (ok (equal '("PROBE-LOCAL") (coerce (gethash "values" detail) 'list)))))
+  (testing "without a package the form keeps qualifying what CL-USER cannot read"
+    (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
+                   :test-name "t" :form (list '= 1 'cl-mcp/src/test-runner-core::%source-text))))
+      (ok (search "CL-MCP/SRC/TEST-RUNNER-CORE::%SOURCE-TEXT" (gethash "form" detail))))))
 
 (deftest run-tests-keeps-the-quotes-on-a-string-assertion-form
   (testing "a real Rove failure whose form is a bare string reports it quoted"
@@ -545,7 +558,19 @@
           (ok (search "3 should equal 4" desc)
               "Description should contain the ok message"))
         (let ((form (gethash "form" failure)))
-          (ok (stringp form) "Should include assertion form"))))))
+          (ok (stringp form) "Should include assertion form")
+          (ok (equal "(= 3 FOUR)" form)
+              "the test's own local prints unqualified, as it is written")))))
+  (testing "a selected run prints the form relative to the test's package too"
+    (let* ((result (run-tests "cl-mcp/tests/test-runner-test-direct-assertion"
+                              :test (concatenate
+                                     'string
+                                     "cl-mcp/tests/test-runner-test-direct-assertion"
+                                     "::direct-assertion-failure")))
+           (failures (gethash "failed_tests" result)))
+      (ok (plusp (length failures)) "the selected test fails")
+      (when (plusp (length failures))
+        (ok (equal "(= 3 FOUR)" (gethash "form" (aref failures 0))))))))
 
 (deftest ensure-system-loaded-reloads-system
   (testing "%%ensure-system-loaded clears and reloads so ASDF re-checks timestamps"
@@ -1185,7 +1210,8 @@ RUN-TESTS-LOAD-LOCK-WRAPPER-COVERS-LOAD-PHASE-ONLY is running its thunk.")
                             (in-suite :fiveam-detail-probe)~%~
                             (test deliberate-failure~%~
                             ~2@T\"documented on purpose\"~%~
-                            ~2@T(is (= 1 2)))~%"))
+                            ~2@T(let ((probe-local 2))~%~
+                            ~4@T(is (= 1 probe-local))))~%"))
                ;; On the central registry rather than only ASDF:LOAD-ASD'd:
                ;; RUN-TESTS force-reloads, and the CLEAR-SYSTEM that precedes
                ;; the reload drops a system ASDF cannot re-find from any
@@ -1212,6 +1238,11 @@ RUN-TESTS-LOAD-LOCK-WRAPPER-COVERS-LOAD-PHASE-ONLY is running its thunk.")
                      (ok failure)
                      (ok (equal "documented on purpose"
                                 (and failure (gethash "description" failure)))))
+                   (testing "the form is printed as the test's own package reads it"
+                     ;; It was printed from CL-USER, so the test's own local
+                     ;; came out as FIVEAM-DETAIL-PROBE-SUITE::PROBE-LOCAL.
+                     (ok (equal "(= 1 PROBE-LOCAL)"
+                                (and failure (gethash "form" failure)))))
                    (testing "the reason carries no blank-line runs"
                      (let ((reason (and failure (gethash "reason" failure))))
                        (ok (stringp reason))

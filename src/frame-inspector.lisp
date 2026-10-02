@@ -209,6 +209,16 @@ point)."
                              (%offset->line namestring tlf-char))))
                 (list :file namestring :line line)))))))))
 
+(defun %frame-name-string (name)
+  "Return NAME, a debug-fun name, printed on one line.
+*PRINT-PRETTY* is the caller's otherwise, and a pretty printer breaks a long
+method name such as (SB-PCL::FAST-METHOD PKG::NAME :BEFORE (T)) over several
+lines: the backtrace header then wraps, and a break straight after the
+operator also hides the \"(SB-PCL::FAST-METHOD \" prefix %INTERNAL-FRAME-P
+recognizes a user's method by."
+  (let ((*print-pretty* nil))
+    (prin1-to-string name)))
+
 #+sbcl
 (defun %frame-function-name (frame)
   "Extract function name from FRAME as a string."
@@ -216,7 +226,7 @@ point)."
       (let* ((debug-fun (sb-di:frame-debug-fun frame))
              (name (sb-di:debug-fun-name debug-fun)))
         (if name
-            (prin1-to-string name)
+            (%frame-name-string name)
             "<anonymous>"))
     (error () "<unknown>")))
 
@@ -226,7 +236,7 @@ point)."
   (let* ((debug-fun (sb-di:frame-debug-fun frame))
          (name (sb-di:debug-fun-name debug-fun)))
     (if name
-        (prin1-to-string name)
+        (%frame-name-string name)
         "<anonymous>")))
 
 (defparameter *internal-package-prefixes*

@@ -337,6 +337,44 @@ established when the context is captured, and HANDLER-CASE unwinds first."
     (cl-mcp/src/frame-inspector::%internal-frame-p
      "(SETF SB-INT::STORE)"))))
 
+(defgeneric frame-probe-generic-function-with-a-long-enough-name (x)
+  (:documentation "Signals from a :before method, for the frame name tests."))
+
+(defmethod frame-probe-generic-function-with-a-long-enough-name :before ((x integer))
+  (error "frame probe ~D" x))
+
+(defmethod frame-probe-generic-function-with-a-long-enough-name ((x integer))
+  x)
+
+(deftest frame-function-names-stay-on-one-line
+  (testing "a method frame's name is one line, however the printer is set up"
+    ;; The name was printed with the caller's *PRINT-PRETTY*, so a qualified
+    ;; method name wrapped and repl-eval's backtrace header broke over two
+    ;; lines, pushing the source location onto the continuation line.  A
+    ;; break straight after the operator also defeats the
+    ;; "(SB-PCL::FAST-METHOD " prefix *INTERNAL-FRAME-P* looks for.
+    (let ((context nil))
+      (let ((*print-pretty* t)
+            (*print-right-margin* 20))
+        (block caught
+          (handler-bind ((error (lambda (e)
+                                  (setf context (capture-error-context e :max-frames 30))
+                                  (return-from caught))))
+            (frame-probe-generic-function-with-a-long-enough-name 1))))
+      (let* ((names (mapcar (lambda (frame) (getf frame :function))
+                            (getf context :frames)))
+             (method-frame (find-if (lambda (name)
+                                      (and (search "FAST-METHOD" name)
+                                           (search "FRAME-PROBE-GENERIC" name)))
+                                    names)))
+        (ok names "frames were captured")
+        (ok (notany (lambda (name) (find #\Newline name)) names)
+            "no frame name holds a line break")
+        (ok method-frame "the :before method's frame is there")
+        (when method-frame
+          (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p method-frame))
+              "and is still recognized as the user's method"))))))
+
 (deftest frame-source-location-returns-real-line-number
  (testing
   "frame :source-line is a real line number, not a small TLF-offset integer"

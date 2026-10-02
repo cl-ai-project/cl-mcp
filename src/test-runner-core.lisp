@@ -238,7 +238,7 @@ per test that skipped anything, whether it passed or checked nothing."
       (setf (gethash "skipped_tests" ht) (coerce skipped-tests 'vector)))
     ht))
 
-(defun %source-text (object)
+(defun %source-text (object &optional package)
   "Return OBJECT printed the way source is written: escapes on, so a string
 keeps its quotes and a keyword its colon, and *PRINT-READABLY* off, so an
 object with no readable representation still prints as #<...> instead of
@@ -248,16 +248,28 @@ PRINC-TO-STRING stood here once, and it made failure reports contradict their
 own verdict: with escapes off it printed the string \"6\" and the number 6 as
 the same token and dropped the colon from every keyword, so a failing
 (equal \"6\" 6) was reported as the visibly true (EQUAL 6 6), under a ✗ FAIL,
-beside a MAKE-INSTANCE call whose initargs had lost their colons."
-  (let ((*print-readably* nil))
+beside a MAKE-INSTANCE call whose initargs had lost their colons.
+
+PACKAGE, when given, is the package the test was written in, and symbols are
+printed as that package reads them.  Printed from whatever package the runner
+happens to be in, a test's own local came out as PKG::NAME, which is not how
+the assertion is written."
+  (let ((*print-readably* nil)
+        (*package* (if (packagep package) package *package*)))
     (prin1-to-string object)))
 
-(defun make-failure-detail (&key test-name description form values reason source)
+(defun %test-name-package (name)
+  "Return the home package of NAME, a test's name, or NIL when it has none.
+That is the package the test's assertions were read in."
+  (and name (symbolp name) (symbol-package name)))
+
+(defun make-failure-detail (&key test-name description form values reason source package)
   "Create a failure detail hash table.
 
 FORM and VALUES are the assertion's own Lisp objects, never text a caller
 rendered first, and both are printed here with %SOURCE-TEXT so the report
-shows them as they are written in source.
+shows them as they are written in source -- relative to PACKAGE, the package
+the test was written in, when the caller knows it.
 
 FORM in particular is not special-cased on being a string.  Rove records the
 quoted form a user wrote, so `(ng \"truthy\")' -- which fails, a string being
@@ -272,10 +284,11 @@ comparison is exactly where it matters."
     (when description
       (setf (gethash "description" ht) description))
     (when form
-      (setf (gethash "form" ht) (%source-text form)))
+      (setf (gethash "form" ht) (%source-text form package)))
     (when values
       (setf (gethash "values" ht)
-            (coerce (mapcar #'%source-text values) 'vector)))
+            (coerce (mapcar (lambda (value) (%source-text value package)) values)
+                    'vector)))
     (when reason
       (setf (gethash "reason" ht)
             (if (stringp reason)
@@ -312,8 +325,9 @@ errors are NOT signaled this way; they propagate so real failures stay visible."
 ;;; Rove Backend
 ;;; ---------------------------------------------------------------------------
 
-(defun %rove-extract-assertions (test-node)
-  "Recursively extract failed assertions from a Rove test node."
+(defun %rove-extract-assertions (test-node &optional package)
+  "Recursively extract failed assertions from a Rove test node.
+PACKAGE is the package the test was written in; see MAKE-FAILURE-DETAIL."
   (let* ((pkg (find-package :rove/core/result))
          (test-failed-fn (fdefinition (find-symbol "TEST-FAILED-TESTS" pkg)))
          (assertion-form-fn (fdefinition (find-symbol "ASSERTION-FORM" pkg)))
@@ -330,9 +344,10 @@ errors are NOT signaled this way; they propagate so real failures stay visible."
                      :description (funcall assertion-desc-fn child)
                      :reason (funcall assertion-reason-fn child)
                      :values (funcall assertion-values-fn child)
-                     :source (funcall assertion-source-fn child))
+                     :source (funcall assertion-source-fn child)
+                     :package package)
           else
-            append (%rove-extract-assertions child))))
+            append (%rove-extract-assertions child package))))
 
 (defun %safe-test-name (test-name-fn node)
   "Call TEST-NAME-FN on NODE, falling back gracefully on error.
@@ -1026,8 +1041,10 @@ a future Rove version returns them directly instead of crashing."
                  :source (funcall assertion-source-fn test-result))
                 failure-details)
           ;; Test node — recurse via %rove-extract-assertions
-          (let ((test-name (princ-to-string (funcall test-name-fn test-result)))
-                (assertions (%rove-extract-assertions test-result)))
+          (let* ((name (funcall test-name-fn test-result))
+                 (test-name (princ-to-string name))
+                 (assertions (%rove-extract-assertions test-result
+                                                       (%test-name-package name))))
             (dolist (assertion assertions)
               (setf (gethash "test_name" assertion) test-name)
               (push assertion failure-details)))))
@@ -1232,9 +1249,10 @@ the surrounding passed/failed/pending/skipped/failure-details bindings."
                                   (funcall failed-tests-fn suite-result)))
                        (dolist
                            (test-fail (funcall failed-tests-fn pkg-result))
-                         (let ((test-name (%safe-test-name test-name-fn test-fail))
-                               (assertions
-                                (%rove-extract-assertions test-fail)))
+                         (let* ((test-name (%safe-test-name test-name-fn test-fail))
+                                (assertions
+                                 (%rove-extract-assertions
+                                  test-fail (%test-name-package test-name))))
                            (dolist (a assertions)
                              (setf (gethash "test_name" a)
                                      (princ-to-string test-name))
@@ -1581,6 +1599,8 @@ was being asserted, and leaving it out reduced the report to a bare test name."
                            ;; prints it with escapes on, which PRINC-TO-STRING
                            ;; here would have already thrown away.
                            :form test-expr
+                           :package (%test-name-package
+                                     (and test-case (fiveam-slot test-case "NAME")))
                            :reason
                            (%collapse-blank-lines
                             (or (and (stringp reason) reason)

@@ -37,9 +37,9 @@
            "form_type" form-type "form_name" form-name "origin" origin
            "call_sites" (coerce sites 'vector) "test" test "stale" nil "note" note))
 
-(defun %site (line &key (kind "call") (context "(foo 1)") shadowed-by)
+(defun %site (line &key (kind "call") (context "(foo 1)") shadowed-by (column 3))
   "Return a call-site object shaped like MERGE-REFERENCES' output."
-  (make-ht "line" line "column" 3 "kind" kind "context" context
+  (make-ht "line" line "column" column "kind" kind "context" context
            "shadowed_by" shadowed-by))
 
 (defun %report (refs &rest overrides)
@@ -84,6 +84,22 @@
       (ok (search "  +2 more" text))
       (ok (search "src/b.lisp:10 (used in hidden) [call] — call not visible in source" text))
       (ok (search "[shadowed by flet]" text)))))
+
+(deftest build-code-find-references-response-tells-same-line-sites-apart
+  (testing "two call sites on one line carry their columns, so the rows differ"
+    ;; Both rows once read `22: (pack (make-crate "a") (make-crate "b"))',
+    ;; the same text twice, as if one site had been listed by mistake.
+    (let* ((context "(pack (make-crate \"a\") (make-crate \"b\"))")
+           (text (first-text
+                  (build-code-find-references-response
+                   (%report (list (%ref :form-type "defun" :form-name "a"
+                                        :sites (list (%site 22 :column 7 :context context)
+                                                     (%site 22 :column 24 :context context)
+                                                     (%site 23 :column 5)))))))))
+      (ok (search (format nil "  22:7: ~A" context) text))
+      (ok (search (format nil "  22:24: ~A" context) text))
+      (ok (search "  23: (foo 1)" text)
+          "a site alone on its line keeps the plain line number"))))
 
 (deftest build-code-find-references-response-hides-lambda-callers
   (testing "a lambda caller without a form falls back to path:line"
