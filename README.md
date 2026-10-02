@@ -11,17 +11,43 @@ system loading, file operations, code introspection, and structure-aware editing
 - **REPL evaluation with object inspection** — evaluate forms, drill down into complex results (CLOS instances, hash-tables, etc.), and capture structured error context with stack frames and local variables
 - **Sandboxed file operations** — read/write/list files restricted to the project root and ASDF system source directories, preventing accidental access outside the project
 - **Structure-aware Lisp editing** — replace, insert, and patch top-level forms using Eclector CST parsing with automatic parinfer repair, preserving formatting and comments
-- **Code intelligence** — symbol lookup, metadata, and cross-references via `sb-introspect`; Lisp-aware file viewing with collapsed signatures and pattern-based expansion
-- **Structured test runner** — run Rove and FiveAM tests with pass/fail counts, failure details, and source locations
-- **Worker pool isolation** — eval-dependent tools run in isolated child SBCL processes with automatic crash recovery, circuit breaker, and per-session affinity
+- **Code intelligence** — symbol lookup and description; callers with their exact call sites and the tests that exercise them; CLOS class hierarchies, slots and generic-function methods; macroexpansion of a form straight from its file; Lisp-aware search and file viewing with collapsed signatures; CLHS lookup
+- **Structured test runner** — run Rove, FiveAM and prove tests with pass/fail counts, failure details, and source locations
+- **Worker pool isolation** — eval-dependent tools run in isolated child SBCL processes with automatic crash recovery, circuit breaker, and per-session affinity; an optional init hook can start your app inside the worker
 - **Three transports** — stdio, TCP (multi-client), and Streamable HTTP (for Claude Code)
+- **Project scaffolding** — generate a throwaway package-inferred project with Rove or FiveAM tests
+- **Optional contract checking** — the `cl-spec` tool group (off by default) lists, reads and checks [cl-spec](https://github.com/masatoi/cl-spec) contracts; see [Optional tool groups](docs/tools.md#optional-tool-groups)
 
-For the full list of tools with input/output schemas, see [docs/tools.md](docs/tools.md).
+### Tools at a glance
+
+| Category | Tool | Purpose | Runs in |
+|---|---|---|---|
+| Project & files | `fs-set-project-root` | Set this session's project root | parent (the worker follows) |
+| | `fs-get-project-info` | Show the root and working directory | parent |
+| | `fs-read-file` / `fs-write-file` / `fs-list-directory` | Text I/O inside the allowed roots | parent |
+| | `project-scaffold` | Generate a new project skeleton | parent |
+| Lisp source | `lisp-read-file` | Collapsed or pattern-expanded view of a file | parent |
+| | `lisp-edit-form` / `lisp-patch-form` | Replace, insert or delete a top-level form; scoped text patch | parent |
+| | `lisp-check-parens` | Diagnose unbalanced delimiters and suggest the fix | parent |
+| | `clgrep-search` | Lisp-aware grep that reports the enclosing form; no loading needed | parent |
+| | `lisp-macroexpand` | Expand a macro call from a file or a code string | parent locates, worker expands |
+| REPL | `repl-eval` | Evaluate forms, with backtraces and locals on error | worker |
+| | `inspect-object` | Drill into a result object | worker |
+| | `load-system` | Load or reload an ASDF system | worker |
+| | `run-tests` | Run Rove/FiveAM/prove tests with structured results | worker |
+| Introspection | `code-find` / `code-describe` | Definition location; signature and documentation | worker |
+| | `code-find-references` | Callers, call sites and affected tests | worker (xref) + parent (source scan) |
+| | `clos-describe` | Classes, slots and generic-function methods | worker, verified against source by the parent |
+| Reference | `clhs-lookup` | Common Lisp HyperSpec | parent |
+| Pool | `pool-status` / `pool-kill-worker` | Diagnose or replace the session's worker | parent |
+| `cl-spec` (opt-in) | `spec-list` / `spec-symbol` / `spec-describe` / `spec-check` | List, read and check contracts | worker |
+
+For every tool's input/output schema, see [docs/tools.md](docs/tools.md).
 
 ## Requirements
 - SBCL 2.x (developed with SBCL 2.5.x)
 - Quicklisp (optional; pure ASDF also works)
-- Dependencies (via ASDF/Quicklisp): runtime — `alexandria`, `cl-ppcre`, `yason`, `usocket`, `bordeaux-threads`, `eclector`, `hunchentoot`; tests — `rove`; optional — `fiveam` (for running FiveAM suites), `clhs` (loaded on-demand by `clhs-lookup` tool).
+- Dependencies (via ASDF/Quicklisp): runtime — `alexandria`, `cl-ppcre`, `yason`, `usocket`, `bordeaux-threads`, `eclector`, `hunchentoot`, `named-readtables`; tests — `rove`; optional — `fiveam` (for running FiveAM suites), `clhs` (loaded on-demand by `clhs-lookup` tool), `swank` (only for `MCP_WORKER_SWANK`), `cl-spec` (only for the `cl-spec` tool group).
 
 ## Quick Start
 
@@ -40,20 +66,20 @@ Load and run from an existing REPL:
 ```lisp
 (asdf:load-system :cl-mcp)  ; or (ql:quickload :cl-mcp) if using Quicklisp
 
-;; Start HTTP server on port 12345
-(cl-mcp:start-http-server :port 12345)
+;; Start the HTTP server on port 3000 (the default)
+(cl-mcp:start-http-server :port 3000)
 
-;; Start TCP transport on port 12345
-(cl-mcp:start-tcp-server-thread :port 12345)
+;; Or start the TCP transport on port 12345, accepting clients until stopped
+(cl-mcp:ensure-tcp-server-thread :port 12345)
 ```
 
 Or run a minimal stdio loop (one JSON-RPC line per request):
 
 ```bash
-;; When use with Roswell
+# With Roswell
 ros run -s cl-mcp -e "(cl-mcp:run :transport :stdio)"
 
-;; When use plain sbcl command
+# With a plain sbcl command
 sbcl --eval '(require :asdf)' \
      --eval '(asdf:load-system :cl-mcp)' \
      --eval '(cl-mcp:run :transport :stdio)'
@@ -127,18 +153,28 @@ Start the HTTP server from your REPL and keep using it alongside Claude Code:
 (cl-mcp:stop-http-server)
 ```
 
-Configure Claude Code to connect (in `~/.claude/settings.json` or project `.mcp.json`):
+Register it with Claude Code:
+
+```bash
+claude mcp add --transport http cl-mcp http://127.0.0.1:3000/mcp
+```
+
+or write the entry yourself, in the project's `.mcp.json` (or `~/.claude.json` for all projects):
 
 ```json
 {
   "mcpServers": {
     "cl-mcp": {
-      "type": "url",
+      "type": "http",
       "url": "http://127.0.0.1:3000/mcp"
     }
   }
 }
 ```
+
+`start-http-server` also takes `:token :generate` (or a token string) to require an
+`Authorization: Bearer <token>` header on every request; the generated token is printed
+to `*error-output*`.
 
 This approach lets both you and Claude Code share the same Lisp runtime.
 You can inspect state from SLIME/Sly while Claude Code works through MCP.
@@ -151,12 +187,20 @@ For a simpler setup where Claude Code manages the server process directly:
 {
   "mcpServers": {
     "cl-mcp": {
+      "type": "stdio",
       "command": "ros",
-      "args": ["run", "-s", "cl-mcp", "-e", "(cl-mcp:run)"]
+      "args": ["run", "-s", "cl-mcp", "-e", "(cl-mcp:run)"],
+      "env": {
+        "MCP_ENABLE_TOOL_GROUPS": "cl-spec"
+      }
     }
   }
 }
 ```
+
+The `env` entry is optional; it turns on the `cl-spec` tool group (see
+[Optional tool groups](docs/tools.md#optional-tool-groups)). Any variable from
+[Environment Variables](#environment-variables) can be passed the same way.
 
 Stdio is easy to configure but the Lisp process is owned by Claude Code,
 making manual intervention from SLIME or another REPL difficult.
@@ -184,16 +228,22 @@ Start a TCP server from your REPL, then point Codex at it via the bundled
 Python bridge that translates stdio ↔ TCP:
 
 ```lisp
-;; In your REPL
+;; In your REPL: keep accepting clients, so Codex can reconnect after a restart
 (asdf:load-system :cl-mcp)
-(cl-mcp:start-tcp-server-thread :port 12345)
+(cl-mcp:ensure-tcp-server-thread :port 12345)
 ```
 
 ```toml
 [mcp_servers.cl-mcp]
 command = "python3"
-args = ["scripts/stdio_tcp_bridge.py", "--host", "127.0.0.1", "--port", "12345"]
+# Codex starts the bridge from your project, not from the cl-mcp checkout,
+# so give the script's absolute path.
+args = ["/path/to/cl-mcp/scripts/stdio_tcp_bridge.py", "--host", "127.0.0.1", "--port", "12345"]
 ```
+
+`--host` and `--port` default to `127.0.0.1` and `12345`; the bridge also reads
+`LISP_MCP_HOST` and `LISP_MCP_PORT`. (`cl-mcp:start-tcp-server-thread` serves a single
+client and then stops unless given `:accept-once nil`.)
 
 This gives you the same shared-REPL workflow as Claude Code's HTTP mode —
 you keep your SLIME/Sly session while Codex works through the bridge.
@@ -201,7 +251,8 @@ you keep your SLIME/Sly session while Codex works through the bridge.
 ## Worker Pool Isolation
 
 Eval-dependent tools (`repl-eval`, `load-system`, `run-tests`, `code-*`,
-`clos-describe`, `inspect-object`) run in isolated child SBCL processes. Each session gets
+`clos-describe`, `lisp-macroexpand`, `inspect-object`, and the optional `spec-*` tools)
+run in isolated child SBCL processes. Each session gets
 a dedicated worker with automatic crash recovery and circuit breaker protection.
 File-system and editing tools run inline in the parent process, each request under
 its own session's project root.
@@ -232,9 +283,11 @@ Disable the worker pool with `MCP_NO_WORKER_POOL=1` or the `:worker-pool` keywor
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `MCP_PROJECT_ROOT` | Default project root for sessions that set none of their own | (not set: each session sets its own) |
-| `MCP_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` | `info` |
-| `MCP_LOG_FILE` | Log to file (timestamped with PID) | (stderr only) |
-| `MCP_NO_WORKER_POOL` | Set to `1` to disable worker pool isolation | (not set = pool enabled) |
+| `MCP_LOG_LEVEL` | Log level: `debug`, `info`, `warn` (or `warning`), `error`; an unrecognized value is ignored | `debug` |
+| `MCP_LOG_FILE` | Also log to a file, named `<stem>-<timestamp>-<pid>`; workers do not inherit it | (stderr only) |
+| `MCP_NO_WORKER_POOL` | Any non-empty value (even `0`) disables worker pool isolation | (not set = pool enabled) |
+| `MCP_ENABLE_TOOL_GROUPS` | Optional tool groups to enable, separated by commas or spaces, case-insensitive (`cl-spec`); read when the system loads. The `:tool-groups` argument of `run`, `start-http-server`, `serve-tcp`, `start-tcp-server-thread` and `ensure-tcp-server-thread` overrides it | (empty: all groups off) |
+| `MCP_WORKER_SWANK` | Any non-empty value makes each worker `(ql:quickload :swank)` and start a Swank server on a free port, reported in the `worker.swank.started` log event (needs Quicklisp in the worker; without it the worker runs without Swank) | (off) |
 | `CL_MCP_WORKER_POOL_WARMUP` | Number of standby workers to maintain (non-negative integer) | `1` |
 | `CL_MCP_MAX_POOL_SIZE` | Maximum total workers, bound + standby (positive integer) | `16` |
 | `MCP_WORKER_INIT_SYSTEM` | ASDF system to load in the elected owner worker at bind (master gate for the init hook) | (unset = off) |
@@ -329,6 +382,16 @@ comes back as an error instead of being read: ask for a shallower `preview_max_d
 that would make the reader recurse more than 500 levels is refused by the tools
 that read it, whether it is a file, tool content or `repl-eval` code. That
 covers nested lists and also chains of prefixes such as `'`, `#'` and `#+`.
+
+The HTTP transport has no authentication by default. `start-http-server`'s
+`:token` argument (`:generate` or a string) makes every request other than
+`OPTIONS` carry `Authorization: Bearer <token>`.
+
+Workers are child processes of the server and inherit its whole environment,
+API keys and other secrets included: code run through `repl-eval` can read them.
+Only the `MCP_WORKER_INIT_*` variables and `MCP_LOG_FILE` are withheld. A worker
+listens on `127.0.0.1` and answers only the parent, which proves itself with a
+per-worker shared secret.
 
 ## License
 MIT

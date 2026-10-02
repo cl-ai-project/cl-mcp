@@ -111,19 +111,33 @@ Input schema (JSON):
 - `package` (string, optional): package to evaluate in (default `CL-USER`)
 - `print_level` (integer|null): binds `*print-level*`
 - `print_length` (integer|null): binds `*print-length*`
-- `timeout_seconds` (number|null): abort evaluation after this many seconds
-- `max_output_length` (optional integer, non-negative): keep at most this many characters of
+- `timeout_seconds` (number, default `300`): abort evaluation after this many seconds; must be
+  positive
+- `max_output_length` (optional integer, non-negative, default `50000`): keep at most this many characters of
   `content`/`stdout`/`stderr`. `stdout` and `stderr` are bounded as the form
   writes them, so output past the limit is never held in memory, and a short
   note saying how many characters there were in total is appended past that
   limit. `0` suppresses the output. `content` is truncated after the fact and
   marked `...(truncated)`.
 - `safe_read` (boolean|null): when `true`, disables `*read-eval*` while reading forms
+- `include_result_preview` (boolean, default `true`): attach `result_preview` to a
+  non-primitive result
+- `preview_max_depth` (integer, default `1`) / `preview_max_elements` (integer, default `8`):
+  bound that preview
+- `locals_preview_frames` (integer, default `0`): on an error, expand the non-primitive locals
+  of the top N frames (see `error_context` below)
+- `locals_preview_max_depth` (integer, default `1`) / `locals_preview_max_elements` (integer,
+  default `5`): bound those expansions
+- `locals_preview_skip_internal` (boolean, default `true`): skip cl-mcp, SBCL, ASDF and other
+  infrastructure frames when counting the N frames
+
 Output fields:
 - `content`: last value as text
 - `stdout`: concatenated standard output from evaluation
 - `stderr`: concatenated standard error from evaluation
 - `result_object_id` (string|null): an opaque id, such as `"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-17"`; when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
+- `result_preview` (object, with `result_object_id`): a lightweight structural preview of the
+  result — its kind, type and first elements or slots — shaped like `inspect-object`'s output
 - `isError` and `execution_status`: when the evaluation timed out, the result is an
   error (`isError: true`) with `execution_status: "execution-unknown"`. It was stopped
   partway, or could not be stopped at all, so whether it did what it was asked, and what it
@@ -178,11 +192,15 @@ An id of the current image whose object was evicted (only the most recent
 1000 are kept) is `OBJECT_NOT_FOUND`; a string that is not an id is
 `INVALID_OBJECT_ID`. An integer, as an older client sends, is refused before
 any lookup by the argument check: `id must be a string`.
+
 - `max_depth` (integer, optional): Nesting depth for expansion (0=summary only, default=1)
 - `max_elements` (integer, optional): Maximum elements for lists/arrays/hash-tables (default=50)
 
 Output fields:
-- `kind`: Object type (`list`, `hash-table`, `array`, `instance`, `structure`, `function`, `other`)
+- `kind`: Object type (`list`, `hash-table`, `array`, `instance`, `structure`, `function`,
+  `other` — which also carries `type`). Two more kinds appear only nested: a list's last
+  element is `dotted-tail` when the list is improper, and a slot's value is `unbound` when the
+  slot is unbound
 - `summary`: String representation of the object
 - `id`: The object's registry ID
 - Type-specific fields:
@@ -192,7 +210,8 @@ Output fields:
   - CLOS instances: `class` name, `slots` array with `name`/`value` pairs
   - Structures: `class` name, `slots` array
   - Functions: `name`, `lambda_list` (SBCL only)
-- `meta`: Contains `truncated` flag, element counts, etc.
+- `meta`: `count`, `truncated` and `max_elements` for a list, array or hash-table;
+  `slot_count` for an instance or structure
 - `hint` (string, only when the object is the class its symbol names or a named generic function): points at `clos-describe`, which describes the class or generic function itself; `inspect-object` shows its internal representation. The text shows it as `Hint:`
 
 Nested objects are returned as `object-ref` with their own `id` for further inspection.
@@ -220,16 +239,23 @@ Input:
   deleting the cached FASLs under the system's source directory. A package-inferred
   subsystem (`my-app/src/contracts`) has no directory of its own, so its primary system's
   (`my-app`) is cleared, which holds every FASL in the tree
-- `timeout_seconds` (number, default `120`): timeout for the load operation
+- `timeout_seconds` (number, default `120`): timeout for the load operation; must be positive
 
 Output fields:
+- `content`: summary text. Warning text in it is cut at 2048 characters; a package-variance
+  warning ("also exports") or an error that happened during the load adds a hint to get a
+  fresh worker with `pool-kill-worker`
 - `system` (string): echoed system name
 - `status` (string): `"loaded"`, `"timeout"`, or `"error"`
 - `duration_ms` (integer): load time in milliseconds
 - `warnings` (integer): number of compiler warnings (when loaded)
 - `warning_details` (string|null): warning text (when warnings > 0)
-- `forced` (boolean): whether force-reload was applied
-- `clear_fasls` (boolean): whether `clear_fasls` was requested
+- `forced` (boolean, when loaded): whether force-reload was applied
+- `clear_fasls` (boolean, when loaded): whether `clear_fasls` was requested
+- `auto_discovered_asd` (string, when it happened): the system was not known to ASDF, and this
+  `.asd` under the project root was found and registered for it; the text says
+  `Auto-registered …`
+- `compiler_output` (string, on error): the compiler's output; the text shows its first 2 KB
 - `fasls_deleted` (integer, with `clear_fasls`): how many cached FASLs were deleted. `0` means
   nothing was forced to recompile, and the text says so
 - `fasls_cleared_from` (string, with `clear_fasls`): the system whose directory was cleared —
@@ -252,10 +278,18 @@ Read text from an allow‑listed path.
 
 Input:
 - `path` (string, required): project‑relative or absolute inside a registered ASDF system's source tree
-- `offset` / `limit` (integer, optional): substring window
+- `offset` / `limit` (integer, optional, non-negative): a window counted in **characters**;
+  `offset` is 0-based and `limit` omitted reads to the end. At most 1 MB is read in one call,
+  and a larger `limit` is an error
+
+Output:
+- `content`: the text; when the read stopped short of the end it is followed by
+  `[TRUNCATED: file is N chars, showing M from offset O. Use offset=K to read more.]`
+- `text` (the text alone), `path`, `offset`, `limit`
+- `truncated`, `file_length`, `read_length` (only when truncated)
 
 Policy: reads are allowed only when the resolved path is under the project root or under `asdf:system-source-directory` of a registered system.
-Dependency libs: reading source in Quicklisp/ASDF dependencies is permitted **only via `fs-read-file`**; do not shell out for metadata (`wc`, `stat`, etc.). File length is intentionally not returned—page through content with `limit`/`offset` when needed.
+Dependency libs: reading source in Quicklisp/ASDF dependencies is permitted **only via `fs-read-file`**; do not shell out for metadata (`wc`, `stat`, etc.).
 
 ## `fs-write-file`
 Write text to a file under the project root (directories auto-created).
@@ -263,8 +297,13 @@ Write text to a file under the project root (directories auto-created).
 Input:
 - `path` (string, required): **must be relative** to the project root
 - `content` (string, required)
-- `allow_unparseable_overwrite` (boolean, optional): permit overwriting an
+- `allow_unparseable_overwrite` (boolean, default `false`): permit overwriting an
   existing `.lisp`/`.asd` file that the structural tools cannot parse.
+
+Output: `content` (`Wrote PATH (N chars)`), `success`, `path`, `bytes` (a character count).
+After a `.lisp`/`.asd` file is written its content is parsed: the write still succeeds, but
+when the file does not parse the response adds `unparseable: true`, a `WARNING` with the
+diagnosis, and a reminder that the next write to it needs `allow_unparseable_overwrite`.
 
 Policy: writes outside the project root are rejected. An existing `.lisp`/`.asd`
 file is never overwritten by default (`existing_lisp_overwrite_forbidden`; use
@@ -299,8 +338,12 @@ List entries in a directory (files/directories only, skips hidden and build arti
 
 Input:
 - `path` (string, required): project root or an ASDF system source dir.
+- `show_hidden` (boolean, default `false`): also list entries starting with `.`, `.git`,
+  `.hg`, `.svn`, `.cache` or `.fasl`. Compiled files (`fasl`, `ufasl`, `x86f`, `cfasl`) are
+  left out either way
 
-Returns: `entries` array plus human-readable `content`.
+Returns: `entries` (each `{name, type}`, `type` being `"file"` or `"directory"`), `path`,
+`show_hidden`, and `content` (`N entries in PATH`, then one `[dir]`/`[file]` line each).
 
 ## `fs-get-project-info`
 Report project root and current working directory information for clients that need
@@ -313,6 +356,8 @@ Output:
   `fs-set-project-root` or `initialize`'s `rootPath`/`rootUri`), otherwise `env`
   (`MCP_PROJECT_ROOT`) or `explicit` (the server default, set outside any session)
 - `relative_cwd` (string|null): cwd relative to project root when inside it
+- `workers` (array, only with the worker pool on): the pool's workers, as `pool-status` lists
+  them
 
 ## `fs-set-project-root`
 Set the calling session's project root to the client's location.
@@ -320,9 +365,10 @@ Set the calling session's project root to the client's location.
 Input:
 - `path` (string, required): path to the project root directory (absolute preferred; relative is resolved to an absolute directory)
 
-This tool allows AI agents to explicitly set the server's working directory, ensuring
-path resolution works correctly. The server updates both `*project-root*` and the
-current working directory (via `uiop:chdir`).
+This tool lets an AI agent tell the server where its project is, so that the session's
+relative paths resolve correctly. It sets the session's project root; it does not change the
+server process's working directory (see below). The directory must exist, and a root that is
+too broad (`/`, `/tmp/`, `/home/`, checked both as given and as it resolves) is refused.
 
 The root is the **calling session's own**: the parent-side tools (`fs-*`, `lisp-read-file`,
 `lisp-edit-form`, `lisp-patch-form`, `lisp-check-parens`, `clgrep-search`, `project-scaffold`)
@@ -335,15 +381,15 @@ A root given as a symbolic link (by either route) is resolved to what it names, 
 "too broad" check applies to that.
 
 A session's root does not move the process working directory, which belongs to the server:
-only a root set outside any session moves it. So a session with no root of its own that
-passes a relative `path` (`"."`) resolves it against the server's directory — never against
-another session's root — and `cwd` in `fs-get-project-info` never shows another session's
-root.
+only a root set outside any session moves it. A relative `path` (`"."`) resolves against the
+root in effect for the session — its own, or else the server default — and only when there is
+neither, against the server's working directory; never against another session's root. `cwd`
+in `fs-get-project-info` never shows another session's root.
 
-Output:
+Output: `content` (the status message) and `info`, an object with:
 - `project_root` (string): new project root path
-- `cwd` (string): new current working directory
-- `previous_root` (string): previous project root path
+- `cwd` (string): the server process's working directory, which this tool does not change
+- `previous_root` (string): previous project root path, or `"(not set)"`
 - `status` (string): confirmation message
 
 **Best Practice for AI Agents:** Call `fs-set-project-root` at the beginning of your
@@ -364,8 +410,15 @@ Inputs:
   it matches, the full form is expanded. For non-Lisp files, this triggers a
   grep-like text filter with ±5 lines of context.
 - `offset` / `limit` (integer, optional): slice window used when `collapsed` is
-  `false`; defaults to `offset=0`, `limit=500` lines. When truncated, a
-  `[Showing lines A-B of N. Use offset=B to read more.]` footer is appended.
+  `false`; defaults to `offset=0`, `limit=500` lines (`limit` must be positive, and also
+  bounds the `content_pattern` filter's output for a non-Lisp file). When truncated, a
+  `[Showing lines A-B of N. Use offset=B to read more.]` footer is appended; an offset past
+  the end prints `[Offset N is past end of file …]`.
+- `readtable` (string, optional): named-readtable designator for a file with custom reader
+  syntax. The standard CL reader is then used instead of Eclector, so comments are not
+  preserved.
+
+A file over the 1 MB read cap cannot be collapsed and is an error.
 
 An **expanded** form is echoed from the file verbatim, so its text — including
 comments inside the form — is exactly what is on disk, and the `NNN:` prefix on
@@ -378,7 +431,9 @@ structure rather than the file's whitespace.
 
 Output fields:
 - `content`: formatted text (collapsed Lisp view, raw slice, or filtered text).
-- `path`: normalized native pathname.
+- `text`: the same text as a plain string.
+- `path`: relative to the project root when the file is under it, absolute otherwise (see
+  [Paths cl-mcp prints](#paths-cl-mcp-prints)).
 - `mode`: one of `lisp-collapsed`, `raw`, `text-filtered`, `lisp-snippet`,
   `text-snippet` depending on inputs and file type.
 - `meta`: includes `total_forms`/`expanded_forms` for collapsed Lisp, or
@@ -389,11 +444,14 @@ Check balanced parentheses/brackets in a file slice or provided code; returns th
 
 Input:
 - `path` (string, optional): absolute path inside the project or registered ASDF system (mutually exclusive with `code`)
-- `code` (string, optional): raw code string (mutually exclusive with `path`)
-- `offset` / `limit` (integer, optional): window when reading from `path`
+- `code` (string, optional): raw code string (mutually exclusive with `path`; exactly one of
+  the two is required)
+- `offset` / `limit` (integer, optional): window when reading from `path`, in characters
 
 Output:
-- `ok` (boolean)
+- `ok` (boolean), and `content` (the summary text)
+- `message`: for `kind: reader-error`, the reader's message (there is no `expected`/`found`)
+- `window` (`{offset, length, first_line}`): when only part of the file was read
 - when not ok: `kind` (`extra-close` | `mismatch` | `unclosed` |
   `unclosed-block-comment` | `unclosed-string` | `reader-error` | `too-large`),
   `expected`, `found`, and `position` (`offset`, `line`, `column`; absent for
@@ -496,8 +554,9 @@ Notes:
 
 ## `lisp-edit-form`
 Perform structure-aware edits to a top-level form using Eclector CST parsing while
-preserving surrounding formatting and comments. Supports replace, insert_before, and
-insert_after operations with automatic parinfer repair for missing closing parentheses.
+preserving surrounding formatting and comments. Supports replace, insert_before,
+insert_after and delete operations, with automatic parinfer repair for missing closing
+parentheses.
 
 Input:
 - `file_path` (string, required): absolute path or project-relative path
@@ -506,9 +565,12 @@ Input:
   the name itself still matches as written (`def:thing`, or `|def:thing|`, for `(|DEF:THING| ...)`), and
   when those two readings name different forms the call is refused as ambiguous. When nothing
   matches, the error lists the file's forms of that type (or all its top-level forms when it has none)
-- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`
-- `operation` (string, required): one of `replace`, `insert_before`, `insert_after`
-- `content` (string, required): full form text to insert or replace with
+- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`. A leading `#:` or `:` is stripped (`"#:my-pkg"` matches `(defpackage #:my-pkg ...)`), and a `defstruct` with options, `(defstruct (name opts...) ...)`, is matched by its bare name
+- `operation` (string, required): one of `replace`, `insert_before`, `insert_after`, `delete`
+- `content` (string): the form text to insert or replace with; required for every operation but
+  `delete`, where it is ignored. `replace` takes exactly one top-level form (several are an error
+  whose data carries a `remediation`); `insert_before` and `insert_after` take one or more,
+  inserted in order as one block
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
 - `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms
 - `readtable` (string, optional): named-readtable designator for files using custom reader
@@ -557,9 +619,10 @@ text, or the same name broken over lines, addresses the form. A name longer than
 `form_name` as written, so a string name such as `"/users/:id"` keeps its colon and spaces.
 
 Operations:
-- **replace**: Replace the entire matched form with `content`
-- **insert_before**: Insert `content` as a new form before the matched form
-- **insert_after**: Insert `content` as a new form after the matched form
+- **replace**: Replace the entire matched form with `content` (one form)
+- **insert_before**: Insert the forms of `content` before the matched form
+- **insert_after**: Insert the forms of `content` after the matched form
+- **delete**: Remove the matched form (`content` is ignored)
 
 Auto-repair: when `content` does not read, missing `)` are inferred from
 **indentation** (parinfer indent mode) and the repaired form is written. The
@@ -588,7 +651,8 @@ verdicts off and leaves the verdict to the reader.
 Output:
 - `path`, `operation`, `form_type`, `form_name`
 - `would_change` (boolean): whether the file was modified
-- `bytes`: size of the updated file content
+- `bytes`: size of the updated file content, in characters
+- `forms` (integer): how many top-level forms `content` held (also in dry-run output)
 - `bracket_warning` (string, optional): the content reads, but its delimiter
   scan found a `]` or `}` where `)` was expected (a symbol character in
   standard syntax, so a `)` typo survives); the edit is applied and the
@@ -596,6 +660,7 @@ Output:
 - `content`: human-readable summary string of the applied change
 
 Dry-run output (when `dry_run` is true):
+- `path`, `operation`, `form_type`, `form_name`, `forms`
 - `would_change` (boolean): whether the operation would modify the file
 - `original` (string): the matched form text before changes
 - `preview` (string): full file preview with changes applied
@@ -726,7 +791,7 @@ made between your read and this patch is neither detected nor reported.
 Output:
 - `path`, `form_type`, `form_name`
 - `would_change` (boolean): whether the file was modified
-- `bytes`: size of the updated file content
+- `bytes`: size of the updated file content, in characters
 - `delta` (integer, present only when `would_change` is true): character count difference (`new_text` length minus `old_text` length)
 - `bracket_warning` (string, optional): set when the patched form reads but its
   delimiter scan stops at a `]` or `}` where `)` was expected (in standard
@@ -736,11 +801,121 @@ Output:
 - `content`: human-readable summary string of the applied change
 
 Dry-run output (when `dry_run` is true):
+- `path`, `operation` (`"patch"`), `form_type`, `form_name`, and `bracket_warning` when
+  there is one
+- `path`, `operation`, `form_type`, `form_name`, `forms`
 - `would_change` (boolean): whether the operation would modify the file
 - `operation`: always `"patch"`
 - `original` (string): the matched form text before changes
 - `preview` (string): modified form text after replacement
 - `content`: human-readable summary with original and preview form text
+
+## `clgrep-search`
+Search Lisp files for a regular expression and report, for each hit, the top-level form it
+sits in. Runs in the parent process and needs nothing loaded, so it is the first stop for
+finding where something is defined or used; `code-find-references` then gives the resolved,
+xref-backed answer once the system is loaded.
+
+Input:
+- `pattern` (string, required): a CL-PPCRE regular expression, matched line by line. An empty
+  or blank pattern is an error, as is one that does not compile.
+- `path` (string, optional): the search root — a directory or a single file. Omitted, it is the
+  project root; a relative path resolves against the project root; an absolute path is
+  accepted inside the project root or inside the source directory of a registered ASDF system,
+  so a dependency's sources can be searched too.
+- `recursive` (boolean, default `true`): descend into subdirectories.
+- `case_insensitive` (boolean, default `false`).
+- `form_types` (array of strings, optional): keep only hits whose top-level form has one of
+  these heads, compared case-insensitively with any package prefix dropped (`"defun"`,
+  `"defmethod"`, `"deftest"`, ...). A head is recognized when it is one of the usual
+  definers or starts with `def`; a form whose head is neither — FiveAM's `test`, a DSL macro —
+  has no type and is never kept by this filter. Hits inside an unterminated form bypass it.
+- `limit` (integer, default `200`): cap on the raw line hits, counted **before** hits are grouped
+  by form, so fewer entries than `limit` can come back.
+- `include_form` (boolean, default `false`): attach each form's full text; a form longer than
+  2000 characters is cut to the five lines around the hit.
+
+Files searched: `.lisp`, `.asd` and `.ros`. The `.gitignore` of the search root (only that one)
+is honoured, with the common glob forms (`*`, `?`, `**`, a leading `/`) but not `!` negation;
+`.git/` is always skipped. Because only the root's own `.gitignore` applies, a directory that
+the project's `.gitignore` excludes is still searched when you pass it as `path`. A hit on a
+line outside every top-level form (a comment between forms) is dropped.
+
+Output:
+- `content`: `N matches for "PATTERN"[ in PATH]:`, then one line per form,
+  `FILE:LINE [FORM-TYPE] SIGNATURE`, then any `NOTE` lines. `FORM-TYPE` prints `NIL` for an
+  unrecognized head.
+- `matches` (array), one entry per (file, form), with:
+  - `file`: relative to the project root, not to `path` — or absolute when outside it — so it
+    can be passed straight to `lisp-read-file`
+  - `line`, `match`: the first hit; `match_lines`: every hit in the form, as `{line, match}`
+  - `package`: from the last `in-package` above the hit, upper-cased (`"UNKNOWN"` if none)
+  - `form-type`, `form-name` (either may be null), `signature` (`(name lambda-list)` for
+    `defun`, `defmacro`, `defgeneric`, `defmethod`, `define-compiler-macro` and `deftest`;
+    `(name superclasses)` for `defclass`; the bare name otherwise)
+  - `form-start-line`, `form-end-line`, `form-start-byte`, `form-end-byte` (the last two are
+    character offsets)
+  - `form` (with `include_form`), `unterminated: true` (for a hit inside an unclosed form)
+- `count` (entries), `limited` (the raw hit count reached `limit`), and `notes` (array, when
+  present).
+
+A file that does not parse is still searched: a form left open to the end of the file
+swallows the rest of it, so each hit inside it gets an entry of its own, attributed to that
+form, and one `NOTE: FILE does not parse: a form opened at line N is never closed.` per file
+says which matches are affected and points at `lisp-check-parens`.
+
+## `lisp-macroexpand`
+Expand a macro call and show the resulting source. The parent locates the form; the session's
+worker, where the macro is defined, expands it. (With the worker pool off, both run in the
+server, and so does the macro's expander.)
+
+Input — exactly one of two ways to name what to expand:
+- **File mode**: `path`, `form_type` and `form_name`, addressed exactly as `lisp-edit-form`
+  addresses a form (`form_name` may end in `[N]`, a 0-based index, to pick one of several
+  matches; an ambiguous name lists the candidates with their `[N]`).
+  - `sub_form` (string, optional): expand the calls to this macro **inside** the addressed form
+    instead of the form itself — every call, up to 10 (a note says how many were skipped).
+    The name is matched case-insensitively, ignoring any package prefix. Quoted data and `#'name`
+    are not searched; the body of `#'(lambda ...)` is. A name in a binding position of
+    `macrolet`, `symbol-macrolet`, `flet` or `labels` is skipped with a note, and a call below
+    such a binding of the same name is expanded with the global definition but labelled as
+    shadowed.
+- **Code mode**: `code` (the source of one form) and `package`.
+
+Other inputs:
+- `level` (`once` | `full` | `all`, default `once`): one `macroexpand-1` step; repeat until the
+  head is not a macro (at most 100 steps); or walk the whole form with `macroexpand-all`,
+  expanding nested macros too (at most 1000 expansions; `defun` itself stays in place).
+- `package` (string): the package to read the form in. In file mode it defaults to the last
+  `in-package` before the form, else the file's first, else `CL-USER`; in code mode to
+  `CL-USER`.
+- `readtable` (string): named-readtable designator; the worker needs `named-readtables`.
+- `print_level` (integer, default `50`), `print_length` (integer, default `1000`): printing
+  bounds, at least 1.
+- `max_output_length` (integer, default `50000`): characters per expansion; longer output ends
+  in `...(truncated)`.
+
+`sub_form` cannot be combined with `readtable` or with `code`, and is refused for a file that
+declares its own `in-readtable`. Expansion uses a null lexical environment, so a form inside
+`macrolet` or `symbol-macrolet` may expand differently than the compiler sees it.
+
+Output:
+- `content`: a header `lisp-macroexpand (level: L, package: P)` (plus any note), then one block
+  per expansion, headed `[i] LABEL` — `form` in code mode, `TYPE NAME (file line N)` for a whole
+  form, `NAME (file line N) [i/total]` for a `sub_form` match. A block then says one of:
+  - `expanded in N step(s)` (or `expanded (full code walk)`), followed by the expansion,
+    printed lower-case and relative to the target package;
+  - `STOPPED at the 100-step expansion limit`, when `full` ran out with a macro call still at
+    the head;
+  - `NOT EXPANDED: the head of this form has no macro definition …` — the macro is not defined
+    in the worker (load its system first), never a silent no-op;
+  - `ERROR: …` for that entry alone; the others are still expanded.
+- `expansions` (array), each with `label`, `printed`, `expanded`, `steps`, `steps_capped`,
+  `truncated` and `error`; plus `level`, `package`, `note` and `count`. `isError` is set when
+  any entry failed.
+
+A package that does not exist in the worker is answered with `Package X does not exist in this
+image … Load the system that defines it with the 'load-system' tool, then retry.`
 
 ## `code-find`
 Return definition location (path, line) for a symbol using SBCL `sb-introspect`.
@@ -765,6 +940,7 @@ Input:
 - `package` (string, optional): must exist when `symbol` is unqualified
 
 Output:
+- `name` (string): the resolved symbol, as printed
 - `type` (`function`, `generic-function`, `macro`, `variable`, `class`, `condition`, `structure`)
 - `arglist` (string; for a class, its direct slot names)
 - `documentation` (string|null)
@@ -987,12 +1163,20 @@ Look up a symbol or section in the Common Lisp HyperSpec (ANSI standard document
 Input:
 - `query` (string, required): either a symbol name (e.g., `"loop"`, `"handler-case"`) or a section number (e.g., `"22.3"`, `"3.1.2"`)
 - `include_content` (boolean, default `true`): include extracted text content from local HyperSpec
+- `brief` (boolean, default `false`): stop before the `Description:` heading, so only Syntax
+  and Arguments come back; a page with no such heading (a section page) is cut to 1500
+  characters
 
 Output:
 - `symbol` or `section`: the query identifier (depends on query type)
-- `url`: HyperSpec URL (`file://` for local, `http://` for remote fallback)
+- `url`: HyperSpec URL (`file://` for local, `http://` for a symbol not installed locally)
 - `source`: `"local"` or `"remote"`
-- `content`: extracted text content (when `include_content` is true and source is local)
+- `content`: the extracted text, at most 8000 characters, as the MCP `content` text (when
+  `include_content` is true and source is local; a remote result has none)
+
+Errors: a symbol that is not a standard Common Lisp symbol is `No HyperSpec entry found for
+'…'`; a section missing from the local HyperSpec is `Section X not found in local HyperSpec
+index` — sections have no remote fallback.
 
 The tool auto-detects whether the query is a section number (digits and dots only, starting with a digit) or a symbol name.
 
@@ -1014,6 +1198,10 @@ Input:
 - `framework` (string, optional): Force a specific framework (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, or `"auto"` for auto-detect). Auto-detection reads the test system's own `:depends-on`: a framework the system declares directly wins, then one reached transitively, and only for a system ASDF has not registered does it fall back to guessing from the loaded packages. Detection never loads anything.
 - `test` (string, optional): Run only a specific test by fully qualified name (e.g., `"my-package::my-test-name"`)
 - `tests` (array of strings, optional): Run only the listed fully qualified tests
+- `timeout_seconds` (number, default `300`): give up on the run after this long. The result is
+  then `framework: "timeout"` with `failed: 1` and a `TIMEOUT` entry in `failed_tests`; when the
+  run's thread could not be stopped, its reason says to get a fresh worker with
+  `pool-kill-worker` before retrying
 
 Output:
 - `passed` (integer): Number of passed tests. Rove and FiveAM count tests, not assertions, and
@@ -1031,6 +1219,10 @@ Output:
 - `success` (boolean|null, ASDF fallback only): `false` when `asdf:test-system` signalled; `null` when it
   returned normally, which says nothing about whether the tests passed
 - `duration_ms` (integer): Execution time in milliseconds
+- `stdout` / `stderr` (string, present when non-empty): the run's captured output. JSON only:
+  the summary text does not show them
+- `debug_output` (string, present when non-empty): what the tests wrote to
+  `cl-mcp/src/test-runner-core:*test-debug-output*`; shown in the summary text too
 
 The summary line in `content[].text` is `✓ PASS`, `✗ FAIL`, `✗ LOAD FAILED`, `✗ UNRESOLVED`, `✗ TIMEOUT`, `⚠ NO TESTS RAN`, `⚠ ALL SKIPPED`, or `⚠ RAN, RESULT UNKNOWN`. `⚠ ALL SKIPPED` means every test that ran only skipped: nothing was checked, so it is not a pass. `⚠ NO TESTS RAN` means the run completed but executed nothing — a system with no tests, or a selection that matched none. It is not a failure, but it is not a pass either. `⚠ RAN, RESULT UNKNOWN` is the ASDF fallback's: `asdf:test-system` returned without signalling, but it reports no counts, and a runner that reports failures by its return value (prove, `rove:run`) returns normally from a failing suite too. The text shows the last lines of the runner's `stdout` under that headline, since the runner's own summary is the only verdict there is.
 
@@ -1063,8 +1255,10 @@ Example requests:
 
 Notes:
 - **Auto-reloads the test system** before execution (clears ASDF's loaded state and reloads from source). Files edited via `lisp-edit-form` are automatically picked up — no need to call `load-system` first.
-- Auto-detects Rove or FiveAM when available; falls back to ASDF `test-system` for text capture
-- Single test execution requires the test package to be loaded first
+- Auto-detects Rove, FiveAM or prove; anything else falls back to ASDF `test-system` for text capture
+- A `test`/`tests` name is resolved after that reload, so its package needs no separate
+  loading as long as `system` loads it; a name that still does not resolve is reported as
+  `✗ UNRESOLVED`. Selection works with Rove and FiveAM only
 - Test names must be fully qualified with package prefix (e.g., `"package::test-name"`)
 - With the worker pool enabled, a worker crash is distinct from a test failure:
   it aborts the in-flight call, resets worker-local Lisp state, and is reported
@@ -1080,7 +1274,14 @@ Output fields:
 - `standby_count` (integer): idle workers available for assignment
 - `max_pool_size` (integer): configured maximum worker count
 - `warmup_target` (integer): target number of warm standby workers
-- `workers` (array): per-worker details including `id`, `state` (`bound` or `standby`), `session` (string or null, truncated to 8 chars), `pid`, and `tcp_port`
+- `workers` (array): per-worker details including `id`, `state` (the worker's state in lower
+  case, normally `bound` or `standby`), `session` (string or null; longer ids are cut to 8
+  characters plus `...`), `pid`, `tcp_port`, and `leaked_threads` (threads a deadline could
+  not stop, as of that worker's last answer; the text shows it when non-zero)
+- `init_owner_session`, `init_owner_worker`, `init_disabled`, `init_failures`: the state of the
+  worker init hook (see the README); the text prints an `Init hook:` line when any is set
+
+When `pool_running` is false, `workers` is empty and the counts are 0.
 
 Example request:
 ```json
@@ -1099,7 +1300,9 @@ Input:
   tool call that needs a worker
 
 Output fields:
-- `killed` (boolean): whether a worker was actually killed
+- `killed` (boolean): whether a worker was actually killed. It is `false`, with the reason in
+  the text, when the worker pool is disabled, the session cannot be identified, or no worker is
+  bound to the session
 - `reset` (boolean|null): whether a replacement was spawned (only present when `killed` is true)
 - `cancelled_spawn` (boolean|null): true if a pending spawn was cancelled instead of killing a live worker
 - `isError` (boolean|null): true if kill succeeded but replacement spawn failed
@@ -1131,7 +1334,7 @@ register the project with ASDF and run its tests.
 
 Input:
 - `name` (string, required): project name in lisp-case. Must match `^[a-z][a-z0-9-]*$` and be 1–64 chars.
-- `description` (string, optional): one-line description for `.asd` and `README.md`. No newlines. Defaults to a generic placeholder.
+- `description` (string, optional): one-line description for `.asd` and `README.md`. No newlines. Defaults to `"A Common Lisp project scaffolded by cl-mcp."`.
 - `author` (string, optional): `.asd` `:author`. No newlines. Defaults to `"Unknown"`.
 - `license` (string, optional): `.asd` `:license`. No newlines. Defaults to `"MIT"`.
 - `destination` (string, optional): parent directory under project root where `<name>/` is created. No absolute paths, no `..` traversal. Defaults to `"scaffolds"`.
@@ -1147,12 +1350,17 @@ Output fields (on success):
 - `files` (array of strings): relative file paths written, in manifest order
 - `framework` (string): the resolved test framework, `"rove"` or `"fiveam"`
 - `next_steps` (array of strings): human-readable REPL commands to register the system with ASDF, load it, run its tests, and edit it via `lisp-edit-form`
+- `warning` (string, only then): an old scaffold that `overwrite` replaced could not be
+  removed; it carries the same `.asd`, so ASDF may resolve the name to that stale copy
+- `content`: `Scaffolded NAME at PATH (N files, FRAMEWORK tests)`, the absolute path, and the
+  steps
 
 The generated directory also contains a `.cl-mcp-scaffold` marker file recording the generator, the project name and the manifest. It is what `overwrite` checks for.
 
-Output on failure:
+Output on failure (an ordinary result, not `isError`):
 - `created` (boolean): `false`
 - `error` (string): diagnostic message explaining which field was rejected
+- `content`: the same message
 
 Behavior:
 - Runs inline in the parent process alongside other `fs-*` tools.
@@ -1196,7 +1404,7 @@ Response (excerpt):
            "files":["demo-lib.asd","CLAUDE.md","AGENTS.md","README.md",
                     ".gitignore","src/main.lisp","tests/main-test.lisp"],
            "framework":"rove",
-           "next_steps":["To register with ASDF: run repl-eval with (asdf:load-asd \"...\")",
+           "next_steps":["The generated system is not registered with ASDF yet; run load-system to register it in this session's worker (or (asdf:load-asd \"...\") via repl-eval)",
                          "To load: run load-system with {\"system\": \"demo-lib\"}",
                          "To test: run run-tests with {\"system\": \"demo-lib/tests\"}",
                          "To edit: use lisp-edit-form with paths under scaffolds/demo-lib/"]}}
@@ -1278,11 +1486,12 @@ construction is supported; it does not guarantee successful draws or reductions.
 
 - `spec-list` — what is registered at all. The entry point when you do not yet
   know a name: the other three all take one you already have. Returns names,
-  and for each property its kind, tags, `(:about ...)` targets and docstring —
+  for each property its kind, tags, `(:about ...)` targets and docstring, and for
+  each function spec its parameter names and whether it carries a `:returns` —
   not bodies.
   - `kind` (`specs` | `properties` | `function-specs` | `both`, default
     `both`), `package`, `tag`, `limit` (positive integer, default 200),
-    `timeout_seconds`
+    `timeout_seconds` (number, default 30)
   - `specs_listable`, `properties_listable`, `function_specs_listable` and
     `tag_filterable` say whether this cl-spec can enumerate each half, and
     whether it can filter by tag at all — facts about the loaded revision, not
@@ -1304,6 +1513,8 @@ construction is supported; it does not guarantee successful draws or reductions.
   not inlined.
   - `symbol` (string, required), `package`, `include_runtime` (boolean,
     default true), `timeout_seconds` (number, default 30)
+  An unqualified `symbol` or `name` is read in `COMMON-LISP-USER` unless `package` says
+  otherwise; this holds for `spec-describe` and `spec-check` as well.
 - `spec-describe` — one definition in full.
   - `kind` (`property` | `spec` | `function-spec`, required), `name` (required),
     `package`, `max_chars` (positive integer, default 8000),
@@ -1508,5 +1719,5 @@ construction is supported; it does not guarantee successful draws or reductions.
 
 Prerequisite: `load-system` with `cl-spec/check-it` (execution) or `cl-spec`
 (introspection only), plus the system defining the specs and properties. All
-three tools run in the session's worker, so the definitions a `load-system`
+four tools run in the session's worker, so the definitions a `load-system`
 put there are the ones they see.
