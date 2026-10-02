@@ -605,11 +605,20 @@ BUILD-CODE-FIND-RESPONSE, annotates the Defined at line and sets \"stale\"."
        (format stream " (~A)" form-type)))
     (format stream " [~A]~:[~; TEST~]~@[ — ~A~]~%"
             type (gethash "test" ref) (gethash "note" ref))
+    ;; Sites sharing a line carry their column too: their context is the
+    ;; same line of source, so without it the rows read as one site twice.
+    ;; All sites are counted, so a shown row may carry a column because its
+    ;; twin is among the "+N more" -- a hint that the line holds more.
     (loop for site in sites
           for shown below *references-sites-shown*
-          do (let ((kind (gethash "kind" site)))
-               (format stream "  ~A~:[ (~A)~;~*~]: ~A~@[  [shadowed by ~A]~]~%"
-                       (gethash "line" site)
+          do (let ((kind (gethash "kind" site))
+                   (line (gethash "line" site)))
+               (format stream "  ~A~@[:~A~]~:[ (~A)~;~*~]: ~A~@[  [shadowed by ~A]~]~%"
+                       line
+                       (and (< 1 (count line sites
+                                        :key (lambda (s) (gethash "line" s))
+                                        :test #'eql))
+                            (gethash "column" site))
                        (equal kind type)
                        kind
                        (%clip-context (gethash "context" site))

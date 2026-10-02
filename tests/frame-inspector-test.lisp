@@ -337,6 +337,70 @@ established when the context is captured, and HANDLER-CASE unwinds first."
     (cl-mcp/src/frame-inspector::%internal-frame-p
      "(SETF SB-INT::STORE)"))))
 
+(defgeneric frame-probe-generic-function-with-a-long-enough-name (x)
+  (:documentation "Signals from a :before method, for the frame name tests."))
+
+(defmethod frame-probe-generic-function-with-a-long-enough-name :before ((x integer))
+  (error "frame probe ~D" x))
+
+(defmethod frame-probe-generic-function-with-a-long-enough-name ((x integer))
+  x)
+
+(deftest frame-function-names-stay-on-one-line
+  (testing "a method frame's name is one line, however the printer is set up"
+    ;; The name was printed with the caller's printer settings, so a qualified
+    ;; method name wrapped and repl-eval's backtrace header broke over two
+    ;; lines, pushing the source location onto the continuation line.  A
+    ;; break straight after the operator also defeats the
+    ;; "(SB-PCL::FAST-METHOD " prefix %INTERNAL-FRAME-P looks for, and a
+    ;; user's *PRINT-LENGTH* cut the name short.
+    (let ((context nil))
+      (let ((*print-pretty* t)
+            (*print-right-margin* 20)
+            (*print-length* 2)
+            (*print-level* 1)
+            (*print-case* :downcase)
+            ;; A user's dispatch entry that forces a break after the operator.
+            (*print-pprint-dispatch* (copy-pprint-dispatch nil)))
+        (set-pprint-dispatch '(cons (member sb-pcl::fast-method lambda))
+                             (lambda (stream list)
+                               (format stream "(~S~:@_~{ ~S~})" (first list) (rest list))))
+        (block caught
+          (handler-bind ((error (lambda (e)
+                                  (setf context (capture-error-context e :max-frames 30))
+                                  (return-from caught))))
+            (frame-probe-generic-function-with-a-long-enough-name 1))))
+      (let* ((names (mapcar (lambda (frame) (getf frame :function))
+                            (getf context :frames)))
+             (method-frame (find-if (lambda (name)
+                                      (and (search "FAST-METHOD" name)
+                                           (search "FRAME-PROBE-GENERIC" name)))
+                                    names)))
+        (ok names "frames were captured")
+        (ok (notany (lambda (name) (find #\Newline name)) names)
+            "no frame name holds a line break")
+        (ok (notany (lambda (name) (search "..." name)) names)
+            "and none is cut short by the caller's *PRINT-LENGTH*")
+        (ok method-frame "the :before method's frame is there")
+        (when method-frame
+          (ok (search ":BEFORE (INTEGER))" method-frame)
+              "with its qualifier and specializers")
+          (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p method-frame))
+              "and is still recognized as the user's method")))))
+  (testing "a lambda's empty lambda list reads as SBCL's debugger writes it"
+    ;; Printing with *PRINT-PRETTY* off would show (LAMBDA NIL :IN ...).  The
+    ;; frames of this deftest's own body and of Rove's runner are such lambdas.
+    (let ((context nil))
+      (block caught
+        (handler-bind ((error (lambda (e)
+                                (setf context (capture-error-context e :max-frames 30))
+                                (return-from caught))))
+          (error "frame probe lambda")))
+      (let ((names (mapcar (lambda (frame) (getf frame :function))
+                           (getf context :frames))))
+        (ok (some (lambda (name) (search "(LAMBDA () :IN" name)) names))
+        (ok (notany (lambda (name) (search "(LAMBDA NIL" name)) names))))))
+
 (deftest frame-source-location-returns-real-line-number
  (testing
   "frame :source-line is a real line number, not a small TLF-offset integer"
