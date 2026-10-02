@@ -216,19 +216,20 @@ being handled -- and a pretty printer breaks a long method name such as
 (SB-PCL::FAST-METHOD PKG::NAME :BEFORE (T)) over several lines: the backtrace
 header then wraps, and a break straight after the operator also hides the
 \"(SB-PCL::FAST-METHOD \" prefix %INTERNAL-FRAME-P recognizes a user's method
-by.  A user's *PRINT-LENGTH* or *PRINT-LEVEL* would likewise cut the name to
-(SB-PCL::FAST-METHOD FOO ...).
+by.  A user's *PRINT-LENGTH*, *PRINT-CASE*, *PRINT-BASE* or pprint-dispatch
+entries would likewise cut, recase or re-break the name.
 
-The pretty printer stays on, with no right margin to break at, so a name reads
-as SBCL's debugger writes it: (LAMBDA () :IN ...), not (LAMBDA NIL :IN ...)."
-  (let ((*print-pretty* t)
-        (*print-right-margin* most-positive-fixnum)
-        (*print-lines* nil)
-        (*print-level* nil)
-        (*print-length* nil)
-        (*print-circle* nil)
-        (*print-readably* nil))
-    (prin1-to-string name)))
+So the name is printed with standard printer settings, keeping only the
+caller's *PACKAGE*, and with the pretty printer on but no right margin to break
+at: a name then reads as SBCL's debugger writes it, (LAMBDA () :IN ...), not
+the (LAMBDA NIL :IN ...) printing without the pretty printer gives."
+  (let ((package *package*))
+    (with-standard-io-syntax
+      (let ((*package* package)
+            (*print-readably* nil)
+            (*print-pretty* t)
+            (*print-right-margin* most-positive-fixnum))
+        (prin1-to-string name)))))
 
 #+sbcl
 (defun %frame-function-name (frame)

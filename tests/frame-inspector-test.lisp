@@ -358,7 +358,13 @@ established when the context is captured, and HANDLER-CASE unwinds first."
       (let ((*print-pretty* t)
             (*print-right-margin* 20)
             (*print-length* 2)
-            (*print-level* 1))
+            (*print-level* 1)
+            (*print-case* :downcase)
+            ;; A user's dispatch entry that forces a break after the operator.
+            (*print-pprint-dispatch* (copy-pprint-dispatch nil)))
+        (set-pprint-dispatch '(cons (member sb-pcl::fast-method lambda))
+                             (lambda (stream list)
+                               (format stream "(~S~:@_~{ ~S~})" (first list) (rest list))))
         (block caught
           (handler-bind ((error (lambda (e)
                                   (setf context (capture-error-context e :max-frames 30))

@@ -533,6 +533,15 @@
                      :test-name "t" :form '(= 1 probe-local))))
         (ok (equal "(= 1 CL-MCP/TESTS/TEST-RUNNER-TEST::PROBE-LOCAL)"
                    (gethash "form" detail))))))
+  (testing "a reason that is a condition is printed relative to the same package"
+    (let ((*package* (find-package '#:cl-user)))
+      (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
+                     :test-name "t"
+                     :reason (make-condition 'simple-error
+                                             :format-control "~S is unbound"
+                                             :format-arguments '(probe-local))
+                     :package (find-package '#:cl-mcp/tests/test-runner-test))))
+        (ok (equal "PROBE-LOCAL is unbound" (gethash "reason" detail))))))
   (testing "a keyword test name does not make every symbol print qualified"
     (let ((*package* (find-package '#:cl-user)))
       (ok (null (cl-mcp/src/test-runner-core::%test-name-package :some-test)))
