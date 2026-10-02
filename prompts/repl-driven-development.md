@@ -230,7 +230,7 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
   ```
   To avoid this, define restarts with **keyword** names (`:return-nil`) in library code.
 
-**Pre-PR**: `(asdf:compile-system :my-system :force :all)` to catch warnings from all file changes, then run full suite. (For a package-inferred system `:force t` recompiles nothing: the work is in its per-file subsystems, which only `:force :all` reaches.)
+**Pre-PR**: `(asdf:compile-system :my-system :force t)` to catch warnings from all file changes, then run full suite. For a package-inferred system use `:force :all` instead: there `:force t` recompiles nothing, because the work is in its per-file subsystems, which only `:force :all` reaches.
 
 ## Troubleshooting
 

@@ -210,8 +210,9 @@ Output fields:
   - CLOS instances: `class` name, `slots` array with `name`/`value` pairs
   - Structures: `class` name, `slots` array
   - Functions: `name`, `lambda_list` (SBCL only)
-- `meta`: `count`, `truncated` and `max_elements` for a list, array or hash-table;
-  `slot_count` for an instance or structure
+- `meta`: `truncated` and `max_elements`, plus `length` for a list (a string `">N"` when
+  truncated), `total_elements` for an array and `count` for a hash-table; `slot_count` for an
+  instance or structure
 - `hint` (string, only when the object is the class its symbol names or a named generic function): points at `clos-describe`, which describes the class or generic function itself; `inspect-object` shows its internal representation. The text shows it as `Hint:`
 
 Nested objects are returned as `object-ref` with their own `id` for further inspection.
@@ -356,8 +357,8 @@ Output:
   `fs-set-project-root` or `initialize`'s `rootPath`/`rootUri`), otherwise `env`
   (`MCP_PROJECT_ROOT`) or `explicit` (the server default, set outside any session)
 - `relative_cwd` (string|null): cwd relative to project root when inside it
-- `workers` (array, only with the worker pool on): the pool's workers, as `pool-status` lists
-  them
+- `workers` (array|null): the pool's workers, as `pool-status` lists them; `null` with the
+  worker pool off
 
 ## `fs-set-project-root`
 Set the calling session's project root to the client's location.
@@ -652,7 +653,8 @@ Output:
 - `path`, `operation`, `form_type`, `form_name`
 - `would_change` (boolean): whether the file was modified
 - `bytes`: size of the updated file content, in characters
-- `forms` (integer): how many top-level forms `content` held (also in dry-run output)
+- `forms` (integer, only when `content` held more than one form): how many it held (also in
+  dry-run output)
 - `bracket_warning` (string, optional): the content reads, but its delimiter
   scan found a `]` or `}` where `)` was expected (a symbol character in
   standard syntax, so a `)` typo survives); the edit is applied and the
@@ -660,7 +662,7 @@ Output:
 - `content`: human-readable summary string of the applied change
 
 Dry-run output (when `dry_run` is true):
-- `path`, `operation`, `form_type`, `form_name`, `forms`
+- `path`, `operation`, `form_type`, `form_name`, and `forms` for a multi-form `content`
 - `would_change` (boolean): whether the operation would modify the file
 - `original` (string): the matched form text before changes
 - `preview` (string): full file preview with changes applied
@@ -801,9 +803,7 @@ Output:
 - `content`: human-readable summary string of the applied change
 
 Dry-run output (when `dry_run` is true):
-- `path`, `operation` (`"patch"`), `form_type`, `form_name`, and `bracket_warning` when
-  there is one
-- `path`, `operation`, `form_type`, `form_name`, `forms`
+- `path`, `form_type`, `form_name`, and `bracket_warning` when there is one
 - `would_change` (boolean): whether the operation would modify the file
 - `operation`: always `"patch"`
 - `original` (string): the matched form text before changes
@@ -826,23 +826,26 @@ Input:
 - `recursive` (boolean, default `true`): descend into subdirectories.
 - `case_insensitive` (boolean, default `false`).
 - `form_types` (array of strings, optional): keep only hits whose top-level form has one of
-  these heads, compared case-insensitively with any package prefix dropped (`"defun"`,
-  `"defmethod"`, `"deftest"`, ...). A head is recognized when it is one of the usual
+  these heads, compared case-insensitively with any package prefix on the form's head dropped;
+  give bare names (`"defun"`, `"defmethod"`, `"deftest"`; `"asdf:defsystem"` matches nothing). A head is recognized when it is one of the usual
   definers or starts with `def`; a form whose head is neither — FiveAM's `test`, a DSL macro —
   has no type and is never kept by this filter. Hits inside an unterminated form bypass it.
-- `limit` (integer, default `200`): cap on the raw line hits, counted **before** hits are grouped
-  by form, so fewer entries than `limit` can come back.
+- `limit` (integer, default `200`): cap on the line hits that pass `form_types`, counted
+  **before** hits are grouped by form, so fewer entries than `limit` can come back.
 - `include_form` (boolean, default `false`): attach each form's full text; a form longer than
-  2000 characters is cut to the five lines around the hit.
+  2000 characters is cut to the lines within five of the hit plus its first and last two lines,
+  with `...` marking the gaps.
 
 Files searched: `.lisp`, `.asd` and `.ros`. The `.gitignore` of the search root (only that one)
-is honoured, with the common glob forms (`*`, `?`, `**`, a leading `/`) but not `!` negation;
-`.git/` is always skipped. Because only the root's own `.gitignore` applies, a directory that
+is honoured, with the common glob forms (`*`, `?`, `**`, a leading `/`) but not `!` negation.
+A pattern without a leading `/` matches anywhere in the path, as a substring, so it can exclude
+more than git would (`build` also skips `src/rebuild.lisp`). `.git/` is always skipped. Because only the root's own `.gitignore` applies, a directory that
 the project's `.gitignore` excludes is still searched when you pass it as `path`. A hit on a
 line outside every top-level form (a comment between forms) is dropped.
 
 Output:
-- `content`: `N matches for "PATTERN"[ in PATH]:`, then one line per form,
+- `content`: `N matches for "PATTERN"[ in PATH]:` (`1 match for` when there is one), then one
+  line per form,
   `FILE:LINE [FORM-TYPE] SIGNATURE`, then any `NOTE` lines. `FORM-TYPE` prints `NIL` for an
   unrecognized head.
 - `matches` (array), one entry per (file, form), with:
@@ -874,7 +877,8 @@ Input — exactly one of two ways to name what to expand:
   addresses a form (`form_name` may end in `[N]`, a 0-based index, to pick one of several
   matches; an ambiguous name lists the candidates with their `[N]`).
   - `sub_form` (string, optional): expand the calls to this macro **inside** the addressed form
-    instead of the form itself — every call, up to 10 (a note says how many were skipped).
+    instead of the form itself — every call, up to 10 (`NOTE: N calls to X matched; showing
+    the first 10.`).
     The name is matched case-insensitively, ignoring any package prefix. Quoted data and `#'name`
     are not searched; the body of `#'(lambda ...)` is. A name in a binding position of
     `macrolet`, `symbol-macrolet`, `flet` or `labels` is skipped with a note, and a call below
@@ -891,7 +895,7 @@ Other inputs:
   `CL-USER`.
 - `readtable` (string): named-readtable designator; the worker needs `named-readtables`.
 - `print_level` (integer, default `50`), `print_length` (integer, default `1000`): printing
-  bounds, at least 1.
+  bounds; a value below 1 is treated as 1.
 - `max_output_length` (integer, default `50000`): characters per expansion; longer output ends
   in `...(truncated)`.
 
@@ -902,7 +906,7 @@ declares its own `in-readtable`. Expansion uses a null lexical environment, so a
 Output:
 - `content`: a header `lisp-macroexpand (level: L, package: P)` (plus any note), then one block
   per expansion, headed `[i] LABEL` — `form` in code mode, `TYPE NAME (file line N)` for a whole
-  form, `NAME (file line N) [i/total]` for a `sub_form` match. A block then says one of:
+  form, `NAME (file line N)` for a `sub_form` match (with `[i/total]` when there are several). A block then says one of:
   - `expanded in N step(s)` (or `expanded (full code walk)`), followed by the expansion,
     printed lower-case and relative to the target package;
   - `STOPPED at the 100-step expansion limit`, when `full` ran out with a macro call still at
@@ -915,7 +919,8 @@ Output:
   any entry failed.
 
 A package that does not exist in the worker is answered with `Package X does not exist in this
-image … Load the system that defines it with the 'load-system' tool, then retry.`
+image … Load the system that defines it with the 'load-system' tool, then retry.` — a response
+with only `content` and `isError`, no `expansions`.
 
 ## `code-find`
 Return definition location (path, line) for a symbol using SBCL `sb-introspect`.
@@ -1302,7 +1307,8 @@ Input:
 Output fields:
 - `killed` (boolean): whether a worker was actually killed. It is `false`, with the reason in
   the text, when the worker pool is disabled, the session cannot be identified, or no worker is
-  bound to the session
+  bound to the session — or when a spawn still in progress was cancelled instead, which also
+  sets `cancelled_spawn`
 - `reset` (boolean|null): whether a replacement was spawned (only present when `killed` is true)
 - `cancelled_spawn` (boolean|null): true if a pending spawn was cancelled instead of killing a live worker
 - `isError` (boolean|null): true if kill succeeded but replacement spawn failed
@@ -1513,8 +1519,8 @@ construction is supported; it does not guarantee successful draws or reductions.
   not inlined.
   - `symbol` (string, required), `package`, `include_runtime` (boolean,
     default true), `timeout_seconds` (number, default 30)
-  An unqualified `symbol` or `name` is read in `COMMON-LISP-USER` unless `package` says
-  otherwise; this holds for `spec-describe` and `spec-check` as well.
+  - An unqualified `symbol` is read in `COMMON-LISP-USER` unless `package` says otherwise;
+    so is an unqualified `name` in `spec-describe` and `spec-check`.
 - `spec-describe` — one definition in full.
   - `kind` (`property` | `spec` | `function-spec`, required), `name` (required),
     `package`, `max_chars` (positive integer, default 8000),

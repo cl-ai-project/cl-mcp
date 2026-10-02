@@ -96,8 +96,9 @@ So does the pool under overlapping operations (`shutdown-pool`, the spawn and en
 stream (`%call-with-stream-held`), and a pool's generations (`initialize-pool`, `%make-generation`,
 `%spawn-and-bind`, `%schedule-replenish`): `property=` for `pool-shutdown-leaves-nothing-behind`,
 `pool-late-work-stays-with-its-generation` and `pool-holds-while-operations-overlap`, then run
-`concurrency-test` and, in a fresh process, `pool-ownership-test` and `pool-test`. A spawn or an ending is accounted for in the critical
-section that decides it, and a spawn hands its count to its worker in the one that registers it.
+`concurrency-test` and, in a fresh process, `pool-ownership-test` and `pool-test`. A spawn or an
+ending is accounted for in the critical section that decides it, and a spawn hands its count to
+its worker in the one that registers it.
 Elsewhere the bundle is not required.
 
 ## Architecture

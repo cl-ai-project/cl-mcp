@@ -284,7 +284,7 @@ Disable the worker pool with `MCP_NO_WORKER_POOL=1` or the `:worker-pool` keywor
 |----------|---------|---------|
 | `MCP_PROJECT_ROOT` | Default project root for sessions that set none of their own | (not set: each session sets its own) |
 | `MCP_LOG_LEVEL` | Log level: `debug`, `info`, `warn` (or `warning`), `error`; an unrecognized value is ignored | `debug` |
-| `MCP_LOG_FILE` | Also log to a file, named `<stem>-<timestamp>-<pid>`; workers do not inherit it | (stderr only) |
+| `MCP_LOG_FILE` | Also log to a file, named `<stem>-<timestamp>-<pid>.<ext>` beside the given path; workers do not inherit it | (stderr only) |
 | `MCP_NO_WORKER_POOL` | Any non-empty value (even `0`) disables worker pool isolation | (not set = pool enabled) |
 | `MCP_ENABLE_TOOL_GROUPS` | Optional tool groups to enable, separated by commas or spaces, case-insensitive (`cl-spec`); read when the system loads. The `:tool-groups` argument of `run`, `start-http-server`, `serve-tcp`, `start-tcp-server-thread` and `ensure-tcp-server-thread` overrides it | (empty: all groups off) |
 | `MCP_WORKER_SWANK` | Any non-empty value makes each worker `(ql:quickload :swank)` and start a Swank server on a free port, reported in the `worker.swank.started` log event (needs Quicklisp in the worker; without it the worker runs without Swank) | (off) |
@@ -389,7 +389,8 @@ The HTTP transport has no authentication by default. `start-http-server`'s
 
 Workers are child processes of the server and inherit its whole environment,
 API keys and other secrets included: code run through `repl-eval` can read them.
-Only the `MCP_WORKER_INIT_*` variables and `MCP_LOG_FILE` are withheld. A worker
+Only the `MCP_WORKER_INIT_*` variables and `MCP_LOG_FILE` are withheld (the worker's own
+`MCP_*` control variables are set fresh). A worker
 listens on `127.0.0.1` and answers only the parent, which proves itself with a
 per-worker shared secret.
 
