@@ -348,14 +348,17 @@ established when the context is captured, and HANDLER-CASE unwinds first."
 
 (deftest frame-function-names-stay-on-one-line
   (testing "a method frame's name is one line, however the printer is set up"
-    ;; The name was printed with the caller's *PRINT-PRETTY*, so a qualified
+    ;; The name was printed with the caller's printer settings, so a qualified
     ;; method name wrapped and repl-eval's backtrace header broke over two
     ;; lines, pushing the source location onto the continuation line.  A
     ;; break straight after the operator also defeats the
-    ;; "(SB-PCL::FAST-METHOD " prefix *INTERNAL-FRAME-P* looks for.
+    ;; "(SB-PCL::FAST-METHOD " prefix %INTERNAL-FRAME-P looks for, and a
+    ;; user's *PRINT-LENGTH* cut the name short.
     (let ((context nil))
       (let ((*print-pretty* t)
-            (*print-right-margin* 20))
+            (*print-right-margin* 20)
+            (*print-length* 2)
+            (*print-level* 1))
         (block caught
           (handler-bind ((error (lambda (e)
                                   (setf context (capture-error-context e :max-frames 30))
@@ -370,10 +373,27 @@ established when the context is captured, and HANDLER-CASE unwinds first."
         (ok names "frames were captured")
         (ok (notany (lambda (name) (find #\Newline name)) names)
             "no frame name holds a line break")
+        (ok (notany (lambda (name) (search "..." name)) names)
+            "and none is cut short by the caller's *PRINT-LENGTH*")
         (ok method-frame "the :before method's frame is there")
         (when method-frame
+          (ok (search ":BEFORE (INTEGER))" method-frame)
+              "with its qualifier and specializers")
           (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p method-frame))
-              "and is still recognized as the user's method"))))))
+              "and is still recognized as the user's method")))))
+  (testing "a lambda's empty lambda list reads as SBCL's debugger writes it"
+    ;; Printing with *PRINT-PRETTY* off would show (LAMBDA NIL :IN ...).  The
+    ;; frames of this deftest's own body and of Rove's runner are such lambdas.
+    (let ((context nil))
+      (block caught
+        (handler-bind ((error (lambda (e)
+                                (setf context (capture-error-context e :max-frames 30))
+                                (return-from caught))))
+          (error "frame probe lambda")))
+      (let ((names (mapcar (lambda (frame) (getf frame :function))
+                           (getf context :frames))))
+        (ok (some (lambda (name) (search "(LAMBDA () :IN" name)) names))
+        (ok (notany (lambda (name) (search "(LAMBDA NIL" name)) names))))))
 
 (deftest frame-source-location-returns-real-line-number
  (testing

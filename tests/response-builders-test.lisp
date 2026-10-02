@@ -98,6 +98,7 @@
                                                      (%site 23 :column 5)))))))))
       (ok (search (format nil "  22:7: ~A" context) text))
       (ok (search (format nil "  22:24: ~A" context) text))
+      (ok (not (search "  22: " text)) "neither twin is left without its column")
       (ok (search "  23: (foo 1)" text)
           "a site alone on its line keeps the plain line number"))))
 

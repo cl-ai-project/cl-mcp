@@ -607,6 +607,8 @@ BUILD-CODE-FIND-RESPONSE, annotates the Defined at line and sets \"stale\"."
             type (gethash "test" ref) (gethash "note" ref))
     ;; Sites sharing a line carry their column too: their context is the
     ;; same line of source, so without it the rows read as one site twice.
+    ;; All sites are counted, so a shown row may carry a column because its
+    ;; twin is among the "+N more" -- a hint that the line holds more.
     (loop for site in sites
           for shown below *references-sites-shown*
           do (let ((kind (gethash "kind" site))

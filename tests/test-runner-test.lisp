@@ -517,19 +517,30 @@
     (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
                    :test-name "t" :form "truthy")))
       (ok (equal "\"truthy\"" (gethash "form" detail)))))
+  ;; The next three run from CL-USER, as the runner does, so that a pass
+  ;; cannot come from *PACKAGE* already being this test package.
   (testing "symbols print as the test's own package reads them"
     ;; Printed from CL-USER, a test's local came out as PKG::NAME.
-    (let* ((package (find-package '#:cl-mcp/tests/test-runner-test))
-           (local (intern "PROBE-LOCAL" package))
-           (detail (cl-mcp/src/test-runner-core::make-failure-detail
-                    :test-name "t" :form (list '= 1 local) :values (list local)
-                    :package package)))
-      (ok (equal "(= 1 PROBE-LOCAL)" (gethash "form" detail)))
-      (ok (equal '("PROBE-LOCAL") (coerce (gethash "values" detail) 'list)))))
+    (let ((*package* (find-package '#:cl-user)))
+      (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
+                     :test-name "t" :form '(= 1 probe-local) :values '(probe-local)
+                     :package (find-package '#:cl-mcp/tests/test-runner-test))))
+        (ok (equal "(= 1 PROBE-LOCAL)" (gethash "form" detail)))
+        (ok (equal '("PROBE-LOCAL") (coerce (gethash "values" detail) 'list))))))
   (testing "without a package the form keeps qualifying what CL-USER cannot read"
-    (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
-                   :test-name "t" :form (list '= 1 'cl-mcp/src/test-runner-core::%source-text))))
-      (ok (search "CL-MCP/SRC/TEST-RUNNER-CORE::%SOURCE-TEXT" (gethash "form" detail))))))
+    (let ((*package* (find-package '#:cl-user)))
+      (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
+                     :test-name "t" :form '(= 1 probe-local))))
+        (ok (equal "(= 1 CL-MCP/TESTS/TEST-RUNNER-TEST::PROBE-LOCAL)"
+                   (gethash "form" detail))))))
+  (testing "a keyword test name does not make every symbol print qualified"
+    (let ((*package* (find-package '#:cl-user)))
+      (ok (null (cl-mcp/src/test-runner-core::%test-name-package :some-test)))
+      (ok (eq (find-package '#:cl-mcp/tests/test-runner-test)
+              (cl-mcp/src/test-runner-core::%test-name-package 'some-test)))
+      (ok (null (cl-mcp/src/test-runner-core::%test-name-package "some-test")))
+      (ok (null (cl-mcp/src/test-runner-core::%test-name-package
+                 (make-symbol "SOME-TEST")))))))
 
 (deftest run-tests-keeps-the-quotes-on-a-string-assertion-form
   (testing "a real Rove failure whose form is a bare string reports it quoted"

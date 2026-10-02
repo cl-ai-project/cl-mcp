@@ -211,12 +211,23 @@ point)."
 
 (defun %frame-name-string (name)
   "Return NAME, a debug-fun name, printed on one line.
-*PRINT-PRETTY* is the caller's otherwise, and a pretty printer breaks a long
-method name such as (SB-PCL::FAST-METHOD PKG::NAME :BEFORE (T)) over several
-lines: the backtrace header then wraps, and a break straight after the
-operator also hides the \"(SB-PCL::FAST-METHOD \" prefix %INTERNAL-FRAME-P
-recognizes a user's method by."
-  (let ((*print-pretty* nil))
+The printer is otherwise the caller's -- the user's own, while their error is
+being handled -- and a pretty printer breaks a long method name such as
+(SB-PCL::FAST-METHOD PKG::NAME :BEFORE (T)) over several lines: the backtrace
+header then wraps, and a break straight after the operator also hides the
+\"(SB-PCL::FAST-METHOD \" prefix %INTERNAL-FRAME-P recognizes a user's method
+by.  A user's *PRINT-LENGTH* or *PRINT-LEVEL* would likewise cut the name to
+(SB-PCL::FAST-METHOD FOO ...).
+
+The pretty printer stays on, with no right margin to break at, so a name reads
+as SBCL's debugger writes it: (LAMBDA () :IN ...), not (LAMBDA NIL :IN ...)."
+  (let ((*print-pretty* t)
+        (*print-right-margin* most-positive-fixnum)
+        (*print-lines* nil)
+        (*print-level* nil)
+        (*print-length* nil)
+        (*print-circle* nil)
+        (*print-readably* nil))
     (prin1-to-string name)))
 
 #+sbcl
