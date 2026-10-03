@@ -18,7 +18,14 @@
   (:import-from #:cl-mcp/src/test-runner-core
                 #:call-with-test-run-deadline
                 #:coerce-timeout-seconds
-                #:make-timeout-result))
+                #:make-timeout-result)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/test-runner)
+  (:import-from #:cl-mcp/src/state
+                #:make-state)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht))
 
 (in-package #:cl-mcp/tests/test-runner-deadline-test)
 
@@ -331,3 +338,32 @@
             "a healthy worker is not sent to pool-kill-worker")
         (ok (search "still executing" leaked))
         (ok (search "pool-kill-worker" leaked))))))
+
+(deftest run-tests-tool-times-out-a-real-slow-suite
+  (testing "run-tests on a suite that outlives timeout_seconds answers TIMEOUT"
+    ;; End to end, through the tool handler: the tests above drive the
+    ;; deadline with synthetic thunks, and this one hands it a real suite.
+    ;; cl-mcp/tests/timeout-test is that suite -- one test that sleeps ten
+    ;; seconds -- and exists for this alone, so it is not run as a suite of
+    ;; its own in either tier.  Without the worker pool the handler runs the
+    ;; suite inline, which is what puts the deadline in this process.
+    (let* ((*use-worker-pool* nil)
+           (start (get-internal-real-time))
+           (response (cl-mcp/src/test-runner::run-tests-handler
+                      (make-state) "deadline-e2e"
+                      (make-ht "system" "cl-mcp/tests/timeout-test"
+                               "timeout_seconds" 2)))
+           (elapsed (/ (- (get-internal-real-time) start)
+                       (float internal-time-units-per-second)))
+           (result (gethash "result" response)))
+      (ok (hash-table-p result) "the tool answered with a result, not an error")
+      (when (hash-table-p result)
+        (ok (equal "timeout" (gethash "framework" result))
+            (format nil "framework is timeout, got ~S" (gethash "framework" result)))
+        (ok (eql 1 (gethash "failed" result)))
+        (ok (search "TIMEOUT" (gethash "text" (aref (gethash "content" result) 0)))
+            "the summary says TIMEOUT"))
+      ;; The suite sleeps ten seconds; answering well before that is the
+      ;; point of a deadline.  Reloading the suite counts against it too.
+      (ok (< elapsed 8)
+          (format nil "answered in ~,2F s, not after the suite's ten" elapsed)))))
