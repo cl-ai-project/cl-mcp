@@ -19,7 +19,7 @@ This project is developed using its own MCP tools. When working on cl-mcp:
 - **Package naming**: Uses ASDF `package-inferred-system` — each file defines package `cl-mcp/src/<path>` and is loaded because a loaded file `:import-from`s it; `cl-mcp.asd` needs no edit. Where a new file must be registered:
   - **Source file**: `:import-from` it in the files that use it
   - **Tool**: add its module to `src/tools/all.lisp` (forgotten, the tool silently never loads and is missing from `tools/list`); a worker-side tool also needs a `"worker/<method>"` entry in `register-all-handlers` (`src/worker/handlers.lisp`)
-  - **Test file**: add `(:import-from #:cl-mcp/tests/<name>-test)` to the root `tests.lisp` (forgotten, neither `rove cl-mcp.asd` nor CI runs it); suites that need cl-spec or a process of their own are not listed there but run as CI steps
+  - **Test file**: add `(:import-from #:cl-mcp/tests/<name>-test)` to the root `tests.lisp` (forgotten, neither `rove cl-mcp.asd` nor CI runs it) — or, for a suite that starts worker processes or servers, its name to `*process-tier-suites*` there instead (see Test tiers); suites that need cl-spec or a process of their own are not listed at all but run as CI steps
   - **Public API**: re-export from `main.lisp`
 
 ## Testing & Linting
@@ -32,7 +32,18 @@ This project is developed using its own MCP tools. When working on cl-mcp:
 
 **Fallback** (stale image / package conflicts): `rove cl-mcp.asd` from Bash for a clean process.
 
-**Pre-PR**: `(asdf:compile-system :cl-mcp :force :all)` to catch warnings, then run full test suite.
+**Test tiers**: `rove cl-mcp.asd` and `run-tests` on `cl-mcp/tests` run the **quick tier** —
+every suite except the ones that start worker processes or servers or wait out real deadlines
+(`*process-tier-suites*` in `tests.lisp`, about 12 of a full run's 14 minutes; they are kept
+out of `cl-mcp/tests`' `:import-from` list, which is what `run-tests` follows). `rove` says so
+at the start and the end of its output. `CL_MCP_TEST_TIER=full rove cl-mcp.asd` runs
+everything; CI does. A process-tier suite run by name (`run-tests`, or `rove:run` on it) always
+runs whole.
+A change to the pool, workers, transports, timeouts or cancellation needs the full tier before
+it is called green; a new suite that spawns workers or servers belongs in that list.
+
+**Pre-PR**: `(asdf:compile-system :cl-mcp :force :all)` to catch warnings, then run the full
+tier (`CL_MCP_TEST_TIER=full rove cl-mcp.asd`).
 (`:force t` recompiles nothing here: cl-mcp is a package-inferred system, so the work is in the
 per-file subsystems that only `:force :all` reaches.)
 

@@ -47,6 +47,11 @@ jobs:
           ros install rove cl-ai-project/cl-mcp
 
       - name: Run Tests
+        # The full tier: a bare `rove cl-mcp.asd` runs the quick tier, which
+        # leaves out the suites that start worker processes and servers
+        # (*process-tier-suites* in tests.lisp).
+        env:
+          CL_MCP_TEST_TIER: full
         run: |
           rove cl-mcp.asd
 
