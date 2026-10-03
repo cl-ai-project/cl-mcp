@@ -31,6 +31,7 @@ the structure a source search cannot see:
 - a class: superclasses, subclasses, precedence list, direct and effective slots
   (initargs, initform as code, type, accessors, and the class each comes from),
   default initargs, and the methods specialized on it or its superclasses
+  (language-level superclasses' methods are omitted and named in omitted_classes)
 A symbol naming a class and a generic function, or a SETF generic function,
 gets every section.  Each definition's source_match reports whether its form
 was independently verified against the running image: only \"matched\"

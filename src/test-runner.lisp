@@ -28,6 +28,9 @@
 (define-tool "run-tests"
   :description "Run tests for a system and return structured results.
 
+The system is force-reloaded from disk first, so no load-system is needed after
+an edit, and test/tests names resolve against the freshly loaded packages.
+
 Supports multiple test frameworks with automatic detection:
 - Rove: Full structured results with failure details
 - FiveAM: Full structured results with failure details
@@ -58,8 +61,9 @@ To include debug prints in the visible summary, write to *test-debug-output*:
 - failed_tests (array of objects with fields:)
   - test_name (string) — name of the failing test
   - description (string) — assertion description (Rove) or the test's docstring (FiveAM)
-  - form (string) — the assertion form expression
-  - values (array of strings) — evaluated argument values (Rove only)
+  - form (string) — the assertion form expression, printed as the test's package
+    reads it (Rove, FiveAM)
+  - values (array of strings) — evaluated argument values (Rove, prove)
   - reason (string) — error reason or condition message
   - source (object) — source location with file and line (Rove only; FiveAM
     records no source location for a test, so use test_name and description)
@@ -71,13 +75,13 @@ Examples:
   :args ((system :type :string :required t
                  :description "System name to test (e.g., 'my-project/tests')")
          (framework :type :string :required nil
-                    :description "Force framework: 'rove', 'fiveam', 'prove', or 'auto' (default: auto-detect)")
+                    :description "Force framework: 'rove', 'fiveam', 'prove', 'asdf', or 'auto' (default: auto-detect from the system's :depends-on). Any other value runs the ASDF fallback")
          (test :type :string :required nil
-               :description "Run only this specific test (fully qualified: 'package::test-name')")
+               :description "Run only this specific test, written 'package::test-name' (double colon). Rove and FiveAM only; exclusive with tests")
          (tests :type :array :required nil
-                :description "Run only these specific tests (array of 'package::test-name')")
+                :description "Run only these specific tests (array of 'package::test-name'). Rove and FiveAM only; exclusive with test")
          (timeout-seconds :type :number :json-name "timeout_seconds" :required nil
-                          :description "Maximum seconds to wait for the test run to complete (default: 300). Increase for large test suites."))
+                          :description "Maximum seconds to wait for the test run to complete (default: 300; a value of 0 or below means the default). Increase for large test suites."))
   :body
   (with-proxy-dispatch (id "worker/run-tests"
                           (make-ht "system" system

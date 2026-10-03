@@ -33,7 +33,14 @@ Solves three problems with using (asdf:load-system) via repl-eval:
 3. Timeout: dedicated timeout prevents hanging on large systems
 
 PREREQUISITE: The system must be findable by ASDF (registered via
-asdf:load-asd or on the ASDF source registry / Quicklisp search paths).
+asdf:load-asd or on the ASDF source registry / Quicklisp search paths). When it
+is not, a matching <name>.asd under the project root is found, registered and
+loaded (the response then carries auto_discovered_asd).
+
+force=true clears ASDF's loaded state, but ASDF still recompiles only the files
+it judges stale by their timestamps (one-second resolution): an edit made in the
+same second as the last compile can be missed. clear_fasls=true is the
+guaranteed rebuild.
 
 Warning handling: when force=true triggers an actual ASDF:CLEAR-SYSTEM
 (i.e., the system was previously loaded), SBCL 'redefining X in DEFUN'
@@ -54,9 +61,9 @@ Examples:
    (force :type :boolean :default t
     :description "Clear loaded state before loading to pick up changes (default: true)")
    (clear-fasls :type :boolean :json-name "clear_fasls"
-    :description "Force full recompilation from source (default: false)")
+    :description "Delete the cached FASLs under this system's source tree (its primary system's, for a package-inferred subsystem) before loading, forcing that tree to recompile; dependencies in other projects are not touched (default: false)")
    (timeout-seconds :type :number :json-name "timeout_seconds"
-    :description "Timeout for the operation in seconds (default: 120)"))
+    :description "Timeout for the operation in seconds; positive (default: 120)"))
   :body
   (progn
     (when (and timeout-seconds (not (plusp timeout-seconds)))

@@ -100,13 +100,13 @@ Examples:
     :enum ("specs" "properties" "function-specs" "both")
     :description "What to list (default: both, which is all three)")
    (package :type :string
-    :description "Only names whose home package is this one")
+    :description "Only names whose home package is this one. A package that does not exist returns status unresolved-package, not an empty list")
    (tag :type :string
     :description "Only properties carrying this tag. Applies to properties only.")
    (limit :type :integer
     :description "Maximum names of each kind to return (default: 200)")
    (timeout-seconds :type :number :json-name "timeout_seconds"
-    :description "Deadline for reading the registry in seconds (default: 30)"))
+    :description "Deadline for reading the registry, a positive whole number of seconds (default: 30)"))
   :body
   (let ((params (make-ht "kind" kind
                          "package" package
@@ -152,7 +152,7 @@ Examples:
     "Join this image's signature, docstring and source location (default: true)")
    (timeout-seconds :type :number :json-name "timeout_seconds"
     :description
-    "Deadline for reading the registry in seconds (default: 30). Digesting every property about a symbol is bounded work, but not free."))
+    "Deadline for reading the registry, a positive whole number of seconds (default: 30). Digesting every property about a symbol is bounded work, but not free."))
   :body
   ;; One binding, used by both branches of WITH-PROXY-DISPATCH.  Marshalling
   ;; the arguments twice means keeping two copies in step by hand, and a
@@ -219,7 +219,7 @@ Examples:
    (max-chars :type :integer :json-name "max_chars"
     :description "Maximum characters of body and source form (default: 8000)")
    (timeout-seconds :type :number :json-name "timeout_seconds"
-    :description "Deadline for reading the registry in seconds (default: 30)"))
+    :description "Deadline for reading the registry, a positive whole number of seconds (default: 30)"))
   :body
   (let ((params (make-ht "kind" kind
                          "name" name
@@ -517,16 +517,20 @@ worker_reuse afterwards.")
     "Trial-count profile, e.g. 'normal' or 'smoke' (default: normal). Property
 runs only -- a contract has no :trials table to select from and cl-spec's
 check-function takes no profile, so it is refused with function=, the mirror
-of how trials is refused with property=. Size a contract run with trials=.")
+of how trials is refused with property=. Size a contract run with trials=.
+The name must be a keyword already present in this image (one some property's
+:trials table uses); any other is refused.")
    (seed :type :string
     :description
-    "Decimal digits AS A STRING. A JSON number would already have lost digits.")
+    "Decimal digits AS A STRING. A JSON number would already have lost digits.
+A seed reproduces one run, so it is refused when symbol= selects more than one
+property; replay each with property= and its own seed.")
    (expect-definition-digest :type :string
     :json-name "expect_definition_digest"
     :description
     "Digest from an earlier run; a mismatch is reported rather than ignored")
    (timeout-seconds :type :number :json-name "timeout_seconds"
-    :description "Budget for the whole call in seconds (default: 60)")
+    :description "Budget for the whole call in seconds (default: 60). Give a positive value: a budget of 0 or less runs nothing, and every result comes back not-run")
    (max-value-chars :type :integer :json-name "max_value_chars"
     :description
     "Maximum printed characters per counterexample value (default: 2000)"))

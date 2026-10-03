@@ -632,11 +632,12 @@ Use this to drill down into complex data structures like CLOS instances, structu
 An object id is an opaque string such as \"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-17\", valid only in the
 worker image that issued it: once that worker is replaced -- a crash, a timeout,
 pool-kill-worker, a cancellation -- its ids are refused as OBJECT_STALE rather
-than resolved to anything else."
+than resolved to anything else. Only the 1000 most recently registered objects
+are kept; an id evicted from that window is refused as OBJECT_NOT_FOUND."
   :args ((object-id :type :string :json-name "id" :required t
                     :description "Object ID (a string) from repl-eval result_object_id, an [object-id: ...] marker, or a previous inspection")
          (max-depth :type :integer :json-name "max_depth"
-                    :description "Nesting depth for expansion (0=summary only, default=1)")
+                    :description "Levels of nested objects to expand in place (default=1: the object's own elements, entries or slots are listed and nested objects appear as object-id refs; 0 behaves like 1)")
          (max-elements :type :integer :json-name "max_elements"
                        :description "Maximum elements for lists/arrays/hash-tables (default=50)"))
   :body

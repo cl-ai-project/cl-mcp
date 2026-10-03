@@ -171,15 +171,23 @@ KEY ADVANTAGE: Works WITHOUT loading systems - faster and no side effects.
 Use this as the FIRST choice for code exploration before code-find/code-describe.
 
 Default: Returns signatures only (token-efficient, ~70% reduction vs full forms).
-Use 'include_form: true' to get complete form text when needed.
+'include_form: true' adds each form's text to the JSON 'matches' only -- the
+content text still shows signatures -- and trims a form over 2000 characters to
+the lines around the match; if your client shows only text, read the form with
+lisp-read-file name_pattern instead.
 
 A file that does not parse (a form left open to the end of the file) is still
 searched: matches inside the unclosed form are listed one per line, attributed
 to that form, and a NOTE names the file and the line where it opens.
 
-Each match's 'file' is relative to the project root -- not to 'path' -- or
-absolute when the file lives outside it, so it can be passed straight to
-lisp-read-file however the search was rooted.
+Each match's 'file' is relative to the project root -- not to 'path' -- so a
+file under the root can be passed straight to lisp-read-file however the search
+was rooted. A file outside the root can come back relative to the server's
+working directory or cl-mcp's own source directory rather than absolute; give
+lisp-read-file an absolute path for such a file.
+
+Only .lisp, .asd and .ros files are searched, honouring the .gitignore of the
+search root alone. A line outside every top-level form is never reported.
 
 Recommended workflow:
 1. clgrep-search to locate functions/usages across the project
@@ -187,7 +195,7 @@ Recommended workflow:
   :args ((pattern :type :string :required t
                   :description "cl-ppcre regular expression pattern to search for")
          (path :type :string
-               :description "Search root directory (optional, defaults to project root).
+               :description "Search root, a directory or a single file (optional, defaults to project root).
 Relative paths resolve against the project root. An absolute path is accepted when it is
 inside the project root or inside the source directory of a registered ASDF system, so a
 dependency's sources can be searched the same way lisp-read-file can read them.")
@@ -196,11 +204,11 @@ dependency's sources can be searched the same way lisp-read-file can read them."
          (case-insensitive :type :boolean :json-name "case_insensitive"
                            :description "Case-insensitive matching (default: false)")
          (form-types :type :array :json-name "form_types"
-                     :description "Filter by form types, e.g., [\"defun\", \"defmethod\"] (optional)")
+                     :description "Filter by form types, e.g., [\"defun\", \"defmethod\"] (optional). Bare names: the form's head is compared without its package prefix. A form whose head is not a recognized definer (starting with def) -- FiveAM's test, say -- has no type and is never kept")
          (limit :type :integer
-                :description "Maximum number of results to return (optional, defaults to 200)")
+                :description "Maximum matching lines collected before they are grouped per form (optional, defaults to 200), so fewer entries can come back; the JSON 'limited' says when it was reached")
          (include-form :type :boolean :json-name "include_form"
-                       :description "Include full form text in results (default: false, returns signatures only)"))
+                       :description "Add each form's text to the JSON matches (default: false; the content text shows signatures either way)"))
   :body
   (let* ((effective-limit (or limit 200))
          (results

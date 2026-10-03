@@ -532,14 +532,15 @@ it is flagged in \"diagnosis_text\" as a likely artifact of the window."
   :description "Check balanced parentheses/brackets in a file slice or provided code.
 Use this to DIAGNOSE syntax errors in existing files or validate code snippets
 before/after editing. Returns the first mismatch position if unbalanced, or
-success if balanced. Unbalanced delimiter results include guidance to use
-lisp-edit-form for existing Lisp files.
+success if balanced. Unbalanced delimiter results name the next step (see the
+last paragraph).
 
 Also detects reader errors (e.g. unknown dispatch characters, #. read-time eval
 when *read-eval* is nil) even when parentheses are balanced. In that case the
 result has kind: \"reader-error\" and a message field describing the error,
-instead of expected/found fields. Files using named-readtables:in-readtable are
-exempt from reader checking to avoid false positives.
+instead of expected/found fields. The reader check is skipped for any text that
+contains in-readtable (a named-readtables file, but also a mention in a comment
+or string), to avoid false positives.
 
 When a file fails the delimiter scan it is also parsed with the editing tools'
 reader (*read-eval* off; an in-file in-readtable is honoured, so its reader
@@ -547,14 +548,14 @@ macros run) to pick the next step: a file that reader accepts is reported as a
 likely false positive with no fix attached, and a file broken on a delimiter is
 sent to the fs-write-file overwrite path."
   :args ((path :type :string
-               :description "Absolute path inside project or registered ASDF system
-(mutually exclusive with code)")
+               :description "Path relative to the project root, or absolute inside it or a
+registered ASDF system (mutually exclusive with code)")
          (code :type :string
                :description "Raw code string to check (mutually exclusive with path)")
          (offset :type :integer
-                 :description "0-based character offset when reading from path")
+                 :description "0-based character offset when reading from path; a window is diagnosed, never repaired")
          (limit :type :integer
-                :description "Maximum characters to read from path"))
+                :description "Maximum characters to read from path (at most 1048576)"))
   :body
   (progn
     (when (and path code)

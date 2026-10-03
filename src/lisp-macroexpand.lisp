@@ -457,7 +457,7 @@ Two ways to name what to expand:
                    get very large; nested macro calls in the body are expanded
                    (loop, for one, expands down to special forms), but defun
                    itself is left in place, so a whole defun still comes back
-                   headed by defun.
+                   headed by defun. Stops with an error after 1000 expansions.
 
 PREREQUISITE: the macro must be DEFINED in the worker image. If the package
 does not exist you get an error telling you to run 'load-system' first; after
