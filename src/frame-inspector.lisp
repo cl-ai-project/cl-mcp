@@ -341,12 +341,43 @@ that merely contain FAST-METHOD as a substring are not misclassified."
         (return-from %method-wrapper-name
           (%parse-wrapped-symbol function-name prefix-len))))))
 
+(defun %common-lisp-name (token)
+  "Return TOKEN, a symbol as printed, without its package prefix when that prefix
+names COMMON-LISP; TOKEN itself when it has no prefix; NIL when another package
+qualifies it.
+Frame names are printed relative to the caller's *PACKAGE* (%FRAME-NAME-STRING),
+so one that does not use COMMON-LISP writes (COMMON-LISP:LABELS ...),
+(COMMON-LISP:SETF ...) and COMMON-LISP:ERROR.  A nickname, or a local nickname
+of the package doing the reading, is accepted as FIND-PACKAGE resolves it."
+  (let ((colon (position #\: token)))
+    (cond ((null colon) token)
+          ((zerop colon) nil)
+          ((let ((prefix (subseq token 0 colon)))
+             (or (member prefix '("COMMON-LISP" "CL") :test #'string-equal)
+                 (eq (find-package prefix) (find-package "COMMON-LISP"))))
+           (string-left-trim ":" (subseq token colon)))
+          (t nil))))
+
+(defun %frame-operator (function-name)
+  "Return (values OPERATOR END) for FUNCTION-NAME, a frame name printed as a
+list: OPERATOR is the name of its first element when that is a COMMON-LISP
+symbol, written without a package prefix (see %COMMON-LISP-NAME), and END the
+index of the space after it.  NIL when FUNCTION-NAME is not such a list."
+  (let ((end (position #\Space function-name)))
+    (when (and end
+               (> end 1)
+               (char= (char function-name 0) #\())
+      (let ((operator (%common-lisp-name (subseq function-name 1 end))))
+        (when operator
+          (values operator end))))))
+
 (defun %setf-frame-target (function-name)
   "Return the target symbol name from a (SETF NAME) frame as a string, or NIL
-when FUNCTION-NAME is not a SETF frame."
-  (when (and (>= (length function-name) 6)
-             (string-equal function-name "(SETF " :end1 6))
-    (string-trim '(#\) #\Space) (subseq function-name 6))))
+when FUNCTION-NAME is not a SETF frame.  The SETF may be printed qualified,
+(COMMON-LISP:SETF NAME)."
+  (multiple-value-bind (operator end) (%frame-operator function-name)
+    (when (and operator (string-equal operator "SETF"))
+      (string-trim '(#\) #\Space) (subseq function-name end)))))
 
 (defparameter *local-function-operators* '("FLET" "LABELS" "LAMBDA")
   "Operators of the names SBCL gives a local or anonymous function:
@@ -370,15 +401,12 @@ when FUNCTION-NAME is not one or names no OUTER.
 Only an :IN at the name's own level counts: one inside a lambda list, as in
 (LAMBDA (&KEY (MODE :IN)) ...), belongs to that list.  A string or |...| token
 is skipped whole, so a parenthesis or :IN inside a source file name is not
-taken for one."
+taken for one.  The operator may be printed qualified, (COMMON-LISP:LABELS ...)."
   (let ((length (length function-name))
-        (operator-end (position #\Space function-name)))
-    (when (and operator-end
-               (> length 1)
-               (char= (char function-name 0) #\()
+        (operator (%frame-operator function-name)))
+    (when (and operator
                (char= (char function-name (1- length)) #\))
-               (member (subseq function-name 1 operator-end) *local-function-operators*
-                       :test #'string-equal))
+               (member operator *local-function-operators* :test #'string-equal))
       (loop with depth = 0
             with i = 0
             while (< i length)
@@ -416,7 +444,13 @@ to the relevant inner name:
                                           such as \"repl-eval\") is internal
 - Any other (...) wrapper              -> always internal
 - Bare symbol name matching an internal package prefix -> internal
-- Unqualified name in *STANDARD-SIGNALING-FRAMES*      -> internal
+- Name in *STANDARD-SIGNALING-FRAMES*, unqualified or
+  COMMON-LISP-qualified                                -> internal
+
+Names are printed relative to the caller's *PACKAGE*, so in a package that does
+not use COMMON-LISP the operators come qualified, (COMMON-LISP:LABELS ...):
+SETF, FLET, LABELS and LAMBDA are recognized either way (%FRAME-OPERATOR), and
+only as COMMON-LISP's own -- a user's MY-APP::LABELS is not one.
 
 A local function or lambda is code of the function it sits in: a LABELS helper
 of the user's function is where the user's error is signalled, and its locals
@@ -434,7 +468,7 @@ Empty strings are treated as non-internal (caller's responsibility to filter)."
                    (%internal-frame-p outer)))
         ((char= (char function-name 0) #\() t)
         ((%prefix-internal-p function-name) t)
-        ((member function-name *standard-signaling-frames*
+        ((member (%common-lisp-name function-name) *standard-signaling-frames*
                  :test #'string-equal)
          t)))))
 
