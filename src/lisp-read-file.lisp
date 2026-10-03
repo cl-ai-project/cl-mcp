@@ -355,6 +355,32 @@ shared symbol is the sole argument of a form."
     (with-output-to-string (out)
       (write form :stream out :pretty t :right-margin 80))))
 
+(defun %body-docstring (body)
+  "Return the docstring of BODY, the forms after a lambda list: a string among
+its leading declarations and strings that is not BODY's last form.  A string
+that is the last form is the value returned (CLHS 3.4.11)."
+  (loop for (form . rest) on body
+        while (or (stringp form)
+                  (and (consp form) (eq (car form) 'declare)))
+        when (and (stringp form) rest)
+          return form))
+
+(defun %definition-docstring (form)
+  "Return the docstring of FORM, a definition %COLLAPSE-DEF-FORM summarizes,
+from the position its definer gives one, or NIL.  The first string after the
+name is not it: that is a variable's value when the value is a string, and the
+only form of a function that returns one."
+  (case (car form)
+    ((defvar defparameter defconstant)
+     (let ((doc (fourth form))) (and (stringp doc) doc)))
+    ((defstruct)
+     (let ((doc (third form))) (and (stringp doc) doc)))
+    ((defun defmacro)
+     (%body-docstring (cdddr form)))
+    ((defmethod)
+     (%body-docstring (rest (member-if #'listp (cddr form)))))
+    (otherwise nil)))
+
 (defun %collapse-def-form (form)
   "Collapse a definition form to a signature line.
 For defmethod, includes qualifiers like :before, :after, :around.
@@ -379,6 +405,9 @@ object across multiple positions in the form tree."
          (args
           (case head
             ((defmethod) (or (find-if #'listp (cddr form)) (third form)))
+            ;; A defstruct has no lambda list: its docstring, when it has
+            ;; one, is shown as the docstring, and its first slot here.
+            ((defstruct) (if (stringp (third form)) (fourth form) (third form)))
             (otherwise (third form))))
          (args-display
           (if args
@@ -386,7 +415,7 @@ object across multiple positions in the form tree."
                 (let ((*print-right-margin* most-positive-fixnum))
                   (write args :stream out :pretty t :case :downcase)))
               "()"))
-         (doc (%truncate-doc (find-if #'stringp (cddr form))))
+         (doc (%truncate-doc (%definition-docstring form)))
          ;; Use ~S to preserve colon for keyword qualifiers
          (qual-str (when qualifiers (format nil "~{~(~S~)~^ ~}" qualifiers))))
     (if qual-str

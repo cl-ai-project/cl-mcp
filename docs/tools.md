@@ -414,7 +414,10 @@ Inputs:
 - `collapsed` (boolean, default `true`): when `true` and the file is Lisp source
   (`.lisp`, `.asd`, `.ros`, `.cl`, `.lsp`), return only top-level signatures
   (e.g., `(defun name (args) ...)`) while keeping `in-package` forms fully
-  shown.
+  shown. A definition's docstring follows as `;; first line`, taken from where its
+  definer puts one: after a variable's value, a `defstruct`'s name, or a function's
+  lambda list (never a function's only form, which is its value), so a variable whose
+  value is a string does not show that value as its documentation.
 - `name_pattern` (string, optional): CL-PPCRE regex; matching definition names are
   expanded even in collapsed mode.
 - `content_pattern` (string, optional): CL-PPCRE regex applied to form bodies; if
