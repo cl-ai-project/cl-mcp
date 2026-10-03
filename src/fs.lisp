@@ -68,6 +68,12 @@
 (defparameter *fs-read-max-bytes* 1048576
   "Maximum number of characters allowed for fs-read-file when LIMIT is provided.")
 
+(defparameter *skip-external-format* '(:utf-8 :replacement #\?)
+  "External format the prefix before an OFFSET is counted in. An invalid byte
+there decodes to one replacement character instead of signalling, so a stray
+bad byte before a window neither makes the window unreadable nor shifts it:
+%READ-FILE-STRING and FS-WINDOW-START both count with it, and so agree.")
+
 (defun %skip-characters (stream count)
   "Read and discard up to COUNT characters from STREAM; stop early at EOF.
 Reads in chunks, so a large offset costs one pass over the prefix and no
@@ -79,6 +85,14 @@ buffer of its size."
                (when (zerop got)
                  (return))
                (decf left got)))))
+
+(defun %octet-position-after-characters (pn count)
+  "Return the octet position in PN that follows its first COUNT characters,
+counted in *SKIP-EXTERNAL-FORMAT*, or the file's length when it has fewer."
+  (with-open-file (in pn :direction :input :element-type 'character
+                         :external-format *skip-external-format*)
+    (%skip-characters in count)
+    (file-position in)))
 
 (defun %read-file-string (pn offset limit)
   "Read file PN honoring OFFSET and LIMIT (both may be NIL), both counted in
@@ -95,11 +109,14 @@ the read (LIMIT or the cap)."
   (when (and limit (> limit *fs-read-max-bytes*))
     (error "limit ~D exceeds maximum ~D" limit *fs-read-max-bytes*))
   (with-open-file (in pn :direction :input :element-type 'character)
-    ;; OFFSET counts characters, as LIMIT does: FILE-POSITION would seek to
-    ;; an octet, which in multibyte text is neither the OFFSETth character
-    ;; nor necessarily the start of one.
+    ;; OFFSET counts characters, as LIMIT does: seeking straight to OFFSET
+    ;; would land on an octet, which in multibyte text is neither the
+    ;; OFFSETth character nor necessarily the start of one.  The prefix is
+    ;; counted on a stream of its own, where an invalid byte is one
+    ;; replacement character rather than an error, and this stream then
+    ;; seeks to where that count ended.
     (when (and offset (plusp offset))
-      (%skip-characters in offset))
+      (file-position in (%octet-position-after-characters pn offset)))
     (let* ((raw-len (ignore-errors (file-length in)))
            (position (ignore-errors (file-position in)))
            (available-octets (and raw-len position (max 0 (- raw-len position))))
@@ -239,7 +256,8 @@ Returns (VALUES 0 0) for a NIL or zero OFFSET."
       (let ((pn (allowed-read-path path)))
         (unless pn
           (error "Read not permitted for path ~A" path))
-        (with-open-file (in pn :direction :input :element-type 'character)
+        (with-open-file (in pn :direction :input :element-type 'character
+                               :external-format *skip-external-format*)
           (let ((lines 0)
                 (col 0))
             (loop repeat offset
@@ -758,7 +776,10 @@ collapsed signatures view that saves ~70% of context window tokens."
     ;; Marked whenever text is left past this window, whether LIMIT or the
     ;; cap stopped the read: a LIMIT read that stopped short was once
     ;; unmarked, and so read exactly like the end of the file.
-    (let* ((more (or capped remaining))
+    ;; Not for an empty window: a limit of 0 would be marked with a
+    ;; next_offset equal to its own offset, and a client following it would
+    ;; never move.
+    (let* ((more (and (plusp (length content-string)) (or capped remaining)))
            (next-offset (and more (+ (or offset 0) (length content-string))))
            (ht (make-ht "content"
                         (text-content

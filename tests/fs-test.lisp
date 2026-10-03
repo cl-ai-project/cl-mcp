@@ -539,6 +539,20 @@ summary text and the result hash."
       (ok (equal "XYZ" (fs-read-file "tests/tmp/offset-units.txt" :offset 1)))
       (ok (equal "" (fs-read-file "tests/tmp/offset-units.txt" :offset 10))
           "an offset past the end reads nothing")))
+  (testing "an invalid byte before the window counts as one character, not an error"
+    ;; Seeking by bytes once stepped over it without decoding; skipping by
+    ;; characters must not turn it into an unreadable prefix.
+    (with-scratch-file ("tests/tmp/offset-units.txt")
+      (let ((abs (merge-pathnames "tests/tmp/offset-units.txt"
+                                  cl-mcp/src/project-root:*project-root*)))
+        (ensure-directories-exist abs)
+        (with-open-file (out abs :direction :output :if-exists :supersede
+                                 :element-type '(unsigned-byte 8))
+          (write-sequence #(65 255 66 120 121 122) out))
+        (ok (equal "xyz" (fs-read-file "tests/tmp/offset-units.txt" :offset 3)))
+        (multiple-value-bind (lines col) (fs-window-start "tests/tmp/offset-units.txt" 3)
+          (ok (= 0 lines))
+          (ok (= 3 col))))))
   (testing "fs-window-start counts the same characters the window skips"
     (with-scratch-file ("tests/tmp/offset-units.txt")
       (fs-write-file "tests/tmp/offset-units.txt" (format nil "é~%ab"))
@@ -559,6 +573,15 @@ summary text and the result hash."
         (ok (eq t (gethash "truncated" payload)))
         (ok (= 4 (gethash "next_offset" payload)))
         (ok (search "Use offset=4 to read more" text)))))
+  (testing "a read that returned nothing carries no marker to loop on"
+    ;; limit 0 once came back marked with next_offset equal to offset, so a
+    ;; client following next_offset never moved.
+    (with-scratch-file ("tests/tmp/limit-marker.txt")
+      (fs-write-file "tests/tmp/limit-marker.txt" (format nil "abc"))
+      (multiple-value-bind (text payload)
+          (%call-fs-read "tests/tmp/limit-marker.txt" :limit 0)
+        (ok (equal "" text))
+        (ok (null (gethash "next_offset" payload))))))
   (testing "a read that reaches the end carries no marker"
     (with-scratch-file ("tests/tmp/limit-marker.txt")
       (fs-write-file "tests/tmp/limit-marker.txt" (format nil "ééabcdef"))

@@ -280,15 +280,16 @@ Read text from an allow‑listed path.
 Input:
 - `path` (string, required): project‑relative or absolute inside a registered ASDF system's source tree
 - `offset` (integer, optional, non-negative): 0-based position to start at, in **characters**
-- `limit` (integer, optional, non-negative): how many characters to return, at most 1 MB
-  (1048576); omitted, the read goes to the end, up to that cap
+- `limit` (integer, optional, non-negative): how many characters to return, at most 1048576;
+  omitted, the read goes to the end, up to that cap
 
 Both count characters, so a window advanced by the characters it returned picks up exactly
-where it stopped, in multibyte text too.
+where it stopped, in multibyte text too. A byte that is not valid UTF-8 before the window counts
+as one character. An offset at or past the end returns an empty result.
 
 Output:
-- `content`: the text. Whenever text is left past it — because `limit` stopped the read or the
-  1 MB cap did — it is followed by
+- `content`: the text. Whenever text is left past a non-empty window — because `limit` stopped
+  the read or the 1048576-character cap did — it is followed by
   `[TRUNCATED: showing M characters from offset O of a N-byte file. Use offset=K to read more.]`
 - `text` (the text alone), `path`, `offset`, `limit`
 - `truncated` (`true`), `next_offset` (K, the offset to continue from), `file_length` (the
