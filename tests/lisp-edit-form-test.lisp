@@ -177,6 +177,162 @@ Used to prove that a dry-run summary does not grow with the size of the file."
         (ok (null node))
         (ok (null reason))))))
 
+(defun %replace-in-feature-fixture (source form-name content &rest options)
+  "Write SOURCE, replace FORM-NAME's defun with CONTENT, and return the file's new
+text and LISP-EDIT-FORM's ninth value, the feature expressions it kept."
+  (with-temp-file "tests/tmp/edit-form-feature-expression.lisp" source
+    (lambda (path)
+      (let ((kept (nth-value 8 (apply #'lisp-edit-form :file-path path :form-type "defun"
+                                      :form-name form-name :operation "replace"
+                                      :content content options))))
+        (values (fs-read-file path) kept)))))
+
+(deftest lisp-edit-form-replace-keeps-the-feature-expression
+  ;; The matched form's span starts at its #+/#-, so a replace whose content
+  ;; was the bare form used to drop the feature expression -- silently making
+  ;; a definition meant for one implementation unconditional.
+  (let ((source (format nil "(in-package :cl-user)~%~%#+(or sbcl ccl)~%(defun probe-b ()~%  :b)~%~%~
+                             #+sbcl #+x86-64~%(defun probe-d () :d)~%~%~
+                             #+sbcl ; only here~%(defun probe-e () :e)~%~%~
+                             (defun probe-c () :c)~%")))
+    (testing "a feature expression stays in front of the replaced form"
+      (multiple-value-bind (text kept)
+          (%replace-in-feature-fixture source "probe-b" "(defun probe-b () :b-edited)")
+        (ok (search (format nil "#+(or sbcl ccl)~%(defun probe-b () :b-edited)") text))
+        (ok (equal "#+(or sbcl ccl)" kept) "and the call says what it kept")))
+    (testing "every expression of a stacked prefix stays"
+      (multiple-value-bind (text kept)
+          (%replace-in-feature-fixture source "probe-d" "(defun probe-d () :d-edited)")
+        (ok (search (format nil "#+sbcl #+x86-64~%(defun probe-d () :d-edited)") text))
+        (ok (equal "#+sbcl #+x86-64" kept))))
+    (testing "a comment between the expression and the form stays with it"
+      (ok (search (format nil "#+sbcl ; only here~%(defun probe-e () 1)")
+                  (%replace-in-feature-fixture source "probe-e" "(defun probe-e () 1)"))))
+    (testing "the expression goes after a comment the content opens with"
+      (ok (search (format nil ";; new note~%#+(or sbcl ccl)~%(defun probe-b () :n)")
+                  (%replace-in-feature-fixture source "probe-b"
+                                               (format nil ";; new note~%(defun probe-b () :n)")))))
+    (testing "content that carries its own feature expression replaces the old one"
+      (multiple-value-bind (text kept)
+          (%replace-in-feature-fixture source "probe-b"
+                                       (format nil "#+(or sbcl ecl)~%(defun probe-b () :b)"))
+        (ok (search (format nil "#+(or sbcl ecl)~%(defun probe-b () :b)") text))
+        (ok (not (search "ccl" text)))
+        (ok (null kept) "nothing was kept: the content chose its own")))
+    (testing "a form without one is replaced as before"
+      (multiple-value-bind (text kept)
+          (%replace-in-feature-fixture source "probe-c" "(defun probe-c () :c2)")
+        (ok (search (format nil "~%~%(defun probe-c () :c2)") text))
+        (ok (null kept))))
+    (testing "the same under a readtable argument, which locates forms with the CL reader"
+      (ok (search (format nil "#+(or sbcl ccl)~%(defun probe-b () :rt)")
+                  (%replace-in-feature-fixture source "probe-b" "(defun probe-b () :rt)"
+                                               :readtable :standard))))
+    (testing "a dry run previews the form with its expression and names it"
+      (with-temp-file "tests/tmp/edit-form-feature-expression.lisp" source
+        (lambda (path)
+          (let ((preview (lisp-edit-form :file-path path :form-type "defun" :form-name "probe-b"
+                                         :operation "replace" :dry-run t
+                                         :content "(defun probe-b () :b-edited)")))
+            (ok (eql 0 (search "#+(or sbcl ccl)" (gethash "preview_form" preview))))
+            (ok (equal "#+(or sbcl ccl)" (gethash "kept_feature_expression" preview)))))))
+    (testing "delete still removes the expression with its form"
+      (with-temp-file "tests/tmp/edit-form-feature-expression.lisp" source
+        (lambda (path)
+          (lisp-edit-form :file-path path :form-type "defun" :form-name "probe-b"
+                          :operation "delete")
+          (ok (not (search "ccl" (fs-read-file path)))))))))
+
+(deftest lisp-edit-form-replace-feature-expressions-need-a-form-and-not-a-true-reading
+  ;; Review of #216: a comment-only replace kept #+sbcl with no form after it,
+  ;; so it applied to the next definition in the file or broke the read at
+  ;; its end; and content opening with an expression false here (#-sbcl on
+  ;; SBCL) was refused as "content is empty" unless a comment came first.
+  (let ((source (format nil "#+sbcl~%(defun probe-b () :b)~%~%(defun probe-c () :c)~%")))
+    (testing "a comment-only replace keeps no expression"
+      (multiple-value-bind (text kept)
+          (%replace-in-feature-fixture source "probe-b" (format nil ";; removed~%"))
+        (ok (search ";; removed" text))
+        (ok (not (search "#+sbcl" text))
+            "nothing is left to fall onto probe-c or past the end of the file")
+        (ok (null kept))))
+    (testing "the same at the end of the file"
+      (ok (not (search "#+sbcl" (%replace-in-feature-fixture
+                                 (format nil "#+sbcl~%(defun probe-b () :b)~%")
+                                 "probe-b" (format nil ";; removed~%"))))))
+    (testing "content opening with an expression false here is validated by its form"
+      (multiple-value-bind (text kept)
+          (%replace-in-feature-fixture source "probe-b"
+                                       (format nil "#-sbcl~%(defun probe-b () :other)"))
+        (ok (search (format nil "#-sbcl~%(defun probe-b () :other)") text))
+        (ok (not (search "#+sbcl" text)))
+        (ok (null kept) "the content chose its own condition")))
+    (testing "with or without a comment in front of it"
+      (ok (search (format nil ";; why~%#-sbcl (defun probe-b () :other)")
+                  (%replace-in-feature-fixture
+                   source "probe-b" (format nil ";; why~%#-sbcl (defun probe-b () :other)")))))
+    (testing "the form after it is repaired as any form is, and the expression kept"
+      (ok (search (format nil "#-sbcl~%(defun probe-b ()~%  :other)")
+                  (%replace-in-feature-fixture
+                   source "probe-b" (format nil "#-sbcl~%(defun probe-b ()~%  :other")))))
+    (testing "an expression with no form after it is still refused"
+      (ok (handler-case
+              (progn (%replace-in-feature-fixture source "probe-b"
+                                                  (format nil "#+sbcl ;; nothing~%"))
+                     nil)
+            (error () t))))))
+
+(deftest lisp-edit-form-replace-checks-the-content-s-own-feature-expressions
+  ;; Second review of #216: setting the content's expressions aside to read
+  ;; its form left the expressions themselves unchecked, so a malformed one
+  ;; was written and the file then failed to read.
+  (let ((source (format nil "#+sbcl~%(defun probe-b () :b)~%")))
+    (dolist (bad '("#+(not sbcl ccl) (defun probe-b () :new)"
+                   "#+(bogus sbcl) (defun probe-b () :new)"
+                   "#-(not) (defun probe-b () :new)"
+                   "#+sbcl #+(or sbcl (bogus)) (defun probe-b () :new)"
+                   "#+\"sbcl\" (defun probe-b () :new)"))
+      (testing (format nil "~A is refused and nothing is written" bad)
+        (with-temp-file "tests/tmp/edit-form-feature-expression.lisp" source
+          (lambda (path)
+            (ok (handler-case
+                    (progn (lisp-edit-form :file-path path :form-type "defun"
+                                           :form-name "probe-b" :operation "replace"
+                                           :content bad)
+                           nil)
+                  (error (e) (search "feature expression" (princ-to-string e)))))
+            (ok (equal source (fs-read-file path)))))))
+    (dolist (good '("#+(and) (defun probe-b () :new)"
+                    "#-(or sbcl (and ccl (not x86-64))) (defun probe-b () :new)"
+                    "#+(:or :sbcl :ccl) (defun probe-b () :new)"))
+      (testing (format nil "~A is accepted, true here or not" good)
+        (ok (search good (%replace-in-feature-fixture source "probe-b" good)))))
+    (testing "checking an expression interns none of its feature names"
+      (%replace-in-feature-fixture
+       source "probe-b" "#+cl-mcp-never-a-feature-here (defun probe-b () :new)")
+      (ok (null (find-symbol "CL-MCP-NEVER-A-FEATURE-HERE" "KEYWORD"))))))
+
+(defvar *feature-read-evaluated* nil
+  "Set by a #. in a feature expression if reading one ever evaluated it.")
+
+(deftest lisp-edit-form-feature-expressions-are-read-without-evaluation
+  ;; Finding the expressions in front of a form, in the file or the content,
+  ;; and checking the content's own, both read text; neither may run #.
+  (let ((source (format nil "#+sbcl~%(defun probe-b () :b)~%"))
+        (content (concatenate
+                  'string
+                  "#+#.(progn (setf cl-mcp/tests/lisp-edit-form-test::*feature-read-evaluated* t)"
+                  " :sbcl) (defun probe-b () :new)")))
+    (setf *feature-read-evaluated* nil)
+    (testing "a #. in the content's feature expression is refused, not run"
+      (ok (handler-case
+              (progn (%replace-in-feature-fixture source "probe-b" content) nil)
+            (error () t)))
+      (ok (null *feature-read-evaluated*)))
+    (testing "nor is it run while finding where the content's form starts"
+      (cl-mcp/src/lisp-edit-form::%feature-prefix-end content 0)
+      (ok (null *feature-read-evaluated*)))))
+
 (deftest lisp-edit-form-accepts-a-package-qualified-form-type
   (testing "form_type asdf:defsystem finds (asdf:defsystem ...), as defsystem does"
     (with-temp-file "tests/tmp/edit-form-qualified-type.asd"

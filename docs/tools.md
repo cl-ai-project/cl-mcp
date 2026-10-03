@@ -586,7 +586,17 @@ Input:
 - `content` (string): the form text to insert or replace with; required for every operation but
   `delete`, where it is ignored. `replace` takes exactly one top-level form (several are an error
   whose data carries a `remediation`); `insert_before` and `insert_after` take one or more,
-  inserted in order as one block
+  inserted in order as one block. A `replace` of a form written behind `#+`/`#-` feature
+  expressions (`#+sbcl (defun ...)`, `#+sbcl #+x86-64 ...`) keeps them, with any comment
+  between them and the form, in front of the new form when `content` does not start with
+  feature expressions of its own; the summary then says `Kept #+sbcl in front of the form`
+  and the result carries `kept_feature_expression`. Start `content` with the expression it
+  should have to change or drop the condition; the form after it is validated (and repaired)
+  whether or not that condition holds in the server, so `#-sbcl (defun ...)` on SBCL is
+  accepted, while an expression with no form after it, or one that breaks the feature
+  expression grammar (`#+(not a b)`, `#+(bogus a)`), is refused and nothing is written.
+  Comment-only content keeps no expression, which would otherwise fall onto the next form in
+  the file. `delete` removes the expressions with the form
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
 - `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms
 - `readtable` (string, optional): named-readtable designator for files using custom reader
