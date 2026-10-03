@@ -1483,6 +1483,30 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
        (ok (null (gethash "unreached_tests" result)) "and neither is called unreached")
        (ok (equal "✓ PASS" (%headline result)))))))
 
+(deftest run-tests-names-a-fiveam-dependency-a-short-circuit-skipped
+  ;; Second review of #218: walking :depends-on counted every name in the
+  ;; expression as run, but (or prerequisite never-run) stops at the first
+  ;; dependency that passes, so FiveAM never runs the second -- which was then
+  ;; hidden behind a plain pass.  What ran is what produced results.
+  (%call-with-fiveam-fixture
+   "fiveam-short-probe"
+   (list (cons "main.lisp"
+               (format nil "(defpackage #:fiveam-short-probe/main (:use #:cl #:fiveam))~%~
+                            (in-package #:fiveam-short-probe/main)~%~
+                            (def-suite :fiveam-short-probe)~%~
+                            (in-suite :fiveam-short-probe)~%~
+                            (test (prerequisite :suite nil) (is (= 1 1)))~%~
+                            (test (never-run :suite nil) (is (= 1 1)))~%~
+                            (test (root-test :depends-on (or prerequisite never-run)) ~
+                            (is (= 2 2)))~%")))
+   (lambda (dir)
+     (declare (ignore dir))
+     (let ((result (run-tests "fiveam-short-probe")))
+       (ok (= 2 (gethash "passed" result)) "root-test and prerequisite ran")
+       (ok (equal '("FIVEAM-SHORT-PROBE/MAIN::NEVER-RUN")
+                  (coerce (gethash "unreached_tests" result) 'list))
+           "the dependency the OR never reached is named")))))
+
 (deftest load-failure-hint-for-an-unknown-fiveam-suite-names-the-load-order
   ;; On a fresh worker the same mistake is loud -- `Unknown suite X' -- but the
   ;; hint blamed the worker's package state and sent the caller to replace it.

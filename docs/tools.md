@@ -1255,8 +1255,9 @@ Output:
   skipped anything, including one that passed on what it did check, so a skip is never hidden inside a
   pass; the summary text lists them under `Skipped`
 - `unreached_tests` (array, FiveAM whole-system run, present when any): tests defined in the
-  system's packages that no suite of the run reached, through its sub-suites or a reached
-  test's `:depends-on` (which FiveAM runs on demand) — typically a file declaring its suite
+  system's packages that the run did not reach, read from FiveAM's own record of the run (a
+  test run only as another's `:depends-on` counts, the unneeded alternative of a satisfied
+  `(or a b)` does not) — typically a file declaring its suite
   `:in` the root suite that loaded before the root's file on a warm worker, so its suite hangs
   from an earlier load of the root. The summary says `⚠ PASS, BUT N TESTS DID NOT RUN`, names
   them, and gives the `:import-from` fix. Tests of a test file since deleted are not counted

@@ -397,7 +397,7 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
               (coerce (or failed-tests 'nil) 'vector)))
          (skipped-tests (coerce (or (gethash "skipped_tests" test-result) #()) 'vector))
          (debug-output-str (gethash "debug_output" test-result))
-         ;; FiveAM: tests no run suite reached, and run suites a root-suite
+         ;; FiveAM: tests the run did not reach, and run suites a root-suite
          ;; test-op would not reach.  Either makes a green run incomplete.
          (unreached (coerce (or (gethash "unreached_tests" test-result) #()) 'list))
          (outside (coerce (or (gethash "suites_outside_root" test-result) #()) 'list))
@@ -455,7 +455,7 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                                (coerce (gethash "reasons" entry) 'list))))
             (when unreached
               (format s "~%Did not run (~D): ~{~A~^, ~}~%  Defined in this system's ~
-                         packages, but reached from no suite that ran. Usually a file ~
+                         packages, but the run did not reach them. Usually a file ~
                          declaring its suite :in the root suite that loads before the ~
                          root's file: its suite joined an earlier load of the root, ~
                          which the new one replaced. Add (:import-from <the root ~

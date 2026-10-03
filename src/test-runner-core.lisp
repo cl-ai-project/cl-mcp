@@ -1837,62 +1837,21 @@ an optional dependency."
   (let ((get-test (%fiveam-symbol "GET-TEST")))
     (and get-test (fboundp get-test) (ignore-errors (funcall get-test name)))))
 
-(defun %fiveam-suite-children (suite)
-  "Return SUITE's entries as (NAME . ENTRY) pairs, in order: ENTRY is a sub-suite
-object or the name of a test.  Current FiveAM keeps them in a TEST-BUNDLE, a list
-of NAMES with a TESTS hash table; older releases keep a bare hash table."
-  (let* ((tests-slot (%fiveam-symbol "TESTS"))
-         (names-slot (%fiveam-symbol "NAMES"))
-         (table (and tests-slot (ignore-errors (slot-value suite tests-slot)))))
-    (flet ((pairs-of (hash names)
-             (mapcar (lambda (name) (cons name (gethash name hash))) names)))
-      (cond ((hash-table-p table)
-             (pairs-of table (loop for name being the hash-keys of table collect name)))
-            (table
-             (let ((names (and names-slot (ignore-errors (slot-value table names-slot))))
-                   (hash (ignore-errors (slot-value table tests-slot))))
-               (and (hash-table-p hash) (pairs-of hash names))))))))
-
-(defun %fiveam-dependency-names (test)
-  "Return the test names TEST's :depends-on expression mentions, its AND, OR and
-NOT operators stripped: the tests FiveAM runs on demand before TEST."
-  (let* ((slot (%fiveam-symbol "DEPENDS-ON"))
-         (expression (and slot (ignore-errors (slot-value test slot))))
-         (names '()))
-    (labels ((walk (form)
-               (cond ((null form))
-                     ((symbolp form) (push form names))
-                     ((consp form)
-                      (dolist (part (if (and (symbolp (first form))
-                                             (member (symbol-name (first form))
-                                                     '("AND" "OR" "NOT") :test #'string=))
-                                        (rest form)
-                                        form))
-                        (walk part))))))
-      (walk expression))
-    names))
-
-(defun %fiveam-reachable-test-names (suite-names)
-  "Return the names of the FiveAM tests reached from the suites SUITE-NAMES,
-through each suite's entries, its sub-suites' and each reached test's
-:depends-on (%FIVEAM-DEPENDENCY-NAMES), which FiveAM runs on demand wherever the
-test it names hangs: the tests a run of those suites runs."
-  (let ((seen (make-hash-table :test 'eq))
-        (names '()))
-    (labels ((visit (name entry)
-               (let ((object (if (%fiveam-suite-p entry) entry (%fiveam-test-object name))))
-                 (when (and object (not (gethash object seen)))
-                   (setf (gethash object seen) t)
-                   (cond ((%fiveam-suite-p object)
-                          (loop for (child-name . child) in (%fiveam-suite-children object)
-                                do (visit child-name child)))
-                         (t
-                          (push name names)
-                          (dolist (dependency (%fiveam-dependency-names object))
-                            (visit dependency nil))))))))
-      (dolist (suite suite-names)
-        (visit suite nil)))
-    (nreverse names)))
+(defun %fiveam-ran-test-names ()
+  "Return the names of the FiveAM tests the last fiveam:run reached: those it ran,
+and those it skipped for a dependency not satisfied.  RUN sets every test's
+status to :UNKNOWN before it starts, and a test leaves :UNKNOWN only when that
+run gets to it, as a suite's entry or as a dependency it needed -- so the second
+test of a satisfied (or a b) stays :UNKNOWN, and so does a test with no
+assertions only when it was not run.  Read it after each RUN: the next resets it."
+  (let ((test-names (%fiveam-symbol "TEST-NAMES"))
+        (status (%fiveam-symbol "STATUS")))
+    (when (and test-names (fboundp test-names) status)
+      (loop for name in (remove-duplicates (funcall test-names))
+            for object = (%fiveam-test-object name)
+            when (and object (not (%fiveam-suite-p object))
+                      (not (eq :unknown (ignore-errors (slot-value object status)))))
+              collect name))))
 
 (defun %removed-test-file-package-p (package)
   "True when PACKAGE is a package-inferred component's whose file is gone: a test
@@ -1930,20 +1889,21 @@ a test file since deleted, which this worker still holds."
       (format nil ":~A" (symbol-name symbol))
       (format nil "~A::~A" (package-name (symbol-package symbol)) (symbol-name symbol))))
 
-(defun %fiveam-reachability (system-name suite-symbols)
-  "Return (values UNREACHED OUTSIDE) for a run of SYSTEM-NAME's SUITE-SYMBOLS.
-UNREACHED: tests defined in the system's namespace that no run suite reaches.
-A file that declares its suite :in the root suite but loads before the root's
-file, on a worker that loaded both before, leaves its tests under the previous
-root suite object: the run then reports a pass without them.
+(defun %fiveam-reachability (system-name suite-symbols ran-names)
+  "Return (values UNREACHED OUTSIDE) for a run of SYSTEM-NAME's SUITE-SYMBOLS that
+reached the tests RAN-NAMES (%FIVEAM-RAN-TEST-NAMES).
+UNREACHED: tests defined in the system's namespace the run did not reach.  A file
+that declares its suite :in the root suite but loads before the root's file, on a
+worker that loaded both before, leaves its tests under the previous root suite
+object: the run then reports a pass without them.  So does a test only an OR's
+unneeded alternative depends on.
 OUTSIDE: run suites other than the root suite, the one named after the primary
 system.  run-tests runs them, but a test-op running the root suite -- the
 scaffold's does -- never reaches them, so the two runs differ unseen.
 Both are lists of qualified names; OUTSIDE is NIL when no root suite is found."
-  (let* ((reached (%fiveam-reachable-test-names suite-symbols))
-         (unreached (set-difference (%fiveam-system-test-names system-name) reached))
-         (root (find (asdf:primary-system-name system-name) suite-symbols
-                     :key #'string :test #'string-equal)))
+  (let ((unreached (set-difference (%fiveam-system-test-names system-name) ran-names))
+        (root (find (asdf:primary-system-name system-name) suite-symbols
+                    :key #'string :test #'string-equal)))
     (values (sort (mapcar #'%qualified-test-name unreached) #'string<)
             (and root
                  (sort (mapcar #'%qualified-test-name (remove root suite-symbols))
@@ -1987,6 +1947,8 @@ SPECS is a list of suite/test symbols passed to %FIVEAM-RUN.  On a runner
 crash, returns a failure result with one failed entry per CRASH-TEST-NAMES
 designator.  Shared by RUN-FIVEAM-TESTS and RUN-FIVEAM-SELECTED-TESTS so the
 stream-capture, crash-handling, and result-assembly logic lives in one place.
+Two more values follow the hash of a run that finished: the names of the tests
+it reached (%FIVEAM-RAN-TEST-NAMES), and T.  A crashed run returns its hash only.
 
 Capture covers the thread the suite runs on.  Output from threads the suite
 spawns is not captured and reaches the process's own stdout: in SBCL a new
@@ -1996,7 +1958,8 @@ invisible to it.  The Rove backend has the same property."
         (stdout-stream (%make-capture-stream))
         (stderr-stream (%make-capture-stream))
         (debug-stream (%make-capture-stream))
-        all-results)
+        all-results
+        ran-names)
     (flet ((duration-ms ()
              (round (* 1000 (/ (- (get-internal-real-time) start-time)
                                internal-time-units-per-second))))
@@ -2010,6 +1973,8 @@ invisible to it.  The Rove backend has the same property."
                           (*standard-output* stdout-stream)
                           (*error-output* stderr-stream))
                       (%fiveam-run spec))))
+              ;; Now: the next spec's run resets what this one reached.
+              (setf ran-names (union ran-names (%fiveam-ran-test-names)))
               (when results
                 (setf all-results (append all-results results)))))
         (error (c)
@@ -2028,12 +1993,15 @@ invisible to it.  The Rove backend has the same property."
              (stdout) (stderr) (debug-output)))))
       (multiple-value-bind (passed failed pending failure-details)
           (%fiveam-extract-results all-results)
-        (%fiveam-attach-output
-         (make-test-result
-          :passed passed :failed failed :pending pending
-          :failed-tests failure-details
-          :framework :fiveam :duration (duration-ms))
-         (stdout) (stderr) (debug-output))))))
+        (values
+         (%fiveam-attach-output
+          (make-test-result
+           :passed passed :failed failed :pending pending
+           :failed-tests failure-details
+           :framework :fiveam :duration (duration-ms))
+          (stdout) (stderr) (debug-output))
+         ran-names
+         t)))))
 
 (defun run-fiveam-tests (system-name)
   "Run the FiveAM suites belonging to SYSTEM-NAME and return results.
@@ -2043,7 +2011,7 @@ Signals an error when no suite name matches SYSTEM-NAME instead of running
 every suite registered in the image, so an explicit system name is never
 silently widened into a full-image run.  When suite names do not follow the
 system-name convention, pass TEST/TESTS to RUN-TESTS to select tests directly.
-The result names the system's tests no run suite reached (\"unreached_tests\")
+The result names the system's tests the run did not reach (\"unreached_tests\")
 and the run suites outside the root suite (\"suites_outside_root\"), the two
 ways a FiveAM run and the system's test-op silently part (%FIVEAM-REACHABILITY)."
   (log-event :info "test.runner" "framework" "fiveam" "system" system-name)
@@ -2056,12 +2024,15 @@ ways a FiveAM run and the system's test-op silently part (%FIVEAM-REACHABILITY).
                       ASDF system, so cl-mcp will not run every suite in the ~
                       image." system-name)
              :hint "Name a suite or its package after the system, or pass TEST/TESTS instead."))
-    (let ((result (%fiveam-run-and-collect suite-symbols (list system-name))))
+    (multiple-value-bind (result ran-names finished)
+        (%fiveam-run-and-collect suite-symbols (list system-name))
       (multiple-value-bind (unreached outside)
           ;; A check on top of a finished run: if FiveAM's internals are not
           ;; what it expects, the run's own result stands as it is.
-          (handler-case (%fiveam-reachability system-name suite-symbols)
-            (error () (values nil nil)))
+          (if finished
+              (handler-case (%fiveam-reachability system-name suite-symbols ran-names)
+                (error () (values nil nil)))
+              (values nil nil))
         (when unreached
           (setf (gethash "unreached_tests" result) (coerce unreached 'vector)))
         (when outside
@@ -2105,7 +2076,7 @@ TEST-SYMBOLS is a list of fully qualified symbols naming tests or suites."
           (mapcar #'%resolve-fiveam-test-symbol test-symbols)))
     (log-event :info "test.runner" "framework" "fiveam" "selected_tests"
                (format nil "~{~A~^, ~}" resolved-symbols))
-    (%fiveam-run-and-collect resolved-symbols test-symbols)))
+    (values (%fiveam-run-and-collect resolved-symbols test-symbols))))
 
 (defun run-tests (system-name &key framework test tests)
   "Run tests for SYSTEM-NAME using the specified or auto-detected FRAMEWORK.

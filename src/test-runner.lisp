@@ -54,9 +54,11 @@ Returns:
   what it did check; also listed under 'Skipped' in the summary text.  When
   every test only skipped, the summary says ALL SKIPPED, not PASS
 - unreached_tests (array, FiveAM whole-system run, present when any) -- tests
-  defined in the system's packages that no run suite reached: a file declaring
-  its suite :in the root suite that loaded before the root's file, on a warm
-  worker.  The summary then says PASS, BUT N TESTS DID NOT RUN
+  defined in the system's packages that the run did not reach, read from
+  FiveAM's record of the run (a test run as another's :depends-on counts):
+  typically a file declaring its suite :in the root suite that loaded before
+  the root's file, on a warm worker.  The summary then says PASS, BUT N TESTS
+  DID NOT RUN
 - suites_outside_root (array, FiveAM, present when any) -- run suites other than
   the root suite (the one named after the primary system): run here, but a
   test-op that runs the root suite skips them.  The summary then says PASS, BUT
