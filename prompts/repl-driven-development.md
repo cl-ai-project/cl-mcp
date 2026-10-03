@@ -20,8 +20,8 @@ EXPLORE -> EXPERIMENT -> PERSIST -> VERIFY
 | Classes / generic functions | `clos-describe` | `symbol` (load-system first) |
 | Load system | `load-system` | `system`, `force`, `clear_fasls` |
 | Eval/test | `repl-eval` | `package`, `timeout_seconds` |
-| Edit form | `lisp-edit-form` | `form_type`, `form_name`, `operation`, `content` |
-| Patch form | `lisp-patch-form` | `form_type`, `form_name`, `old_text`, `new_text` |
+| Edit form | `lisp-edit-form` | `file_path`, `form_type`, `form_name`, `operation`, `content` |
+| Patch form | `lisp-patch-form` | `file_path`, `form_type`, `form_name`, `old_text`, `new_text` |
 | Inspect deeper | `inspect-object` | `id` (from `result_object_id`) |
 | Check syntax | `lisp-check-parens` | `path` or `code` (string) |
 | Expand macro | `lisp-macroexpand` | `path`+`form_type`+`form_name`, or `code`; `sub_form`, `level` |
@@ -32,7 +32,7 @@ EXPLORE -> EXPERIMENT -> PERSIST -> VERIFY
 
 **Minimal Workflow:** `repl-eval` (prototype) -> `lisp-edit-form` (persist) -> `repl-eval` (verify)
 
-**First-time Setup:** `fs-set-project-root` with `{"path": "."}` before file operations.
+**First-time Setup:** `fs-set-project-root` with the absolute path of your working directory before file operations (a relative path such as `"."` resolves on the server's side, not yours).
 
 **CRITICAL INITIAL STEP:** ALWAYS verify or set the project root using `fs-set-project-root` before attempting any file operations. Do this at the start of every session.
 
@@ -47,11 +47,13 @@ Tools run in two process types when the worker pool is enabled (default):
 - Lisp-aware: `lisp-read-file`, `lisp-edit-form`, `lisp-patch-form`, `lisp-check-parens`
 - Search: `clgrep-search`, `clhs-lookup`
 - Diagnostics: `pool-status`, `pool-kill-worker`
+- Scaffolding: `project-scaffold` (writes files only; `load-system` then registers the project in the worker)
 
 **Worker process** (isolated, one per session):
 - `repl-eval`, `load-system`, `run-tests`, `lisp-macroexpand`
 - `code-find`, `code-describe`, `code-find-references`, `clos-describe`
 - `inspect-object`
+- `spec-list`, `spec-symbol`, `spec-describe`, `spec-check` (when the optional `cl-spec` group is on)
 
 `lisp-macroexpand` splits across both: the parent resolves `path`/`form_type`/`form_name`
 against the CST to locate the form's source text, then the worker expands it, because only
@@ -121,7 +123,7 @@ the text a client actually renders.)
 **ALWAYS use `lisp-edit-form` or `lisp-patch-form` for modifying existing Lisp source code.** They preserve structure, comments, and formatting via CST parsing. Only use `fs-write-file` for brand new files.
 
 **`lisp-edit-form`** (structural, with parinfer auto-repair):
-- Operations: `replace`, `insert_before`, `insert_after`
+- Operations: `replace`, `insert_before`, `insert_after`, `delete` (`content` is ignored)
 - Content must be the complete form including `(defun ...)` wrapper
 - `replace` takes one top-level form; `insert_before`/`insert_after` take one or more, inserted in order as one block (several new definitions go in with one call)
 - For `defmethod`, MUST include specializers in `form_name`: `"print-object ((obj my-class) stream)"`
@@ -149,7 +151,7 @@ the text a client actually renders.)
 - `name_pattern="^my-function$"`: expand forms whose definition name matches
 - `content_pattern="error"`: expand forms whose body matches the pattern
 - `collapsed=false`: full content (only when necessary; offset/limit are in lines)
-- Use `fs-read-file` only for non-Lisp files (README, JSON, YAML, config). Note: `fs-read-file` offset/limit are in characters, not lines
+- Use `fs-read-file` only for non-Lisp files (README, JSON, YAML, config). Note: `fs-read-file`'s `offset` is a byte position and `limit` a character count, not lines; they agree only for ASCII text, and a `limit` read that stops short carries no truncation marker
 
 ## REPL Evaluation
 
@@ -193,9 +195,9 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
 
 ## Testing
 
-**Preferred: `run-tests` tool** for structured Rove/FiveAM results (pass/fail counts, failure details).
+**Preferred: `run-tests` tool** for structured Rove/FiveAM/prove results (pass/fail counts, failure details).
 - Run system: `{"system": "my-system/tests"}`
-- Run single test: `{"system": "my-system/tests", "test": "my-system/tests::my-specific-test"}` (package must be loaded first)
+- Run single test: `{"system": "my-system/tests", "test": "my-system/tests::my-specific-test"}` (`run-tests` reloads `system` before resolving the name, so the test's package needs no separate loading)
 - Run selected tests: `{"system": "my-system/tests", "tests": ["my-system/tests::first-test", "my-system/tests::second-test"]}`
 - Framework is detected from the test system's own `:depends-on`; override with `{"system": "my-system/tests", "framework": "fiveam"}`
 - A `⚠ NO TESTS RAN` summary means the run completed but executed nothing — check the system name and any `tests` selection before reading it as success
@@ -228,7 +230,7 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
   ```
   To avoid this, define restarts with **keyword** names (`:return-nil`) in library code.
 
-**Pre-PR**: `(asdf:compile-system :my-system :force t)` to catch warnings from all file changes, then run full suite.
+**Pre-PR**: `(asdf:compile-system :my-system :force t)` to catch warnings from all file changes, then run full suite. For a package-inferred system use `:force :all` instead: there `:force t` recompiles nothing, because the work is in its per-file subsystems, which only `:force :all` reaches.
 
 ## Troubleshooting
 

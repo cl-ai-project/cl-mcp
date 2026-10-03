@@ -16,7 +16,11 @@ This project is developed using its own MCP tools. When working on cl-mcp:
 
 - **Lisp code operations** (search, read, edit, eval): Use cl-mcp tools (`clgrep-search`, `lisp-read-file`, `lisp-edit-form`, `repl-eval`, etc.) per repl-driven-development.md
 - **Shell commands**: Only for `git`, `mallet` (linting), `rove` (test fallback), and user-requested commands
-- **Package naming**: Uses ASDF `package-inferred-system` — each file defines package `cl-mcp/src/<name>`. Add new files by updating `cl-mcp.asd` dependencies. Exports go in `main.lisp`
+- **Package naming**: Uses ASDF `package-inferred-system` — each file defines package `cl-mcp/src/<path>` and is loaded because a loaded file `:import-from`s it; `cl-mcp.asd` needs no edit. Where a new file must be registered:
+  - **Source file**: `:import-from` it in the files that use it
+  - **Tool**: add its module to `src/tools/all.lisp` (forgotten, the tool silently never loads and is missing from `tools/list`); a worker-side tool also needs a `"worker/<method>"` entry in `register-all-handlers` (`src/worker/handlers.lisp`)
+  - **Test file**: add `(:import-from #:cl-mcp/tests/<name>-test)` to the root `tests.lisp` (forgotten, neither `rove cl-mcp.asd` nor CI runs it); suites that need cl-spec or a process of their own are not listed there but run as CI steps
+  - **Public API**: re-export from `main.lisp`
 
 ## Testing & Linting
 
@@ -89,15 +93,17 @@ claiming it (`claim-session-resets`), never by copying it to a replacement.
 So does the pool under overlapping operations (`shutdown-pool`, the spawn and ending accounting
 -- `%begin-spawn`, `%begin-ending`, `%end-worker`, `%wait-for-work-in-flight` --
 `%handle-worker-crash`, `%replenish-standbys`, `%effective-pool-size`) and the wait for a worker's
-stream (`%call-with-stream-held`): `property=` for `pool-shutdown-leaves-nothing-behind` and
-`pool-holds-while-operations-overlap`, then run `concurrency-test` and, in a fresh process,
-`pool-ownership-test` and `pool-test`. A spawn or an ending is accounted for in the critical
-section that decides it, and a spawn hands its count to its worker in the one that registers it.
+stream (`%call-with-stream-held`), and a pool's generations (`initialize-pool`, `%make-generation`,
+`%spawn-and-bind`, `%schedule-replenish`): `property=` for `pool-shutdown-leaves-nothing-behind`,
+`pool-late-work-stays-with-its-generation` and `pool-holds-while-operations-overlap`, then run
+`concurrency-test` and, in a fresh process, `pool-ownership-test` and `pool-test`. A spawn or an
+ending is accounted for in the critical section that decides it, and a spawn hands its count to
+its worker in the one that registers it.
 Elsewhere the bundle is not required.
 
 ## Architecture
 
-**Protocol** (`src/protocol.lisp`): JSON-RPC 2.0, MCP handshake (2025-06-18, 2025-03-26, 2024-11-05), tools dispatch
+**Protocol** (`src/protocol.lisp`): JSON-RPC 2.0, MCP handshake (2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05), tools dispatch
 **Transports** (`src/tcp.lisp`, `src/http.lisp`, `src/run.lisp`): Stdio, TCP (multi-threaded), HTTP (Streamable HTTP via Hunchentoot)
 **Tools:**
 
@@ -111,8 +117,15 @@ Elsewhere the bundle is not required.
 | Lisp Patching | `src/lisp-patch-form.lisp` | Token-efficient sub-form text replacement |
 | Code Intel | `src/code.lisp`, `src/code-refs-scan.lisp`, `src/code-refs-core.lisp` | Symbol lookup, describe; callers with call sites and tests (xref + source scan) |
 | CLOS | `src/clos.lisp`, `src/clos-core.lisp`, `src/clos-verify-core.lisp`, `src/tools/clos-response-builders.lisp` | Generic function methods, class hierarchy, slots and specialized methods (clos-describe; worker reads the image, parent reads the source, worker re-verifies each token so a `form_type`/`form_name` is only handed out once source and image agree — see `clos-describe` in docs/tools.md) |
+| Macroexpand | `src/lisp-macroexpand.lisp`, `src/macroexpand-core.lisp` | `lisp-macroexpand`: parent locates the form (CST), worker expands it |
+| Search & Reference | `src/clgrep.lisp`, `src/utils/clgrep.lisp`, `src/clhs.lisp` | `clgrep-search` (Lisp-aware grep, no loading), `clhs-lookup` |
+| Inspection | `src/inspect.lisp`, `src/object-registry.lisp`, `src/frame-inspector.lisp` | `inspect-object`, object ids, backtrace frames and locals |
+| Tests | `src/test-runner.lisp`, `src/test-runner-core.lisp` | `run-tests`: Rove/FiveAM/prove detection, structured results |
+| Scaffold | `src/project-scaffold.lisp` | `project-scaffold`: throwaway package-inferred projects |
 | Validation | `src/validate.lisp`, `src/parinfer.lisp` | Paren checking, auto-repair |
 | Pool Mgmt | `src/tools/pool-status.lisp`, `src/tools/pool-kill-worker.lisp` | Worker diagnostics and lifecycle |
+| Worker pool | `src/pool.lisp`, `src/proxy.lisp`, `src/worker-client.lisp`, `src/request-lifecycle.lisp`, `src/reset-events.lisp`, `src/worker/` | Session affinity, spawning, crash recovery, request routing; the worker process itself |
+| Tool plumbing | `src/tools/define-tool.lisp`, `src/tools/registry.lisp`, `src/tools/all.lisp`, `src/tools/response-builders.lisp`, `src/server-instructions.lisp` | Tool definition and registration, optional groups, response text, the `initialize` instructions |
 | cl-spec (opt-in) | `src/spec-adapter-core.lisp`, `src/spec-adapter-report.lisp`, `src/tools/spec-*.lisp` | Spec/Property listing, discovery and execution (`spec-list` / `spec-symbol` / `spec-describe` / `spec-check`). **Optional tool group `cl-spec`, off by default** |
 
 **Optional tool groups:** a tool declared with `define-tool`'s `:group` stays
