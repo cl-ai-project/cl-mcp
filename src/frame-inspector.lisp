@@ -348,6 +348,60 @@ when FUNCTION-NAME is not a SETF frame."
              (string-equal function-name "(SETF " :end1 6))
     (string-trim '(#\) #\Space) (subseq function-name 6))))
 
+(defparameter *local-function-operators* '("FLET" "LABELS" "LAMBDA")
+  "Operators of the names SBCL gives a local or anonymous function:
+(FLET NAME :IN OUTER), (LABELS NAME :IN OUTER) and (LAMBDA LAMBDA-LIST :IN OUTER),
+where OUTER is the global function the definition sits in.")
+
+(defun %skip-delimited (s start delimiter)
+  "Return the index just past the DELIMITER that closes the token opened at
+START in S, honouring backslash escapes, or the length of S when none does."
+  (loop with i = (1+ start)
+        while (< i (length s))
+        do (let ((c (char s i)))
+             (cond ((char= c #\\) (incf i 2))
+                   ((char= c delimiter) (return (1+ i)))
+                   (t (incf i))))
+        finally (return (length s))))
+
+(defun %local-function-outer (function-name)
+  "Return OUTER's text from a (FLET|LABELS|LAMBDA ... :IN OUTER) frame name, or NIL
+when FUNCTION-NAME is not one or names no OUTER.
+Only an :IN at the name's own level counts: one inside a lambda list, as in
+(LAMBDA (&KEY (MODE :IN)) ...), belongs to that list.  A string or |...| token
+is skipped whole, so a parenthesis or :IN inside a source file name is not
+taken for one."
+  (let ((length (length function-name))
+        (operator-end (position #\Space function-name)))
+    (when (and operator-end
+               (> length 1)
+               (char= (char function-name 0) #\()
+               (char= (char function-name (1- length)) #\))
+               (member (subseq function-name 1 operator-end) *local-function-operators*
+                       :test #'string-equal))
+      (loop with depth = 0
+            with i = 0
+            while (< i length)
+            do (let ((c (char function-name i)))
+                 (cond
+                   ((or (char= c #\") (char= c #\|))
+                    (setf i (%skip-delimited function-name i c)))
+                   ((char= c #\()
+                    (incf depth)
+                    (incf i))
+                   ((char= c #\))
+                    (decf depth)
+                    (incf i))
+                   ((and (= depth 1)
+                         (char= c #\:)
+                         (<= (+ i 4) length)
+                         (char= (char function-name (1- i)) #\Space)
+                         (string-equal function-name ":IN " :start1 i :end1 (+ i 4)))
+                    (let ((outer (string-trim " " (subseq function-name (+ i 4)
+                                                          (1- length)))))
+                      (return (and (plusp (length outer)) outer))))
+                   (t (incf i))))))))
+
 (defun %internal-frame-p (function-name)
   "Return T if FUNCTION-NAME appears to be an internal/infrastructure frame.
 Dispatches on structural shape first, then applies the package-prefix filter
@@ -356,17 +410,28 @@ to the relevant inner name:
 - (SB-PCL::FAST-METHOD NAME (...) ...) -> internal iff NAME has an internal prefix
 - (SB-PCL::SLOW-METHOD NAME (...) ...) -> internal iff NAME has an internal prefix
 - (SETF NAME)                          -> internal iff NAME has an internal prefix
-- Any other (...) wrapper (FLET, LAMBDA, LABELS, etc.) -> always internal
+- (FLET|LABELS|LAMBDA ... :IN OUTER)   -> internal iff OUTER is, classified by
+                                          these same rules; an OUTER that is a
+                                          string (a top-level form's source,
+                                          such as \"repl-eval\") is internal
+- Any other (...) wrapper              -> always internal
 - Bare symbol name matching an internal package prefix -> internal
 - Unqualified name in *STANDARD-SIGNALING-FRAMES*      -> internal
+
+A local function or lambda is code of the function it sits in: a LABELS helper
+of the user's function is where the user's error is signalled, and its locals
+are the ones that explain it, so it is shown whenever that function is.
 
 Empty strings are treated as non-internal (caller's responsibility to filter)."
   (when (plusp (length function-name))
     (let ((method-name (%method-wrapper-name function-name))
-          (setf-target (%setf-frame-target function-name)))
+          (setf-target (%setf-frame-target function-name))
+          (outer (%local-function-outer function-name)))
       (cond
         (method-name (%prefix-internal-p method-name))
         (setf-target (%prefix-internal-p setf-target))
+        (outer (or (char= (char outer 0) #\")
+                   (%internal-frame-p outer)))
         ((char= (char function-name 0) #\() t)
         ((%prefix-internal-p function-name) t)
         ((member function-name *standard-signaling-frames*

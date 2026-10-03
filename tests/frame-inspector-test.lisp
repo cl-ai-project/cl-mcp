@@ -382,6 +382,76 @@ captured by CAPTURE, called with the condition inside the signalling handler."
                          #'string<))
             "and each name carries its own value")))))
 
+(deftest internal-frame-p-local-functions-follow-their-outer-function
+  (testing "a local or anonymous function inside a user's function is the user's frame"
+    ;; SBCL names it (FLET NAME :IN OUTER), (LABELS NAME :IN OUTER) or
+    ;; (LAMBDA LAMBDA-LIST :IN OUTER).  Every such name used to count as
+    ;; internal, so the frame an error was signalled in was dropped from the
+    ;; backtrace whenever that was a LABELS helper or a lambda.
+    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
+              "(LABELS MY-APP::VISIT :IN MY-APP::TOPOLOGICAL-SORT)")))
+    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
+              "(FLET MY-APP::HELPER :IN MY-APP::RUN)")))
+    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
+              "(LAMBDA (MY-APP::X) :IN MY-APP::RUN)")))
+    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p "(LABELS WALK :IN OUTER)"))
+        "names printed relative to the user's own package")
+    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
+              "(FLET MY-APP::INNER :IN (SB-PCL::FAST-METHOD MY-APP::GREET (STRING)))"))
+        "an OUTER that is itself a user's method")
+    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
+              "(LAMBDA (&KEY (MY-APP::MODE :IN)) :IN MY-APP::RUN)"))
+        "an :IN inside the lambda list is not the one that names OUTER"))
+  (testing "a local function inside infrastructure stays internal"
+    (ok (cl-mcp/src/frame-inspector::%internal-frame-p
+         "(FLET SB-C::WITH-IT :IN SB-C::%WITH-COMPILATION-UNIT)"))
+    (ok (cl-mcp/src/frame-inspector::%internal-frame-p
+         "(LAMBDA () :IN CL-MCP/SRC/REPL-CORE::%EVAL-FORMS)"))
+    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "(LAMBDA (C) :IN ERROR)"))
+    (ok (cl-mcp/src/frame-inspector::%internal-frame-p
+         "(LAMBDA (&OPTIONAL (X :IN)) :IN SB-IMPL::FOO)"))
+    (ok (cl-mcp/src/frame-inspector::%internal-frame-p
+         "(FLET MY-APP::INNER :IN (SB-PCL::FAST-METHOD SB-INT::FAKE (T)))")))
+  (testing "a top-level form's lambda, named by a source string, stays internal"
+    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "(LAMBDA () :IN \"repl-eval\")"))
+    (ok (cl-mcp/src/frame-inspector::%internal-frame-p
+         "(LAMBDA () :IN \"/tmp/a (b) :IN c.lisp\")"))))
+
+(defun frame-probe-walk (item)
+  "Signal from inside a LABELS function, for the local-function frame test.
+VISIT recurses outside tail position and is called twice, so SBCL keeps it a
+function of its own with frames of its own."
+  (labels ((visit (depth)
+             (if (zerop depth)
+                 (error "frame probe local ~S" item)
+                 (cons item (visit (1- depth))))))
+    (list (visit 1) (visit 2))))
+
+(deftest filtered-backtrace-keeps-the-labels-frame-that-signalled
+  (testing "capture-error-context with :filter-internal keeps a user's LABELS frames"
+    (let ((context nil))
+      (block caught
+        (handler-bind ((error (lambda (e)
+                                (setf context (capture-error-context
+                                               e :max-frames 30 :filter-internal t))
+                                (return-from caught))))
+          (frame-probe-walk :x)))
+      (let* ((names (mapcar (lambda (frame) (getf frame :function))
+                            (getf context :frames)))
+             (visit-frames (remove-if-not
+                            (lambda (name)
+                              (and (search "(LABELS " name)
+                                   (search "VISIT :IN " name)
+                                   (search "FRAME-PROBE-WALK" name)))
+                            names)))
+        (ok (find-if (lambda (name) (search "FRAME-PROBE-WALK" name)) names)
+            "the outer function's frame is there")
+        (ok (= 2 (length visit-frames))
+            "and so are both VISIT frames, the one that signalled included")
+        (ok (search "VISIT :IN "
+                    (find-if (lambda (name) (search "FRAME-PROBE-WALK" name)) names))
+            "the probe's innermost frame shown is the one that signalled")))))
+
 (defgeneric frame-probe-generic-function-with-a-long-enough-name (x)
   (:documentation "Signals from a :before method, for the frame name tests."))
 
