@@ -92,10 +92,69 @@
 
 (in-package #:cl-mcp/tests)
 
+(defparameter *process-tier-suites*
+  '("cl-mcp/tests/pool-test"
+    "cl-mcp/tests/worker-leaked-thread-test"
+    "cl-mcp/tests/pool-ownership-test"
+    "cl-mcp/tests/debugger-boundary-worker-test"
+    "cl-mcp/tests/spec-worker-test"
+    "cl-mcp/tests/pool-kill-worker-test"
+    "cl-mcp/tests/pool-startup-latency-test"
+    "cl-mcp/tests/concurrency-test"
+    "cl-mcp/tests/http-test"
+    "cl-mcp/tests/pool-init-config-test"
+    "cl-mcp/tests/worker-test"
+    "cl-mcp/tests/clos-describe-integration-test"
+    "cl-mcp/tests/timeout-test"
+    "cl-mcp/tests/tcp-test"
+    "cl-mcp/tests/cancel-test"
+    "cl-mcp/tests/test-runner-deadline-test")
+  "Suites that start worker processes or network servers, or wait out real
+deadlines.  Together they take most of a full run (about twelve of fourteen
+minutes, measured 2026-10-03), so the quick tier leaves them out.
+
+They are still loaded and compiled in every tier, so a compile error in one
+is caught either way, and running one by name (run-tests, or
+(rove:run :cl-mcp/tests/pool-test)) runs all of it.")
+
+(defun test-tier ()
+  "Return :FULL when CL_MCP_TEST_TIER is \"full\" (any case), else :QUICK.
+
+Quick is the default because it is what a developer runs between edits; CI
+sets the variable to run everything."
+  (let ((value (uiop:getenv "CL_MCP_TEST_TIER")))
+    (if (and value (string-equal value "full")) :full :quick)))
+
 (defmethod asdf:perform :after ((op asdf:test-op) (system (eql (asdf:find-system :cl-mcp/tests))))
-  (let ((test-packages (remove-if-not
-                        (lambda (dep)
-                          (and (stringp dep)
-                               (uiop:string-prefix-p "cl-mcp/tests/" dep)))
-                        (asdf:system-depends-on system))))
-    (rove:run test-packages)))
+  (let* ((test-packages (remove-if-not
+                         (lambda (dep)
+                           (and (stringp dep)
+                                (uiop:string-prefix-p "cl-mcp/tests/" dep)))
+                         (asdf:system-depends-on system)))
+         ;; A renamed or removed suite would otherwise drop out of the list
+         ;; unnoticed, and a quick run would then start running it again.
+         (unknown (set-difference *process-tier-suites* test-packages
+                                  :test #'string=)))
+    (when unknown
+      (error "*PROCESS-TIER-SUITES* names suites cl-mcp/tests does not load: ~{~A~^, ~}"
+             unknown))
+    (if (eq (test-tier) :full)
+        (rove:run test-packages)
+        ;; REMOVE, not SET-DIFFERENCE: the suites keep the order tests.lisp
+        ;; lists them in.
+        (let ((quick (remove-if (lambda (suite)
+                                  (member suite *process-tier-suites* :test #'string=))
+                                test-packages)))
+          ;; Said before the run and again after it, so neither the top nor
+          ;; the tail of the output reads as a full pass.  On *ERROR-OUTPUT*:
+          ;; the rove command discards *STANDARD-OUTPUT* while tests run.
+          (flet ((notice ()
+                   (format *error-output* "~&;; Quick tier: ~D of ~D suites; the ~D that ~
+                              start worker ~
+                              processes or servers were skipped.~%;; Run them all with ~
+                              CL_MCP_TEST_TIER=full (as CI does).~%"
+                           (length quick) (length test-packages)
+                           (length *process-tier-suites*))))
+            (notice)
+            (prog1 (rove:run quick)
+              (notice)))))))

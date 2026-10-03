@@ -32,7 +32,16 @@ This project is developed using its own MCP tools. When working on cl-mcp:
 
 **Fallback** (stale image / package conflicts): `rove cl-mcp.asd` from Bash for a clean process.
 
-**Pre-PR**: `(asdf:compile-system :cl-mcp :force :all)` to catch warnings, then run full test suite.
+**Test tiers**: `rove cl-mcp.asd` runs the **quick tier** by default — every suite except the
+ones that start worker processes or servers or wait out real deadlines
+(`*process-tier-suites*` in `tests.lisp`, about 12 of a full run's 14 minutes). It says so at
+the start and the end of its output. `CL_MCP_TEST_TIER=full rove cl-mcp.asd` runs everything;
+CI does. A process-tier suite run by name (`run-tests`, or `rove:run` on it) always runs whole.
+A change to the pool, workers, transports, timeouts or cancellation needs the full tier before
+it is called green; a new suite that spawns workers or servers belongs in that list.
+
+**Pre-PR**: `(asdf:compile-system :cl-mcp :force :all)` to catch warnings, then run the full
+tier (`CL_MCP_TEST_TIER=full rove cl-mcp.asd`).
 (`:force t` recompiles nothing here: cl-mcp is a package-inferred system, so the work is in the
 per-file subsystems that only `:force :all` reaches.)
 
