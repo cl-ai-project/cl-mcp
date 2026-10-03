@@ -26,9 +26,12 @@
     (let* ((flag nil)
            (thread (bt:make-thread (lambda () (sleep 0.2) (setf flag :done))))
            (start (get-internal-real-time)))
-      (ok (eq :done (wait-until (lambda () flag) :timeout 10 :interval 0.01)))
-      (ok (< (seconds-since start) 5) "far sooner than the 10 s timeout")
-      (bt:join-thread thread))))
+      (unwind-protect
+           (progn
+             (ok (eq :done (wait-until (lambda () flag) :timeout 10 :interval 0.01)))
+             (ok (< (seconds-since start) 5) "far sooner than the 10 s timeout"))
+        ;; Joined whatever happens above, so an error there leaves no thread.
+        (bt:join-thread thread)))))
 
 (deftest wait-until-gives-up-at-the-deadline
   (testing "a predicate that never holds answers NIL once the time is up"
