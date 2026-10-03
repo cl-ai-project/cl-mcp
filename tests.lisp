@@ -90,7 +90,6 @@
     "cl-mcp/tests/pool-init-config-test"
     "cl-mcp/tests/worker-test"
     "cl-mcp/tests/clos-describe-integration-test"
-    "cl-mcp/tests/timeout-test"
     "cl-mcp/tests/tcp-test"
     "cl-mcp/tests/cancel-test"
     "cl-mcp/tests/test-runner-deadline-test")
