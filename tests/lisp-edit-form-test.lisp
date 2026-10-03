@@ -243,6 +243,45 @@ text and LISP-EDIT-FORM's ninth value, the feature expressions it kept."
                           :operation "delete")
           (ok (not (search "ccl" (fs-read-file path)))))))))
 
+(deftest lisp-edit-form-replace-feature-expressions-need-a-form-and-not-a-true-reading
+  ;; Review of #216: a comment-only replace kept #+sbcl with no form after it,
+  ;; so it applied to the next definition in the file or broke the read at
+  ;; its end; and content opening with an expression false here (#-sbcl on
+  ;; SBCL) was refused as "content is empty" unless a comment came first.
+  (let ((source (format nil "#+sbcl~%(defun probe-b () :b)~%~%(defun probe-c () :c)~%")))
+    (testing "a comment-only replace keeps no expression"
+      (multiple-value-bind (text kept)
+          (%replace-in-feature-fixture source "probe-b" (format nil ";; removed~%"))
+        (ok (search ";; removed" text))
+        (ok (not (search "#+sbcl" text))
+            "nothing is left to fall onto probe-c or past the end of the file")
+        (ok (null kept))))
+    (testing "the same at the end of the file"
+      (ok (not (search "#+sbcl" (%replace-in-feature-fixture
+                                 (format nil "#+sbcl~%(defun probe-b () :b)~%")
+                                 "probe-b" (format nil ";; removed~%"))))))
+    (testing "content opening with an expression false here is validated by its form"
+      (multiple-value-bind (text kept)
+          (%replace-in-feature-fixture source "probe-b"
+                                       (format nil "#-sbcl~%(defun probe-b () :other)"))
+        (ok (search (format nil "#-sbcl~%(defun probe-b () :other)") text))
+        (ok (not (search "#+sbcl" text)))
+        (ok (null kept) "the content chose its own condition")))
+    (testing "with or without a comment in front of it"
+      (ok (search (format nil ";; why~%#-sbcl (defun probe-b () :other)")
+                  (%replace-in-feature-fixture
+                   source "probe-b" (format nil ";; why~%#-sbcl (defun probe-b () :other)")))))
+    (testing "the form after it is repaired as any form is, and the expression kept"
+      (ok (search (format nil "#-sbcl~%(defun probe-b ()~%  :other)")
+                  (%replace-in-feature-fixture
+                   source "probe-b" (format nil "#-sbcl~%(defun probe-b ()~%  :other")))))
+    (testing "an expression with no form after it is still refused"
+      (ok (handler-case
+              (progn (%replace-in-feature-fixture source "probe-b"
+                                                  (format nil "#+sbcl ;; nothing~%"))
+                     nil)
+            (error () t))))))
+
 (deftest lisp-edit-form-accepts-a-package-qualified-form-type
   (testing "form_type asdf:defsystem finds (asdf:defsystem ...), as defsystem does"
     (with-temp-file "tests/tmp/edit-form-qualified-type.asd"

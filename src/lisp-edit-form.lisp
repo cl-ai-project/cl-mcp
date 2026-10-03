@@ -630,32 +630,60 @@ feature expressions are read whatever the file's readtable."
                (setf pos (%skip-blank-and-comments text after))))
     pos))
 
-(defun %keep-feature-prefix (text node content)
-  "Return CONTENT, the validated replacement for NODE in TEXT, with the #+/#-
-feature expressions NODE's form carries put back in front of its form, and the
-expressions' text as a second value.  NODE's span starts at its first #, so a
-replace by the bare form used to drop them, making a definition meant for one
-implementation or configuration unconditional.  When NODE carries none, or
-CONTENT starts with feature expressions of its own (the caller changing or
-removing the condition on purpose), CONTENT is returned as it is with NIL.
-The expressions go after any comments CONTENT opens with, right before its
-form, and keep their own text: a comment between them and the form included."
+(defun %target-feature-prefix (text node)
+  "Return the #+/#- feature expressions written in front of NODE's form in TEXT,
+with the whitespace and comments after them, as they appear; NIL when there are
+none.  NODE's span starts at its first #, so a replace of the whole span by the
+bare form would drop them, making a definition meant for one implementation or
+configuration unconditional."
   (let* ((start (cst-node-start node))
-         (form-start (%feature-prefix-end text start))
-         (content-form-start (%skip-blank-and-comments content 0)))
-    (if (or (= form-start start)
-            (/= content-form-start (%feature-prefix-end content content-form-start)))
+         (end (%feature-prefix-end text start)))
+    (and (/= start end) (subseq text start end))))
+
+(defun %split-feature-prefix (content)
+  "Return (values STRIPPED PREFIX) for CONTENT: PREFIX the #+/#- feature
+expressions in front of its form, as written, and STRIPPED CONTENT without them
+-- each replaced by the line breaks it held, so the lines a repair reports keep
+their numbers.  Content is validated by its form, which the reader skips when
+the new condition is false in this process: #-sbcl (defun ...) on SBCL read as
+no form at all.  CONTENT and NIL when it starts with none."
+  (let* ((lead-end (%skip-blank-and-comments content 0))
+         (prefix-end (%feature-prefix-end content lead-end)))
+    (if (= lead-end prefix-end)
         (values content nil)
-        (let ((prefix (subseq text start form-start)))
+        (let ((prefix (subseq content lead-end prefix-end)))
           (values (concatenate 'string
-                               (subseq content 0 content-form-start)
-                               prefix
-                               (subseq content content-form-start))
-                  (string-right-trim '(#\Space #\Tab #\Newline #\Return) prefix))))))
+                               (subseq content 0 lead-end)
+                               (remove #\Newline prefix :test-not #'char=)
+                               (subseq content prefix-end))
+                  prefix)))))
+
+(defun %form-start (content)
+  "Return the index of CONTENT's first form, past its leading whitespace and
+comments, or NIL when it holds comments only."
+  (let ((start (%skip-blank-and-comments content 0)))
+    (and (< start (length content)) start)))
+
+(defun %put-feature-prefix (content prefix &optional (held-breaks 0))
+  "Return CONTENT, validated replacement text, with PREFIX -- feature
+expressions and the whitespace after them -- right before its form.  When
+%SPLIT-FEATURE-PREFIX took PREFIX out of CONTENT, HELD-BREAKS is the number of
+line breaks it left in PREFIX's place, which PREFIX now takes back.  CONTENT
+itself when it holds no form: expressions with nothing after them would apply
+to whatever follows in the file, or break its read at the end."
+  (let ((form-start (%form-start content)))
+    (if (null form-start)
+        content
+        (let ((start (if (and (>= form-start held-breaks)
+                              (every (lambda (ch) (char= ch #\Newline))
+                                     (subseq content (- form-start held-breaks) form-start)))
+                         (- form-start held-breaks)
+                         form-start)))
+          (concatenate 'string (subseq content 0 start) prefix (subseq content form-start))))))
 
 (defun %kept-feature-note (kept)
-  "Return the summary line saying a replace kept KEPT, the feature expressions
-%KEEP-FEATURE-PREFIX put back, or NIL when it kept none."
+  "Return the summary line saying a replace kept KEPT, the target's feature
+expressions (%TARGET-FEATURE-PREFIX) put back, or NIL when it kept none."
   (when kept
     (format nil "~%Kept ~A in front of the form: the content did not carry it. ~
                  To change or drop the condition, start the content with the ~
@@ -863,7 +891,10 @@ checkout, is not coordinated. GUARD remains the only check against one, and it
 is a precondition, not a lock.
 
 A replace keeps the #+/#- feature expressions in front of the target form
-when CONTENT does not start with its own (%KEEP-FEATURE-PREFIX).
+(%TARGET-FEATURE-PREFIX) when CONTENT does not start with its own and holds a
+form for them.  CONTENT's own expressions are set aside while its form is
+validated (%SPLIT-FEATURE-PREFIX), so a condition false in this process is
+accepted, and put back in front of it.
 
 For non-delete operations without DRY-RUN, returns nine values: the updated
 file text, the parinfer warning or NIL, whether the file changed, the repair
@@ -928,8 +959,19 @@ a replace kept, or NIL. A dry run carries the reparented forms as
             ;; Content is validated under the readtable in effect at the target:
             ;; the caller's argument, or an (in-readtable ...) earlier in the
             ;; file, as lisp-patch-form does.
-            (let ((content-readtable
-                    (or readtable (%detect-readtable-before-node nodes target))))
+            (let* ((content-readtable
+                     (or readtable (%detect-readtable-before-node nodes target)))
+                   ;; A replace's own feature expressions are set aside so that
+                   ;; its form is validated whether or not their condition
+                   ;; holds in this process.
+                   (split (if (eq op-key :replace)
+                              (multiple-value-list (%split-feature-prefix content))
+                              (list content nil)))
+                   (form-content (first split))
+                   (own-prefix (second split)))
+              (when (and own-prefix (null (%form-start form-content)))
+                (error "content has the feature expression ~A but no form after it"
+                       (string-right-trim '(#\Space #\Tab #\Newline #\Return) own-prefix)))
               (multiple-value-bind (validated-content parinfer-warning repair-fixes
                                     bracket-warning reparented form-count spans)
                   ;; insert_before/insert_after take one or more forms (issue
@@ -937,7 +979,7 @@ a replace kept, or NIL. A dry run carries the reparented forms as
                   (if (member op-key '(:insert-before :insert-after))
                       (%validate-and-repair-block content content-readtable
                                                   file-package-name abs)
-                      (%validate-and-repair-content content content-readtable
+                      (%validate-and-repair-content form-content content-readtable
                                                     file-package-name abs))
                 (let* ((block-spliced
                          ;; Normalise only the gaps between a block's forms, and
@@ -948,12 +990,21 @@ a replace kept, or NIL. A dry run carries the reparented forms as
                                        *standard-readtable*)))
                              (%normalize-block-gaps validated-content spans)
                              validated-content))
-                       (kept (if (eq op-key :replace)
-                                 (multiple-value-list
-                                  (%keep-feature-prefix original target block-spliced))
-                                 (list block-spliced nil)))
-                       (spliced (first kept))
-                       (kept-feature (second kept))
+                       ;; The target's expressions are kept only when the
+                       ;; content brings none and holds a form for them.
+                       (target-prefix (and (eq op-key :replace) (null own-prefix)
+                                           (%target-feature-prefix original target)))
+                       (spliced (cond
+                                  (own-prefix
+                                   (%put-feature-prefix block-spliced own-prefix
+                                                        (count #\Newline own-prefix)))
+                                  (target-prefix
+                                   (%put-feature-prefix block-spliced target-prefix))
+                                  (t block-spliced)))
+                       (kept-feature (and target-prefix (%form-start block-spliced)
+                                          (string-right-trim '(#\Space #\Tab #\Newline
+                                                               #\Return)
+                                                             target-prefix)))
                        (several-forms (and form-count (> form-count 1) form-count))
                        (updated
                          (%apply-operation original target op-key spliced
@@ -1073,7 +1124,9 @@ several new definitions go in with one call; comments between them stay where
 they are. Comment-only content is accepted too.
 replace keeps the #+/#- feature expressions written in front of the target form
 when content starts with none of its own, and says so (kept_feature_expression);
-start content with the expression it should have to change or drop the condition.
+start content with the expression it should have to change or drop the condition
+(its form is checked whether or not that condition holds here). Comment-only
+content keeps none.
 Missing closing parentheses are automatically repaired using parinfer; a block
 is repaired as a whole and must then read as complete forms, or nothing is
 written.")
