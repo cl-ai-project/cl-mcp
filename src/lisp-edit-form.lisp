@@ -750,6 +750,15 @@ expressions (%TARGET-FEATURE-PREFIX) put back, or NIL when it kept none."
                  feature expression it should have."
             kept)))
 
+(defun %blank-lines-note (normalized)
+  "Return the summary line saying a replace also moved the blank lines around the
+form, when NORMALIZED says it did, or NIL.  Forms written with no blank line
+between them are set apart by normalize_blank_lines, a change to more than the
+form itself that the summary would otherwise leave unmentioned."
+  (when normalized
+    (format nil "~%The blank lines around the form were normalized too; pass ~
+                 normalize_blank_lines=false to leave them as they were.")))
+
 (defun %apply-operation-preserve-spacing (text node operation content)
   (let ((start (cst-node-start node))
         (end (cst-node-end node)))
@@ -956,16 +965,20 @@ form for them.  CONTENT's own expressions are set aside while its form is
 validated (%SPLIT-FEATURE-PREFIX), so a condition false in this process is
 accepted, and put back in front of it.
 
-For non-delete operations without DRY-RUN, returns nine values: the updated
+A replace by the form already there changes nothing, normalized spacing
+included.
+
+For non-delete operations without DRY-RUN, returns ten values: the updated
 file text, the parinfer warning or NIL, whether the file changed, the repair
 line diff or NIL, the validated content that was spliced in, a bracket
 warning (a ] or } found where ) was expected, in content that still reads)
 or NIL, the forms the repair moved out of the form the content's own
 parens put them in (REPARENTED-FORMS) or NIL, the number of forms an
-insert put in when it was more than one, or NIL, and the feature expressions
-a replace kept, or NIL. A dry run carries the reparented forms as
-\"repair_reparented\", that number as \"forms\" and the expressions as
-\"kept_feature_expression\"."
+insert put in when it was more than one, or NIL, the feature expressions
+a replace kept, or NIL, and whether normalizing moved the blank lines around a
+replaced form. A dry run carries the reparented forms as
+\"repair_reparented\", that number as \"forms\", the expressions as
+\"kept_feature_expression\" and the last as \"blank_lines_normalized\"."
   (unless
       (and (stringp file-path) (stringp form-type) (stringp form-name)
            (stringp operation))
@@ -1068,9 +1081,25 @@ a replace kept, or NIL. A dry run carries the reparented forms as
                                                                #\Return)
                                                              target-prefix)))
                        (several-forms (and form-count (> form-count 1) form-count))
+                       ;; A replace by the form already there changes nothing:
+                       ;; normalising its surroundings would rewrite the file
+                       ;; for an edit that did not happen.
+                       (same-form (and (eq op-key :replace)
+                                       (string= (%trim-outer-whitespace spliced)
+                                                (%trim-outer-whitespace target-snippet))))
                        (updated
-                         (%apply-operation original target op-key spliced
-                                           normalize-blank-lines))
+                         (if same-form
+                             original
+                             (%apply-operation original target op-key spliced
+                                               normalize-blank-lines)))
+                       ;; Whether normalising moved the blank lines around a
+                       ;; replaced form, compared with leaving them as they were.
+                       (blank-lines-normalized
+                         (and (eq op-key :replace) normalize-blank-lines (not same-form)
+                              (not (string= updated
+                                            (%apply-operation-preserve-spacing
+                                             original target :replace
+                                             (%trim-outer-whitespace spliced))))))
                        (would-change (not (string= original updated))))
                   (log-event :debug "lisp.edit.form" "path" (namestring abs)
                              "operation" op-normalized "form_type" form-type
@@ -1100,13 +1129,16 @@ a replace kept, or NIL. A dry run carries the reparented forms as
                         (setf (gethash "forms" result) several-forms))
                       (when kept-feature
                         (setf (gethash "kept_feature_expression" result) kept-feature))
+                      (when blank-lines-normalized
+                        (setf (gethash "blank_lines_normalized" result) t))
                       result))
                    (would-change (fs-write-file rel updated)
                     (values updated parinfer-warning t repair-fixes validated-content
-                            bracket-warning reparented several-forms kept-feature))
+                            bracket-warning reparented several-forms kept-feature
+                            blank-lines-normalized))
                    (t (values updated parinfer-warning nil repair-fixes
                               validated-content bracket-warning reparented
-                              several-forms kept-feature)))))))))))
+                              several-forms kept-feature nil)))))))))))
 
 (defun %resolve-guard-argument (args guard guard-token)
   "Return the guard LISP-EDIT-FORM should run with, or NIL for an unguarded
@@ -1230,7 +1262,7 @@ without a guard."))
     (handler-case
         (multiple-value-bind (updated parinfer-warning changed-p repair-fixes
                               repaired-form bracket-warning reparented forms
-                              kept-feature)
+                              kept-feature blank-lines-normalized)
             (lisp-edit-form :file-path file_path
                             :form-type form_type
                             :form-name form_name
@@ -1254,15 +1286,17 @@ without a guard."))
                      (bw (gethash "bracket_warning" updated))
                      (block-forms (gethash "forms" updated))
                      (dry-kept (gethash "kept_feature_expression" updated))
+                     (dry-blank-lines (gethash "blank_lines_normalized" updated))
                      (summary
                       (format nil "Dry-run ~A~@[ of ~D forms~] on ~A ~A in ~A ~
                                    (~:[no change~;would change~])~
-                                   ~@[~A~]~@[~A~]~@[~%WARNING: ~A~]~
+                                   ~@[~A~]~@[~A~]~@[~A~]~@[~%WARNING: ~A~]~
                                    ~@[~%~%--- original ---~%~A~]~
                                    ~@[~%~%--- preview ---~%~A~]"
                               operation block-forms form_type form_name file_path
                               would-change
                               (%kept-feature-note dry-kept)
+                              (%blank-lines-note dry-blank-lines)
                               (%repair-summary pw (gethash "repair_fixes" updated)
                                                (or (gethash "validated_content" updated)
                                                    preview-form)
@@ -1289,7 +1323,9 @@ without a guard."))
                                 (when block-forms
                                   (list "forms" block-forms))
                                 (when dry-kept
-                                  (list "kept_feature_expression" dry-kept))))))
+                                  (list "kept_feature_expression" dry-kept))
+                                (when dry-blank-lines
+                                  (list "blank_lines_normalized" t))))))
               (let ((summary
                      (cond
                        ((not changed-p)
@@ -1303,10 +1339,11 @@ without a guard."))
                                 bracket-warning))
                        (t
                         (format nil "Applied ~A~@[ of ~D forms~] to ~A ~A in ~A ~
-                                     (~D chars)~@[~A~]~@[~A~]~@[~%WARNING: ~A~]"
+                                     (~D chars)~@[~A~]~@[~A~]~@[~A~]~@[~%WARNING: ~A~]"
                                 operation forms form_type form_name file_path
                                 (length updated)
                                 (%kept-feature-note kept-feature)
+                                (%blank-lines-note blank-lines-normalized)
                                 (%repair-summary parinfer-warning repair-fixes
                                                  repaired-form :include-form t
                                                  :moved reparented)
@@ -1326,7 +1363,9 @@ without a guard."))
                                 (when forms
                                   (list "forms" forms))
                                 (when kept-feature
-                                  (list "kept_feature_expression" kept-feature))))))))
+                                  (list "kept_feature_expression" kept-feature))
+                                (when blank-lines-normalized
+                                  (list "blank_lines_normalized" t))))))))
       (content-unrepairable-error (e)
         (tool-error id (sanitize-for-json (princ-to-string e))
                     :protocol-version (protocol-version state)))

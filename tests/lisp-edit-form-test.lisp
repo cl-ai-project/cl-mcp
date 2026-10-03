@@ -187,6 +187,61 @@ text and LISP-EDIT-FORM's ninth value, the feature expressions it kept."
                                       :content content options))))
         (values (fs-read-file path) kept)))))
 
+(defparameter *adjacent-forms-source*
+  (format nil "(define-unit :m :length 1)~%(define-unit :km :length 1000)~%~
+               (define-unit :cm :length 1/100)~%")
+  "One-line forms written with no blank line between them.")
+
+(deftest lisp-edit-form-replace-with-the-same-form-changes-nothing
+  ;; It reported `(would change)' with the original and the preview identical,
+  ;; and, applied, put a blank line on each side of the form, splitting the run.
+  (dolist (content (list "(define-unit :km :length 1000)"
+                         (format nil "  (define-unit :km :length 1000)~%~%")))
+    (testing (format nil "content ~S" content)
+      (with-temp-file "tests/tmp/edit-form-noop.lisp" *adjacent-forms-source*
+        (lambda (path)
+          (let ((preview (lisp-edit-form :file-path path :form-type "define-unit"
+                                         :form-name "km" :operation "replace"
+                                         :content content :dry-run t)))
+            (ok (null (gethash "would_change" preview)) "a dry run says no change"))
+          (ok (null (nth-value 2 (lisp-edit-form :file-path path :form-type "define-unit"
+                                                 :form-name "km" :operation "replace"
+                                                 :content content)))
+              "the call reports no change")
+          (ok (equal *adjacent-forms-source* (fs-read-file path)) "and the file is as it was"))))))
+
+(deftest lisp-edit-form-replace-says-when-it-normalizes-the-blank-lines-around
+  (testing "a real edit inside a run of adjacent forms says the spacing changed too"
+    (with-temp-file "tests/tmp/edit-form-noop.lisp" *adjacent-forms-source*
+      (lambda (path)
+        (let ((preview (lisp-edit-form :file-path path :form-type "define-unit"
+                                       :form-name "km" :operation "replace"
+                                       :content "(define-unit :km :length 1000.0)"
+                                       :dry-run t)))
+          (ok (eq t (gethash "blank_lines_normalized" preview))))
+        (ok (eq t (nth-value 9 (lisp-edit-form :file-path path :form-type "define-unit"
+                                               :form-name "km" :operation "replace"
+                                               :content "(define-unit :km :length 1000.0)"))))
+        (ok (search (format nil "1)~%~%(define-unit :km :length 1000.0)~%~%(define-unit :cm")
+                    (fs-read-file path))
+            "normalize_blank_lines still separates it, as before"))))
+  (testing "with normalize_blank_lines off the run stays whole and nothing is said"
+    (with-temp-file "tests/tmp/edit-form-noop.lisp" *adjacent-forms-source*
+      (lambda (path)
+        (ok (null (nth-value 9 (lisp-edit-form :file-path path :form-type "define-unit"
+                                               :form-name "km" :operation "replace"
+                                               :content "(define-unit :km :length 1000.0)"
+                                               :normalize-blank-lines nil))))
+        (ok (search (format nil "1)~%(define-unit :km :length 1000.0)~%(define-unit :cm")
+                    (fs-read-file path))))))
+  (testing "a form already set apart by blank lines changes nothing around it"
+    (with-temp-file "tests/tmp/edit-form-noop.lisp"
+        (format nil "(defun a () 1)~%~%(defun b () 2)~%~%(defun c () 3)~%")
+      (lambda (path)
+        (ok (null (nth-value 9 (lisp-edit-form :file-path path :form-type "defun"
+                                               :form-name "b" :operation "replace"
+                                               :content "(defun b () 22)"))))))))
+
 (deftest lisp-edit-form-replace-keeps-the-feature-expression
   ;; The matched form's span starts at its #+/#-, so a replace whose content
   ;; was the bare form used to drop the feature expression -- silently making
