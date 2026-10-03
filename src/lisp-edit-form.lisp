@@ -620,6 +620,9 @@ feature expressions are read whatever the file's readtable."
                      (member (char text (1+ pos)) '(#\+ #\-)))
           do (let ((after (handler-case
                               (let ((*read-suppress* t)
+                                    ;; #. is not evaluated while suppressing;
+                                    ;; this says so and keeps it that way.
+                                    (*read-eval* nil)
                                     (*readtable* *standard-readtable*))
                                 (nth-value 1 (read-from-string text t nil
                                                                :start (+ pos 2)

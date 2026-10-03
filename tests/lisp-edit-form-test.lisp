@@ -312,6 +312,27 @@ text and LISP-EDIT-FORM's ninth value, the feature expressions it kept."
        source "probe-b" "#+cl-mcp-never-a-feature-here (defun probe-b () :new)")
       (ok (null (find-symbol "CL-MCP-NEVER-A-FEATURE-HERE" "KEYWORD"))))))
 
+(defvar *feature-read-evaluated* nil
+  "Set by a #. in a feature expression if reading one ever evaluated it.")
+
+(deftest lisp-edit-form-feature-expressions-are-read-without-evaluation
+  ;; Finding the expressions in front of a form, in the file or the content,
+  ;; and checking the content's own, both read text; neither may run #.
+  (let ((source (format nil "#+sbcl~%(defun probe-b () :b)~%"))
+        (content (concatenate
+                  'string
+                  "#+#.(progn (setf cl-mcp/tests/lisp-edit-form-test::*feature-read-evaluated* t)"
+                  " :sbcl) (defun probe-b () :new)")))
+    (setf *feature-read-evaluated* nil)
+    (testing "a #. in the content's feature expression is refused, not run"
+      (ok (handler-case
+              (progn (%replace-in-feature-fixture source "probe-b" content) nil)
+            (error () t)))
+      (ok (null *feature-read-evaluated*)))
+    (testing "nor is it run while finding where the content's form starts"
+      (cl-mcp/src/lisp-edit-form::%feature-prefix-end content 0)
+      (ok (null *feature-read-evaluated*)))))
+
 (deftest lisp-edit-form-accepts-a-package-qualified-form-type
   (testing "form_type asdf:defsystem finds (asdf:defsystem ...), as defsystem does"
     (with-temp-file "tests/tmp/edit-form-qualified-type.asd"
