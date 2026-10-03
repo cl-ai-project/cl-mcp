@@ -805,7 +805,11 @@ in the cleanup form regardless of success or failure."
           ;; (sets state to :crashed, then kill-worker sets :dead),
           ;; then release the session.
           ;; The spawn-worker call takes seconds, so we have a wide window.
-          (wait-until (lambda () (not (eq :bound (worker-state worker))))
+          ;; Waiting for :DEAD -- not merely "no longer :BOUND" -- keeps the
+          ;; release where the fixed sleep put it: after kill-worker, while the
+          ;; replacement is still spawning, rather than between :CRASHED and
+          ;; the kill, which is a different interleaving.
+          (wait-until (lambda () (eq :dead (worker-state worker)))
                       :timeout 10)
           (ok (not (eq :bound (worker-state worker)))
               "worker state changed from :bound (recovery started)")
