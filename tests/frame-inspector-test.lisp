@@ -337,6 +337,51 @@ established when the context is captured, and HANDLER-CASE unwinds first."
     (cl-mcp/src/frame-inspector::%internal-frame-p
      "(SETF SB-INT::STORE)"))))
 
+(defun frame-probe-shadowed-local (pattern)
+  "Signal with two live variables named PATTERN in one frame -- the argument and
+an inner binding of the same name -- as a let-converted LABELS helper leaves
+them in its caller's frame."
+  (declare (optimize (debug 3)))
+  (let ((pattern (rest pattern)))
+    (error "frame probe shadowed ~S" pattern)))
+
+(defun %probe-frame-locals (capture)
+  "Return the locals of FRAME-PROBE-SHADOWED-LOCAL's frame, as (NAME . VALUE),
+captured by CAPTURE, called with the condition inside the signalling handler."
+  (let ((context nil))
+    (block caught
+      (handler-bind ((error (lambda (e)
+                              (setf context (funcall capture e))
+                              (return-from caught))))
+        (frame-probe-shadowed-local '(:a :b))))
+    (let ((frame (find-if (lambda (frame)
+                            (search "FRAME-PROBE-SHADOWED-LOCAL" (getf frame :function)))
+                          (getf context :frames))))
+      (mapcar (lambda (local) (cons (getf local :name) (getf local :value)))
+              (getf frame :locals)))))
+
+(deftest same-named-locals-are-told-apart
+  ;; Both used to be listed as PATTERN.  SBCL's debugger writes the second as
+  ;; PATTERN#1 (its debug-var id), and so do we now.
+  (dolist (capture (list (lambda (e) (capture-error-context e :max-frames 30))
+                         (lambda (e)
+                           (capture-debugger-error-context
+                            e (lambda (secondary) (error secondary)) :max-frames 30))))
+    (testing "in both the ordinary and the debugger-boundary capture"
+      (let ((locals (%probe-frame-locals capture)))
+        (ok (equal '("PATTERN" "PATTERN#1")
+                   (sort (mapcar #'car (remove-if-not
+                                        (lambda (local) (search "PATTERN" (car local)))
+                                        locals))
+                         #'string<))
+            "the two variables have two names")
+        (ok (equal '("(:A :B)" "(:B)")
+                   (sort (mapcar #'cdr (remove-if-not
+                                        (lambda (local) (search "PATTERN" (car local)))
+                                        locals))
+                         #'string<))
+            "and each name carries its own value")))))
+
 (defgeneric frame-probe-generic-function-with-a-long-enough-name (x)
   (:documentation "Signals from a :before method, for the frame name tests."))
 

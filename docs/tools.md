@@ -147,6 +147,9 @@ Output fields:
   result, contains `condition_type`, `message`, `restarts`, and `frames` with local
   variable inspection. The content text carries the same thing: each displayed frame is followed by its locals as
   `NAME = VALUE`, with `[object-id: ID]` on a non-primitive one, capped at 10 per frame.
+  Two variables of one name in a frame -- an inner binding shadowing an argument, or a
+  `labels` helper's variables merged into its caller -- are named as SBCL's debugger names
+  them, `PATTERN` and `PATTERN#1`, here and in the JSON `name`.
   `locals_preview_frames` expands the entries, elements or slots of a non-primitive local in
   the top N frames underneath it, nested as deep as `locals_preview_max_depth` reached. A
   value over 200 characters is cut with its full length noted, and a preview over 20 lines
