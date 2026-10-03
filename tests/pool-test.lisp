@@ -38,6 +38,8 @@
                 #:worker-crashed
                 #:*reaper-threads*
                 #:*reaper-threads-lock*)
+  (:import-from #:cl-mcp/src/utils/deadline
+                #:wait-until)
   (:import-from #:cl-mcp/tests/test-helpers
                 #:spawn-available-p
                 #:with-pool))
@@ -803,7 +805,8 @@ in the cleanup form regardless of success or failure."
           ;; (sets state to :crashed, then kill-worker sets :dead),
           ;; then release the session.
           ;; The spawn-worker call takes seconds, so we have a wide window.
-          (sleep 1)
+          (wait-until (lambda () (not (eq :bound (worker-state worker))))
+                      :timeout 10)
           (ok (not (eq :bound (worker-state worker)))
               "worker state changed from :bound (recovery started)")
           (release-session "resurrection-test")
@@ -912,7 +915,10 @@ in the cleanup form regardless of success or failure."
           (ok (integerp pid) "worker has valid pid")
           ;; Kill the worker process
           (sb-posix:kill pid sb-posix:sigkill)
-          (sleep 0.5)
+          (wait-until (lambda ()
+                        (not (sb-ext:process-alive-p
+                              (cl-mcp/src/worker-client:worker-process-info worker))))
+                      :timeout 5)
           ;; Trigger crash handler — threshold is 1, so this trips the breaker
           (cl-mcp/src/pool::%handle-worker-crash worker)
           ;; Session should be removed from affinity map
@@ -938,9 +944,18 @@ in the cleanup form regardless of success or failure."
         (ok (integerp pid) "worker has valid pid")
         ;; Kill the worker
         (sb-posix:kill pid sb-posix:sigkill)
-        ;; Wait for health monitor to detect and recover
-        ;; health-check at 0.1s + spawn time (~2s) + buffer
-        (sleep 5)
+        ;; Wait for the health monitor to detect the crash and bind a
+        ;; replacement to the session -- as long as that takes, and no longer.
+        (ok (wait-until
+             (lambda ()
+               (bordeaux-threads:with-lock-held (cl-mcp/src/pool::*pool-lock*)
+                 (find-if (lambda (w)
+                            (and (equal "health-session" (worker-session-id w))
+                                 (eq :bound (worker-state w))
+                                 (not (eql old-id (worker-id w)))))
+                          cl-mcp/src/pool::*all-workers*)))
+             :timeout 30)
+            "the health monitor bound a replacement to the session")
         ;; A new worker should be assigned with a different ID
         (let ((new-worker (get-or-assign-worker "health-session")))
           (ok new-worker "new worker assigned after recovery")
@@ -1192,7 +1207,10 @@ send-root-to-session-worker failure"
         (let ((worker (get-or-assign-worker "reaper-test")))
           (ok worker "worker assigned")
           (sb-posix:kill (worker-pid worker) sb-posix:sigkill)
-          (sleep 0.5)
+          (wait-until (lambda ()
+                        (not (sb-ext:process-alive-p
+                              (cl-mcp/src/worker-client:worker-process-info worker))))
+                      :timeout 5)
           (cl-mcp/src/pool::%handle-worker-crash worker))
         ;; Inject a slow sentinel reaper that takes ~1s
         (let ((sentinel
@@ -1278,4 +1296,9 @@ send-root-to-session-worker failure"
                 (format nil "exactly 1 recovery deferred (got ~D)"
                         recovery-deferred))
             ;; Wait for the recovery thread to finish
-            (sleep 5)))))))
+            (wait-until (lambda ()
+                          (notany #'bordeaux-threads:thread-alive-p
+                                  (bordeaux-threads:with-lock-held
+                                      (cl-mcp/src/pool::*pool-lock*)
+                                    (copy-list cl-mcp/src/pool::*recovery-threads*))))
+                        :timeout 30)))))))

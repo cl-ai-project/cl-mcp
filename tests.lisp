@@ -40,6 +40,7 @@
   (:import-from #:cl-mcp/tests/write-path-specs-test)
   (:import-from #:cl-mcp/tests/utils-bounded-stream-test)
   (:import-from #:cl-mcp/tests/utils-request-debugger-boundary-test)
+  (:import-from #:cl-mcp/tests/utils-wait-until-test)
   (:import-from #:cl-mcp/tests/validate-test)
   (:import-from #:cl-mcp/tests/tools-test)
   (:import-from #:cl-mcp/tests/define-tool-test)
