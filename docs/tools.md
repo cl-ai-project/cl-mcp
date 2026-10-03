@@ -598,7 +598,11 @@ Input:
   Comment-only content keeps no expression, which would otherwise fall onto the next form in
   the file. `delete` removes the expressions with the form
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
-- `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms
+- `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms.
+  A `replace` whose content is the form already there changes nothing, spacing included
+  (`No change …`). When a real `replace` also moves the blank lines around the form -- forms
+  written with no blank line between them are set apart -- the summary says so and the
+  result carries `blank_lines_normalized: true`; pass `false` to leave them as they were
 - `readtable` (string, optional): named-readtable designator for files using custom reader
   macros. **The readtable must be registered in the cl-mcp server process**, which is where
   files are parsed. `load-system` and `repl-eval` load into the session's *worker*, so

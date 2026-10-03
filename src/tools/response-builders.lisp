@@ -558,7 +558,9 @@ The text ends with %CLOS-DESCRIBE-HINT's line for a generic function (with
 METHOD-COUNT, its number of methods) or a class, since code-describe shows
 neither methods nor more than a class's direct slot names.  STALE, as in
 BUILD-CODE-FIND-RESPONSE, annotates the Defined at line and sets \"stale\"."
-  (let ((text (format nil "~A :: ~A~@[ ~A~]~%~@[~A~]~@[~A~]"
+  ;; The docstring brings its own line break: written unconditionally, it left
+  ;; an empty line between the signature and the location when there was none.
+  (let ((text (format nil "~A :: ~A~@[ ~A~]~@[~%~A~]~@[~A~]"
                       name type arglist doc
                       ;; Built apart so a missing PATH consumes LINE with it.
                       (and path

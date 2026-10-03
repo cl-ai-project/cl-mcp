@@ -894,6 +894,32 @@
                      (format nil "and so does the text (dry_run ~A)" dry-run))))
           (ignore-errors (delete-file abs)))))))
 
+(deftest tools-call-lisp-edit-form-says-when-the-blank-lines-around-change
+  (testing "the summary and the JSON say the blank lines around the form were normalized"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/lisp-edit-form-blank-lines-note.lisp")
+             (abs (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*)))
+        (unwind-protect
+             (dolist (dry-run '("true" "false"))
+               (with-open-file (out abs :direction :output :if-exists :supersede)
+                 (format out "(defvar *a* 1)~%(defvar *b* 2)~%(defvar *c* 3)~%"))
+               (let* ((req (concatenate
+                            'string
+                            "{\"jsonrpc\":\"2.0\",\"id\":24,\"method\":\"tools/call\","
+                            "\"params\":{\"name\":\"lisp-edit-form\","
+                            "\"arguments\":{\"file_path\":\"" tmp-path "\","
+                            "\"form_type\":\"defvar\",\"form_name\":\"*b*\","
+                            "\"operation\":\"replace\","
+                            "\"content\":\"(defvar *b* 20)\","
+                            "\"dry_run\":" dry-run "}}}"))
+                      (result (gethash "result" (parse (%pjl req))))
+                      (text (gethash "text" (elt (gethash "content" result) 0))))
+                 (ok (eq t (gethash "blank_lines_normalized" result))
+                     (format nil "JSON says so (dry_run ~A)" dry-run))
+                 (ok (search "normalize_blank_lines=false" text)
+                     (format nil "and the text names the way out (dry_run ~A)" dry-run))))
+          (ignore-errors (delete-file abs)))))))
+
 (deftest tools-call-lisp-edit-form-default-normalizes-blank-lines
   (testing "tools/call lisp-edit-form normalizes blank lines when option is omitted"
     (with-test-project-root

@@ -253,7 +253,7 @@
     (ok (not (search "changed since" (first-text r))))
     (ok (not (nth-value 1 (gethash "stale" r)))))
   (testing "no path leaves nothing behind where the location would be"
-    (ok (equal (format nil "*X* :: variable~%")
+    (ok (equal "*X* :: variable"
                (first-text (build-code-describe-response "*X*" "variable" nil nil nil nil))))
     (ok (equal (format nil "X :: function (a)~%doc")
                (first-text (build-code-describe-response "X" "function" "(a)" "doc" nil 12)))
@@ -290,6 +290,23 @@
     (let ((text (first-text r)))
       (ok (search "BAR" text))
       (ok (search "macro" text))))))
+
+(deftest build-code-describe-response-leaves-no-empty-line-without-a-docstring
+  ;; A symbol with no docstring printed `NAME :: type (args)', an empty line,
+  ;; then `Defined at ...': the newline before the docstring was written
+  ;; whether or not there was one.
+  (testing "the location follows the signature directly"
+    (let ((text (first-text (build-code-describe-response
+                             "INCOMPATIBLE-UNITS" "condition" "(from to)" nil
+                             "src/units.lisp" 29))))
+      (ok (eql 0 (search (format nil "INCOMPATIBLE-UNITS :: condition (from to)~%~
+                                      Defined at src/units.lisp:29")
+                         text)))
+      (ok (not (search (format nil "~%~%") text)) "no empty line anywhere")))
+  (testing "a docstring still sits between them, one line break on each side"
+    (ok (equal (format nil "FOO :: function (X)~%Adds.~%Defined at src/a.lisp:3")
+               (first-text (build-code-describe-response
+                            "FOO" "function" "(X)" "Adds." "src/a.lisp" 3))))))
 
 (deftest build-code-describe-response-points-at-clos-describe
   (testing "a generic function's text counts its methods and names clos-describe"
