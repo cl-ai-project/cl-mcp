@@ -67,7 +67,7 @@ jobs:
       # cl-spec is not in Quicklisp.  Pin the commit the bundle was written and
       # checked against; bump it deliberately, in its own commit.
       CL_SPEC_REPOSITORY: https://github.com/masatoi/cl-spec.git
-      CL_SPEC_REVISION: 08d3adaf912b614537ca32cf5a9451fe0b807337
+      CL_SPEC_REVISION: 2538477fb35a877e7e6c92945370801ee78ed13f
     steps:
       - name: Checkout
         uses: actions/checkout@v4
