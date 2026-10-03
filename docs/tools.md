@@ -593,9 +593,10 @@ Input:
   and the result carries `kept_feature_expression`. Start `content` with the expression it
   should have to change or drop the condition; the form after it is validated (and repaired)
   whether or not that condition holds in the server, so `#-sbcl (defun ...)` on SBCL is
-  accepted, while an expression with no form after it is refused. Comment-only content keeps
-  no expression, which would otherwise fall onto the next form in the file. `delete` removes
-  the expressions with the form
+  accepted, while an expression with no form after it, or one that breaks the feature
+  expression grammar (`#+(not a b)`, `#+(bogus a)`), is refused and nothing is written.
+  Comment-only content keeps no expression, which would otherwise fall onto the next form in
+  the file. `delete` removes the expressions with the form
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
 - `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms
 - `readtable` (string, optional): named-readtable designator for files using custom reader

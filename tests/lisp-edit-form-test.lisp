@@ -282,6 +282,36 @@ text and LISP-EDIT-FORM's ninth value, the feature expressions it kept."
                      nil)
             (error () t))))))
 
+(deftest lisp-edit-form-replace-checks-the-content-s-own-feature-expressions
+  ;; Second review of #216: setting the content's expressions aside to read
+  ;; its form left the expressions themselves unchecked, so a malformed one
+  ;; was written and the file then failed to read.
+  (let ((source (format nil "#+sbcl~%(defun probe-b () :b)~%")))
+    (dolist (bad '("#+(not sbcl ccl) (defun probe-b () :new)"
+                   "#+(bogus sbcl) (defun probe-b () :new)"
+                   "#-(not) (defun probe-b () :new)"
+                   "#+sbcl #+(or sbcl (bogus)) (defun probe-b () :new)"
+                   "#+\"sbcl\" (defun probe-b () :new)"))
+      (testing (format nil "~A is refused and nothing is written" bad)
+        (with-temp-file "tests/tmp/edit-form-feature-expression.lisp" source
+          (lambda (path)
+            (ok (handler-case
+                    (progn (lisp-edit-form :file-path path :form-type "defun"
+                                           :form-name "probe-b" :operation "replace"
+                                           :content bad)
+                           nil)
+                  (error (e) (search "feature expression" (princ-to-string e)))))
+            (ok (equal source (fs-read-file path)))))))
+    (dolist (good '("#+(and) (defun probe-b () :new)"
+                    "#-(or sbcl (and ccl (not x86-64))) (defun probe-b () :new)"
+                    "#+(:or :sbcl :ccl) (defun probe-b () :new)"))
+      (testing (format nil "~A is accepted, true here or not" good)
+        (ok (search good (%replace-in-feature-fixture source "probe-b" good)))))
+    (testing "checking an expression interns none of its feature names"
+      (%replace-in-feature-fixture
+       source "probe-b" "#+cl-mcp-never-a-feature-here (defun probe-b () :new)")
+      (ok (null (find-symbol "CL-MCP-NEVER-A-FEATURE-HERE" "KEYWORD"))))))
+
 (deftest lisp-edit-form-accepts-a-package-qualified-form-type
   (testing "form_type asdf:defsystem finds (asdf:defsystem ...), as defsystem does"
     (with-temp-file "tests/tmp/edit-form-qualified-type.asd"

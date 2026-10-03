@@ -658,6 +658,63 @@ no form at all.  CONTENT and NIL when it starts with none."
                                (subseq content prefix-end))
                   prefix)))))
 
+(defun %feature-expression-problem (expression &optional (depth 0))
+  "Return why EXPRESSION, a feature expression as read, breaks the grammar of
+CLHS 24.1.2.1 -- a symbol, or a proper list headed by AND, OR or NOT, NOT with
+exactly one argument, whose arguments are feature expressions in turn -- or NIL
+when it keeps it.  Operators are compared by name, so :NOT and a NOT read in
+another package both count, as readers accept both.  Nothing is evaluated: a
+condition false in this process is as valid as a true one."
+  (cond
+    ((> depth 64) "it is nested too deeply")
+    ((symbolp expression) nil)
+    ((not (and (consp expression) (ignore-errors (list-length expression))))
+     (format nil "~S is neither a symbol nor a proper list" expression))
+    ((not (and (symbolp (first expression))
+               (member (symbol-name (first expression)) '("AND" "OR" "NOT")
+                       :test #'string=)))
+     ;; By name: its package was the reader's scratch one, deleted by now.
+     (format nil "~A is not AND, OR or NOT"
+             (let ((operator (first expression)))
+               (if (symbolp operator) (symbol-name operator) (prin1-to-string operator)))))
+    ((and (string= (symbol-name (first expression)) "NOT")
+          (/= 1 (length (rest expression))))
+     "NOT takes exactly one feature expression")
+    (t (some (lambda (argument) (%feature-expression-problem argument (1+ depth)))
+             (rest expression)))))
+
+(defun %check-feature-prefix (prefix)
+  "Signal an error naming the first malformed feature expression in PREFIX, the
+#+/#- expressions %SPLIT-FEATURE-PREFIX set aside from a replace's content.
+Setting them aside is what lets a condition false here through, so they are not
+read with the form and have to be checked on their own: a malformed one would
+be written and break the file's next read.  Each is read in a package of its
+own, deleted afterwards, so its feature names are interned nowhere."
+  (let ((pos 0))
+    (loop while (and (< (1+ pos) (length prefix))
+                     (char= (char prefix pos) #\#)
+                     (member (char prefix (1+ pos)) '(#\+ #\-)))
+          do (let ((package (make-package (symbol-name (gensym "CL-MCP-FEATURE-CHECK-"))
+                                          :use '())))
+               (multiple-value-bind (expression end)
+                   (unwind-protect
+                        (handler-case
+                            (let ((*package* package)
+                                  (*readtable* *standard-readtable*)
+                                  (*read-eval* nil)
+                                  (*read-suppress* nil))
+                              (read-from-string prefix t nil :start (+ pos 2)
+                                                             :preserve-whitespace t))
+                          (error (e)
+                            (error "content's feature expression ~A cannot be read: ~A"
+                                   (subseq prefix pos) (sanitize-condition-text e))))
+                     (delete-package package))
+                 (let ((problem (%feature-expression-problem expression)))
+                   (when problem
+                     (error "content's feature expression ~A is malformed: ~A"
+                            (subseq prefix pos end) problem)))
+                 (setf pos (%skip-blank-and-comments prefix end)))))))
+
 (defun %form-start (content)
   "Return the index of CONTENT's first form, past its leading whitespace and
 comments, or NIL when it holds comments only."
@@ -969,6 +1026,8 @@ a replace kept, or NIL. A dry run carries the reparented forms as
                               (list content nil)))
                    (form-content (first split))
                    (own-prefix (second split)))
+              (when own-prefix
+                (%check-feature-prefix own-prefix))
               (when (and own-prefix (null (%form-start form-content)))
                 (error "content has the feature expression ~A but no form after it"
                        (string-right-trim '(#\Space #\Tab #\Newline #\Return) own-prefix)))
