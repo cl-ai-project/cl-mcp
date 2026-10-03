@@ -795,6 +795,56 @@ rather than by whatever reads it next."
        ;; TYPE-ERROR on the first one, which a passing run's NIL
        ;; counterexample never exercises.
        '(:pairs :opaque)
+       ;; A result's :COVERAGE (cl-spec's COVERAGE-DATA).  cl-mcp never asks
+       ;; cl-spec to measure coverage, so what arrives is the explicit
+       ;; missing-measurement record, (:AVAILABILITY :NOT-COLLECTED :REASON
+       ;; :DISABLED) -- cl-spec/src/coverage-report.lisp, COVERAGE-REPORT-DATA.
+       ;; A collected :COVERAGE-REPORT is not described here: its keys would
+       ;; reach UNKNOWN-KEYS, which is the honest answer for a record this
+       ;; adapter does not read.
+       :coverage-data
+       '(:object (:availability . :leaf) (:reason . :leaf))
+       ;; One measured dimension of an evidence summary
+       ;; (cl-spec/src/evidence.lisp, EVIDENCE-DIMENSIONS).  :SOURCE names
+       ;; where the measurement came from, e.g. (:TRIAL-REPORT :CHECKED).
+       :evidence-dimension
+       '(:object (:kind . :leaf) (:availability . :leaf) (:unit . :leaf)
+                 (:source . :word-list) (:value . :leaf) (:required . :leaf)
+                 (:counts . (:object (:passed . :leaf) (:failed . :leaf)
+                                     (:rejected . :leaf) (:error . :leaf)))
+                 (:declared . :word-list)
+                 (:cases . (:array (:object (:name . :leaf) (:called . :leaf)
+                                            (:checked . :leaf)
+                                            (:availability . :leaf)))))
+       ;; One entry of an evidence summary's :GAPS or :UNKNOWNS
+       ;; (cl-spec/src/evidence.lisp, SUMMARY-FROM-FACTS and
+       ;; ASSESS-REQUIREMENT): what was missing or below a requirement, and
+       ;; where it would have been measured.
+       :evidence-finding
+       '(:object (:kind . :leaf) (:dimension . :leaf) (:case . :leaf)
+                 (:source . :word-list) (:required . :leaf) (:observed . :leaf))
+       ;; A result's :EVIDENCE: cl-spec's own saved-evidence summary
+       ;; (cl-spec/src/evidence.lisp, EVIDENCE-SUMMARY), a versioned record of
+       ;; its own (:RECORD-KIND :EVIDENCE-SUMMARY).  Its :DIAGNOSTICS repeat the
+       ;; result's own generation and shrink reports and capabilities, so they
+       ;; take the shapes those already have.
+       :evidence-summary
+       '(:object (:schema-version . :leaf) (:record-kind . :leaf)
+                 (:assessment . :leaf) (:execution-status . :leaf)
+                 (:scope . :leaf)
+                 (:subject . (:object (:name . :leaf)
+                                      (:definition-digest . :leaf)
+                                      (:definition-digest-complete . :boolean)
+                                      (:target-revision . :leaf)))
+                 (:coverage . (:ref :coverage-data))
+                 (:dimensions . (:array (:ref :evidence-dimension)))
+                 (:gaps . (:array (:ref :evidence-finding)))
+                 (:unknowns . (:array (:ref :evidence-finding)))
+                 (:limitations . :word-list)
+                 (:diagnostics . (:object
+                                  (:generation-report . (:ref :generation-report))
+                                  (:shrink-report . (:ref :shrink-report))
+                                  (:capabilities . (:ref :capabilities)))))
        :result-data
        '(:object (:schema-version . :leaf) (:record-kind . :leaf)
                  (:entity-kind . :leaf) (:definition-digest . :leaf)
@@ -804,6 +854,8 @@ rather than by whatever reads it next."
                  (:digest-exclusions . :word-list)
                  (:capabilities . (:ref :capabilities))
                  (:state-constraints . :leaf)
+                 (:coverage . (:ref :coverage-data))
+                 (:evidence . (:ref :evidence-summary))
                  (:name . :leaf) (:status . :leaf) (:trials . :leaf)
                  (:budget . :leaf) (:rejected . :leaf)
                  ;; Never a JSON number, even inside the safe range: design
