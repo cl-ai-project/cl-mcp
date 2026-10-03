@@ -324,13 +324,17 @@ surface."
   ((name :type :string :required t :description
          "Project name in lisp-case (e.g. foo-lib). Must match ^[a-z][a-z0-9-]*$ and be 1-64 chars.")
    (description :type :string :description
-                "One-line project description for .asd and README. No newlines, double quotes or backslashes. Default: \"A Common Lisp project scaffolded by cl-mcp.\"")
+                "One-line project description for .asd and README. No newlines, double quotes or
+backslashes. Default: \"A Common Lisp project scaffolded by cl-mcp.\"")
    (author :type :string :description
-           "Author string for .asd :author. No newlines, double quotes or backslashes. Default: Unknown.")
+           "Author string for .asd :author. No newlines, double quotes or backslashes. Default:
+Unknown.")
    (license :type :string :description
-            "License string for .asd :license. No newlines, double quotes or backslashes. Default: MIT.")
+            "License string for .asd :license. No newlines, double quotes or backslashes. Default:
+MIT.")
    (destination :type :string :description
-                "Relative parent directory under project root where <name>/ is created: non-empty, no leading /, no .. segment. Default: scaffolds.")
+                "Relative parent directory under project root where <name>/ is created: non-empty,
+no leading /, no .. segment. Default: scaffolds.")
    (framework :type :string :description
               "Test framework the generated tests are written with: 'rove' (default) or
 'fiveam'. Selects the .asd :depends-on entry, the test-op hook and the

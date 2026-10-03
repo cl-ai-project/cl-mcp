@@ -195,7 +195,8 @@ Recommended workflow:
   :args ((pattern :type :string :required t
                   :description "cl-ppcre regular expression pattern to search for")
          (path :type :string
-               :description "Search root, a directory or a single file (optional, defaults to project root).
+               :description "Search root, a directory or a single file (optional, defaults to
+project root).
 Relative paths resolve against the project root. An absolute path is accepted when it is
 inside the project root or inside the source directory of a registered ASDF system, so a
 dependency's sources can be searched the same way lisp-read-file can read them.")
@@ -204,11 +205,17 @@ dependency's sources can be searched the same way lisp-read-file can read them."
          (case-insensitive :type :boolean :json-name "case_insensitive"
                            :description "Case-insensitive matching (default: false)")
          (form-types :type :array :json-name "form_types"
-                     :description "Filter by form types, e.g., [\"defun\", \"defmethod\"] (optional). Bare names: the form's head is compared without its package prefix. A form whose head is not a recognized definer (starting with def) -- FiveAM's test, say -- has no type and is never kept")
+                     :description "Filter by form types, e.g., [\"defun\", \"defmethod\"]
+(optional). Bare names: the form's head is compared without its package prefix. A form whose head is
+not a recognized definer (starting with def) -- FiveAM's test, say -- has no type and is never
+kept")
          (limit :type :integer
-                :description "Maximum matching lines collected before they are grouped per form (optional, defaults to 200), so fewer entries can come back; the JSON 'limited' says when it was reached")
+                :description "Maximum matching lines collected before they are grouped per form
+(optional, defaults to 200), so fewer entries can come back; the JSON 'limited' says when it was
+reached")
          (include-form :type :boolean :json-name "include_form"
-                       :description "Add each form's text to the JSON matches (default: false; the content text shows signatures either way)"))
+                       :description "Add each form's text to the JSON matches (default: false; the
+content text shows signatures either way)"))
   :body
   (let* ((effective-limit (or limit 200))
          (results

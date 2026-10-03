@@ -637,7 +637,9 @@ are kept; an id evicted from that window is refused as OBJECT_NOT_FOUND."
   :args ((object-id :type :string :json-name "id" :required t
                     :description "Object ID (a string) from repl-eval result_object_id, an [object-id: ...] marker, or a previous inspection")
          (max-depth :type :integer :json-name "max_depth"
-                    :description "Levels of nested objects to expand in place (default=1: the object's own elements, entries or slots are listed and nested objects appear as object-id refs; 0 behaves like 1)")
+                    :description "Levels of nested objects to expand in place (default=1: the
+object's own elements, entries or slots are listed and nested objects appear as object-id refs; 0
+behaves like 1)")
          (max-elements :type :integer :json-name "max_elements"
                        :description "Maximum elements for lists/arrays/hash-tables (default=50)"))
   :body

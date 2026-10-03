@@ -769,7 +769,8 @@ collapsed signatures view that saves ~70% of context window tokens."
          (offset :type :integer
                  :description "0-based character offset to start reading")
          (limit :type :integer
-                :description "Maximum characters to return, at most 1048576; omit to read to the end (or to that cap)"))
+                :description "Maximum characters to return, at most 1048576; omit to read to the end
+(or to that cap)"))
   :body
   (multiple-value-bind (content-string capped file-length remaining)
       (fs-read-file path :offset offset :limit limit)
@@ -910,7 +911,8 @@ RESTRICTION: You MUST only provide your current working directory (e.g., obtaine
 Do not use arbitrary paths."
   :args ((path :type :string :required t
                :description "Absolute path to the project root directory (a relative one
-resolves against the current root, which is rarely what you want). Must exist; /,
+resolves against the current root, or the server's working directory when none is set,
+which is rarely what you want). Must exist; /,
 /tmp/ and /home/ are refused as too broad"))
   :body
   (let ((info (fs-set-project-root path)))

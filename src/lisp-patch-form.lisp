@@ -389,7 +389,9 @@ Does NOT auto-repair parentheses — if the patch breaks form structure, it fail
 immediately and no changes are written to disk.
 Use 'lisp-edit-form' instead when replacing or inserting entire forms."
   :args ((file_path :type :string :required t
-                    :description "Target file path: relative to the project root, or absolute inside it (absolute recommended). Files outside the project root, registered ASDF sources included, are refused")
+                    :description "Target file path: relative to the project root, or absolute inside
+it (absolute recommended). Files outside the project root, registered ASDF sources included, are
+refused")
          (form_type :type :string :required t
                     :description "Form type to search, e.g., \"defun\", \"defmacro\", \"defmethod\".
 A package prefix is ignored: \"asdf:defsystem\" and \"defsystem\" both match

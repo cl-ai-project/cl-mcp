@@ -553,7 +553,8 @@ registered ASDF system (mutually exclusive with code)")
          (code :type :string
                :description "Raw code string to check (mutually exclusive with path)")
          (offset :type :integer
-                 :description "0-based character offset when reading from path; a window is diagnosed, never repaired")
+                 :description "0-based character offset when reading from path; a window is
+diagnosed, never repaired")
          (limit :type :integer
                 :description "Maximum characters to read from path (at most 1048576)"))
   :body

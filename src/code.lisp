@@ -44,11 +44,14 @@ NOTE: If the symbol is not found, the system might not be loaded yet.
 For code exploration WITHOUT loading systems, use 'clgrep-search' instead.
 Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
   :args ((symbol :type :string :required t
-                 :description "Symbol name like \"cl:mapcar\" (package-qualified preferred). It is read as the Lisp reader would, so a symbol the package does not export needs 'pkg::name' ('pkg:name' fails on it), and looking a name up interns it")
+                 :description "Symbol name like \"cl:mapcar\" (package-qualified preferred). It is
+read as the Lisp reader would, so a symbol the package does not export needs 'pkg::name' ('pkg:name'
+fails on it), and looking a name up interns it")
          (package :type :string
                   :description "Optional package used when SYMBOL is unqualified; ensure the package exists
-and is loaded. A package that does not exist is not reported: the lookup falls back
-to the current package and ends in 'not found'"))
+and is loaded. A package that does not exist is not reported: the name is read in
+the current package instead, so it may resolve to a different symbol visible there,
+or not be found"))
   :body
   (with-proxy-dispatch (id "worker/code-find"
                           (make-ht "symbol" symbol "package" package))
@@ -66,11 +69,14 @@ NOTE: If the symbol is not found, the system might not be loaded yet.
 For code exploration WITHOUT loading systems, use 'clgrep-search' instead.
 Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
   :args ((symbol :type :string :required t
-                 :description "Symbol name like \"cl:mapcar\" (package-qualified preferred). It is read as the Lisp reader would, so a symbol the package does not export needs 'pkg::name' ('pkg:name' fails on it), and looking a name up interns it")
+                 :description "Symbol name like \"cl:mapcar\" (package-qualified preferred). It is
+read as the Lisp reader would, so a symbol the package does not export needs 'pkg::name' ('pkg:name'
+fails on it), and looking a name up interns it")
          (package :type :string
                   :description "Optional package used when SYMBOL is unqualified; ensure the package exists
-and is loaded. A package that does not exist is not reported: the lookup falls back
-to the current package and ends in 'not found'"))
+and is loaded. A package that does not exist is not reported: the name is read in
+the current package instead, so it may resolve to a different symbol visible there,
+or not be found"))
   :body
   (with-proxy-dispatch (id "worker/code-describe"
                           (make-ht "symbol" symbol "package" package))

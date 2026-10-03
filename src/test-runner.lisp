@@ -75,13 +75,17 @@ Examples:
   :args ((system :type :string :required t
                  :description "System name to test (e.g., 'my-project/tests')")
          (framework :type :string :required nil
-                    :description "Force framework: 'rove', 'fiveam', 'prove', 'asdf', or 'auto' (default: auto-detect from the system's :depends-on). Any other value runs the ASDF fallback")
+                    :description "Force framework: 'rove', 'fiveam', 'prove', 'asdf', or 'auto'
+(default: auto-detect from the system's :depends-on). Any other value runs the ASDF fallback")
          (test :type :string :required nil
-               :description "Run only this specific test, written 'package::test-name' (double colon). Rove and FiveAM only; exclusive with tests")
+               :description "Run only this specific test, written 'package::test-name' (double
+colon). Rove and FiveAM only; exclusive with tests")
          (tests :type :array :required nil
-                :description "Run only these specific tests (array of 'package::test-name'). Rove and FiveAM only; exclusive with test")
+                :description "Run only these specific tests (array of 'package::test-name'). Rove
+and FiveAM only; exclusive with test")
          (timeout-seconds :type :number :json-name "timeout_seconds" :required nil
-                          :description "Maximum seconds to wait for the test run to complete (default: 300; a value of 0 or below means the default). Increase for large test suites."))
+                          :description "Maximum seconds to wait for the test run to complete
+(default: 300; a value of 0 or below means the default). Increase for large test suites."))
   :body
   (with-proxy-dispatch (id "worker/run-tests"
                           (make-ht "system" system

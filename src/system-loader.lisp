@@ -61,7 +61,9 @@ Examples:
    (force :type :boolean :default t
     :description "Clear loaded state before loading to pick up changes (default: true)")
    (clear-fasls :type :boolean :json-name "clear_fasls"
-    :description "Delete the cached FASLs under this system's source tree (its primary system's, for a package-inferred subsystem) before loading, forcing that tree to recompile; dependencies in other projects are not touched (default: false)")
+    :description "Delete the cached FASLs under this system's source tree (its primary system's, for
+a package-inferred subsystem) before loading, forcing that tree to recompile; dependencies in other
+projects are not touched (default: false)")
    (timeout-seconds :type :number :json-name "timeout_seconds"
     :description "Timeout for the operation in seconds; positive (default: 120)"))
   :body

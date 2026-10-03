@@ -67,13 +67,16 @@ read in the original package. Use separate repl-eval calls or specify the
   (package :type :string :description
    "Existing package name (e.g., CL-USER); forms are read/evaluated there (default: CL-USER)")
   (print-level :type :integer :json-name "print_level" :description
-   "Integer to limit the result's printed nesting depth (omit to print it fully; backtrace locals default to 3)")
+   "Integer to limit the result's printed nesting depth (omit to print it fully; backtrace locals
+default to 3)")
   (print-length :type :integer :json-name "print_length" :description
-   "Integer to limit the result's printed list length (omit to print it fully; backtrace locals default to 10)")
+   "Integer to limit the result's printed list length (omit to print it fully; backtrace locals
+default to 10)")
   (timeout-seconds :type :number :json-name "timeout_seconds" :description
    "Seconds to wait before timing out evaluation; positive (default: 300)")
   (max-output-length :type :integer :json-name "max_output_length" :description
-   "Maximum characters for printed result/stdout/stderr; non-negative, and 0 suppresses output (default: 50000)")
+   "Maximum characters for printed result/stdout/stderr; non-negative, and 0 suppresses output
+(default: 50000)")
   (safe-read :type :boolean :json-name "safe_read" :description
    "When true, disables #. reader evaluation for safety")
   (include-result-preview :type :boolean :json-name "include_result_preview"
