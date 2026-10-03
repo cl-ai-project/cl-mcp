@@ -12,6 +12,8 @@
                 #:transient-error)
   (:import-from #:cl-mcp/src/utils/paths
                 #:discover-asd-in-project)
+  (:import-from #:cl-mcp/src/utils/fasls
+                #:delete-same-second-fasls)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
   (:import-from #:cl-mcp/src/utils/bounded-stream
@@ -548,6 +550,16 @@ opaque RPC-level error.  Mirrors the timeout pattern used by
                        register its .asd with load-system or asdf:load-asd, ~
                        then retry run-tests."
                   text system-name (asdf:primary-system-name system-name)))
+         ;; FiveAM's own error for a def-suite :in a suite not defined yet:
+         ;; a load-order mistake in the project, not a broken worker.
+         ((search "Unknown suite" text)
+          (format nil "~A~%~%Hint: a (def-suite NAME :in PARENT) loaded before ~
+                       the file that defines PARENT. Make that file load first: in ~
+                       a package-inferred system add (:import-from <the package ~
+                       of PARENT's file>) to the defpackage of the file with the ~
+                       :in; otherwise put PARENT's file earlier in the .asd's ~
+                       components."
+                  text))
          (t
           (format nil "~A~%~%Hint: the worker process may have a broken ~
                        package state. Use pool-kill-worker to get a fresh ~
@@ -877,6 +889,9 @@ Clears ASDF's loaded state for the system, then reloads.  This ensures
 that files edited on disk (e.g., via lisp-edit-form in the parent process)
 are recompiled before tests execute.  Dependencies whose source files
 have not changed are skipped by ASDF's timestamp check (negligible overhead).
+That check has one-second resolution, so a file of the system's tree written
+in the same second as its fasl has the fasl deleted first
+(DELETE-SAME-SECOND-FASLS): otherwise the code from before the edit runs.
 
 Captures compile-time diagnostics during the load phase so that on
 failure the tail of the captured output is included in the error
@@ -931,6 +946,12 @@ COMPILE-FILE-ERROR."
                 ;; and other system metadata are picked up.
                 (when asd-src
                   (ignore-errors (asdf:load-asd asd-src)))))
+            ;; A file edited in the second its fasl was written looks
+            ;; current to ASDF; its fasl goes, so the edit is what runs.
+            (let ((stale (delete-same-second-fasls system-name)))
+              (when (plusp stale)
+                (log-event :info "test.runner.same-second-fasls"
+                           "system" system-name "deleted" stale)))
             (let ((*error-output* captured-stderr))
               (with-compilation-unit (:override t)
                 (asdf:load-system system-name)))))
@@ -1798,6 +1819,111 @@ an optional dependency."
                      (%fiveam-suite-matches-system-p suite-sym system-name))
                    all-suites)))
 
+(defun %fiveam-symbol (name)
+  "Return FiveAM's symbol NAME, or NIL when FiveAM or the symbol is absent."
+  (let ((package (find-package :fiveam)))
+    (and package (find-symbol name package))))
+
+(defun %fiveam-suite-p (object)
+  "True when OBJECT is a FiveAM suite."
+  (let* ((name (%fiveam-symbol "TEST-SUITE"))
+         (class (and name (find-class name nil))))
+    (and class (typep object class))))
+
+(defun %fiveam-test-object (name)
+  "Return the FiveAM test or suite registered under NAME, or NIL."
+  (let ((get-test (%fiveam-symbol "GET-TEST")))
+    (and get-test (fboundp get-test) (ignore-errors (funcall get-test name)))))
+
+(defun %fiveam-suite-children (suite)
+  "Return SUITE's entries as (NAME . ENTRY) pairs, in order: ENTRY is a sub-suite
+object or the name of a test.  Current FiveAM keeps them in a TEST-BUNDLE, a list
+of NAMES with a TESTS hash table; older releases keep a bare hash table."
+  (let* ((tests-slot (%fiveam-symbol "TESTS"))
+         (names-slot (%fiveam-symbol "NAMES"))
+         (table (and tests-slot (ignore-errors (slot-value suite tests-slot)))))
+    (flet ((pairs-of (hash names)
+             (mapcar (lambda (name) (cons name (gethash name hash))) names)))
+      (cond ((hash-table-p table)
+             (pairs-of table (loop for name being the hash-keys of table collect name)))
+            (table
+             (let ((names (and names-slot (ignore-errors (slot-value table names-slot))))
+                   (hash (ignore-errors (slot-value table tests-slot))))
+               (and (hash-table-p hash) (pairs-of hash names))))))))
+
+(defun %fiveam-reachable-test-names (suite-names)
+  "Return the names of the FiveAM tests reached from the suites SUITE-NAMES,
+through each suite's entries and its sub-suites': the tests a run of those suites
+runs."
+  (let ((seen (make-hash-table :test 'eq))
+        (names '()))
+    (labels ((visit (name entry)
+               (let ((object (if (%fiveam-suite-p entry) entry (%fiveam-test-object name))))
+                 (when (and object (not (gethash object seen)))
+                   (setf (gethash object seen) t)
+                   (if (%fiveam-suite-p object)
+                       (loop for (child-name . child) in (%fiveam-suite-children object)
+                             do (visit child-name child))
+                       (push name names))))))
+      (dolist (suite suite-names)
+        (visit suite nil)))
+    (nreverse names)))
+
+(defun %removed-test-file-package-p (package)
+  "True when PACKAGE is a package-inferred component's whose file is gone: a test
+file deleted while this worker kept what it had loaded from it."
+  (let ((system (ignore-errors
+                 (asdf:find-system (string-downcase (package-name package)) nil))))
+    (and system
+         (typep system 'asdf:package-inferred-system)
+         (let ((files (remove-if-not #'asdf:component-pathname
+                                     (asdf:component-children system))))
+           (and files
+                (notany (lambda (file) (probe-file (asdf:component-pathname file)))
+                        files))))))
+
+(defun %fiveam-system-test-names (system-name)
+  "Return the names of the FiveAM tests defined in SYSTEM-NAME's namespace
+(%FIVEAM-SUITE-MATCHES-SYSTEM-P), wherever their suites hang -- except those of
+a test file since deleted, which this worker still holds."
+  (let ((test-names (%fiveam-symbol "TEST-NAMES")))
+    (when (and test-names (fboundp test-names))
+      (remove-if-not
+       (lambda (name)
+         (and (symbolp name)
+              (symbol-package name)
+              (%fiveam-suite-matches-system-p name system-name)
+              (let ((object (%fiveam-test-object name)))
+                (and object (not (%fiveam-suite-p object))))
+              (not (%removed-test-file-package-p (symbol-package name)))))
+       ;; FiveAM lists a name again each time its test is redefined.
+       (remove-duplicates (funcall test-names))))))
+
+(defun %qualified-test-name (symbol)
+  "Return SYMBOL written PACKAGE::NAME, or :NAME for a keyword."
+  (if (keywordp symbol)
+      (format nil ":~A" (symbol-name symbol))
+      (format nil "~A::~A" (package-name (symbol-package symbol)) (symbol-name symbol))))
+
+(defun %fiveam-reachability (system-name suite-symbols)
+  "Return (values UNREACHED OUTSIDE) for a run of SYSTEM-NAME's SUITE-SYMBOLS.
+UNREACHED: tests defined in the system's namespace that no run suite reaches.
+A file that declares its suite :in the root suite but loads before the root's
+file, on a worker that loaded both before, leaves its tests under the previous
+root suite object: the run then reports a pass without them.
+OUTSIDE: run suites other than the root suite, the one named after the primary
+system.  run-tests runs them, but a test-op running the root suite -- the
+scaffold's does -- never reaches them, so the two runs differ unseen.
+Both are lists of qualified names; OUTSIDE is NIL when no root suite is found."
+  (let* ((reached (%fiveam-reachable-test-names suite-symbols))
+         (unreached (set-difference (%fiveam-system-test-names system-name) reached))
+         (root (find (asdf:primary-system-name system-name) suite-symbols
+                     :key #'string :test #'string-equal)))
+    (values (sort (mapcar #'%qualified-test-name unreached) #'string<)
+            (and root
+                 (sort (mapcar #'%qualified-test-name (remove root suite-symbols))
+                       #'string<)))))
+
 (defun %with-fiveam-variables (fn)
   "Bind FiveAM special variables for output suppression and call FN.
 Uses dynamic symbol resolution so FiveAM is an optional dependency."
@@ -1891,7 +2017,10 @@ SYSTEM-NAME (see %FIND-FIVEAM-SUITES-FOR-SYSTEM).
 Signals an error when no suite name matches SYSTEM-NAME instead of running
 every suite registered in the image, so an explicit system name is never
 silently widened into a full-image run.  When suite names do not follow the
-system-name convention, pass TEST/TESTS to RUN-TESTS to select tests directly."
+system-name convention, pass TEST/TESTS to RUN-TESTS to select tests directly.
+The result names the system's tests no run suite reached (\"unreached_tests\")
+and the run suites outside the root suite (\"suites_outside_root\"), the two
+ways a FiveAM run and the system's test-op silently part (%FIVEAM-REACHABILITY)."
   (log-event :info "test.runner" "framework" "fiveam" "system" system-name)
   (let ((suite-symbols (%find-fiveam-suites-for-system system-name)))
     (unless suite-symbols
@@ -1902,7 +2031,17 @@ system-name convention, pass TEST/TESTS to RUN-TESTS to select tests directly."
                       ASDF system, so cl-mcp will not run every suite in the ~
                       image." system-name)
              :hint "Name a suite or its package after the system, or pass TEST/TESTS instead."))
-    (%fiveam-run-and-collect suite-symbols (list system-name))))
+    (let ((result (%fiveam-run-and-collect suite-symbols (list system-name))))
+      (multiple-value-bind (unreached outside)
+          ;; A check on top of a finished run: if FiveAM's internals are not
+          ;; what it expects, the run's own result stands as it is.
+          (handler-case (%fiveam-reachability system-name suite-symbols)
+            (error () (values nil nil)))
+        (when unreached
+          (setf (gethash "unreached_tests" result) (coerce unreached 'vector)))
+        (when outside
+          (setf (gethash "suites_outside_root" result) (coerce outside 'vector))))
+      result)))
 
 (defun %resolve-fiveam-test-symbol (test-sym)
   "Resolve TEST-SYM to a symbol that FiveAM's test table recognizes.

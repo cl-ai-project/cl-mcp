@@ -397,6 +397,10 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
               (coerce (or failed-tests 'nil) 'vector)))
          (skipped-tests (coerce (or (gethash "skipped_tests" test-result) #()) 'vector))
          (debug-output-str (gethash "debug_output" test-result))
+         ;; FiveAM: tests no run suite reached, and run suites a root-suite
+         ;; test-op would not reach.  Either makes a green run incomplete.
+         (unreached (coerce (or (gethash "unreached_tests" test-result) #()) 'list))
+         (outside (coerce (or (gethash "suites_outside_root" test-result) #()) 'list))
          (summary
           (with-output-to-string (s)
             (format s "~A~%"
@@ -429,6 +433,13 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                           ;; and a pass would say something had been.
                           ((and (zerop failed) (zerop passed) (plusp pending))
                            "⚠ ALL SKIPPED (no test checked anything)")
+                          ((and (zerop failed) unreached)
+                           (format nil "⚠ PASS, BUT ~D ~:[TESTS~;TEST~] DID NOT RUN"
+                                   (length unreached) (= 1 (length unreached))))
+                          ((and (zerop failed) outside)
+                           (format nil "⚠ PASS, BUT ~D ~:[SUITES ARE~;SUITE IS~] OUTSIDE ~
+                                        THE ROOT SUITE"
+                                   (length outside) (= 1 (length outside))))
                           ((zerop failed) "✓ PASS")
                           (t "✗ FAIL")))
             (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%" passed
@@ -442,6 +453,21 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                     do (format s "  ~A — ~{~A~^; ~}~%"
                                (gethash "test_name" entry)
                                (coerce (gethash "reasons" entry) 'list))))
+            (when unreached
+              (format s "~%Did not run (~D): ~{~A~^, ~}~%  Defined in this system's ~
+                         packages, but reached from no suite that ran. Usually a file ~
+                         declaring its suite :in the root suite that loads before the ~
+                         root's file: its suite joined an earlier load of the root, ~
+                         which the new one replaced. Add (:import-from <the root ~
+                         suite file's package>) to that file's defpackage, or put it ~
+                         after the root's file in the .asd.~%"
+                      (length unreached) unreached))
+            (when outside
+              (format s "~%Suites outside the root suite (~D): ~{~A~^, ~}~%  run-tests ~
+                         ran them, but a test-op that runs the root suite -- the ~
+                         scaffold's runs (fiveam:run! :<system>) -- skips them. Nest ~
+                         each with (def-suite NAME :in <the root suite>).~%"
+                      (length outside) outside))
             (when (plusp (length failed-tests-vector))
               (format s "~%Failures:~%")
               (loop for fail across failed-tests-vector
@@ -478,7 +504,8 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                     failed "pending" pending "framework" framework-name
                     "duration_ms" duration "failed_tests" failed-tests-vector)))
       (dolist (field '("success" "stdout" "stderr" "debug_output" "passed_tests"
-                       "counts_available" "skipped_tests"))
+                       "counts_available" "skipped_tests" "unreached_tests"
+                       "suites_outside_root"))
         (multiple-value-bind (value presentp)
             (gethash field test-result)
           (when presentp (setf (gethash field response) value))))
