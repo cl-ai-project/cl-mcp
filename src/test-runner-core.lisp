@@ -923,6 +923,14 @@ COMPILE-FILE-ERROR."
                   (log-event :info "test.runner.discover"
                              "system" system-name "asd_path" (namestring asd))
                   (asdf:load-asd asd))))
+            ;; A file edited in the second its fasl was written looks
+            ;; current to ASDF; its fasl goes, so the edit is what runs.
+            ;; Before the clearing below: the project's registered
+            ;; components are half of what it reads.
+            (let ((stale (delete-same-second-fasls system-name)))
+              (when (plusp stale)
+                (log-event :info "test.runner.same-second-fasls"
+                           "system" system-name "deleted" stale)))
             (when (asdf:find-system system-name nil)
               (let ((asd-src
                       (ignore-errors
@@ -946,12 +954,6 @@ COMPILE-FILE-ERROR."
                 ;; and other system metadata are picked up.
                 (when asd-src
                   (ignore-errors (asdf:load-asd asd-src)))))
-            ;; A file edited in the second its fasl was written looks
-            ;; current to ASDF; its fasl goes, so the edit is what runs.
-            (let ((stale (delete-same-second-fasls system-name)))
-              (when (plusp stale)
-                (log-event :info "test.runner.same-second-fasls"
-                           "system" system-name "deleted" stale)))
             (let ((*error-output* captured-stderr))
               (with-compilation-unit (:override t)
                 (asdf:load-system system-name)))))
@@ -1851,20 +1853,43 @@ of NAMES with a TESTS hash table; older releases keep a bare hash table."
                    (hash (ignore-errors (slot-value table tests-slot))))
                (and (hash-table-p hash) (pairs-of hash names))))))))
 
+(defun %fiveam-dependency-names (test)
+  "Return the test names TEST's :depends-on expression mentions, its AND, OR and
+NOT operators stripped: the tests FiveAM runs on demand before TEST."
+  (let* ((slot (%fiveam-symbol "DEPENDS-ON"))
+         (expression (and slot (ignore-errors (slot-value test slot))))
+         (names '()))
+    (labels ((walk (form)
+               (cond ((null form))
+                     ((symbolp form) (push form names))
+                     ((consp form)
+                      (dolist (part (if (and (symbolp (first form))
+                                             (member (symbol-name (first form))
+                                                     '("AND" "OR" "NOT") :test #'string=))
+                                        (rest form)
+                                        form))
+                        (walk part))))))
+      (walk expression))
+    names))
+
 (defun %fiveam-reachable-test-names (suite-names)
   "Return the names of the FiveAM tests reached from the suites SUITE-NAMES,
-through each suite's entries and its sub-suites': the tests a run of those suites
-runs."
+through each suite's entries, its sub-suites' and each reached test's
+:depends-on (%FIVEAM-DEPENDENCY-NAMES), which FiveAM runs on demand wherever the
+test it names hangs: the tests a run of those suites runs."
   (let ((seen (make-hash-table :test 'eq))
         (names '()))
     (labels ((visit (name entry)
                (let ((object (if (%fiveam-suite-p entry) entry (%fiveam-test-object name))))
                  (when (and object (not (gethash object seen)))
                    (setf (gethash object seen) t)
-                   (if (%fiveam-suite-p object)
-                       (loop for (child-name . child) in (%fiveam-suite-children object)
-                             do (visit child-name child))
-                       (push name names))))))
+                   (cond ((%fiveam-suite-p object)
+                          (loop for (child-name . child) in (%fiveam-suite-children object)
+                                do (visit child-name child)))
+                         (t
+                          (push name names)
+                          (dolist (dependency (%fiveam-dependency-names object))
+                            (visit dependency nil))))))))
       (dolist (suite suite-names)
         (visit suite nil)))
     (nreverse names)))
