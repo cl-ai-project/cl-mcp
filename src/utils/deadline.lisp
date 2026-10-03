@@ -25,6 +25,7 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:export #:call-with-deadline-thread
+           #:wait-until
            #:leaked-threads
            #:*retired-leaked-thread-reason*
            #:+leaked-thread-exit-code+
@@ -100,8 +101,40 @@ as they found it."
   (with-lock-held (%leaked-lock%)
     (setf %leaked-threads% ())))
 
+(defun wait-until (predicate &key (timeout 5) (interval *poll-interval*))
+  "Call PREDICATE until it returns true or TIMEOUT seconds pass, and return its
+first true value, or NIL when the time ran out.
+
+PREDICATE is called once at once, then every INTERVAL seconds, and once more at
+the deadline, so a state reached just before it is still seen.  The deadline is
+read off the clock, never counted in iterations: a SLEEP can return early or
+late, and a loop of N sleeps waits for however long those N happened to take.
+
+For waiting on something no notification reaches -- a thread or process
+ending, a port opening, a background thread's work landing -- in place of a
+fixed sleep sized for the slowest machine, which both waits too long on a fast
+one and too little on a loaded one."
+  (let ((deadline (+ (get-internal-real-time)
+                     (round (* timeout internal-time-units-per-second)))))
+    (loop
+      (let ((value (funcall predicate)))
+        (when value
+          (return value)))
+      (let ((remaining (/ (- deadline (get-internal-real-time))
+                          internal-time-units-per-second)))
+        (unless (plusp remaining)
+          (return (funcall predicate)))
+        (sleep (min interval remaining))))))
+
 (defun %wait-until-dead (thread seconds)
-  "Poll until THREAD is gone or SECONDS elapse.  Returns true when it is gone."
+  "Poll until THREAD is gone or SECONDS elapse.  Returns true when it is gone.
+
+Deliberately not WAIT-UNTIL: this sleeps whole *POLL-INTERVAL*s, so a deadline
+shorter than one interval effectively rounds up to it, and work finishing
+within that slack is returned as a result rather than a timeout
+(system-loader-test's timeout-returns-completed-work relies on it).
+WAIT-UNTIL trims its last sleep to the deadline and would report that work as
+timed out."
   (let ((deadline (+ (get-internal-real-time)
                      (round (* seconds internal-time-units-per-second)))))
     (loop while (and (thread-alive-p thread)

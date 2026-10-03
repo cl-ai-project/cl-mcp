@@ -13,7 +13,8 @@
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread
                 #:leaked-threads
-                #:forget-leaked-threads)
+                #:forget-leaked-threads
+                #:wait-until)
   (:import-from #:cl-mcp/tests/test-helpers
                 #:spawn-available-p
                 #:with-pool)
@@ -115,6 +116,14 @@ SB-SYS:WITHOUT-INTERRUPTS defers both the cooperative unwind and
 DESTROY-THREAD, so the deadline answers its caller and the thread keeps
 running -- the condition the worker retires for."
   (eval-params "(sb-sys:without-interrupts (sleep 10))" 1))
+
+(defun await-process-death (worker)
+  "Wait until WORKER's process, just sent SIGKILL, is no longer alive (at most
+five seconds) -- as long as that takes rather than a fixed half second."
+  (wait-until (lambda ()
+                (not (sb-ext:process-alive-p
+                      (cl-mcp/src/worker-client:worker-process-info worker))))
+              :timeout 5))
 
 (deftest leaked-threads-records-what-a-deadline-could-not-stop
   (testing "a run the deadline gave up on is recorded, not merely reported"
@@ -913,7 +922,7 @@ parent waited long enough for the status to settle to read it"))
         (flet ((kill-and-record-retirement (worker)
                  (sb-posix:kill (cl-mcp/src/worker-client:worker-pid worker)
                                 sb-posix:sigkill)
-                 (sleep 0.5)
+                 (await-process-death worker)
                  ;; Recorded the way the RPC that sees the EOF records it,
                  ;; rather than by setting the slots the pool reads: what a
                  ;; classified death leaves behind is part of what is under
@@ -972,7 +981,7 @@ user's next call learns why the session was reset")
                   "the fresh worker has not retired")
               (sb-posix:kill (cl-mcp/src/worker-client:worker-pid replacement)
                              sb-posix:sigkill)
-              (sleep 0.5)
+              (await-process-death replacement)
               (cl-mcp/src/pool::%handle-worker-crash replacement)
               (bt:with-lock-held (cl-mcp/src/pool::*pool-lock*)
                 (ok (null (gethash session cl-mcp/src/pool::*affinity-map*))
@@ -1133,7 +1142,7 @@ user's next call learns why the session was reset")
                (worker (cl-mcp/src/pool:get-or-assign-worker session)))
           (sb-posix:kill (cl-mcp/src/worker-client:worker-pid worker)
                          sb-posix:sigkill)
-          (sleep 0.5)
+          (await-process-death worker)
           (cl-mcp/src/pool::%handle-worker-crash worker)
           (let ((replacement (cl-mcp/src/pool:get-or-assign-worker session)))
             (ok (not (eq worker replacement)))
@@ -1252,7 +1261,7 @@ user's next call learns why the session was reset")
              (worker (cl-mcp/src/pool:get-or-assign-worker session)))
         (sb-posix:kill (cl-mcp/src/worker-client:worker-pid worker)
                        sb-posix:sigkill)
-        (sleep 0.5)
+        (await-process-death worker)
         (cl-mcp/src/pool::%handle-worker-crash worker)
         ;; And again, as the health monitor and a request can both meet it.
         (cl-mcp/src/pool::%handle-worker-crash worker)
@@ -1340,7 +1349,7 @@ user's next call learns why the session was reset")
              (worker (cl-mcp/src/pool:get-or-assign-worker session)))
         (sb-posix:kill (cl-mcp/src/worker-client:worker-pid worker)
                        sb-posix:sigkill)
-        (sleep 0.5)
+        (await-process-death worker)
         (let ((cl-mcp/src/worker-client::*worker-startup-timeout* 0.01))
           (cl-mcp/src/pool::%handle-worker-crash worker))
         (ok (equal '(:crashed) (owed session))

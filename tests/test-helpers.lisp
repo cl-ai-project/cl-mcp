@@ -15,17 +15,29 @@
 
 (in-package #:cl-mcp/tests/test-helpers)
 
+(defvar *spawn-available* :unknown
+  "SPAWN-AVAILABLE-P's answer once it has been computed, or :UNKNOWN.")
+
 (defun spawn-available-p ()
   "Check if we can spawn worker processes.
-Uses :wait t and checks exit code to avoid a TOCTOU race."
-  (ignore-errors
-    (let* ((cmd (if (member :ros.init *features*)
-                    '("ros" "version")
-                    '("sbcl" "--version")))
-           (p (sb-ext:run-program (first cmd) (rest cmd)
-                :search t :output :stream :wait t)))
-      (prog1 (zerop (sb-ext:process-exit-code p))
-        (ignore-errors (sb-ext:process-close p))))))
+Uses :wait t and checks exit code to avoid a TOCTOU race.
+
+Asked once per process and remembered: starting `ros version' takes about two
+and a half seconds, eighty-odd tests ask before spawning a worker, and the
+answer -- whether this machine has the launcher at all -- does not change while
+the tests run.  That was about three and a half minutes of a full run."
+  (when (eq *spawn-available* :unknown)
+    (setf *spawn-available*
+          (and (ignore-errors
+                 (let* ((cmd (if (member :ros.init *features*)
+                                 '("ros" "version")
+                                 '("sbcl" "--version")))
+                        (p (sb-ext:run-program (first cmd) (rest cmd)
+                             :search t :output :stream :wait t)))
+                   (prog1 (zerop (sb-ext:process-exit-code p))
+                     (ignore-errors (sb-ext:process-close p)))))
+               t)))
+  *spawn-available*)
 
 (defmacro with-pool ((&key (health-check-interval 60.0d0)) &body body)
   "Initialize the pool, execute BODY, and always shut down the pool.
