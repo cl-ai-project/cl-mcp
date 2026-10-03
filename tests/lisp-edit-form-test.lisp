@@ -177,6 +177,72 @@ Used to prove that a dry-run summary does not grow with the size of the file."
         (ok (null node))
         (ok (null reason))))))
 
+(defun %replace-in-feature-fixture (source form-name content &rest options)
+  "Write SOURCE, replace FORM-NAME's defun with CONTENT, and return the file's new
+text and LISP-EDIT-FORM's ninth value, the feature expressions it kept."
+  (with-temp-file "tests/tmp/edit-form-feature-expression.lisp" source
+    (lambda (path)
+      (let ((kept (nth-value 8 (apply #'lisp-edit-form :file-path path :form-type "defun"
+                                      :form-name form-name :operation "replace"
+                                      :content content options))))
+        (values (fs-read-file path) kept)))))
+
+(deftest lisp-edit-form-replace-keeps-the-feature-expression
+  ;; The matched form's span starts at its #+/#-, so a replace whose content
+  ;; was the bare form used to drop the feature expression -- silently making
+  ;; a definition meant for one implementation unconditional.
+  (let ((source (format nil "(in-package :cl-user)~%~%#+(or sbcl ccl)~%(defun probe-b ()~%  :b)~%~%~
+                             #+sbcl #+x86-64~%(defun probe-d () :d)~%~%~
+                             #+sbcl ; only here~%(defun probe-e () :e)~%~%~
+                             (defun probe-c () :c)~%")))
+    (testing "a feature expression stays in front of the replaced form"
+      (multiple-value-bind (text kept)
+          (%replace-in-feature-fixture source "probe-b" "(defun probe-b () :b-edited)")
+        (ok (search (format nil "#+(or sbcl ccl)~%(defun probe-b () :b-edited)") text))
+        (ok (equal "#+(or sbcl ccl)" kept) "and the call says what it kept")))
+    (testing "every expression of a stacked prefix stays"
+      (multiple-value-bind (text kept)
+          (%replace-in-feature-fixture source "probe-d" "(defun probe-d () :d-edited)")
+        (ok (search (format nil "#+sbcl #+x86-64~%(defun probe-d () :d-edited)") text))
+        (ok (equal "#+sbcl #+x86-64" kept))))
+    (testing "a comment between the expression and the form stays with it"
+      (ok (search (format nil "#+sbcl ; only here~%(defun probe-e () 1)")
+                  (%replace-in-feature-fixture source "probe-e" "(defun probe-e () 1)"))))
+    (testing "the expression goes after a comment the content opens with"
+      (ok (search (format nil ";; new note~%#+(or sbcl ccl)~%(defun probe-b () :n)")
+                  (%replace-in-feature-fixture source "probe-b"
+                                               (format nil ";; new note~%(defun probe-b () :n)")))))
+    (testing "content that carries its own feature expression replaces the old one"
+      (multiple-value-bind (text kept)
+          (%replace-in-feature-fixture source "probe-b"
+                                       (format nil "#+(or sbcl ecl)~%(defun probe-b () :b)"))
+        (ok (search (format nil "#+(or sbcl ecl)~%(defun probe-b () :b)") text))
+        (ok (not (search "ccl" text)))
+        (ok (null kept) "nothing was kept: the content chose its own")))
+    (testing "a form without one is replaced as before"
+      (multiple-value-bind (text kept)
+          (%replace-in-feature-fixture source "probe-c" "(defun probe-c () :c2)")
+        (ok (search (format nil "~%~%(defun probe-c () :c2)") text))
+        (ok (null kept))))
+    (testing "the same under a readtable argument, which locates forms with the CL reader"
+      (ok (search (format nil "#+(or sbcl ccl)~%(defun probe-b () :rt)")
+                  (%replace-in-feature-fixture source "probe-b" "(defun probe-b () :rt)"
+                                               :readtable :standard))))
+    (testing "a dry run previews the form with its expression and names it"
+      (with-temp-file "tests/tmp/edit-form-feature-expression.lisp" source
+        (lambda (path)
+          (let ((preview (lisp-edit-form :file-path path :form-type "defun" :form-name "probe-b"
+                                         :operation "replace" :dry-run t
+                                         :content "(defun probe-b () :b-edited)")))
+            (ok (eql 0 (search "#+(or sbcl ccl)" (gethash "preview_form" preview))))
+            (ok (equal "#+(or sbcl ccl)" (gethash "kept_feature_expression" preview)))))))
+    (testing "delete still removes the expression with its form"
+      (with-temp-file "tests/tmp/edit-form-feature-expression.lisp" source
+        (lambda (path)
+          (lisp-edit-form :file-path path :form-type "defun" :form-name "probe-b"
+                          :operation "delete")
+          (ok (not (search "ccl" (fs-read-file path)))))))))
+
 (deftest lisp-edit-form-accepts-a-package-qualified-form-type
   (testing "form_type asdf:defsystem finds (asdf:defsystem ...), as defsystem does"
     (with-temp-file "tests/tmp/edit-form-qualified-type.asd"

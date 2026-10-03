@@ -868,6 +868,32 @@
           (ignore-errors
             (delete-file (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))))))))
 
+(deftest tools-call-lisp-edit-form-says-which-feature-expression-it-kept
+  (testing "a replace that kept #+... in front of the form says so, in text and JSON"
+    (with-test-project-root
+      (let* ((tmp-path "tests/tmp/lisp-edit-form-kept-feature.lisp")
+             (abs (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*)))
+        (with-open-file (out abs :direction :output :if-exists :supersede)
+          (format out "#+(or sbcl ccl)~%(defun kept-fn () 1)~%"))
+        (unwind-protect
+             (dolist (dry-run '("true" "false"))
+               (let* ((req (concatenate
+                            'string
+                            "{\"jsonrpc\":\"2.0\",\"id\":23,\"method\":\"tools/call\","
+                            "\"params\":{\"name\":\"lisp-edit-form\","
+                            "\"arguments\":{\"file_path\":\"" tmp-path "\","
+                            "\"form_type\":\"defun\",\"form_name\":\"kept-fn\","
+                            "\"operation\":\"replace\","
+                            "\"content\":\"(defun kept-fn () 2)\","
+                            "\"dry_run\":" dry-run "}}}"))
+                      (result (gethash "result" (parse (%pjl req))))
+                      (text (gethash "text" (elt (gethash "content" result) 0))))
+                 (ok (equal "#+(or sbcl ccl)" (gethash "kept_feature_expression" result))
+                     (format nil "JSON names it (dry_run ~A)" dry-run))
+                 (ok (search "Kept #+(or sbcl ccl) in front of the form" text)
+                     (format nil "and so does the text (dry_run ~A)" dry-run))))
+          (ignore-errors (delete-file abs)))))))
+
 (deftest tools-call-lisp-edit-form-default-normalizes-blank-lines
   (testing "tools/call lisp-edit-form normalizes blank lines when option is omitted"
     (with-test-project-root

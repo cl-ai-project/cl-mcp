@@ -597,6 +597,71 @@ error are never taken on their own."
                            (length repaired-spans)
                            repaired-spans)))))))))))
 
+(defun %skip-blank-and-comments (text start)
+  "Return the index of the first character at or after START in TEXT that is
+neither whitespace nor inside a comment, reading the standard syntax; START when
+a block comment there is never closed."
+  (with-input-from-string (in text :start start)
+    (if (%skip-whitespace-and-comments in *standard-readtable*)
+        start
+        ;; A string input stream counts its position from START.
+        (+ start (file-position in)))))
+
+(defun %feature-prefix-end (text start)
+  "Return the index in TEXT where the form at START begins once the #+ and #-
+feature expressions in front of it are passed, with the whitespace and comments
+after each; START when there are none.  The expressions are read with
+*READ-SUPPRESS* on, which interns nothing, and under the standard syntax, as
+feature expressions are read whatever the file's readtable."
+  (let ((pos start)
+        (length (length text)))
+    (loop while (and (< (1+ pos) length)
+                     (char= (char text pos) #\#)
+                     (member (char text (1+ pos)) '(#\+ #\-)))
+          do (let ((after (handler-case
+                              (let ((*read-suppress* t)
+                                    (*readtable* *standard-readtable*))
+                                (nth-value 1 (read-from-string text t nil
+                                                               :start (+ pos 2)
+                                                               :preserve-whitespace t)))
+                            (error () nil))))
+               (unless after
+                 (return-from %feature-prefix-end start))
+               (setf pos (%skip-blank-and-comments text after))))
+    pos))
+
+(defun %keep-feature-prefix (text node content)
+  "Return CONTENT, the validated replacement for NODE in TEXT, with the #+/#-
+feature expressions NODE's form carries put back in front of its form, and the
+expressions' text as a second value.  NODE's span starts at its first #, so a
+replace by the bare form used to drop them, making a definition meant for one
+implementation or configuration unconditional.  When NODE carries none, or
+CONTENT starts with feature expressions of its own (the caller changing or
+removing the condition on purpose), CONTENT is returned as it is with NIL.
+The expressions go after any comments CONTENT opens with, right before its
+form, and keep their own text: a comment between them and the form included."
+  (let* ((start (cst-node-start node))
+         (form-start (%feature-prefix-end text start))
+         (content-form-start (%skip-blank-and-comments content 0)))
+    (if (or (= form-start start)
+            (/= content-form-start (%feature-prefix-end content content-form-start)))
+        (values content nil)
+        (let ((prefix (subseq text start form-start)))
+          (values (concatenate 'string
+                               (subseq content 0 content-form-start)
+                               prefix
+                               (subseq content content-form-start))
+                  (string-right-trim '(#\Space #\Tab #\Newline #\Return) prefix))))))
+
+(defun %kept-feature-note (kept)
+  "Return the summary line saying a replace kept KEPT, the feature expressions
+%KEEP-FEATURE-PREFIX put back, or NIL when it kept none."
+  (when kept
+    (format nil "~%Kept ~A in front of the form: the content did not carry it. ~
+                 To change or drop the condition, start the content with the ~
+                 feature expression it should have."
+            kept)))
+
 (defun %apply-operation-preserve-spacing (text node operation content)
   (let ((start (cst-node-start node))
         (end (cst-node-end node)))
@@ -797,14 +862,19 @@ ordered: an external editor, and equally a second cl-mcp server over the same
 checkout, is not coordinated. GUARD remains the only check against one, and it
 is a precondition, not a lock.
 
-For non-delete operations without DRY-RUN, returns eight values: the updated
+A replace keeps the #+/#- feature expressions in front of the target form
+when CONTENT does not start with its own (%KEEP-FEATURE-PREFIX).
+
+For non-delete operations without DRY-RUN, returns nine values: the updated
 file text, the parinfer warning or NIL, whether the file changed, the repair
 line diff or NIL, the validated content that was spliced in, a bracket
 warning (a ] or } found where ) was expected, in content that still reads)
 or NIL, the forms the repair moved out of the form the content's own
-parens put them in (REPARENTED-FORMS) or NIL, and the number of forms an
-insert put in when it was more than one, or NIL. A dry run carries the
-reparented forms as \"repair_reparented\" and that number as \"forms\"."
+parens put them in (REPARENTED-FORMS) or NIL, the number of forms an
+insert put in when it was more than one, or NIL, and the feature expressions
+a replace kept, or NIL. A dry run carries the reparented forms as
+\"repair_reparented\", that number as \"forms\" and the expressions as
+\"kept_feature_expression\"."
   (unless
       (and (stringp file-path) (stringp form-type) (stringp form-name)
            (stringp operation))
@@ -869,7 +939,7 @@ reparented forms as \"repair_reparented\" and that number as \"forms\"."
                                                   file-package-name abs)
                       (%validate-and-repair-content content content-readtable
                                                     file-package-name abs))
-                (let* ((spliced
+                (let* ((block-spliced
                          ;; Normalise only the gaps between a block's forms, and
                          ;; only where the gaps read the standard way.
                          (if (and spans normalize-blank-lines
@@ -878,6 +948,12 @@ reparented forms as \"repair_reparented\" and that number as \"forms\"."
                                        *standard-readtable*)))
                              (%normalize-block-gaps validated-content spans)
                              validated-content))
+                       (kept (if (eq op-key :replace)
+                                 (multiple-value-list
+                                  (%keep-feature-prefix original target block-spliced))
+                                 (list block-spliced nil)))
+                       (spliced (first kept))
+                       (kept-feature (second kept))
                        (several-forms (and form-count (> form-count 1) form-count))
                        (updated
                          (%apply-operation original target op-key spliced
@@ -909,13 +985,15 @@ reparented forms as \"repair_reparented\" and that number as \"forms\"."
                         (setf (gethash "bracket_warning" result) bracket-warning))
                       (when several-forms
                         (setf (gethash "forms" result) several-forms))
+                      (when kept-feature
+                        (setf (gethash "kept_feature_expression" result) kept-feature))
                       result))
                    (would-change (fs-write-file rel updated)
                     (values updated parinfer-warning t repair-fixes validated-content
-                            bracket-warning reparented several-forms))
+                            bracket-warning reparented several-forms kept-feature))
                    (t (values updated parinfer-warning nil repair-fixes
                               validated-content bracket-warning reparented
-                              several-forms)))))))))))
+                              several-forms kept-feature)))))))))))
 
 (defun %resolve-guard-argument (args guard guard-token)
   "Return the guard LISP-EDIT-FORM should run with, or NIL for an unguarded
@@ -993,6 +1071,9 @@ Ignored for delete. replace takes exactly ONE top-level form. insert_before and
 insert_after take one or more, inserted in the order given as one block, so
 several new definitions go in with one call; comments between them stay where
 they are. Comment-only content is accepted too.
+replace keeps the #+/#- feature expressions written in front of the target form
+when content starts with none of its own, and says so (kept_feature_expression);
+start content with the expression it should have to change or drop the condition.
 Missing closing parentheses are automatically repaired using parinfer; a block
 is repaired as a whole and must then read as complete forms, or nothing is
 written.")
@@ -1033,7 +1114,8 @@ without a guard."))
              :message (format nil "content is required for ~A operation" operation)))
     (handler-case
         (multiple-value-bind (updated parinfer-warning changed-p repair-fixes
-                              repaired-form bracket-warning reparented forms)
+                              repaired-form bracket-warning reparented forms
+                              kept-feature)
             (lisp-edit-form :file-path file_path
                             :form-type form_type
                             :form-name form_name
@@ -1056,14 +1138,16 @@ without a guard."))
                      (pw (gethash "parinfer_warning" updated))
                      (bw (gethash "bracket_warning" updated))
                      (block-forms (gethash "forms" updated))
+                     (dry-kept (gethash "kept_feature_expression" updated))
                      (summary
                       (format nil "Dry-run ~A~@[ of ~D forms~] on ~A ~A in ~A ~
                                    (~:[no change~;would change~])~
-                                   ~@[~A~]~@[~%WARNING: ~A~]~
+                                   ~@[~A~]~@[~A~]~@[~%WARNING: ~A~]~
                                    ~@[~%~%--- original ---~%~A~]~
                                    ~@[~%~%--- preview ---~%~A~]"
                               operation block-forms form_type form_name file_path
                               would-change
+                              (%kept-feature-note dry-kept)
                               (%repair-summary pw (gethash "repair_fixes" updated)
                                                (or (gethash "validated_content" updated)
                                                    preview-form)
@@ -1088,7 +1172,9 @@ without a guard."))
                                 (when bw
                                   (list "bracket_warning" bw))
                                 (when block-forms
-                                  (list "forms" block-forms))))))
+                                  (list "forms" block-forms))
+                                (when dry-kept
+                                  (list "kept_feature_expression" dry-kept))))))
               (let ((summary
                      (cond
                        ((not changed-p)
@@ -1102,9 +1188,10 @@ without a guard."))
                                 bracket-warning))
                        (t
                         (format nil "Applied ~A~@[ of ~D forms~] to ~A ~A in ~A ~
-                                     (~D chars)~@[~A~]~@[~%WARNING: ~A~]"
+                                     (~D chars)~@[~A~]~@[~A~]~@[~%WARNING: ~A~]"
                                 operation forms form_type form_name file_path
                                 (length updated)
+                                (%kept-feature-note kept-feature)
                                 (%repair-summary parinfer-warning repair-fixes
                                                  repaired-form :include-form t
                                                  :moved reparented)
@@ -1122,7 +1209,9 @@ without a guard."))
                                 (when bracket-warning
                                   (list "bracket_warning" bracket-warning))
                                 (when forms
-                                  (list "forms" forms))))))))
+                                  (list "forms" forms))
+                                (when kept-feature
+                                  (list "kept_feature_expression" kept-feature))))))))
       (content-unrepairable-error (e)
         (tool-error id (sanitize-for-json (princ-to-string e))
                     :protocol-version (protocol-version state)))
