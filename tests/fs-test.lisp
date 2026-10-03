@@ -515,6 +515,82 @@ the summary text, the result hash, and the JSON-RPC error hash, if any."
        (ignore-errors
         (delete-file (merge-pathnames ,relative cl-mcp/src/project-root:*project-root*))))))
 
+(defun %call-fs-read (path &key offset limit)
+  "Call the fs-read-file tool handler and return (VALUES text payload): the
+summary text and the result hash."
+  (let ((args (cl-mcp/src/tools/helpers:make-ht "path" path)))
+    (when offset (setf (gethash "offset" args) offset))
+    (when limit (setf (gethash "limit" args) limit))
+    (let* ((response (cl-mcp/src/fs::fs-read-file-handler
+                      (cl-mcp/src/state:make-state) 1 args))
+           (payload (gethash "result" response))
+           (content (and payload (gethash "content" payload))))
+      (values (and content (plusp (length content)) (gethash "text" (aref content 0)))
+              payload))))
+
+(deftest fs-read-file-offset-and-limit-both-count-characters
+  (testing "a multibyte character before the window does not shift it"
+    ;; offset was a byte position once while limit counted characters: on
+    ;; "éXYZ" offset 2 landed on X (é is two bytes in UTF-8), so a caller
+    ;; paging by the characters it had been given re-read text.
+    (with-scratch-file ("tests/tmp/offset-units.txt")
+      (fs-write-file "tests/tmp/offset-units.txt" (format nil "éXYZ"))
+      (ok (equal "YZ" (fs-read-file "tests/tmp/offset-units.txt" :offset 2 :limit 2)))
+      (ok (equal "XYZ" (fs-read-file "tests/tmp/offset-units.txt" :offset 1)))
+      (ok (equal "" (fs-read-file "tests/tmp/offset-units.txt" :offset 10))
+          "an offset past the end reads nothing")))
+  (testing "an invalid byte before the window counts as one character, not an error"
+    ;; Seeking by bytes once stepped over it without decoding; skipping by
+    ;; characters must not turn it into an unreadable prefix.
+    (with-scratch-file ("tests/tmp/offset-units.txt")
+      (let ((abs (merge-pathnames "tests/tmp/offset-units.txt"
+                                  cl-mcp/src/project-root:*project-root*)))
+        (ensure-directories-exist abs)
+        (with-open-file (out abs :direction :output :if-exists :supersede
+                                 :element-type '(unsigned-byte 8))
+          (write-sequence #(65 255 66 120 121 122) out))
+        (ok (equal "xyz" (fs-read-file "tests/tmp/offset-units.txt" :offset 3)))
+        (multiple-value-bind (lines col) (fs-window-start "tests/tmp/offset-units.txt" 3)
+          (ok (= 0 lines))
+          (ok (= 3 col))))))
+  (testing "fs-window-start counts the same characters the window skips"
+    (with-scratch-file ("tests/tmp/offset-units.txt")
+      (fs-write-file "tests/tmp/offset-units.txt" (format nil "é~%ab"))
+      ;; Characters: é, newline, a -- offset 3 is b: one newline, one character.
+      (multiple-value-bind (lines col) (fs-window-start "tests/tmp/offset-units.txt" 3)
+        (ok (= 1 lines))
+        (ok (= 1 col))))))
+
+(deftest fs-read-file-tool-says-when-a-limited-read-stops-short
+  (testing "a limit read with text left over says so and gives the next offset"
+    ;; Only a read cut by the 1 MB cap carried the marker once, so a limit
+    ;; read that stopped short looked exactly like the end of the file.
+    (with-scratch-file ("tests/tmp/limit-marker.txt")
+      (fs-write-file "tests/tmp/limit-marker.txt" (format nil "ééabcdef"))
+      (multiple-value-bind (text payload)
+          (%call-fs-read "tests/tmp/limit-marker.txt" :offset 1 :limit 3)
+        (ok (equal "éab" (gethash "text" payload)))
+        (ok (eq t (gethash "truncated" payload)))
+        (ok (= 4 (gethash "next_offset" payload)))
+        (ok (search "Use offset=4 to read more" text)))))
+  (testing "a read that returned nothing carries no marker to loop on"
+    ;; limit 0 once came back marked with next_offset equal to offset, so a
+    ;; client following next_offset never moved.
+    (with-scratch-file ("tests/tmp/limit-marker.txt")
+      (fs-write-file "tests/tmp/limit-marker.txt" (format nil "abc"))
+      (multiple-value-bind (text payload)
+          (%call-fs-read "tests/tmp/limit-marker.txt" :limit 0)
+        (ok (equal "" text))
+        (ok (null (gethash "next_offset" payload))))))
+  (testing "a read that reaches the end carries no marker"
+    (with-scratch-file ("tests/tmp/limit-marker.txt")
+      (fs-write-file "tests/tmp/limit-marker.txt" (format nil "ééabcdef"))
+      (multiple-value-bind (text payload)
+          (%call-fs-read "tests/tmp/limit-marker.txt" :offset 4 :limit 10)
+        (ok (equal "cdef" text))
+        (ok (null (gethash "truncated" payload)))
+        (ok (null (gethash "next_offset" payload)))))))
+
 (deftest fs-test-process-has-the-overwrite-guards-verdict-installed
   (testing "loading this test system installs the edit tools' parser as the hook"
     (ok (eq (fdefinition '%file-unparseable-by-edit-tools-p)

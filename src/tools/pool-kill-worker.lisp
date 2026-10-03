@@ -47,7 +47,13 @@ and bound to your session.  The next tool call is ready without delay.
 Note that reset=true makes this call slower (includes spawn time).
 
 In both cases, you must call load-system again to restore previously
-loaded systems."
+loaded systems.
+
+Response fields: killed, reset. If a spawn was still in progress, it is
+cancelled instead (cancelled_spawn: true, killed: false) and nothing is spawned,
+even with reset=true. With no worker bound, or the pool disabled, killed is
+false. If reset=true and the replacement fails to start, the result is an error
+with killed: true and reset: false; a later call that needs a worker retries."
   :args ((reset :type :boolean :default nil
                 :description "When true, immediately spawn a replacement worker
 after killing the current one.  When false (default), defer spawning until

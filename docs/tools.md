@@ -193,7 +193,7 @@ An id of the current image whose object was evicted (only the most recent
 `INVALID_OBJECT_ID`. An integer, as an older client sends, is refused before
 any lookup by the argument check: `id must be a string`.
 
-- `max_depth` (integer, optional): Nesting depth for expansion (0=summary only, default=1)
+- `max_depth` (integer, optional, default 1): levels of nested objects to expand in place; at 1 the object's own elements, entries or slots are listed and nested objects appear as `object-ref`s. `0` behaves like `1`
 - `max_elements` (integer, optional): Maximum elements for lists/arrays/hash-tables (default=50)
 
 Output fields:
@@ -279,28 +279,22 @@ Read text from an allow‑listed path.
 
 Input:
 - `path` (string, required): project‑relative or absolute inside a registered ASDF system's source tree
-- `offset` (integer, optional, non-negative): 0-based **byte** (octet) position to start at
-- `limit` (integer, optional, non-negative): how many **characters** to return; omitted, the
-  read goes to the end, up to the 1 MB cap. A `limit` above 1 MB is an error
+- `offset` (integer, optional, non-negative): 0-based position to start at, in **characters**
+- `limit` (integer, optional, non-negative): how many characters to return, at most 1048576;
+  omitted, the read goes to the end, up to that cap
 
-The two count different units. In an ASCII file they agree; in UTF-8 text with multibyte
-characters they do not: for the file `éXYZ`, `offset: 2, limit: 2` returns `XY` (`é` is two
-bytes), not `YZ`. Advancing `offset` by the number of characters returned therefore repeats
-text, and an offset inside a multibyte character splits it. To page through non-ASCII text,
-read it whole when it fits under the cap, or use `lisp-read-file` (raw mode, `offset`/`limit`
-in lines) for a source file.
+Both count characters, so a window advanced by the characters it returned picks up exactly
+where it stopped, in multibyte text too. A byte that is not valid UTF-8 before the window counts
+as one character. An offset at or past the end returns an empty result.
 
 Output:
-- `content`: the text. Only when a read **without** `limit` hits the 1 MB cap is it followed by
-  `[TRUNCATED: file is N chars, showing M from offset O. Use offset=K to read more.]`, where N
-  is the file's size in bytes and K is O plus the characters shown — exact for ASCII, short of
-  the true position for multibyte text, for the reason above
+- `content`: the text. Whenever text is left past a non-empty window — because `limit` stopped
+  the read or the 1048576-character cap did — it is followed by
+  `[TRUNCATED: showing M characters from offset O of a N-byte file. Use offset=K to read more.]`
 - `text` (the text alone), `path`, `offset`, `limit`
-- `truncated`, `file_length` (bytes), `read_length` (characters): only with that marker
-
-A read **with** `limit` returns at most `limit` characters and nothing else: no marker and no
-length fields, even when the file goes on. A result shorter than `limit` means the end was
-reached; one exactly `limit` long may or may not be the end, so read on to find out.
+- `truncated` (`true`), `next_offset` (K, the offset to continue from), `file_length` (the
+  file's size in bytes) and `read_length` (characters returned): only with that marker. A result
+  without the marker reached the end of the file.
 
 Policy: reads are allowed only when the resolved path is under the project root or under `asdf:system-source-directory` of a registered system.
 Dependency libs: reading source in Quicklisp/ASDF dependencies is permitted **only via `fs-read-file`**; do not shell out for metadata (`wc`, `stat`, etc.).
@@ -862,8 +856,9 @@ Output:
   `FILE:LINE [FORM-TYPE] SIGNATURE`, then any `NOTE` lines. `FORM-TYPE` prints `NIL` for an
   unrecognized head.
 - `matches` (array), one entry per (file, form), with:
-  - `file`: relative to the project root, not to `path` — or absolute when outside it — so it
-    can be passed straight to `lisp-read-file`
+  - `file`: relative to the project root, not to `path`, so a file under the root can be passed
+    straight to `lisp-read-file`. A file outside the root can come back relative to the server's
+    working directory or cl-mcp's own source directory rather than absolute
   - `line`, `match`: the first hit; `match_lines`: every hit in the form, as `{line, match}`
   - `package`: from the last `in-package` above the hit, upper-cased (`"UNKNOWN"` if none)
   - `form-type`, `form-name` (either may be null), `signature` (`(name lambda-list)` for

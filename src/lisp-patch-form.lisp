@@ -389,7 +389,9 @@ Does NOT auto-repair parentheses — if the patch breaks form structure, it fail
 immediately and no changes are written to disk.
 Use 'lisp-edit-form' instead when replacing or inserting entire forms."
   :args ((file_path :type :string :required t
-                    :description "Target file path (absolute recommended)")
+                    :description "Target file path: relative to the project root, or absolute inside
+it (absolute recommended). Files outside the project root, registered ASDF sources included, are
+refused")
          (form_type :type :string :required t
                     :description "Form type to search, e.g., \"defun\", \"defmacro\", \"defmethod\".
 A package prefix is ignored: \"asdf:defsystem\" and \"defsystem\" both match
@@ -398,7 +400,8 @@ A package prefix is ignored: \"asdf:defsystem\" and \"defsystem\" both match
 name different forms, the call is refused as ambiguous.")
          (form_name :type :string :required t
                     :description "Form name to match; for defmethod include specializers,
-e.g., \"print-object ((obj my-class) stream)\". For defstruct with
+e.g., \"print-object ((obj my-class) stream)\" (a method whose name is unique matches
+by name alone). A name[N] suffix, 0-based, picks the Nth of several matches. For defstruct with
 options \"(defstruct (name opts...) ...)\", use just the bare struct name.
 Reader macro prefixes #: and : are stripped automatically, so
 \"#:my-pkg\" and \"my-pkg\" both match \"(defpackage #:my-pkg ...).\"")
@@ -416,7 +419,9 @@ add or remove.")
                     :description "Named-readtable designator for files using custom reader macros.
 Supports both keyword style ('interpol-syntax') and package-qualified style
 ('pokepay-syntax:pokepay-syntax'). NOTE: When specified, the standard CL reader
-is used instead of Eclector, which means comments are NOT preserved."))
+is used to locate forms instead of Eclector. Only needed when the file does not
+declare its own (in-readtable ...): one earlier in the file is honoured automatically.
+The patch replaces text in place, so comments are kept."))
   :body
   (let ((readtable-designator
          (handler-case (%parse-readtable-designator readtable)

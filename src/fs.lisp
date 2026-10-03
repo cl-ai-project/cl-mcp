@@ -68,11 +68,40 @@
 (defparameter *fs-read-max-bytes* 1048576
   "Maximum number of characters allowed for fs-read-file when LIMIT is provided.")
 
+(defparameter *skip-external-format* '(:utf-8 :replacement #\?)
+  "External format the prefix before an OFFSET is counted in. An invalid byte
+there decodes to one replacement character instead of signalling, so a stray
+bad byte before a window neither makes the window unreadable nor shifts it:
+%READ-FILE-STRING and FS-WINDOW-START both count with it, and so agree.")
+
+(defun %skip-characters (stream count)
+  "Read and discard up to COUNT characters from STREAM; stop early at EOF.
+Reads in chunks, so a large offset costs one pass over the prefix and no
+buffer of its size."
+  (let ((chunk (make-string (min count 65536))))
+    (loop with left = count
+          while (plusp left)
+          do (let ((got (read-sequence chunk stream :end (min left (length chunk)))))
+               (when (zerop got)
+                 (return))
+               (decf left got)))))
+
+(defun %octet-position-after-characters (pn count)
+  "Return the octet position in PN that follows its first COUNT characters,
+counted in *SKIP-EXTERNAL-FORMAT*, or the file's length when it has fewer."
+  (with-open-file (in pn :direction :input :element-type 'character
+                         :external-format *skip-external-format*)
+    (%skip-characters in count)
+    (file-position in)))
+
 (defun %read-file-string (pn offset limit)
-  "Read file PN honoring OFFSET and LIMIT (both may be NIL).
-Returns (VALUES content-string truncated-p file-length).
+  "Read file PN honoring OFFSET and LIMIT (both may be NIL), both counted in
+characters.
+Returns (VALUES content-string truncated-p file-length remaining-p).
 TRUNCATED-P is T when the file was larger than the effective read cap.
-FILE-LENGTH is the total size of the file (NIL if unknown)."
+FILE-LENGTH is the total size of the file in octets (NIL if unknown).
+REMAINING-P is T when input remains past the returned text, whatever stopped
+the read (LIMIT or the cap)."
   (when (and offset (< offset 0))
     (error "offset must be non-negative"))
   (when (and limit (< limit 0))
@@ -80,9 +109,17 @@ FILE-LENGTH is the total size of the file (NIL if unknown)."
   (when (and limit (> limit *fs-read-max-bytes*))
     (error "limit ~D exceeds maximum ~D" limit *fs-read-max-bytes*))
   (with-open-file (in pn :direction :input :element-type 'character)
-    (when offset (file-position in offset))
+    ;; OFFSET counts characters, as LIMIT does: seeking straight to OFFSET
+    ;; would land on an octet, which in multibyte text is neither the
+    ;; OFFSETth character nor necessarily the start of one.  The prefix is
+    ;; counted on a stream of its own, where an invalid byte is one
+    ;; replacement character rather than an error, and this stream then
+    ;; seeks to where that count ended.
+    (when (and offset (plusp offset))
+      (file-position in (%octet-position-after-characters pn offset)))
     (let* ((raw-len (ignore-errors (file-length in)))
-           (available-octets (and raw-len (max 0 (- raw-len (or offset 0)))))
+           (position (ignore-errors (file-position in)))
+           (available-octets (and raw-len position (max 0 (- raw-len position))))
            (effective (or limit available-octets *fs-read-max-bytes*))
            (capped (min effective *fs-read-max-bytes*))
            (buf (make-string capped))
@@ -205,10 +242,10 @@ the number of newlines before the window and the number of characters between
 the last of those newlines (or the start of the file) and the window. A
 failure reported at window line L, column C is therefore at file line
 L + newlines and, on the first window line only, column C + that count.
-The prefix is read one character at a time up to the same FILE-POSITION
-%READ-FILE-STRING seeks to, so the count stops exactly where the window starts
-even in a multibyte file, and no buffer is built, so *FS-READ-MAX-BYTES* does
-not apply. PATH is checked against the read policy like FS-READ-FILE.
+OFFSET counts characters, as FS-READ-FILE's does, so the prefix is read one
+character at a time for OFFSET characters and the count stops exactly where
+the window starts even in a multibyte file; no buffer is built, so
+*FS-READ-MAX-BYTES* does not apply. PATH is checked against the read policy like FS-READ-FILE.
 Returns (VALUES 0 0) for a NIL or zero OFFSET."
   (when (and offset (not (integerp offset)))
     (error "offset must be an integer"))
@@ -219,11 +256,12 @@ Returns (VALUES 0 0) for a NIL or zero OFFSET."
       (let ((pn (allowed-read-path path)))
         (unless pn
           (error "Read not permitted for path ~A" path))
-        (with-open-file (in pn :direction :input :element-type 'character)
+        (with-open-file (in pn :direction :input :element-type 'character
+                               :external-format *skip-external-format*)
           (let ((lines 0)
                 (col 0))
-            (loop for ch = (and (< (file-position in) offset)
-                                (read-char in nil nil))
+            (loop repeat offset
+                  for ch = (read-char in nil nil)
                   while ch
                   do (if (char= ch #\Newline)
                          (setf lines (1+ lines)
@@ -716,8 +754,12 @@ Returns a hash-table with updated path information:
 
 (define-tool "fs-read-file"
   :description "Read a text file with optional offset and limit.
-Prefer absolute paths inside the project; offset/limit are character counts
-to avoid loading whole files.
+Prefer absolute paths inside the project; offset and limit both count
+characters, so a window can be paged through without loading the whole file.
+At most 1048576 characters are read in one call. Whenever text is left past
+the returned window -- because of limit or that cap -- the text ends with a
+[TRUNCATED: ... Use offset=N to read more.] line and the result carries
+truncated, next_offset, file_length (bytes) and read_length.
 It can only open files in the project or in loaded dependent libraries.
 
 For .lisp and .asd files, prefer 'lisp-read-file' instead - it provides
@@ -727,22 +769,35 @@ collapsed signatures view that saves ~70% of context window tokens."
          (offset :type :integer
                  :description "0-based character offset to start reading")
          (limit :type :integer
-                :description "Maximum characters to return; omit to read to end"))
+                :description "Maximum characters to return, at most 1048576; omit to read to the end
+(or to that cap)"))
   :body
-  (multiple-value-bind (content-string truncated file-length)
+  (multiple-value-bind (content-string capped file-length remaining)
       (fs-read-file path :offset offset :limit limit)
-    (let ((ht (make-ht "content" (text-content
-                                  (if truncated
-                                      (let ((next-offset (+ (or offset 0) (length content-string))))
-                                        (format nil "~A~%~%[TRUNCATED: file is ~:D chars, showing ~:D from offset ~:D. Use offset=~D to read more.]"
-                                                content-string file-length (length content-string) (or offset 0) next-offset))
-                                      content-string))
-                       "text" content-string
-                       "path" path
-                       "offset" offset
-                       "limit" limit)))
-      (when truncated
+    ;; Marked whenever text is left past this window, whether LIMIT or the
+    ;; cap stopped the read: a LIMIT read that stopped short was once
+    ;; unmarked, and so read exactly like the end of the file.
+    ;; Not for an empty window: a limit of 0 would be marked with a
+    ;; next_offset equal to its own offset, and a client following it would
+    ;; never move.
+    (let* ((more (and (plusp (length content-string)) (or capped remaining)))
+           (next-offset (and more (+ (or offset 0) (length content-string))))
+           (ht (make-ht "content"
+                        (text-content
+                         (if more
+                             (format nil "~A~%~%[TRUNCATED: showing ~:D characters from ~
+                                          offset ~:D~@[ of a ~:D-byte file~]. Use ~
+                                          offset=~D to read more.]"
+                                     content-string (length content-string) (or offset 0)
+                                     file-length next-offset)
+                             content-string))
+                        "text" content-string
+                        "path" path
+                        "offset" offset
+                        "limit" limit)))
+      (when more
         (setf (gethash "truncated" ht) t
+              (gethash "next_offset" ht) next-offset
               (gethash "file_length" ht) file-length
               (gethash "read_length" ht) (length content-string)))
       (result id ht))))
@@ -823,8 +878,10 @@ ASDF system")
                      "show_hidden" show-hidden))))
 
 (define-tool "fs-get-project-info"
-  :description "Get project root and current working directory information for
-path resolution context."
+  :description "Get this session's project root (relative paths resolve against it),
+how it was set (project_root_source: session, env or explicit), and the server
+process's working directory (cwd), which a session's root does not move.
+Fails when no project root is set."
   :args ()
   :body
   (let* ((info (fs-get-project-info))
@@ -853,7 +910,10 @@ call this again.
 RESTRICTION: You MUST only provide your current working directory (e.g., obtained via pwd).
 Do not use arbitrary paths."
   :args ((path :type :string :required t
-               :description "Absolute path to the project root directory"))
+               :description "Absolute path to the project root directory (a relative one
+resolves against the current root, or the server's working directory when none is set,
+which is rarely what you want). Must exist; /,
+/tmp/ and /home/ are refused as too broad"))
   :body
   (let ((info (fs-set-project-root path)))
     (result id

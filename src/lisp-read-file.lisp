@@ -792,13 +792,18 @@ or relative to project root")
          (collapsed :type :boolean :default t
                     :description "When true (default) collapse Lisp definitions to signatures")
          (name_pattern :type :string
-                       :description "Regex to match definition names to expand (CL-PPCRE syntax)")
+                       :description "Regex to match definition names to expand (CL-PPCRE syntax),
+matched against the lower-cased name; a string name keeps its double quotes, so (define-tool \"x\"
+...) is matched by ^\"x\"$. Ignored when collapsed=false")
          (content_pattern :type :string
-                          :description "Regex to match form bodies or text lines to expand")
+                          :description "Regex to match form bodies or text lines to expand. Ignored
+when collapsed=false")
          (offset :type :integer
-                 :description "0-based line offset when collapsed=false (raw mode only)")
+                 :description "0-based line offset; used when collapsed=false, and for a non-Lisp
+file read without content_pattern")
          (limit :type :integer
-                :description "Maximum lines to return; defaults to 500")
+                :description "Maximum lines to return; defaults to 500. The collapsed view of a Lisp
+file is not limited")
          (readtable :type :string
                     :description "Named-readtable designator for files using custom reader macros.
 Supports both keyword style ('interpol-syntax') and package-qualified style

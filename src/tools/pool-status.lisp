@@ -18,11 +18,15 @@
   :description "Return worker pool diagnostic information including per-worker
 details and pool-level summary.  No arguments required.
 Returns pool_running, total_workers, standby_count, bound_count,
-max_pool_size, warmup_target, and a workers array.
+max_pool_size, warmup_target, init_owner_session, init_owner_worker,
+init_disabled and init_failures (the worker init hook), and a workers array
+(empty, with the counts at 0, while the pool is not running).
 
 Each entry in the workers array is an object with keys:
-id (integer), session (string or null, truncated to 8 chars),
-tcp_port (integer), pid (integer), state (\"bound\" or \"standby\"),
+id (integer), session (string or null; a longer id is cut to its first 8
+characters plus \"...\"), tcp_port (integer), pid (integer), state (the
+worker's state in lower case: normally \"bound\" or \"standby\"; a crashed
+worker not yet reaped shows its own state and is counted in bound_count),
 leaked_threads (integer): threads a deadline could not stop, as of that
 worker's last answer.  A non-zero count means a run exceeded its timeout and
 could not be interrupted; the worker retires rather than serve its next

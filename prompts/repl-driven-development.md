@@ -151,7 +151,7 @@ the text a client actually renders.)
 - `name_pattern="^my-function$"`: expand forms whose definition name matches
 - `content_pattern="error"`: expand forms whose body matches the pattern
 - `collapsed=false`: full content (only when necessary; offset/limit are in lines)
-- Use `fs-read-file` only for non-Lisp files (README, JSON, YAML, config). Note: `fs-read-file`'s `offset` is a byte position and `limit` a character count, not lines; they agree only for ASCII text, and a `limit` read that stops short carries no truncation marker
+- Use `fs-read-file` only for non-Lisp files (README, JSON, YAML, config). Note: `fs-read-file` offset/limit are in characters, not lines; when text is left past the window the result ends with a `[TRUNCATED: … Use offset=K to read more.]` line
 
 ## REPL Evaluation
 
@@ -287,6 +287,7 @@ parameter to `lisp-edit-form` instead.
 - `sub_form` cannot be combined with `readtable` (a custom readtable forces the standard CL
   reader, which does not record sub-form positions), nor with `code` (there is no enclosing
   form to search in).
-- `level: "all"` can produce very large output; `loop` and `defun` expand down to special
-  forms. Start with the default `once`.
+- `level: "all"` can produce very large output: nested macros such as `loop` expand down to
+  special forms (a `defun` itself stays a `defun`), and it stops after 1000 expansions. Start
+  with the default `once`.
 - Expanding runs the macro's expander function, i.e. arbitrary code, in the worker process.

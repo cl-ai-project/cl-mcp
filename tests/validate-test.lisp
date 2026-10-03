@@ -443,6 +443,19 @@ then delete the file."
         (ok (%ok? res))
         (ok (null (gethash "window" res)))))))
 
+(deftest lisp-check-parens-window-offset-counts-characters-past-multibyte-text
+  (testing "a window after a multibyte comment starts where its character offset says"
+    ;; ";; é" is four characters but five bytes.  With the offset taken as a
+    ;; byte position the window opened one character late, on "defun b"
+    ;; instead of its "(".
+    (with-window-fixture (abs (format nil ";; é~%(defun a ()~%  1)~%(defun b ()~%"))
+      ;; Characters: ";; é" + newline = 5, "(defun a ()" + newline = 12,
+      ;; "  1)" + newline = 5, so offset 22 is the "(" of "(defun b ()".
+      (let ((res (lisp-check-parens :path (namestring abs) :offset 22 :limit 11)))
+        (ok (string= (%kind res) "unclosed"))
+        (ok (= 4 (%pos res "line")))
+        (ok (= 1 (%pos res "column")) "the window opens on the paren itself")))))
+
 (deftest lisp-check-parens-window-reader-error-is-flagged-and-positioned
   (with-window-fixture (abs *window-comma-fixture*)
     ;; Offset 20 is the comma: the window ", wo" balances, and the reader then

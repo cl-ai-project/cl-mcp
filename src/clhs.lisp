@@ -314,14 +314,21 @@ Examples:
   query='loop' - LOOP macro syntax and clauses
   query='format' - FORMAT function (references Section 22.3)
   query='22.3' - Formatted Output section (FORMAT directives)
-  query='22.3.1' - Basic Output subsection (~C, ~%, etc.)"
+  query='22.3.1' - Basic Output subsection (~C, ~%, etc.)
+
+The page text comes from the local HyperSpec, capped at 8000 characters. A
+section number must exist there (no remote fallback); a symbol missing locally
+gets only a remote URL. When there is no page text -- include_content=false, or
+that remote case -- the URL is in the JSON 'url' field only, not in the content
+text."
   :args ((query :type :string :required t
                 :description "Symbol name or section number to look up")
          (include_content :type :boolean :required nil :default t
                           :description "Include extracted text content (default: true)")
          (brief :type :boolean :required nil
                 :description "When true, return only Syntax and Arguments sections (compact).
-Omits Description, Examples, Notes for token efficiency."))
+Omits Description, Examples, Notes for token efficiency. A page with no Description
+heading (a section page) is cut to 1500 characters instead."))
   :body
   (result id (clhs-lookup query :include-content include_content
                                 :brief brief)))
