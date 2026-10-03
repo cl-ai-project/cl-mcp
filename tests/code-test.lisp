@@ -16,7 +16,9 @@
                 #:definition-source-location
                 #:%read-form-starts
                 #:%offset->line
-                #:generic-function-method-count)
+                #:generic-function-method-count
+                #:symbol-not-describable
+                #:symbol-not-describable-name)
   (:import-from #:cl-mcp/src/code-refs-scan
                 #:scan-project
                 #:top-level-forms-at)
@@ -97,6 +99,45 @@
       (ok (string= type "generic-function")
           "print-object should be described as a generic-function")
       (ok (stringp arglist)))))
+
+(defparameter *describe-probe-without-binding*
+  "cl-mcp/tests/code-test::describe-probe-without-binding"
+  "A symbol bound as nothing at all, like a restart's name.")
+
+(deftest code-describe-symbol-signals-symbol-not-describable
+  (testing "a symbol bound as nothing signals SYMBOL-NOT-DESCRIBABLE, naming it qualified"
+    (let ((condition (handler-case
+                         (progn (code-describe-symbol *describe-probe-without-binding*) nil)
+                       (symbol-not-describable (c) c))))
+      (ok condition)
+      (when condition
+        (ok (equal "CL-MCP/TESTS/CODE-TEST::DESCRIBE-PROBE-WITHOUT-BINDING"
+                   (symbol-not-describable-name condition)))
+        (ok (equal (concatenate 'string
+                                "Symbol DESCRIBE-PROBE-WITHOUT-BINDING is not bound as a "
+                                "function, variable, class, or condition")
+                   (princ-to-string condition))
+            "the report keeps its text, which spec-symbol quotes as its runtime reason")))))
+
+(deftest code-describe-tool-answers-a-symbol-without-binding-as-not-found
+  ;; It used to signal through to the transport, which a client sees as
+  ;; "Worker error: JSON-RPC error -32603: Internal error: ..." -- an internal
+  ;; fault, for what code-find answers as an ordinary "not found".
+  (dolist (pooled '(nil t))
+    (testing (format nil "~:[inline~;through a worker~]" pooled)
+      (let* ((response (%call-code-tool
+                        "code-describe"
+                        (lambda (params)
+                          (cl-mcp/src/worker/handlers::%handle-code-describe params))
+                        *describe-probe-without-binding* :pooled pooled))
+             (result (gethash "result" response))
+             (text (and result (gethash "text" (aref (gethash "content" result) 0)))))
+        (ok (null (gethash "error" response)) "no JSON-RPC error")
+        (ok (and result (eq t (gethash "isError" result))) "an isError result")
+        (ok (and text (search "CL-MCP/TESTS/CODE-TEST::DESCRIBE-PROBE-WITHOUT-BINDING" text))
+            "naming the symbol as a reader outside its package needs it")
+        (ok (and text (search "load-system" text))
+            "and the step to take when its system is not loaded yet")))))
 
 (deftest code-find-definition-logical-pathname
   (testing "code-find-definition handles CL standard symbols with logical pathnames"
@@ -661,31 +702,40 @@ worker's answer with its JSON types kept."
                           :json-nulls-as-keyword t)
         (yason:parse text))))
 
-(defun %call-references-tool (symbol &key pooled worker)
-  "Call the code-find-references tool for SYMBOL through process-json-line and
-return the JSON-RPC result.  When POOLED, the worker pool path is taken with
-PROXY-TO-WORKER standing in for the pool: it calls WORKER (by default the real
-worker handler, across both JSON boundaries) instead of a worker process."
+(defun %call-code-tool (tool handler symbol &key pooled worker)
+  "Call TOOL for SYMBOL through process-json-line and return the whole JSON-RPC
+response.  When POOLED, the worker pool path is taken with PROXY-TO-WORKER
+standing in for the pool: it calls WORKER (by default HANDLER, the real handler
+of \"worker/TOOL\", across both JSON boundaries) instead of a worker process."
   (let* ((request (format nil "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",~
-\"params\":{\"name\":\"code-find-references\",\"arguments\":{\"symbol\":~S}}}"
-                          symbol))
+\"params\":{\"name\":~S,\"arguments\":{\"symbol\":~S}}}"
+                          tool symbol))
+         (method (format nil "worker/~A" tool))
          (proxy 'cl-mcp/src/proxy:proxy-to-worker)
          (original (fdefinition proxy))
-         (worker (or worker
-                     (lambda (params)
-                       (cl-mcp/src/worker/handlers::%handle-code-find-references params)))))
+         (worker (or worker handler)))
     (unwind-protect
          (progn
            (when pooled
              (setf (fdefinition proxy)
-                   (lambda (id method params &key preserve-json-types)
+                   (lambda (id called-method params &key preserve-json-types)
                      (declare (ignore id))
-                     (assert (equal method "worker/code-find-references"))
+                     (assert (equal called-method method))
                      (%json-round-trip (funcall worker (%json-round-trip params))
                                        :preserve preserve-json-types))))
            (let ((cl-mcp/src/proxy:*use-worker-pool* pooled))
-             (gethash "result" (yason:parse (cl-mcp/src/protocol:process-json-line request)))))
+             (yason:parse (cl-mcp/src/protocol:process-json-line request))))
       (setf (fdefinition proxy) original))))
+
+(defun %call-references-tool (symbol &key pooled worker)
+  "Call the code-find-references tool for SYMBOL through %CALL-CODE-TOOL and
+return the JSON-RPC result."
+  (gethash "result"
+           (%call-code-tool "code-find-references"
+                            (lambda (params)
+                              (cl-mcp/src/worker/handlers::%handle-code-find-references
+                               params))
+                            symbol :pooled pooled :worker worker)))
 
 (deftest code-find-references-tool-answers-the-same-inline-and-through-a-worker
   (if (uiop:os-macosx-p)

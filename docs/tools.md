@@ -970,6 +970,11 @@ Output:
 
 The text ends with a pointer to `clos-describe` for a generic function (with its method count) or a class.
 
+A symbol bound as none of these — a restart's name, or a name whose system is not loaded yet —
+is answered as not found, the way `code-find` answers one: a result with `isError` and a
+`content` text naming the symbol qualified (`Nothing to describe for PKG::NAME: …`), not a
+JSON-RPC error.
+
 ## `code-find-references`
 Find who calls or references a symbol — its callers, the exact call sites inside
 them, and the tests involved — to judge what a change would affect. Combines SBCL

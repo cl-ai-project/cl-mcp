@@ -5,6 +5,8 @@
   (:import-from #:cl-mcp/src/code-core
                 #:code-find-definition
                 #:code-describe-symbol
+                #:symbol-not-describable
+                #:symbol-not-describable-name
                 #:code-find-references
                 #:code-find-references-report
                 #:generic-function-method-count)
@@ -22,6 +24,7 @@
   (:import-from #:cl-mcp/src/tools/response-builders
                 #:build-code-find-response
                 #:build-code-describe-response
+                #:build-code-describe-not-found-response
                 #:build-code-find-references-response)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*
@@ -80,12 +83,17 @@ or not be found"))
   :body
   (with-proxy-dispatch (id "worker/code-describe"
                           (make-ht "symbol" symbol "package" package))
-    (multiple-value-bind (name type arglist doc path line stale)
-        (code-describe-symbol symbol :package package)
-      (result id (build-code-describe-response
-                  name type arglist doc path line
-                  :method-count (generic-function-method-count symbol :package package)
-                  :stale stale)))))
+    (result id
+            (handler-case
+                (multiple-value-bind (name type arglist doc path line stale)
+                    (code-describe-symbol symbol :package package)
+                  (build-code-describe-response
+                   name type arglist doc path line
+                   :method-count (generic-function-method-count symbol :package package)
+                   :stale stale))
+              (symbol-not-describable (condition)
+                (build-code-describe-not-found-response
+                 (symbol-not-describable-name condition)))))))
 
 (defun %json-nulls->nil (value)
   "Return VALUE, a worker's answer parsed with its JSON types kept, with every

@@ -30,6 +30,7 @@
            #:build-run-tests-response
            #:build-code-find-response
            #:build-code-describe-response
+           #:build-code-describe-not-found-response
            #:build-code-find-references-response
            #:build-inspect-response
            #:build-macroexpand-response
@@ -574,6 +575,19 @@ BUILD-CODE-FIND-RESPONSE, annotates the Defined at line and sets \"stale\"."
       (when (and path stale)
         (setf (gethash "stale" r) t))
       r)))
+
+(defun build-code-describe-not-found-response (name)
+  "Build code-describe's answer for NAME, a qualified symbol name bound as
+nothing it can describe: an isError result, as code-find's not-found one is,
+rather than an error signalled through to the transport, which a client reads
+as an internal fault."
+  (make-ht "isError" t
+           "content"
+           (text-content
+            (format nil "Nothing to describe for ~A: it is not bound as a function, macro, ~
+variable, class, condition or structure type. If the system defining it is not loaded yet, ~
+run load-system first; a name such as a restart's has no definition to describe."
+                    name))))
 
 (defparameter *references-sites-shown* 5
   "Call sites listed per form in code-find-references' text; the rest are counted.")

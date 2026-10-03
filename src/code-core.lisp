@@ -23,6 +23,9 @@
                 #:build-references-report)
   (:export #:code-find-definition
            #:code-describe-symbol
+           #:symbol-not-describable
+           #:symbol-not-describable-symbol
+           #:symbol-not-describable-name
            #:code-find-references
            #:code-find-references-report
            #:%offset->line
@@ -658,6 +661,17 @@ downstream therefore failed for every file that does exist."
     #-sbcl
     (error "code-find-definition requires SBCL")))
 
+(define-condition symbol-not-describable (error)
+  ((symbol :initarg :symbol :reader symbol-not-describable-symbol)
+   (name :initarg :name :reader symbol-not-describable-name
+         :documentation "SYMBOL qualified as QUALIFIED-SYMBOL-NAME writes it."))
+  (:report (lambda (condition stream)
+             (format stream "Symbol ~A is not bound as a function, variable, class, or condition"
+                     (symbol-not-describable-symbol condition))))
+  (:documentation "Signalled by CODE-DESCRIBE-SYMBOL for a symbol bound as none of
+the things it describes, such as a restart's name or a name not yet loaded.
+A lookup that found nothing, not a fault: the tools answer it as not found."))
+
 (declaim (ftype (function (string &key (:package (or null package symbol string)))
                           (values string string (or null string) (or null string)
                                   (or null string) (or null integer) t &optional))
@@ -667,8 +681,8 @@ downstream therefore failed for every file that does exist."
   "Return NAME, TYPE, ARGLIST, DOCUMENTATION, PATH, LINE and STALE for SYMBOL-NAME.
 STALE is CODE-FIND-DEFINITION's: the file changed after it was compiled.
 Handles functions, macros, generic functions, variables, classes,
-condition types, and structure types. Signals an error only when none
-of those bindings resolve. PATH/LINE may be NIL when unknown.
+condition types, and structure types. Signals SYMBOL-NOT-DESCRIBABLE only
+when none of those bindings resolve. PATH/LINE may be NIL when unknown.
 
 TYPE is one of:
   \"function\", \"generic-function\", \"macro\", \"variable\",
@@ -694,8 +708,7 @@ TYPE is one of:
             (class "class")
             (t "unbound"))))
     (when (string= type "unbound")
-      (error "Symbol ~A is not bound as a function, variable, class, or condition"
-             sym))
+      (error 'symbol-not-describable :symbol sym :name (qualified-symbol-name sym)))
     #+sbcl
     (%ensure-sb-introspect)
     (let* ((fn (cond
