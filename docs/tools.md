@@ -129,7 +129,9 @@ Input schema (JSON):
 - `locals_preview_max_depth` (integer, default `1`) / `locals_preview_max_elements` (integer,
   default `5`): bound those expansions
 - `locals_preview_skip_internal` (boolean, default `true`): skip cl-mcp, SBCL, ASDF and other
-  infrastructure frames when counting the N frames
+  infrastructure frames when counting the N frames. A local function or lambda counts as part
+  of the function it is written in (SBCL names it `(LABELS VISIT :IN OUTER)`), so one inside
+  your own function is your frame, here and in the backtrace
 
 Output fields:
 - `content`: last value as text
@@ -967,6 +969,11 @@ Output:
 - `stale` (`true`, present only then): as for `code-find`; the `Defined at` line says so
 
 The text ends with a pointer to `clos-describe` for a generic function (with its method count) or a class.
+
+A symbol bound as none of these — a restart's name, or a name whose system is not loaded yet —
+is answered as not found, the way `code-find` answers one: a result with `isError` and a
+`content` text naming the symbol qualified (`Nothing to describe for PKG::NAME: …`), not a
+JSON-RPC error.
 
 ## `code-find-references`
 Find who calls or references a symbol — its callers, the exact call sites inside
