@@ -588,9 +588,30 @@ BUILD-CODE-FIND-RESPONSE, annotates the Defined at line and sets \"stale\"."
         (concatenate 'string (subseq text 0 (1- *references-context-width*)) "…")
         text)))
 
-(defun %format-reference (stream ref)
-  "Write REF, one code-find-references reference object, to STREAM."
+(defun %shared-notes (refs)
+  "Return the notes that more than one of REFS carries, in the order they first
+appear.  Such a note is written out once under the list, as Note N, and the
+rows carrying it say only `note N': in a FiveAM project the same sentence about
+xref otherwise follows every test row."
+  (let ((seen '())
+        (shared '()))
+    (dolist (ref refs)
+      (let ((note (gethash "note" ref)))
+        (when note
+          (if (member note seen :test #'equal)
+              (pushnew note shared :test #'equal)
+              (push note seen)))))
+    (remove-if-not (lambda (note) (member note shared :test #'equal))
+                   (reverse seen))))
+
+(defun %format-reference (stream ref &optional shared-notes)
+  "Write REF, one code-find-references reference object, to STREAM.
+A note among SHARED-NOTES (%SHARED-NOTES) is written as `note N', its position
+there counted from one; any other note is written out."
   (let ((form-type (gethash "form_type" ref))
+        (note (let* ((note (gethash "note" ref))
+                     (shared (and note (position note shared-notes :test #'equal))))
+                (if shared (format nil "note ~D" (1+ shared)) note)))
         (form-name (gethash "form_name" ref))
         (caller (gethash "caller" ref))
         (type (gethash "type" ref))
@@ -604,7 +625,7 @@ BUILD-CODE-FIND-RESPONSE, annotates the Defined at line and sets \"stale\"."
       (form-type
        (format stream " (~A)" form-type)))
     (format stream " [~A]~:[~; TEST~]~@[ — ~A~]~%"
-            type (gethash "test" ref) (gethash "note" ref))
+            type (gethash "test" ref) note)
     ;; Sites sharing a line carry their column too: their context is the
     ;; same line of source, so without it the rows read as one site twice.
     ;; All sites are counted, so a shown row may carry a column because its
@@ -662,11 +683,15 @@ BUILD-CODE-FIND-RESPONSE, annotates the Defined at line and sets \"stale\"."
          (format s "~A (~A) — ~D form~:P in ~D file~:P~[~:;, ~:*~D test~:P~]~%"
                  (gethash "resolved_symbol" report) (gethash "symbol_kind" report)
                  count (gethash "file_count" report) (length tests))
-         (dolist (ref refs)
-           (%format-reference s ref))
-         (when (> count (length refs))
-           (format s "… ~D more form~:P (raise limit to see them)~%"
-                   (- count (length refs))))
+         (let ((shared-notes (%shared-notes refs)))
+           (dolist (ref refs)
+             (%format-reference s ref shared-notes))
+           (when (> count (length refs))
+             (format s "… ~D more form~:P (raise limit to see them)~%"
+                     (- count (length refs))))
+           (loop for note in shared-notes
+                 for number from 1
+                 do (format s "Note ~D: ~A~%" number note)))
          (when tests
            (format s "Tests: ~{~A~^, ~}~%"
                    (mapcar (lambda (test)

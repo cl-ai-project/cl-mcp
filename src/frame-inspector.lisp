@@ -55,11 +55,25 @@ restart is distinguishable from a symbol-named one."
                       :description (princ-to-string restart))))
 
 #+sbcl
+(defun %debug-var-name (var)
+  "Return VAR's name as SBCL's debugger writes it: its symbol's name, followed by
+#ID when ID is not zero.  A frame can hold several variables of one name -- an
+inner binding that shadows an argument, or the variables of a LABELS helper the
+compiler merged into its caller -- and SBCL tells them apart only by that id,
+so without it two locals read PATTERN with nothing to say which is which."
+  (let ((name (symbol-name (sb-di:debug-var-symbol var)))
+        (id (sb-di:debug-var-id var)))
+    (if (zerop id)
+        name
+        (format nil "~A#~D" name id))))
+
+#+sbcl
 (defun %frame-locals (frame print-level print-length
                       &key include-preview preview-max-depth preview-max-elements)
   "Extract local variable names and values from FRAME.
 Non-primitive values are registered in the object registry for drill-down inspection.
-When INCLUDE-PREVIEW is true, generates structural preview for non-primitive locals."
+When INCLUDE-PREVIEW is true, generates structural preview for non-primitive locals.
+A name is %DEBUG-VAR-NAME's, so two variables of one name stay apart."
   (let ((debug-fun (sb-di:frame-debug-fun frame))
         (locals '()))
     (handler-case
@@ -67,8 +81,8 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
           (when (eq (sb-di:debug-var-validity var (sb-di:frame-code-location frame))
                     :valid)
             (handler-case
-                (let ((sym (sb-di:debug-var-symbol var))
-                       (val (sb-di:debug-var-value var frame)))
+                (let ((name (%debug-var-name var))
+                      (val (sb-di:debug-var-value var frame)))
                   (if (inspectable-p val)
                       ;; Non-primitive: generate preview or just register
                       (if include-preview
@@ -76,7 +90,7 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
                                           val
                                           :max-depth (or preview-max-depth 1)
                                           :max-elements (or preview-max-elements 5))))
-                            (push (list :name (symbol-name sym)
+                            (push (list :name name
                                         :value (safe-prin1 val
                                                            :level print-level
                                                            :length print-length)
@@ -84,14 +98,14 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
                                         :preview preview)
                                   locals))
                           (let ((object-id (register-object val)))
-                            (push (list :name (symbol-name sym)
+                            (push (list :name name
                                         :value (safe-prin1 val
                                                            :level print-level
                                                            :length print-length)
                                         :object-id object-id)
                                   locals)))
                       ;; Primitive: just include name and value
-                      (push (list :name (symbol-name sym)
+                      (push (list :name name
                                   :value (safe-prin1 val
                                                      :level print-level
                                                      :length print-length))
@@ -113,13 +127,14 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
 (defun %frame-locals-for-debugger (frame print-level print-length
                                    &key include-preview preview-max-depth
                                         preview-max-elements)
-  "Extract FRAME locals while allowing every diagnostic condition to escape."
+  "Extract FRAME locals while allowing every diagnostic condition to escape.
+A name is %DEBUG-VAR-NAME's, as in %FRAME-LOCALS."
   (let ((debug-fun (sb-di:frame-debug-fun frame))
         (locals '()))
     (sb-di:do-debug-fun-vars (var debug-fun)
       (when (eq (sb-di:debug-var-validity var (sb-di:frame-code-location frame))
                 :valid)
-        (let ((sym (sb-di:debug-var-symbol var))
+        (let ((name (%debug-var-name var))
               (val (sb-di:debug-var-value var frame)))
           (if (inspectable-p val)
               (if include-preview
@@ -127,17 +142,17 @@ When INCLUDE-PREVIEW is true, generates structural preview for non-primitive loc
                                   val
                                   :max-depth (or preview-max-depth 1)
                                   :max-elements (or preview-max-elements 5))))
-                    (push (list :name (symbol-name sym)
+                    (push (list :name name
                                 :value (%debugger-prin1 val print-level print-length)
                                 :object-id (gethash "id" preview)
                                 :preview preview)
                           locals))
                   (let ((object-id (register-object val)))
-                    (push (list :name (symbol-name sym)
+                    (push (list :name name
                                 :value (%debugger-prin1 val print-level print-length)
                                 :object-id object-id)
                           locals)))
-              (push (list :name (symbol-name sym)
+              (push (list :name name
                           :value (%debugger-prin1 val print-level print-length))
                     locals)))))
     (nreverse locals)))

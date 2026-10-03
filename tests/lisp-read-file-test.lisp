@@ -358,6 +358,51 @@ returned list is the assertion the signature-layout tests below are built on."
       (ok (every (lambda (line) (scan "^ *\\d+: " line)) lines)
           "an unnumbered line means a signature spilled onto a continuation line"))))
 
+(defun %collapsed-line (name source)
+  "Return the one collapsed line lisp-read-file shows for SOURCE, written to
+tests/tmp/NAME.lisp."
+  (or (first (%collapsed-lines (format nil "tests/tmp/~A.lisp" name) source)) ""))
+
+(deftest lisp-read-file-collapsed-docstring-is-taken-by-position
+  ;; The docstring after ;; used to be the first string anywhere after the
+  ;; definition's name: a variable's string value, or a defstruct's docstring
+  ;; that the signature had already printed in its argument position.
+  (testing "a variable whose value is a string shows its docstring, not its value"
+    (let ((line (%collapsed-line "sig-doc-value"
+                                 (format nil "~A~%~A~%"
+                                         "(defparameter *sig-doc-value* \"the value\""
+                                         "  \"The real docstring.\")"))))
+      (ok (search ";; The real docstring." line))
+      (ok (not (search ";; the value" line)))
+      (ok (search "\"the value\"" line) "the value is still shown as the value")))
+  (testing "a variable whose value is a string and has no docstring shows none"
+    (let ((line (%collapsed-line "sig-doc-value-only"
+                                 (format nil "(defvar *sig-doc-value-only* \"just a value\")~%"))))
+      (ok (not (search ";;" line)))))
+  (testing "a defstruct's docstring is shown once, as its docstring"
+    (let ((line (%collapsed-line "sig-doc-struct"
+                                 (format nil "~A~%~A~%"
+                                         "(defstruct (sig-doc-route (:constructor %make))"
+                                         "  \"One route.\" (verb :get) (path \"/\"))"))))
+      (ok (search ";; One route." line))
+      (ok (eql (search "One route" line) (search "One route" line :from-end t))
+          "and only once")
+      (ok (search "(verb :get)" line) "its first slot takes the argument position")))
+  (testing "a function's docstring comes after its lambda list, never as its only form"
+    (ok (search ";; Doc." (%collapsed-line "sig-doc-defun"
+                                           (format nil "(defun sig-doc-f (x) \"Doc.\" x)~%"))))
+    (ok (search ";; Doc." (%collapsed-line
+                           "sig-doc-declare"
+                           (format nil "(defun sig-doc-g (x) (declare (ignore x)) \"Doc.\" 1)~%")))
+        "a docstring may follow the declarations")
+    (ok (not (search ";;" (%collapsed-line "sig-doc-returns-string"
+                                           (format nil "(defun sig-doc-h () \"a result\")~%"))))
+        "a lone string is the function's value (CLHS 3.4.11), not its documentation")
+    (ok (search ";; Doc." (%collapsed-line
+                           "sig-doc-method"
+                           (format nil "(defmethod sig-doc-m :around ((x t)) \"Doc.\" x)~%")))
+        "a method's docstring comes after its qualifiers and lambda list")))
+
 (defun %try-load (system)
   "Attempt to load SYSTEM via Quicklisp or ASDF. Returns T on success, NIL on failure."
   (handler-case

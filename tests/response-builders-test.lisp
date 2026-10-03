@@ -85,6 +85,38 @@
       (ok (search "src/b.lisp:10 (used in hidden) [call] — call not visible in source" text))
       (ok (search "[shadowed by flet]" text)))))
 
+(deftest build-code-find-references-response-states-a-shared-note-once
+  ;; In a FiveAM project every test row carried the same ~150-character
+  ;; "not in xref (...)" sentence, five times over for one symbol.
+  (testing "a note several rows share is numbered on them and written out once"
+    (let* ((shared (concatenate 'string "not in xref (top-level form, code compiled while "
+                                "loading such as a FiveAM test, or not compiled since it was "
+                                "written)"))
+           (alone "call not visible in source (produced by a macro expansion)")
+           (r (build-code-find-references-response
+               (%report (list (%ref :path "t/a.lisp" :line 1 :form-type "test"
+                                    :form-name "one" :note shared)
+                              (%ref :path "t/a.lisp" :line 5 :form-type "test"
+                                    :form-name "two" :note shared)
+                              (%ref :path "src/b.lisp" :line 9 :caller "hidden" :note alone)
+                              (%ref :path "t/a.lisp" :line 9 :form-type "test"
+                                    :form-name "three" :note shared)))))
+           (text (first-text r)))
+      (ok (search "t/a.lisp:1 (test one) [call] — note 1" text))
+      (ok (search "t/a.lisp:5 (test two) [call] — note 1" text))
+      (ok (search "t/a.lisp:9 (test three) [call] — note 1" text))
+      (ok (search (format nil "Note 1: ~A" shared) text))
+      (ok (eql (search shared text) (search shared text :from-end t))
+          "the shared sentence appears once")
+      (ok (search (format nil "src/b.lisp:9 (used in hidden) [call] — ~A" alone) text)
+          "a note only one row carries stays on that row")
+      (ok (every (lambda (ref) (equal (gethash "note" ref) (if (equal (gethash "path" ref)
+                                                                      "src/b.lisp")
+                                                                alone
+                                                                shared)))
+                 (gethash "refs" r))
+          "the JSON keeps each row's note whole"))))
+
 (deftest build-code-find-references-response-tells-same-line-sites-apart
   (testing "two call sites on one line carry their columns, so the rows differ"
     ;; Both rows once read `22: (pack (make-crate "a") (make-crate "b"))',
