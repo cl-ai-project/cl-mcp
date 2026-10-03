@@ -279,15 +279,28 @@ Read text from an allow‑listed path.
 
 Input:
 - `path` (string, required): project‑relative or absolute inside a registered ASDF system's source tree
-- `offset` / `limit` (integer, optional, non-negative): a window counted in **characters**;
-  `offset` is 0-based and `limit` omitted reads to the end. At most 1 MB is read in one call,
-  and a larger `limit` is an error
+- `offset` (integer, optional, non-negative): 0-based **byte** (octet) position to start at
+- `limit` (integer, optional, non-negative): how many **characters** to return; omitted, the
+  read goes to the end, up to the 1 MB cap. A `limit` above 1 MB is an error
+
+The two count different units. In an ASCII file they agree; in UTF-8 text with multibyte
+characters they do not: for the file `éXYZ`, `offset: 2, limit: 2` returns `XY` (`é` is two
+bytes), not `YZ`. Advancing `offset` by the number of characters returned therefore repeats
+text, and an offset inside a multibyte character splits it. To page through non-ASCII text,
+read it whole when it fits under the cap, or use `lisp-read-file` (raw mode, `offset`/`limit`
+in lines) for a source file.
 
 Output:
-- `content`: the text; when the read stopped short of the end it is followed by
-  `[TRUNCATED: file is N chars, showing M from offset O. Use offset=K to read more.]`
+- `content`: the text. Only when a read **without** `limit` hits the 1 MB cap is it followed by
+  `[TRUNCATED: file is N chars, showing M from offset O. Use offset=K to read more.]`, where N
+  is the file's size in bytes and K is O plus the characters shown — exact for ASCII, short of
+  the true position for multibyte text, for the reason above
 - `text` (the text alone), `path`, `offset`, `limit`
-- `truncated`, `file_length`, `read_length` (only when truncated)
+- `truncated`, `file_length` (bytes), `read_length` (characters): only with that marker
+
+A read **with** `limit` returns at most `limit` characters and nothing else: no marker and no
+length fields, even when the file goes on. A result shorter than `limit` means the end was
+reached; one exactly `limit` long may or may not be the end, so read on to find out.
 
 Policy: reads are allowed only when the resolved path is under the project root or under `asdf:system-source-directory` of a registered system.
 Dependency libs: reading source in Quicklisp/ASDF dependencies is permitted **only via `fs-read-file`**; do not shell out for metadata (`wc`, `stat`, etc.).

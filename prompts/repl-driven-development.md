@@ -151,7 +151,7 @@ the text a client actually renders.)
 - `name_pattern="^my-function$"`: expand forms whose definition name matches
 - `content_pattern="error"`: expand forms whose body matches the pattern
 - `collapsed=false`: full content (only when necessary; offset/limit are in lines)
-- Use `fs-read-file` only for non-Lisp files (README, JSON, YAML, config). Note: `fs-read-file` offset/limit are in characters, not lines
+- Use `fs-read-file` only for non-Lisp files (README, JSON, YAML, config). Note: `fs-read-file`'s `offset` is a byte position and `limit` a character count, not lines; they agree only for ASCII text, and a `limit` read that stops short carries no truncation marker
 
 ## REPL Evaluation
 
