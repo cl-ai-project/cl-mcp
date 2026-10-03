@@ -1273,6 +1273,251 @@ RUN-TESTS-LOAD-LOCK-WRAPPER-COVERS-LOAD-PHASE-ONLY is running its thunk.")
           (ignore-errors (asdf:clear-system system))
           (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
 
+(defun %write-fixture-file (directory name text)
+  "Write TEXT to the file NAME under DIRECTORY, replacing it."
+  (with-open-file (s (uiop:merge-pathnames* name directory)
+                     :direction :output :if-exists :supersede)
+    (write-string text s)))
+
+(defun %call-with-fiveam-fixture (system files thunk)
+  "Write SYSTEM's .asd -- a FiveAM system of FILES' components, in order -- and
+FILES, a list of (NAME . TEXT), to a fresh directory on ASDF's central registry,
+then call THUNK with that directory.  Clean up the system, its suites and the
+directory afterwards.  NIL when FiveAM is not installed, after a skip."
+  (if (null (asdf:find-system "fiveam" nil))
+      (rove:skip "FiveAM is not installed; the FiveAM backend cannot run here")
+      (let ((dir (uiop:ensure-directory-pathname
+                  (uiop:merge-pathnames*
+                   (format nil "cl-mcp-~A-~A-~A/" system (get-universal-time)
+                           (random 100000))
+                   (uiop:temporary-directory)))))
+        (asdf:load-system "fiveam")
+        (unwind-protect
+             (progn
+               (ensure-directories-exist dir)
+               (%write-fiveam-fixture-asd dir system (mapcar #'car files))
+               (dolist (file files)
+                 (%write-fixture-file dir (car file) (cdr file)))
+               (let ((asdf:*central-registry* (cons dir asdf:*central-registry*)))
+                 (asdf:load-asd (uiop:merge-pathnames* (format nil "~A.asd" system) dir))
+                 (funcall thunk dir)))
+          (let ((var (uiop:find-symbol* '#:*toplevel-suites* :fiveam)))
+            (setf (symbol-value var)
+                  (remove-if (lambda (suite) (search (string-upcase system) (string suite)))
+                             (symbol-value var))))
+          (ignore-errors (asdf:clear-system system))
+          (ignore-errors (uiop:delete-directory-tree dir :validate t))))))
+
+(defun %write-fiveam-fixture-asd (directory system file-names)
+  "Write SYSTEM's .asd under DIRECTORY: FiveAM, then FILE-NAMES' components in
+order, each with a :type when its extension is not lisp."
+  (%write-fixture-file
+   directory (format nil "~A.asd" system)
+   (format nil "(asdf:defsystem ~S~%  :depends-on (\"fiveam\")~%  :components (~{~A~^ ~}))~%"
+           system
+           (mapcar (lambda (file)
+                     (let ((type (pathname-type file)))
+                       (format nil "(:file ~S~@[ :type ~S~])" (pathname-name file)
+                               (and type (string/= type "lisp") type))))
+                   file-names))))
+
+(defun %fiveam-fixture-file (package suite tests &optional parent)
+  "Return the text of a FiveAM test file: PACKAGE using FiveAM, the suite SUITE
+(written as given, `:root' or `sub-suite') nested :in PARENT when that is
+given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
+  (format nil "(defpackage #:~A (:use #:cl #:fiveam))~%(in-package #:~A)~%~
+               (def-suite ~A~@[ :in ~A~])~%(in-suite ~A)~%~{~A~%~}"
+          package package suite parent suite
+          (mapcar (lambda (test) (format nil "(test ~A (is ~A))" (first test) (second test)))
+                  tests)))
+
+(defun %summary-text (result)
+  "Return the content text run-tests' response would show for RESULT."
+  (gethash "text" (aref (gethash "content" (build-run-tests-response result)) 0)))
+
+(defun %headline (result)
+  "Return the first line of RESULT's summary text: its verdict."
+  (let ((text (%summary-text result)))
+    (subseq text 0 (position #\Newline text))))
+
+(deftest run-tests-recompiles-a-file-edited-in-the-second-of-its-compile
+  ;; ASDF compares FILE-WRITE-DATEs, whole seconds: an edit landing in the
+  ;; second its fasl was written leaves the two equal, ASDF keeps the fasl, and
+  ;; run-tests reported the old, passing test as a pass.  Review of #218: a
+  ;; source whose extension is not .lisp, (:file "main" :type "cl"), was missed.
+  (dolist (file '("main.lisp" "main.cl"))
+    (testing (format nil "a source named ~A" file)
+      (flet ((main (form)
+               (%fiveam-fixture-file "fiveam-stale-probe/main" ":fiveam-stale-probe"
+                                     (list (list "stays-true" form)))))
+        (%call-with-fiveam-fixture
+         "fiveam-stale-probe"
+         (list (cons file (main "(= 1 1)")))
+         (lambda (dir)
+           (ok (equal "✓ PASS" (%headline (run-tests "fiveam-stale-probe")))
+               "the first run passes")
+           (let* ((source (uiop:merge-pathnames* file dir))
+                  (fasl (asdf:apply-output-translations (compile-file-pathname source))))
+             (%write-fixture-file dir file (main "(= 1 2)"))
+             ;; The edit's second is the compile's: give the source the fasl's date.
+             (let ((unix (- (file-write-date fasl) (encode-universal-time 0 0 0 1 1 1970 0))))
+               (sb-posix:utimes (namestring source) unix unix))
+             (ok (= 1 (gethash "failed" (run-tests "fiveam-stale-probe")))
+                 "the edited, failing test is what runs"))))))))
+
+(deftest run-tests-recompiles-a-same-second-edit-in-a-package-inferred-project
+  ;; The run clears the test system's subsystems from ASDF before reloading,
+  ;; so a stale-fasl check that reads only registered components, run after
+  ;; that clearing, missed this layout -- the scaffold's -- entirely.
+  (if (null (asdf:find-system "fiveam" nil))
+      (rove:skip "FiveAM is not installed; the FiveAM backend cannot run here")
+      (let ((dir (uiop:ensure-directory-pathname
+                  (uiop:merge-pathnames*
+                   (format nil "cl-mcp-pi-stale-probe-~A-~A/" (get-universal-time)
+                           (random 100000))
+                   (uiop:temporary-directory)))))
+        (asdf:load-system "fiveam")
+        (flet ((test-file (form)
+                 (%fiveam-fixture-file "pi-stale-probe/tests/main-test" ":pi-stale-probe"
+                                       (list (list "stays-true" form)))))
+          (unwind-protect
+               (progn
+                 (ensure-directories-exist (uiop:merge-pathnames* "tests/" dir))
+                 (%write-fixture-file
+                  dir "pi-stale-probe.asd"
+                  ;; One system per .asd, named after it: run inside an ASDF
+                  ;; session -- rove cl-mcp.asd's test-op -- a second system of
+                  ;; the file is not defined again after run-tests clears it.
+                  (format nil "(asdf:defsystem \"pi-stale-probe\" ~
+                                 :class :package-inferred-system ~
+                                 :depends-on (\"fiveam\" \"pi-stale-probe/tests/main-test\"))~%"))
+                 (%write-fixture-file dir "tests/main-test.lisp" (test-file "(= 1 1)"))
+                 (let ((asdf:*central-registry* (cons dir asdf:*central-registry*)))
+                   (asdf:load-asd (uiop:merge-pathnames* "pi-stale-probe.asd" dir))
+                   (let ((first (run-tests "pi-stale-probe")))
+                     ;; Quote the reason: a fixture that fails to load fails
+                     ;; every later step for that reason, not the one tested.
+                     (ok (equal "✓ PASS" (%headline first))
+                         (format nil "the first run passes (~A)"
+                                 (let ((failures (gethash "failed_tests" first)))
+                                   (and (plusp (length failures))
+                                        (gethash "reason" (aref failures 0)))))))
+                   (let* ((source (uiop:merge-pathnames* "tests/main-test.lisp" dir))
+                          (fasl (asdf:apply-output-translations
+                                 (compile-file-pathname source))))
+                     (%write-fixture-file dir "tests/main-test.lisp" (test-file "(= 1 2)"))
+                     (let ((unix (- (file-write-date fasl)
+                                    (encode-universal-time 0 0 0 1 1 1970 0))))
+                       (sb-posix:utimes (namestring source) unix unix))
+                     (ok (= 1 (gethash "failed" (run-tests "pi-stale-probe")))
+                         "the edited, failing test is what runs"))))
+            (let ((var (uiop:find-symbol* '#:*toplevel-suites* :fiveam)))
+              (setf (symbol-value var) (remove :pi-stale-probe (symbol-value var))))
+            (dolist (system '("pi-stale-probe/tests/main-test" "pi-stale-probe"))
+              (ignore-errors (asdf:clear-system system)))
+            (ignore-errors (uiop:delete-directory-tree dir :validate t)))))))
+
+(deftest run-tests-names-fiveam-suites-outside-the-root-suite
+  ;; A suite declared without :in is run by run-tests, which runs every
+  ;; top-level suite of the system, but not by a test-op that runs the root
+  ;; suite -- the scaffold's runs (fiveam:run! :<name>).  run-tests reported
+  ;; them as an ordinary pass, so nothing showed the two runs differed.
+  (%call-with-fiveam-fixture
+   "fiveam-orphan-probe"
+   (list (cons "main.lisp" (%fiveam-fixture-file "fiveam-orphan-probe/main"
+                                                 ":fiveam-orphan-probe"
+                                                 '(("in-root" "(= 1 1)"))))
+         (cons "orphan.lisp" (%fiveam-fixture-file "fiveam-orphan-probe/orphan" "orphan-suite"
+                                                   '(("outside-root" "(= 1 1)")))))
+   (lambda (dir)
+     (declare (ignore dir))
+     (let* ((result (run-tests "fiveam-orphan-probe"))
+            (outside (gethash "suites_outside_root" result))
+            (text (%summary-text result)))
+       (ok (= 2 (gethash "passed" result)) "both suites still run")
+       (ok (equal '("FIVEAM-ORPHAN-PROBE/ORPHAN::ORPHAN-SUITE") (coerce outside 'list))
+           "the suite outside the root is named")
+       (ok (search "⚠ PASS" text) "the headline is not a plain pass")
+       (ok (search ":in" text) "and the text says how to nest it")))))
+
+(deftest run-tests-names-fiveam-tests-that-did-not-run
+  ;; A file declaring its suite :in the root suite, loaded before the file that
+  ;; defines the root on a worker that had loaded both: its suite joins the
+  ;; previous root object, the new root replaces it, and its tests are reached
+  ;; from no suite.  run-tests ran the rest and reported a pass, the tests just
+  ;; gone.
+  (%call-with-fiveam-fixture
+   "fiveam-lost-probe"
+   (list (cons "main.lisp" (%fiveam-fixture-file "fiveam-lost-probe/main" ":fiveam-lost-probe"
+                                                 '(("in-root" "(= 1 1)"))))
+         (cons "sub.lisp" (%fiveam-fixture-file "fiveam-lost-probe/sub" "sub-suite"
+                                                '(("in-sub" "(= 1 1)"))
+                                                ":fiveam-lost-probe")))
+   (lambda (dir)
+     (ok (= 2 (gethash "passed" (run-tests "fiveam-lost-probe"))) "in order, both run")
+     (%write-fiveam-fixture-asd dir "fiveam-lost-probe" '("sub.lisp" "main.lisp"))
+     (let* ((result (run-tests "fiveam-lost-probe"))
+            (lost (coerce (gethash "unreached_tests" result) 'list))
+            (text (%summary-text result)))
+       (ok (equal '("FIVEAM-LOST-PROBE/SUB::IN-SUB") lost) "the lost test is named")
+       (ok (search "⚠ PASS, BUT 1 TEST DID NOT RUN" text) "and the headline says so")
+       (ok (search ":import-from" text) "with the way to fix the load order")))))
+
+(deftest run-tests-counts-a-fiveam-dependency-as-run
+  ;; Review of #218: a test the root suite reaches only as another test's
+  ;; :depends-on -- FiveAM runs it on demand -- was listed as unreached
+  ;; although it ran and passed.
+  (%call-with-fiveam-fixture
+   "fiveam-dependency-probe"
+   (list (cons "main.lisp"
+               (format nil "(defpackage #:fiveam-dependency-probe/main (:use #:cl #:fiveam))~%~
+                            (in-package #:fiveam-dependency-probe/main)~%~
+                            (def-suite :fiveam-dependency-probe)~%~
+                            (in-suite :fiveam-dependency-probe)~%~
+                            (test (prerequisite :suite nil) (is (= 1 1)))~%~
+                            (test (root-test :depends-on (and prerequisite)) (is (= 2 2)))~%")))
+   (lambda (dir)
+     (declare (ignore dir))
+     (let ((result (run-tests "fiveam-dependency-probe")))
+       (ok (= 2 (gethash "passed" result)) "both tests ran")
+       (ok (null (gethash "unreached_tests" result)) "and neither is called unreached")
+       (ok (equal "✓ PASS" (%headline result)))))))
+
+(deftest run-tests-names-a-fiveam-dependency-a-short-circuit-skipped
+  ;; Second review of #218: walking :depends-on counted every name in the
+  ;; expression as run, but (or prerequisite never-run) stops at the first
+  ;; dependency that passes, so FiveAM never runs the second -- which was then
+  ;; hidden behind a plain pass.  What ran is what produced results.
+  (%call-with-fiveam-fixture
+   "fiveam-short-probe"
+   (list (cons "main.lisp"
+               (format nil "(defpackage #:fiveam-short-probe/main (:use #:cl #:fiveam))~%~
+                            (in-package #:fiveam-short-probe/main)~%~
+                            (def-suite :fiveam-short-probe)~%~
+                            (in-suite :fiveam-short-probe)~%~
+                            (test (prerequisite :suite nil) (is (= 1 1)))~%~
+                            (test (never-run :suite nil) (is (= 1 1)))~%~
+                            (test (root-test :depends-on (or prerequisite never-run)) ~
+                            (is (= 2 2)))~%")))
+   (lambda (dir)
+     (declare (ignore dir))
+     (let ((result (run-tests "fiveam-short-probe")))
+       (ok (= 2 (gethash "passed" result)) "root-test and prerequisite ran")
+       (ok (equal '("FIVEAM-SHORT-PROBE/MAIN::NEVER-RUN")
+                  (coerce (gethash "unreached_tests" result) 'list))
+           "the dependency the OR never reached is named")))))
+
+(deftest load-failure-hint-for-an-unknown-fiveam-suite-names-the-load-order
+  ;; On a fresh worker the same mistake is loud -- `Unknown suite X' -- but the
+  ;; hint blamed the worker's package state and sent the caller to replace it.
+  (let* ((condition (make-condition 'simple-error :format-control "Unknown suite ~A."
+                                                  :format-arguments '("PROBE")))
+         (result (cl-mcp/src/test-runner-core:make-load-failure-result "probe/tests"
+                                                                         condition))
+         (reason (gethash "reason" (aref (gethash "failed_tests" result) 0))))
+    (ok (search ":import-from" reason))
+    (ok (not (search "pool-kill-worker" reason)))))
+
 (defun %call-with-prove-fixture (thunk &key failing)
   "Write a prove-asdf test system with two test files -- one green, one with a
 SUBTEST and, when FAILING, one wrong assertion -- then call THUNK with its name."

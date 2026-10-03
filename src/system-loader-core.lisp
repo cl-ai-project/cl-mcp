@@ -19,6 +19,8 @@
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/utils/paths
                 #:discover-asd-in-project)
+  (:import-from #:cl-mcp/src/utils/fasls
+                #:fasl-source-directory)
   (:export #:load-system
            #:*system-load-lock-wrapper*
            #:*last-compiler-stderr*))
@@ -246,40 +248,27 @@ DEFUN' lines are noise that drown real warnings."
 
 (defun %delete-system-fasls (system-name)
   "Delete the cached fasls under SYSTEM-NAME's output-translation
-directory.  ASDF's :FORCE T only forces the named system, not its
-dependencies — for package-inferred systems the actual code lives in
-dependency subsystems, so forcing the top system alone recompiles
+directory (FASL-SOURCE-DIRECTORY).  ASDF's :FORCE T only forces the named
+system, not its dependencies — for package-inferred systems the actual code
+lives in dependency subsystems, so forcing the top system alone recompiles
 nothing, and a source edit landing in the same second as the previous
 compile is masked by second-granularity FILE-WRITE-DATE.  Deleting the
 fasls makes recompilation unconditional.
 
-A package-inferred subsystem such as \"my-app/src/contracts\" has no source
-directory of its own, so its primary system's (\"my-app\") is used: that
-directory holds every fasl in the tree, the subsystem's dependencies
-included.
-
 Returns two values: the number of files deleted (0 when no system or cache
 directory is found), and the name of the system whose directory was
 cleared, or NIL."
-  (flet ((source-dir-of (name)
-           (let ((system (ignore-errors (asdf:find-system name nil))))
-             (and system (asdf:system-source-directory system)))))
-    (let* ((primary (asdf:primary-system-name system-name))
-           (cleared (cond ((source-dir-of system-name) system-name)
-                          ((and (string/= primary system-name)
-                                (source-dir-of primary))
-                           primary)))
-           (source-dir (and cleared (source-dir-of cleared))))
-      (if (null source-dir)
-          (values 0 nil)
-          (let ((deleted 0))
-            (dolist (fasl (directory
-                           (merge-pathnames
-                            "**/*.fasl"
-                            (asdf:apply-output-translations source-dir))))
-              (when (ignore-errors (delete-file fasl) t)
-                (incf deleted)))
-            (values deleted cleared))))))
+  (multiple-value-bind (source-dir cleared) (fasl-source-directory system-name)
+    (if (null source-dir)
+        (values 0 nil)
+        (let ((deleted 0))
+          (dolist (fasl (directory
+                         (merge-pathnames
+                          "**/*.fasl"
+                          (asdf:apply-output-translations source-dir))))
+            (when (ignore-errors (delete-file fasl) t)
+              (incf deleted)))
+          (values deleted cleared)))))
 
 (declaim (ftype (function (string &key (:force boolean)
                                        (:clear-fasls boolean)

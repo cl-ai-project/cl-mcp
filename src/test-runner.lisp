@@ -29,7 +29,10 @@
   :description "Run tests for a system and return structured results.
 
 The system is force-reloaded from disk first, so no load-system is needed after
-an edit, and test/tests names resolve against the freshly loaded packages.
+an edit, and test/tests names resolve against the freshly loaded packages.  A
+file of the system's tree written in the same second as its fasl is recompiled
+too: ASDF's one-second timestamps would otherwise keep the code from before
+the edit.
 
 Supports multiple test frameworks with automatic detection:
 - Rove: Full structured results with failure details
@@ -50,6 +53,16 @@ Returns:
   reasons of every test that skipped anything, including one that passed on
   what it did check; also listed under 'Skipped' in the summary text.  When
   every test only skipped, the summary says ALL SKIPPED, not PASS
+- unreached_tests (array, FiveAM whole-system run, present when any) -- tests
+  defined in the system's packages that the run did not reach, read from
+  FiveAM's record of the run (a test run as another's :depends-on counts):
+  typically a file declaring its suite :in the root suite that loaded before
+  the root's file, on a warm worker.  The summary then says PASS, BUT N TESTS
+  DID NOT RUN
+- suites_outside_root (array, FiveAM, present when any) -- run suites other than
+  the root suite (the one named after the primary system): run here, but a
+  test-op that runs the root suite skips them.  The summary then says PASS, BUT
+  N SUITES ARE OUTSIDE THE ROOT SUITE
 - framework (string)
 - duration_ms (integer)
 - stdout (string, present when non-empty) — captured test standard output
