@@ -154,35 +154,52 @@ replace: the old method, macro function or function, or NIL."
 under the logical host SYS:CONTRIB; (UIOP and ASDF among them)."
   (uiop:string-prefix-p "SYS:CONTRIB;" (string-upcase source)))
 
+(defun %replacement-definition (warning)
+  "Return the new definition WARNING, an SBCL redefinition warning, announces
+when it carries one -- the new function or macro function of a DEFUN or
+DEFMACRO -- or NIL."
+  #+sbcl
+  (ignore-errors
+   (and (slot-exists-p warning 'sb-kernel::new-function)
+        (slot-boundp warning 'sb-kernel::new-function)
+        (slot-value warning 'sb-kernel::new-function)))
+  #-sbcl
+  (declare (ignore warning))
+  #-sbcl
+  nil)
+
+(defun %file-of-source-p (file source)
+  "True when FILE, a namestring, is SOURCE or the fasl compiled from it: ASDF's,
+under the output translations, or one COMPILE-FILE wrote beside it."
+  (or (string= file source)
+      (let ((fasl (ignore-errors (compile-file-pathname source))))
+        (and fasl
+             (or (string= file (namestring fasl))
+                 (let ((translated (ignore-errors (asdf:apply-output-translations fasl))))
+                   (and translated (string= file (namestring translated)))))))))
+
 (defun %same-file-redefinition-p (warning)
-  "True when WARNING redefines something the file being compiled or loaded made
-before -- that file is the old definition's source, or the fasl compiled from
-it -- or something a module SBCL ships defined (SYS:CONTRIB;), such as the UIOP
-a system's newer copy replaces.  Either is a reload, which says nothing.  A
-redefinition by another file of one's own -- two files defining one name -- is
-not one, nor is one whose old source or current file cannot be told.  A name
-defined twice in one file is told apart by SBCL's own DUPLICATE-DEFINITION
-warning, which this does not touch."
-  (let* ((source (%definition-file (%redefined-definition warning)))
-         (current (or *compile-file-truename* *load-truename*))
-         (current (and current (namestring current))))
+  "True when WARNING redefines something from the file the replacement comes
+from -- a reload, which says nothing -- or something a module SBCL ships defined
+(SYS:CONTRIB;), such as the UIOP a system's newer copy replaces.
+
+The replacement's file is the new function's own source when the warning carries
+it (a DEFUN's or DEFMACRO's).  Otherwise it is the file being compiled or loaded,
+and each of those must be the old source or its fasl: a file LOADed while another
+compiles is the one making the definition, and which of the two is innermost
+cannot be told.  A redefinition by another file -- two files defining one name --
+is never one, nor one whose sources cannot be told.  A name defined twice in one
+file is SBCL's own DUPLICATE-DEFINITION warning, which this does not touch."
+  (let ((source (%definition-file (%redefined-definition warning))))
     (and source
-         (or ;; A newer version of a library SBCL ships, which a project can
-             ;; neither avoid nor act on.
-             (%bundled-module-source-p source)
-             (and current
-                  (or (string= current source)
-                      ;; Its fasl: ASDF's, under the output translations, or
-                      ;; one COMPILE-FILE wrote beside it.
-                      (let ((fasl (ignore-errors (compile-file-pathname source))))
-                        (and fasl
-                             (or (string= current (namestring fasl))
-                                 (let ((translated
-                                         (ignore-errors
-                                          (asdf:apply-output-translations fasl))))
-                                   (and translated
-                                        (string= current
-                                                 (namestring translated)))))))))))))
+         (or (%bundled-module-source-p source)
+             (let ((replacement (%definition-file (%replacement-definition warning))))
+               (if replacement
+                   (string= replacement source)
+                   (let ((files (remove nil (list *compile-file-truename* *load-truename*))))
+                     (and files
+                          (every (lambda (file) (%file-of-source-p (namestring file) source))
+                                 files)))))))))
 
 (defun %decide-suppress-redefinition (flag cleared-prior-p)
   "Resolve the `suppress-redefinition-warnings` flag against whether a

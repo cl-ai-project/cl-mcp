@@ -332,7 +332,44 @@
                    (multiple-value-bind (result count details) (load* b)
                      (declare (ignore result))
                      (ok (= 1 count) "b.lisp redefining a.lisp's PROBE is still reported")
-                     (ok (search "PROBE" details) "and named")))))
+                     (ok (search "PROBE" details) "and named")))
+                 ;; Review of #220: b.lisp loaded while a.lisp compiles.  The
+                 ;; file compiling is a.lisp, PROBE's old source, but the one
+                 ;; replacing PROBE is b.lisp: still two files, one name.
+                 (load* a)
+                 (write-file* "a.lisp"
+                              (format nil "(in-package #:clmcp-redef-probe)~%~
+                                           (eval-when (:compile-toplevel)~%  ~
+                                             (load ~S))~%~
+                                           (defun probe () 1)~%"
+                                      (namestring (uiop:merge-pathnames* "b.lisp" dir))))
+                 (multiple-value-bind (result count)
+                     (cl-mcp/src/system-loader-core::%call-with-suppressed-output
+                      (lambda ()
+                        (let ((*error-output* (make-broadcast-stream)))
+                          (compile-file (uiop:merge-pathnames* "a.lisp" dir))))
+                      :suppress-redefinition :same-file)
+                   (declare (ignore result))
+                   (ok (= 1 count)
+                       "b.lisp loaded while another file compiles is still reported"))
+                 ;; A method's warning carries no new function: then every file
+                 ;; being compiled or loaded must be the old source.
+                 (write-file* "m.lisp" (format nil "(in-package #:clmcp-redef-probe)~%~
+                                                    (defmethod probe-gf ((x integer)) (1+ x))~%"))
+                 (write-file* "a.lisp"
+                              (format nil "(in-package #:clmcp-redef-probe)~%~
+                                           (eval-when (:compile-toplevel)~%  ~
+                                             (load ~S))~%"
+                                      (namestring (uiop:merge-pathnames* "m.lisp" dir))))
+                 (multiple-value-bind (result count details)
+                     (cl-mcp/src/system-loader-core::%call-with-suppressed-output
+                      (lambda ()
+                        (let ((*error-output* (make-broadcast-stream)))
+                          (compile-file (uiop:merge-pathnames* "a.lisp" dir))))
+                      :suppress-redefinition :same-file)
+                   (declare (ignore result))
+                   (ok (and (= 1 count) (search "DEFMETHOD" details))
+                       "a method another file replaces while one compiles is reported"))))
           (ignore-errors (delete-package package-name))
           (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))))
 
