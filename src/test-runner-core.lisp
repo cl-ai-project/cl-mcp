@@ -1882,6 +1882,37 @@ an (or a b) may never need it -- and is left to what the run recorded."
              for name = (and test (ignore-errors (slot-value test name-slot)))
              when name collect name)))))
 
+(defvar *fiveam-started-tests* nil
+  "While RUN-TESTS runs FiveAM, an EQ hash table whose keys are the names of the
+tests FiveAM started (%ENSURE-FIVEAM-START-RECORDER); NIL otherwise.")
+
+(defun %ensure-fiveam-start-recorder ()
+  "Give FiveAM's RUN-TEST-LAMBDA, which runs one test's body, a :BEFORE method on
+TEST-CASE that records the test's name in *FIVEAM-STARTED-TESTS* while that is a
+table, unless there is one.  Neither a test's status nor its results keep that it
+ran: a fiveam:run inside a later test resets every status, and a test with no
+assertions leaves no result.  Outside RUN-TESTS the method does nothing.  Built
+with the MOP rather than DEFMETHOD, since FiveAM is loaded only at run time."
+  (let* ((gf-name (%fiveam-symbol "RUN-TEST-LAMBDA"))
+         (class-name (%fiveam-symbol "TEST-CASE"))
+         (name-slot (%fiveam-symbol "NAME"))
+         (gf (and gf-name (fboundp gf-name) (fdefinition gf-name)))
+         (class (and class-name (find-class class-name nil))))
+    (when (and (typep gf 'generic-function) class name-slot
+               (null (find-method gf '(:before) (list class) nil)))
+      (add-method gf (make-instance
+                      'standard-method
+                      :qualifiers '(:before)
+                      :specializers (list class)
+                      :lambda-list '(test)
+                      :function (lambda (arguments next-methods)
+                                  (declare (ignore next-methods))
+                                  (let ((table *fiveam-started-tests*)
+                                        (name (ignore-errors
+                                               (slot-value (first arguments) name-slot))))
+                                    (when (and table name)
+                                      (setf (gethash name table) t)))))))))
+
 (defun %fiveam-ran-test-names ()
   "Return the names of the FiveAM tests the last fiveam:run reached: those it ran,
 and those it skipped for a dependency not satisfied.  RUN sets every test's
@@ -2000,7 +2031,8 @@ crash, returns a failure result with one failed entry per CRASH-TEST-NAMES
 designator.  Shared by RUN-FIVEAM-TESTS and RUN-FIVEAM-SELECTED-TESTS so the
 stream-capture, crash-handling, and result-assembly logic lives in one place.
 Two more values follow the hash of a run that finished: the names of the tests
-it reached (%FIVEAM-RAN-TEST-NAMES, and those its results came from), and T.
+it reached -- started (%ENSURE-FIVEAM-START-RECORDER), skipped or left results
+(%FIVEAM-RAN-TEST-NAMES, %FIVEAM-RESULT-TEST-NAMES) -- and T.
 A crashed run returns its hash only.
 
 Capture covers the thread the suite runs on.  Output from threads the suite
@@ -2011,8 +2043,12 @@ invisible to it.  The Rove backend has the same property."
         (stdout-stream (%make-capture-stream))
         (stderr-stream (%make-capture-stream))
         (debug-stream (%make-capture-stream))
+        (started (make-hash-table :test 'eq))
         all-results
         ran-names)
+    ;; A check on top of the run: without the recorder, the statuses and the
+    ;; results still say most of what ran.
+    (ignore-errors (%ensure-fiveam-start-recorder))
     (flet ((duration-ms ()
              (round (* 1000 (/ (- (get-internal-real-time) start-time)
                                internal-time-units-per-second))))
@@ -2024,10 +2060,12 @@ invisible to it.  The Rove backend has the same property."
             (let ((results
                     (let ((*test-debug-output* debug-stream)
                           (*standard-output* stdout-stream)
-                          (*error-output* stderr-stream))
+                          (*error-output* stderr-stream)
+                          (*fiveam-started-tests* started))
                       (%fiveam-run spec))))
               ;; Now: the next spec's run resets what this one reached.  The
-              ;; results keep what a run inside a test reset already.
+              ;; started tests and the results keep what a run inside a test
+              ;; reset already; the statuses add the skipped tests.
               (setf ran-names (union ran-names
                                      (union (%fiveam-ran-test-names)
                                             (%fiveam-result-test-names results))))
@@ -2056,7 +2094,7 @@ invisible to it.  The Rove backend has the same property."
            :failed-tests failure-details
            :framework :fiveam :duration (duration-ms))
           (stdout) (stderr) (debug-output))
-         ran-names
+         (union ran-names (loop for name being the hash-keys of started collect name))
          t)))))
 
 (defun run-fiveam-tests (system-name)

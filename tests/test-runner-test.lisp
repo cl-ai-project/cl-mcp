@@ -1536,6 +1536,33 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
            (format nil "nothing that ran is named unreached (~S)"
                    (gethash "unreached_tests" result)))))))
 
+(deftest run-tests-keeps-a-setup-dependency-across-a-nested-fiveam-run
+  ;; Fourth review of #218: a dependency in no suite that only prepares state
+  ;; leaves FiveAM no result, and a fiveam:run inside a later test resets its
+  ;; status -- so nothing recorded that it ran, although the test depending on
+  ;; it checks that it did.  What a run starts is recorded as it starts.
+  (%call-with-fiveam-fixture
+   "fiveam-setup-probe"
+   (list (cons "main.lisp"
+               (format nil "(defpackage #:fiveam-setup-probe/main (:use #:cl #:fiveam))~%~
+                            (in-package #:fiveam-setup-probe/main)~%~
+                            (defvar *ready* nil)~%~
+                            (def-suite :fiveam-setup-probe)~%~
+                            (in-suite :fiveam-setup-probe)~%~
+                            (test (setup :suite nil) (setf *ready* t))~%~
+                            (test (uses-setup :depends-on setup) (is (eq t *ready*)))~%~
+                            (test (helper :suite nil) (is (= 3 3)))~%~
+                            (test runs-nested ~
+                            (is (eq t (let ((*test-dribble* (make-broadcast-stream))) ~
+                            (results-status (run 'helper))))))~%")))
+   (lambda (dir)
+     (declare (ignore dir))
+     (let ((result (run-tests "fiveam-setup-probe")))
+       (ok (= 2 (gethash "passed" result)) "uses-setup and runs-nested pass")
+       (ok (null (gethash "unreached_tests" result))
+           (format nil "the setup that ran is not named unreached (~S)"
+                   (gethash "unreached_tests" result)))))))
+
 (deftest load-failure-hint-for-an-unknown-fiveam-suite-names-the-load-order
   ;; On a fresh worker the same mistake is loud -- `Unknown suite X' -- but the
   ;; hint blamed the worker's package state and sent the caller to replace it.
