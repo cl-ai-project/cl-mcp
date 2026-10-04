@@ -232,275 +232,176 @@
             (ok (cl-mcp/src/system-loader-core::%redefinition-warning-p hit)
                 "primary typep branch of %redefinition-warning-p matches")))))))
 
-(deftest decide-suppress-redefinition-helper
-  (testing "%decide-suppress-redefinition honors :auto, T, and NIL"
-    (testing ":auto keeps only the conflicts a project can act on"
-      (ok (eq :conflicts
-              (cl-mcp/src/system-loader-core::%decide-suppress-redefinition :auto))))
-    (testing "explicit T always suppresses"
-      (ok (eq t (cl-mcp/src/system-loader-core::%decide-suppress-redefinition t))))
-    (testing "explicit NIL never suppresses"
-      (ok (null (cl-mcp/src/system-loader-core::%decide-suppress-redefinition nil))))))
-
 (deftest suppress-redefinition-warning-filter-behavior
-  (testing "%call-with-suppressed-output drops redefining-warnings when asked"
-    (let ((thunk
-           (lambda ()
-             (warn "redefining FOO in DEFUN")
-             (warn "redefining BAR in DEFMACRO")
-             (warn "something real and bad")
-             :done)))
-      (testing "without suppress: all three warnings counted"
-        (multiple-value-bind (result warning-count details)
-            (cl-mcp/src/system-loader-core::%call-with-suppressed-output thunk)
-          (ok (eq result :done))
-          (ok (= warning-count 3))
-          (ok (search "redefining FOO" details))
-          (ok (search "something real" details))))
-      (testing "with suppress: redefining-warnings filtered, real one remains"
-        (multiple-value-bind (result warning-count details)
-            (cl-mcp/src/system-loader-core::%call-with-suppressed-output
-             thunk :suppress-redefinition t)
-          (ok (eq result :done))
-          (ok (= warning-count 1))
-          (ok (null (search "redefining FOO" details)))
-          (ok (search "something real" details)))))))
+  (testing "%call-with-suppressed-output drops redefining-warnings and keeps the rest"
+    (multiple-value-bind (result warning-count details)
+        (cl-mcp/src/system-loader-core::%call-with-suppressed-output
+         (lambda ()
+           (warn "redefining FOO in DEFUN")
+           (warn "redefining BAR in DEFMACRO")
+           (warn "something real and bad")
+           :done))
+      (ok (eq result :done))
+      (ok (= warning-count 1))
+      (ok (null (search "redefining FOO" details)))
+      (ok (search "something real" details)))))
 
-(deftest redefinitions-are-reported-only-as-project-conflicts
-  ;; A fresh worker's first load-system cl-mcp reported about 2000
-  ;; redefinitions: its dependencies read again, SBCL's UIOP replaced by
-  ;; Quicklisp's.  A reload says nothing either.  What is worth a word is a
-  ;; file of the project replacing what another file defined.
-  (let* ((root (uiop:ensure-directory-pathname
-                (uiop:merge-pathnames*
-                 (format nil "clmcp-redef-~36R/"
-                         (random most-positive-fixnum (make-random-state t)))
-                 (uiop:temporary-directory))))
-         (project (uiop:merge-pathnames* "proj/" root))
-         (library (uiop:merge-pathnames* "lib/" root))
-         ;; Where a Quicklisp dist keeps a release of the same project.
-         (release (uiop:merge-pathnames* "proj-20240101-git/" root))
-         (link (uiop:merge-pathnames* "link" root))
-         (package-name "CLMCP-REDEF-PROBE"))
-    (labels ((write-file* (dir name text)
-               (let ((path (uiop:merge-pathnames* name dir)))
+(deftest redefinition-notices-are-dropped-and-other-warnings-kept
+  ;; Redefining is ordinary Common Lisp development, and a reload exists to
+  ;; do it: every redefinition notice is dropped -- a first load's, a
+  ;; reload's, another file's -- and no other warning is touched.  Each case
+  ;; is first run bare, to show SBCL does signal the notices it drops.
+  (let ((root (uiop:ensure-directory-pathname
+               (uiop:merge-pathnames*
+                (format nil "clmcp-redef-~36R/"
+                        (random most-positive-fixnum (make-random-state t)))
+                (uiop:temporary-directory))))
+        (package-name "CLMCP-REDEF-PROBE"))
+    (labels ((write-file* (name text)
+               (let ((path (uiop:merge-pathnames* name root)))
                  (ensure-directories-exist path)
                  (with-open-file (out path :direction :output :if-exists :supersede)
                    (write-string text out))
                  path))
-             (source (name)
-               (format nil "(in-package #:clmcp-redef-probe)~%~A~%" name))
-             (compile* (path)
-               (let ((*error-output* (make-broadcast-stream)))
-                 (handler-bind ((warning #'muffle-warning))
-                   (compile-file path))))
-             (load* (fasl &key (directories (list (truename project))))
-               (cl-mcp/src/system-loader-core::%call-with-suppressed-output
-                (lambda () (load fasl))
-                :suppress-redefinition
-                (cl-mcp/src/system-loader-core::%decide-suppress-redefinition :auto)
-                :project-directories directories
-                :project-name "proj"))
-             (conflicts (fasl)
-               (multiple-value-bind (result count details) (load* fasl)
+             (source (text)
+               (format nil "(in-package #:clmcp-redef-probe)~%~A~%" text))
+             (fresh-package ()
+               (ignore-errors (delete-package package-name))
+               (make-package package-name :use '(#:cl)))
+             (bare (thunk)
+               ;; The redefinition notices THUNK signals, counted and muffled.
+               (let ((count 0)
+                     (*error-output* (make-broadcast-stream)))
+                 (handler-bind ((warning (lambda (w)
+                                           (when (typep w 'sb-kernel:redefinition-warning)
+                                             (incf count))
+                                           (muffle-warning w))))
+                   (funcall thunk))
+                 count))
+             (suppressed (thunk)
+               (multiple-value-bind (result count details)
+                   (cl-mcp/src/system-loader-core::%call-with-suppressed-output
+                    (lambda ()
+                      (let ((*error-output* (make-broadcast-stream)))
+                        (funcall thunk))))
                  (declare (ignore result))
                  (values count details))))
       (unwind-protect
-           (let* ((base (compile* (write-file* library "base.lisp"
-                                               (format nil "(defpackage #:clmcp-redef-probe ~
-                                                            (:use #:cl))~%~
-                                                            (in-package #:clmcp-redef-probe)~%~
-                                                            (defun lib-fn () 1)~%"))))
-                  (copy-text (source "(defun copied () 1)
-(defgeneric copied-gf (x))
-(defmethod copied-gf ((x integer)) x)"))
-                  (release-copy (progn (load base)
-                                       (compile* (write-file* release "src/copy.lisp"
-                                                              copy-text))))
-                  (lib-lists (compile* (write-file* library "lists.lisp"
-                                                    (source "(defun lib-flatten () 1)"))))
-                  (a (compile* (write-file* project "a.lisp"
-                                            (source "(defun probe () 1)
+           (let* ((a (write-file* "a.lisp" (source "(defun probe () 1)
 (defmacro probe-macro () 1)
 (defgeneric probe-gf (x))
-(defmethod probe-gf ((x integer)) x)
-(defun (setf probe-place) (value) value)"))))
-                  (b (compile* (write-file* project "b.lisp" (source "(defun probe () 2)"))))
-                  (m (compile* (write-file* project "m.lisp"
-                                            (source "(defmethod probe-gf ((x integer)) (1+ x))"))))
-                  (g (compile* (write-file* project "g.lisp" (source "(defgeneric probe-gf (x))"))))
-                  (setter (compile* (write-file* project "setter.lisp"
-                                                 (source "(defun (setf probe-place) (value)
-  (1+ value))"))))
-                  (clobber (compile* (write-file* project "clobber.lisp"
-                                                  (source "(defun lib-fn () 2)"))))
-                  (project-lists (compile* (write-file* project "lists.lisp"
-                                                        (source "(defun lib-flatten () 2)"))))
-                  (late (compile* (write-file* library "late.lisp" (source "(defun probe () 3)"))))
-                  (project-copy (compile* (write-file* project "src/copy.lisp" copy-text))))
-             (testing "a reload of a project file says nothing"
-               (load* a)
-               (multiple-value-bind (count details) (conflicts a)
-                 (ok (zerop count) (format nil "defun, defmacro, defgeneric, defmethod, ~
-                                                (setf f) (~A)"
-                                           details))))
-             (testing "another project file redefining a function is reported, with both files"
-               (multiple-value-bind (count details) (conflicts b)
-                 (ok (= 1 count) "b.lisp replaces a.lisp's PROBE")
-                 (ok (and (search "PROBE" details)
-                          (search "a.lisp" details)
-                          (search "b.lisp" details))
-                     "the details name the old file and the new one")))
-             (testing "a method, a generic function and a (setf f) are reported too"
-               (multiple-value-bind (count details) (conflicts m)
-                 (ok (and (= 1 count) (search "DEFMETHOD" details)) "m.lisp replaces a method"))
-               (multiple-value-bind (count details) (conflicts g)
-                 (ok (and (= 1 count) (search "DEFGENERIC" details))
-                     "g.lisp replaces a.lisp's generic function"))
-               (multiple-value-bind (count details) (conflicts setter)
-                 (ok (and (= 1 count) (search "a.lisp" details))
-                     "setter.lisp replaces a.lisp's (setf probe-place)")))
-             (testing "a macro is reported, and so is a function replacing it"
-               ;; Review of the rework: (fdefinition 'macro) is SBCL's guard,
-               ;; defined in SYS:SRC;, and (macro-function 'function) is NIL.
-               (let ((macro (compile* (write-file* project "macro.lisp"
-                                                   (source "(defmacro probe-macro () 2)"))))
-                     (function (compile* (write-file* project "function.lisp"
-                                                      (source "(defun probe-macro () 3)")))))
-                 (load* a)
-                 (multiple-value-bind (count details) (conflicts macro)
-                   (ok (and (= 1 count) (search "a.lisp" details))
-                       "macro.lisp replaces a.lisp's PROBE-MACRO"))
-                 (multiple-value-bind (count details) (conflicts function)
-                   (ok (and (plusp count) (search "macro.lisp" details)
-                            (not (search "SYS:" details)))
-                       (format nil "function.lisp replaces macro.lisp's macro (~A)" details)))))
-             (testing "a project file clobbering a library's function is reported"
-               (ok (= 1 (conflicts clobber)) "clobber.lisp replaces lib-fn")
-               (load* lib-lists)
-               (ok (= 1 (conflicts project-lists))
-                   "proj/lists.lisp replaces lib/lists.lisp's function: a shared path is no copy"))
-             (testing "what a dependency redefines is not the project's to act on"
-               (ok (zerop (conflicts late)) "lib/late.lisp replaces PROBE"))
-             (testing "a copy of the same file from another release is a reload"
-               (load* release-copy)
-               (multiple-value-bind (count details) (conflicts project-copy)
-                 (ok (zerop count) (format nil "proj/src/copy.lisp over ~
-                                                proj-20240101-git/src/copy.lisp (~A)"
-                                           details))))
-             (testing "without a project directory nothing is a conflict"
-               (load* a)
-               (multiple-value-bind (result count) (load* b :directories nil)
-                 (declare (ignore result))
-                 (ok (zerop count))))
-             (testing "the replacing file is the new definition's, not the one compiling"
-               ;; Review of #220: b.lisp loaded while a.lisp compiles replaces
-               ;; a.lisp's PROBE: still two files, one name.
-               (load* a)
-               (let ((nested (write-file* project "nested.lisp"
-                                          (format nil "(eval-when (:compile-toplevel) (load ~S))~%"
-                                                  (namestring b)))))
-                 (multiple-value-bind (result count)
-                     (cl-mcp/src/system-loader-core::%call-with-suppressed-output
-                      (lambda ()
-                        (let ((*error-output* (make-broadcast-stream)))
-                          (compile-file nested)))
-                      :suppress-redefinition :conflicts
-                      :project-directories (list (truename project)))
-                   (declare (ignore result))
-                   (ok (= 1 count)))))
-             (testing "a source name that is no file proves nothing"
-               ;; Review of #220 (160da27): code compiled inside repl-eval's
-               ;; compilation unit records "repl-eval" for every file.
-               (flet ((compile-as-repl (path)
-                        (with-compilation-unit (:override t :source-namestring "repl-eval")
-                          (compile* path))))
-                 (load* (compile-as-repl (uiop:merge-pathnames* "a.lisp" project)))
-                 (ok (zerop (conflicts (compile-as-repl
-                                        (uiop:merge-pathnames* "b.lisp" project)))))))
-             (testing "a recorded name with a character a namestring escapes is still a file"
-               (let ((odd (uiop:merge-pathnames* (uiop:parse-native-namestring "odd[1].lisp")
-                                                 project)))
-                 (with-open-file (out odd :direction :output :if-exists :supersede)
-                   (write-string "nil" out))
-                 (ok (cl-mcp/src/system-loader-core::%source-file (namestring odd))
-                     "SBCL records odd\\[1].lisp")))
-             (testing "a project reached through a symbolic link is still one project"
-               (uiop:run-program (list "ln" "-s"
-                                       (uiop:native-namestring
-                                        (string-right-trim "/" (namestring project)))
-                                       (uiop:native-namestring link)))
-               (let* ((via (uiop:ensure-directory-pathname link))
-                      (a-via (compile* (uiop:merge-pathnames* "a.lisp" via)))
-                      (m-via (compile* (uiop:merge-pathnames* "m.lisp" via))))
-                 (load* a-via)
-                 (multiple-value-bind (count details) (conflicts a-via)
-                   (ok (zerop count) (format nil "reloaded through the link (~A)" details)))
-                 (ok (= 1 (conflicts m-via)) "m.lisp through the link replaces a.lisp's method")))
-             (testing "a name defined twice in one file is still SBCL's own warning"
-               (let ((dup (write-file* project "dup.lisp"
-                                       (source "(defun dup () 1)
-(defun dup () 2)"))))
-                 (multiple-value-bind (result count details)
-                     (cl-mcp/src/system-loader-core::%call-with-suppressed-output
-                      (lambda () (load (compile-file dup)))
-                      :suppress-redefinition :conflicts
-                      :project-directories (list (truename project)))
-                   (declare (ignore result))
-                   (ok (and (plusp count) (search "Duplicate definition" details)))))))
+(defmethod probe-gf ((x integer)) x)")))
+                  (b (write-file* "b.lisp" (source "(defun probe () 2)")))
+                  (other (write-file* "other.lisp" (source "(defun dup () 1)
+(defun dup () 2)
+(defun calls-missing () (clmcp-redef-missing-function))")))
+                  (load-a (lambda () (load (compile-file a))))
+                  (reload-a (lambda () (load (compile-file-pathname a))))
+                  (load-b (lambda () (load (compile-file b)))))
+             (testing "a first load: compile-file defines the macro, the fasl again"
+               (fresh-package)
+               (ok (plusp (bare load-a)) "SBCL signals it")
+               (fresh-package)
+               (multiple-value-bind (count details) (suppressed load-a)
+                 (ok (zerop count) (format nil "dropped (~A)" details))))
+             (testing "a reload"
+               (ok (<= 4 (bare reload-a)) "SBCL signals one per definition")
+               (multiple-value-bind (count details) (suppressed reload-a)
+                 (ok (zerop count) (format nil "dropped (~A)" details))))
+             (testing "another file's redefinition"
+               (ok (= 1 (bare load-b)) "SBCL signals it")
+               (bare reload-a)
+               (multiple-value-bind (count details) (suppressed load-b)
+                 (ok (zerop count) (format nil "dropped (~A)" details))))
+             (testing "warnings of other kinds are kept"
+               (multiple-value-bind (count details)
+                   (suppressed (lambda () (load (compile-file other))))
+                 (ok (not (search "redefining" details))
+                     (format nil "the second DUP's notice is dropped (~A)" details))
+                 (ok (search "Duplicate definition" details) "Duplicate definition is kept")
+                 (ok (search "CLMCP-REDEF-MISSING-FUNCTION" details)
+                     "an undefined function is kept")
+                 (ok (<= 2 count) (format nil "and counted (~A)" details)))))
         (ignore-errors (delete-package package-name))
-        ;; rm, not DELETE-FILE: the link itself goes, never what it names.
-        (uiop:run-program (list "rm" "-f" (uiop:native-namestring link))
-                          :ignore-error-status t)
         (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore)))))
 
-(deftest project-directories-cover-sources-the-asd-moves-elsewhere
-  ;; Review of the rework: an .asd in systems/ with :pathname "../src/" has
-  ;; every source outside its own directory.
-  (let* ((root (uiop:ensure-directory-pathname
-                (uiop:merge-pathnames*
-                 (format nil "clmcp-redef-dirs-~36R/"
-                         (random most-positive-fixnum (make-random-state t)))
-                 (uiop:temporary-directory))))
-         (asd (uiop:merge-pathnames* "systems/clmcp-redef-moved.asd" root))
-         (source (uiop:merge-pathnames* "src/one.lisp" root)))
-    (unwind-protect
-         (progn
-           (ensure-directories-exist asd)
-           (ensure-directories-exist source)
-           (with-open-file (out asd :direction :output :if-exists :supersede)
-             (write-string "(defsystem \"clmcp-redef-moved\" :pathname \"../src/\"
-  :components ((:file \"one\")))" out))
-           (with-open-file (out source :direction :output :if-exists :supersede)
-             (write-string "nil" out))
-           (asdf:load-asd asd)
-           (let ((directories (cl-mcp/src/system-loader-core::%project-directories
-                               "clmcp-redef-moved/sub")))
-             (ok (equal (truename (uiop:merge-pathnames* "systems/" root)) (first directories))
-                 "the .asd's directory first")
-             (ok (member (truename (uiop:merge-pathnames* "src/" root)) directories
-                         :test #'equal)
-                 "and the one :pathname moves the sources to")))
-      (asdf:clear-system "clmcp-redef-moved")
-      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+(deftest load-system-drops-redefinition-notices-on-first-load-and-reload
+  ;; Through load-system itself: a first load (force=false) and a reload
+  ;; (force=true) of a system whose second file redefines its first file's
+  ;; function, with a warning of another kind signalled while it loads.
+  (let ((root (uiop:ensure-directory-pathname
+               (uiop:merge-pathnames*
+                (format nil "clmcp-redef-system-~36R/"
+                        (random most-positive-fixnum (make-random-state t)))
+                (uiop:temporary-directory))))
+        (system "clmcp-redef-fixture")
+        (package-name "CLMCP-REDEF-FIXTURE"))
+    (flet ((write-file* (name text)
+             (let ((path (uiop:merge-pathnames* name root)))
+               (ensure-directories-exist path)
+               (with-open-file (out path :direction :output :if-exists :supersede)
+                 (write-string text out))
+               path))
+           (forget ()
+             (asdf:clear-system system)
+             (ignore-errors (delete-package package-name))
+             (asdf:load-asd (uiop:merge-pathnames* "clmcp-redef-fixture.asd" root)))
+           (bare-redefinitions (reload-p)
+             ;; What ASDF's own load signals, with nothing dropped.  A reload
+             ;; clears the system as load-system does: ASDF refuses :force in
+             ;; a call nested in another operation, such as rove's test-op.
+             (let ((count 0)
+                   (*error-output* (make-broadcast-stream))
+                   (*standard-output* (make-broadcast-stream)))
+               (when reload-p
+                 (asdf:clear-system system)
+                 (asdf:load-asd (uiop:merge-pathnames* "clmcp-redef-fixture.asd" root)))
+               (handler-bind ((warning (lambda (w)
+                                         (when (typep w 'sb-kernel:redefinition-warning)
+                                           (incf count))
+                                         (muffle-warning w))))
+                 (asdf:load-system system))
+               count)))
+      (unwind-protect
+           (progn
+             (write-file* "clmcp-redef-fixture.asd"
+                          "(defsystem \"clmcp-redef-fixture\" :serial t
+  :components ((:file \"package\") (:file \"a\") (:file \"b\") (:file \"other\")))")
+             (write-file* "package.lisp" "(defpackage #:clmcp-redef-fixture (:use #:cl))")
+             (write-file* "a.lisp" "(in-package #:clmcp-redef-fixture)
+(defun probe () 1)")
+             (write-file* "b.lisp" "(in-package #:clmcp-redef-fixture)
+(defun probe () 2)")
+             (write-file* "other.lisp" "(in-package #:clmcp-redef-fixture)
+(warn \"clmcp-redef-fixture: a warning of another kind\")")
+             (forget)
+             (ok (plusp (bare-redefinitions nil)) "a bare first load signals a redefinition")
+             (ok (plusp (bare-redefinitions t)) "and so does a bare reload")
+             (forget)
+             (dolist (force '(nil t))
+               (let* ((ht (load-system system :force force))
+                      (details (or (gethash "warning_details" ht) "")))
+                 (ok (string= "loaded" (gethash "status" ht))
+                     (format nil "~:[first load~;reload~] loaded" force))
+                 (ok (search "a warning of another kind" details)
+                     (format nil "~:[first load~;reload~]: the other warning is kept" force))
+                 (ok (and (= 1 (gethash "warnings" ht))
+                          (not (search "redefining" details)))
+                     (format nil "~:[first load~;reload~]: no redefinition (~A)"
+                             force details)))))
+        (asdf:clear-system system)
+        (ignore-errors (delete-package package-name))
+        (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore)))))
 
-(deftest load-system-force-default-auto-suppresses-redefinition
+(deftest load-system-force-reload-reports-no-redefinitions
   (testing "force=true on an already-loaded system reports zero warnings
-(the implied redefining-warnings are now auto-filtered)"
+(the redefinitions a reload makes are dropped)"
     (let ((ht (load-system "cl-mcp" :force t)))
       (ok (hash-table-p ht))
       (ok (string= "loaded" (gethash "status" ht)))
       (ok (integerp (gethash "warnings" ht)))
       (ok (zerop (gethash "warnings" ht))
           "reloading an already-loaded system must not surface noise"))))
-
-(deftest load-system-explicit-suppress-nil-is-honored
-  (testing "explicit :suppress-redefinition-warnings nil is wired through without errors"
-    (let ((ht (load-system "cl-mcp"
-                           :force t
-                           :suppress-redefinition-warnings nil)))
-      (ok (hash-table-p ht))
-      (ok (string= "loaded" (gethash "status" ht))))))
 
 (deftest load-system-clear-fasls-recompiles-package-inferred
   (testing "clear_fasls recompiles dependency subsystems regardless of timestamps"

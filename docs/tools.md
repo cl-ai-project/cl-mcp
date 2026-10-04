@@ -255,17 +255,10 @@ Output fields:
 - `status` (string): `"loaded"`, `"timeout"`, or `"error"`
 - `duration_ms` (integer): load time in milliseconds
 - `warnings` (integer): number of compiler warnings (when loaded). SBCL's `redefining X in
-  DEFUN` notices are left out — a reload redefines what it reloads, and a dependency the
-  worker already had is read again — except a conflict the project can act on: a file under
-  the system's directory (or the one its `:pathname` names) replacing what another file
-  defined (two files defining one name, or a `defun` on a library's symbol inherited by
-  `:use`). A copy of the same file from another checkout or a Quicklisp release of the same
-  project is a reload. A definition moved to another file is reported once, by the load that
-  moves it. A name defined twice in one file is SBCL's own `Duplicate
-  definition` warning for a `defun` or `defmacro`; a `defmethod` written twice in one file is
-  not reported
-- `warning_details` (string|null): warning text (when warnings > 0); a kept redefinition
-  ends with `(defined in OLD-FILE, redefined in NEW-FILE)`
+  DEFUN` notices are left out, on a first load and a reload alike: redefining is ordinary
+  Common Lisp development, and a reload exists to do it. Other warnings (duplicate
+  definition, type, undefined function or variable, package variance) are counted
+- `warning_details` (string|null): warning text (when warnings > 0)
 - `forced` (boolean, when loaded): whether force-reload was applied
 - `clear_fasls` (boolean, when loaded): whether `clear_fasls` was requested
 - `auto_discovered_asd` (string, when it happened): the system was not known to ASDF, and this

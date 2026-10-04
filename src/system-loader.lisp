@@ -43,17 +43,10 @@ same second as the last compile can be missed. clear_fasls=true is the
 guaranteed rebuild.
 
 Warning handling: SBCL 'redefining X in DEFUN' notifications are dropped
-from the warnings count/details -- a reload redefines what it reloads, and a
-dependency the worker already had is read again -- except a conflict the
-project can act on: a file under the system's directory replacing what
-another file defined (two files defining one name, or a DEFUN on a
-library's symbol inherited by :use).  Such a warning stays, naming both
-files.  A definition moved to another file is reported once, by the load
-that moves it.  A name defined twice in one file is SBCL's separate 'Duplicate
-definition' warning for a DEFUN or DEFMACRO; one DEFMETHOD written twice in
-a file is not reported.
-Real warnings (style, type, package variance) always pass through
-unchanged.
+from the warnings count/details, on a first load and a reload alike:
+redefining is ordinary Common Lisp development, and a reload exists to do
+it.  Other warnings (duplicate definition, type, undefined function or
+variable, package variance) always pass through unchanged.
 
 Examples:
   First-time load: system='my-project', force=false

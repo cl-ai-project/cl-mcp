@@ -116,218 +116,33 @@ on other implementations so the filter still works in portable images."
              ;; are not mistakenly muffled.
              (search " in " text)))))
 
-(defun %definition-source-name (object)
-  "Return the source namestring SBCL recorded for OBJECT -- a function, a macro
-function, a generic function or a method -- or NIL when it cannot be told.  The
-name is as recorded, not yet known to be a file (%SOURCE-FILE)."
-  #+sbcl
-  (or (ignore-errors
-       (and (functionp object)
-            (not (typep object 'generic-function))
-            (sb-c::debug-source-namestring
-             (sb-c::debug-info-source
-              (sb-kernel:%code-debug-info
-               (sb-kernel:fun-code-header (sb-kernel:%fun-fun object)))))))
-      (ignore-errors
-       (sb-c:definition-source-location-namestring
-        (sb-pcl::definition-source object))))
-  #-sbcl
-  (progn object nil))
-
-(defun %new-definition-source-name (warning)
-  "Return the source namestring of the definition WARNING, an SBCL redefinition
-warning, announces -- recorded the same way as %DEFINITION-SOURCE-NAME's -- or NIL.
-A DEFGENERIC's or DEFMETHOD's warning carries it as its new location; a DEFUN's or
-DEFMACRO's loaded from a fasl carries no location, only the new function."
-  #+sbcl
-  (flet ((slot (name)
-           (and (slot-exists-p warning name)
-                (slot-boundp warning name)
-                (slot-value warning name))))
-    (ignore-errors
-     (let ((location (slot 'sb-kernel::new-location))
-           (function (slot 'sb-kernel::new-function)))
-       (or (and location (sb-c:definition-source-location-namestring location))
-           (and function (%definition-source-name function))))))
-  #-sbcl
-  (progn warning nil))
-
-(defun %source-file (name)
-  "Return the file NAME, a recorded source namestring, names, or NIL when it names
-none: a logical pathname as is (SBCL's own sources, SYS:SRC; and SYS:CONTRIB;),
-and an absolute path to an existing file as its truename, so a file reached
-through a symbolic link is one file.  SBCL records a NAMESTRING, which escapes
-[, * and ? with a backslash, so NAME is read as one first and as a native name
-after.  Code compiled inside another compilation unit can record that unit's
-name instead -- repl-eval gives every file compiled in it \"repl-eval\" -- and
-that names no file."
-  (and (stringp name)
-       (plusp (length name))
-       (if (char= (char name 0) #\/)
-           (or (ignore-errors (probe-file (parse-namestring name)))
-               (ignore-errors (probe-file (uiop:parse-native-namestring name))))
-           (ignore-errors (logical-pathname name)))))
-
-(defun %cached-source-file (name cache)
-  "%SOURCE-FILE of NAME, remembered in CACHE, an EQUAL hash table: a load
-redefines many definitions of one file."
-  (multiple-value-bind (file present-p) (gethash name cache)
-    (if present-p
-        file
-        (setf (gethash name cache) (%source-file name)))))
-
-(defun %redefined-definition (warning)
-  "Return the definition WARNING, an SBCL redefinition warning, is about to
-replace: the old method, or the old macro function or function of its name,
-whichever it was -- a DEFUN can replace a macro and a DEFMACRO a function, and
-FDEFINITION of a macro is SBCL's own guard, defined in no file of the project --
-or NIL."
-  #+sbcl
-  (ignore-errors
-   (if (typep warning 'sb-kernel:redefinition-with-defmethod)
-       (slot-value warning 'sb-kernel::old-method)
-       (let ((name (slot-value warning 'sb-kernel::name)))
-         (or (and (symbolp name) (macro-function name))
-             (and (fboundp name) (fdefinition name))))))
-  #-sbcl
-  (progn warning nil))
-
-(defun %name-prefix-p (prefix string)
-  "True when STRING starts with PREFIX, ignoring case."
-  (and (<= (length prefix) (length string))
-       (string-equal prefix string :end2 (length prefix))))
-
-(defun %copy-of-project-file-p (old new root project-name)
-  "True when OLD, a file outside ROOT, is another copy of NEW, a file under ROOT,
-one of the project's directories: OLD's path ends with NEW's path relative to
-ROOT, and the directory that path hangs from is named after the project --
-PROJECT-NAME, its primary system's name, or ROOT's own name -- as another
-checkout or a Quicklisp dist's release directory (alexandria-20241012-git) is.
-A project the worker had already loaded from elsewhere -- one of cl-mcp's own
-dependencies, being developed -- replaces every definition of its old copy, and
-none of that is a conflict.  A library file that only shares the path, such as
-a lists.lisp of its own, is not a copy."
-  (and (not (typep old 'logical-pathname))
-       (not (uiop:subpathp old root))
-       (let ((old-name (uiop:native-namestring old))
-             (suffix (concatenate 'string "/"
-                                  (uiop:native-namestring
-                                   (uiop:enough-pathname new root)))))
-         (and (uiop:string-suffix-p old-name suffix)
-              (let* ((parent (subseq old-name 0 (- (length old-name) (length suffix))))
-                     (directory (subseq parent
-                                        (1+ (or (position #\/ parent :from-end t) -1)))))
-                (some (lambda (name)
-                        (and (stringp name)
-                             (plusp (length name))
-                             (%name-prefix-p name directory)))
-                      (list project-name (car (last (pathname-directory root))))))))))
-
-(defun %redefinition-conflict (warning project-directories project-name cache)
-  "When WARNING, an SBCL redefinition warning, is a conflict the project can act
-on, return the old definition's file and the new one's; otherwise NIL.
-
-A conflict is a file under one of PROJECT-DIRECTORIES, truenames, replacing what
-another file defined: two of its files defining one name, or one of them
-clobbering a library's or SBCL's definition (a DEFUN on a symbol inherited by
-:USE).  Not one: a file redefining its own definitions -- a reload, which
-load-system exists to do -- anything a dependency redefines, a copy of the same
-file from elsewhere (%COPY-OF-PROJECT-FILE-P, with PROJECT-NAME), and anything
-whose old or new source names no file.  A definition moved from one file of the
-project to another is reported once, by the load that moves it, since the image
-still holds the old file's.  A name defined twice in one file is not told here:
-SBCL's own DUPLICATE-DEFINITION warning reports a DEFUN or DEFMACRO, and nothing
-reports a DEFMETHOD or DEFGENERIC.  CACHE is %CACHED-SOURCE-FILE's."
-  (let* ((new (and project-directories
-                   (%cached-source-file (%new-definition-source-name warning) cache)))
-         (root (and new
-                    (not (typep new 'logical-pathname))
-                    (find-if (lambda (directory) (uiop:subpathp new directory))
-                             project-directories))))
-    (when root
-      (let ((old (%cached-source-file
-                  (%definition-source-name (%redefined-definition warning))
-                  cache)))
-        (when (and old
-                   (not (equal old new))
-                   (not (%copy-of-project-file-p old new root project-name)))
-          (values old new))))))
-
-(defun %display-file (file)
-  "FILE, a pathname from %SOURCE-FILE, as text for a warning's details."
-  (if (typep file 'logical-pathname)
-      (namestring file)
-      (uiop:native-namestring file)))
-
-(defun %decide-suppress-redefinition (flag)
-  "Resolve the `suppress-redefinition-warnings` flag to a mode of
-%CALL-WITH-SUPPRESSED-OUTPUT.
-
-  :auto  - :CONFLICTS: drop every redefinition but a conflict the project can
-           act on (%REDEFINITION-CONFLICT).  A reload redefines what it
-           reloads, and a dependency the worker had already loaded is read
-           again; neither tells anyone anything.
-  T      - always suppress.
-  NIL    - never suppress."
-  (if (eq flag :auto) :conflicts flag))
-
-(defun %project-directories (system-name)
-  "Return the truenames of the directories of SYSTEM-NAME's primary system -- the
-project a load-system of it is about, whose files' conflicts are worth a word:
-the directory of its .asd first, then that of its components when :PATHNAME
-puts them elsewhere (an .asd in systems/ with :pathname \"../src/\") -- or NIL
-when ASDF cannot find it."
-  (ignore-errors
-   (let ((system (asdf:find-system (asdf:primary-system-name system-name) nil)))
-     (and system
-          (remove-duplicates
-           (loop for directory in (list (asdf:system-source-directory system)
-                                        (asdf:component-pathname system))
-                 for truename = (and directory (ignore-errors (truename directory)))
-                 when truename collect truename)
-           :test #'equal :from-end t)))))
-
-(defun %call-with-suppressed-output (thunk &key suppress-redefinition project-directories
-                                                project-name)
+(defun %call-with-suppressed-output (thunk)
   "Call THUNK with compilation and load output suppressed.
 Returns (values thunk-result warning-count warning-details compiler-stderr).
 The stderr string is also saved to *last-compiler-stderr* via unwind-protect
 so it survives error unwinds and can be retrieved by callers that catch the error.
 
-When SUPPRESS-REDEFINITION is non-nil, warnings identified by
-%REDEFINITION-WARNING-P are silently muffled and do not increment the
-returned count.  When it is :CONFLICTS, a conflict the project in
-PROJECT-DIRECTORIES, truenames, can act on is kept instead
-(%REDEFINITION-CONFLICT, with PROJECT-NAME, its primary system's name), and
-its details name both files; without PROJECT-DIRECTORIES nothing is one.  Useful under force=true reloads where
-'redefining X in DEFUN' lines are noise that drown real warnings."
+Redefinition notices (%REDEFINITION-WARNING-P) are muffled and not counted,
+on a first load and a reload alike: redefining is ordinary Common Lisp
+development, and a reload exists to do it.  Every other warning -- a
+duplicate definition in one file, a type conflict, an undefined function --
+is counted."
   (let ((warning-count 0)
         (warning-details (make-string-output-stream))
-        (stderr (make-string-output-stream))
-        (source-files (make-hash-table :test #'equal)))
+        (stderr (make-string-output-stream)))
     ;; Reset before each call so stale data from a previous run is not
     ;; mistakenly attributed to this invocation.
     (setf *last-compiler-stderr* nil)
     (flet ((handle-warning (w)
-             (let ((redefinition-p (and suppress-redefinition
-                                        (%redefinition-warning-p w))))
-               (multiple-value-bind (old new)
-                   (and redefinition-p
-                        (eq suppress-redefinition :conflicts)
-                        (%redefinition-conflict w project-directories project-name
-                                                source-files))
-                 (cond
-                   ((and redefinition-p (not old))
-                    (when (find-restart 'muffle-warning)
-                      (invoke-restart 'muffle-warning)))
-                   (t
-                    (incf warning-count)
-                    (if old
-                        (format warning-details "~A (defined in ~A, redefined in ~A)~%"
-                                w (%display-file old) (%display-file new))
-                        (format warning-details "~A~%" w))
-                    (when (find-restart 'muffle-warning)
-                      (invoke-restart 'muffle-warning))))))))
+             (cond
+               ((%redefinition-warning-p w)
+                (when (find-restart 'muffle-warning)
+                  (invoke-restart 'muffle-warning)))
+               (t
+                (incf warning-count)
+                (format warning-details "~A~%" w)
+                (when (find-restart 'muffle-warning)
+                  (invoke-restart 'muffle-warning))))))
       #+sbcl
       (let ((err-sym (find-symbol "*COMPILER-ERROR-OUTPUT*" "SB-C"))
             (note-sym (find-symbol "*COMPILER-NOTE-STREAM*" "SB-C"))
@@ -443,14 +258,12 @@ cleared, or NIL."
 
 (declaim (ftype (function (string &key (:force boolean)
                                        (:clear-fasls boolean)
-                                       (:timeout-seconds (or null (real (0))))
-                                       (:suppress-redefinition-warnings t))
+                                       (:timeout-seconds (or null (real (0)))))
                           (values hash-table &rest t))
                 load-system))
 
 (defun load-system
-       (system-name &key (force t) (clear-fasls nil) (timeout-seconds 120)
-                         (suppress-redefinition-warnings :auto))
+       (system-name &key (force t) (clear-fasls nil) (timeout-seconds 120))
   "Load ASDF system SYSTEM-NAME with structured result.
 
 When FORCE is true (default), clears loaded state before loading so
@@ -461,16 +274,10 @@ package-inferred dependency subsystems that :FORCE T alone would not
 rebuild. TIMEOUT-SECONDS must be a positive number
 or NIL (no timeout). Default is 120 seconds.
 
-SUPPRESS-REDEFINITION-WARNINGS controls whether SBCL
-'redefining X in DEFUN' style notifications are dropped from the
-captured warning stream.  Values:
-  :auto  - suppress all but a conflict the project can act on: a file
-           under SYSTEM-NAME's primary system's directories replacing
-           what another file defined (%REDEFINITION-CONFLICT).  A reload
-           redefines what it reloads, and a dependency the worker had
-           already loaded is read again; both are dropped.
-  T      - always suppress.
-  NIL    - never suppress (preserve pre-change behavior).
+SBCL's 'redefining X in DEFUN' notifications are dropped from the
+captured warnings, on a first load and a reload alike, whatever FORCE is
+and wherever the old definition came from; every other warning is kept
+(%CALL-WITH-SUPPRESSED-OUTPUT).
 
 If ASDF signals MISSING-COMPONENT for the requested system, searches
 *project-root* for a matching .asd file and retries once after
@@ -509,11 +316,7 @@ registering it."
                            (asdf:load-asd asd-src)))))
                     (%call-with-suppressed-output
                      (lambda ()
-                       (asdf:load-system system-name :force clear-fasls))
-                     :suppress-redefinition
-                     (%decide-suppress-redefinition suppress-redefinition-warnings)
-                     :project-directories (%project-directories system-name)
-                     :project-name (asdf:primary-system-name system-name))))
+                       (asdf:load-system system-name :force clear-fasls)))))
              (handler-case (%do-load)
                (asdf/find-component:missing-component (c)
                  (let* ((missing (princ-to-string
