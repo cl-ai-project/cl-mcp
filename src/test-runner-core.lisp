@@ -943,6 +943,9 @@ COMPILE-FILE-ERROR."
                 ;; so any deftest forms deleted from source since the
                 ;; previous load do not linger as ghost tests.
                 (ignore-errors (%rove-purge-ghost-suites system-name))
+                ;; FiveAM's, for the files the clearing below reloads.
+                (ignore-errors
+                  (%fiveam-purge-ghost-tests (cons system-name sub-systems)))
                 (asdf:clear-system system-name)
                 ;; Also clear test sub-systems so ASDF reloads them even
                 ;; when source files are unchanged.  Without this, deftest
@@ -1960,6 +1963,54 @@ a test file since deleted, which this worker still holds."
               (not (%removed-test-file-package-p (symbol-package name)))))
        ;; FiveAM lists a name again each time its test is redefined.
        (remove-duplicates (funcall test-names))))))
+
+(defun %reloaded-packages (system-names)
+  "Return the packages a reload of SYSTEM-NAMES, systems just cleared, defines
+again: each one named like a system (a package-inferred system's file) and each
+one a DEFPACKAGE in the systems' own source files names.  Dependencies are not
+followed -- a system not cleared is not reloaded, so what its files define would
+not come back.  The source scan interns into a throwaway package."
+  (let ((packages '())
+        (scan-package (make-package (gensym "CL-MCP-DEFPACKAGE-SCAN") :use '(:cl))))
+    (labels ((note (name)
+               ;; A DEFPACKAGE name comes as written; a system name in lower case.
+               (let ((package (and (stringp name)
+                                   (or (find-package name)
+                                       (find-package (string-upcase name))))))
+                 (when package (pushnew package packages))))
+             (walk (component)
+               (cond ((typep component 'asdf:cl-source-file)
+                      (let ((path (ignore-errors (asdf:component-pathname component))))
+                        (when (and path (probe-file path))
+                          (mapc #'note (%extract-defpackage-names-from-file
+                                        path scan-package)))))
+                     ((typep component 'asdf:parent-component)
+                      (mapc #'walk (asdf:component-children component))))))
+      (unwind-protect
+           (dolist (name system-names)
+             (note name)
+             (let ((system (ignore-errors (asdf:registered-system name))))
+               (when system (walk system))))
+        (ignore-errors (delete-package scan-package))))
+    packages))
+
+(defun %fiveam-purge-ghost-tests (system-names)
+  "Remove from FiveAM the tests of the packages a reload of SYSTEM-NAMES defines
+again (%RELOADED-PACKAGES), before that reload.  FiveAM keeps every test it was
+ever given, so a test deleted from its file would outlive it on this worker,
+reached by no suite and reported as never run; the reload defines the current
+ones again.  A test of any other package stays, and so does every suite: a
+def-suite replaces its suite when it runs again."
+  (let ((test-names (%fiveam-symbol "TEST-NAMES"))
+        (rem-test (%fiveam-symbol "REM-TEST")))
+    (when (and test-names rem-test (fboundp test-names) (fboundp rem-test))
+      (let ((packages (%reloaded-packages system-names)))
+        (dolist (name (remove-duplicates (funcall test-names)))
+          (when (and (symbolp name)
+                     (member (symbol-package name) packages)
+                     (let ((object (%fiveam-test-object name)))
+                       (and object (not (%fiveam-suite-p object)))))
+            (funcall rem-test name)))))))
 
 (defun %qualified-test-name (symbol)
   "Return SYMBOL written PACKAGE::NAME, or :NAME for a keyword."

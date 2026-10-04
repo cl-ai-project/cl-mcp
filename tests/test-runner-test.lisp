@@ -1438,7 +1438,10 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
        (ok (equal '("FIVEAM-ORPHAN-PROBE/ORPHAN::ORPHAN-SUITE") (coerce outside 'list))
            "the suite outside the root is named")
        (ok (search "⚠ PASS" text) "the headline is not a plain pass")
-       (ok (search ":in" text) "and the text says how to nest it")))))
+       (ok (search ":in" text) "and the text says how to nest it")
+       ;; A suite that says :in the root but loaded before the root's file on
+       ;; this worker is outside it too: that advice alone would be wrong.
+       (ok (search "already says so" text) "and what to do when it already is")))))
 
 (deftest run-tests-names-fiveam-tests-that-did-not-run
   ;; A file declaring its suite :in the root suite, loaded before the file that
@@ -1461,7 +1464,64 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
             (text (%summary-text result)))
        (ok (equal '("FIVEAM-LOST-PROBE/SUB::IN-SUB") lost) "the lost test is named")
        (ok (search "⚠ PASS, BUT 1 TEST DID NOT RUN" text) "and the headline says so")
-       (ok (search ":import-from" text) "with the way to fix the load order")))))
+       (ok (search ":import-from" text) "with the way to fix the load order")
+       (ok (search ":suite nil" text) "and the other cause, a test in no suite")))))
+
+(deftest run-tests-forgets-a-fiveam-test-deleted-from-its-file
+  ;; FiveAM keeps every test it was given.  The reload re-created the suite
+  ;; without a deleted test, which stayed registered on the worker, reached by
+  ;; nothing: run-tests named it under "Did not run", with load-order advice.
+  (%call-with-fiveam-fixture
+   "fiveam-ghost-probe"
+   (list (cons "main.lisp" (%fiveam-fixture-file "fiveam-ghost-probe/main" ":fiveam-ghost-probe"
+                                                 '(("kept" "(= 1 1)") ("deleted" "(= 2 2)")))))
+   (lambda (dir)
+     (ok (= 2 (gethash "passed" (run-tests "fiveam-ghost-probe"))) "both tests run first")
+     (%write-fixture-file dir "main.lisp"
+                          (%fiveam-fixture-file "fiveam-ghost-probe/main" ":fiveam-ghost-probe"
+                                                '(("kept" "(= 1 1)"))))
+     (let ((result (run-tests "fiveam-ghost-probe")))
+       (ok (= 1 (gethash "passed" result)) "only the test still in the file runs")
+       (ok (null (gethash "unreached_tests" result))
+           (format nil "the deleted test is not reported (~S)"
+                   (gethash "unreached_tests" result)))
+       (ok (equal "✓ PASS" (%headline result)) "a plain pass")))))
+
+(deftest run-tests-keeps-fiveam-tests-of-packages-it-does-not-reload
+  ;; Only a package the reload defines again loses its tests first: a test of
+  ;; any other package would not come back, and would vanish from the run.
+  (%call-with-fiveam-fixture
+   "fiveam-keep-probe"
+   (list (cons "main.lisp" (%fiveam-fixture-file "fiveam-keep-probe/main" ":fiveam-keep-probe"
+                                                 '(("in-root" "(= 1 1)")))))
+   (lambda (dir)
+     ;; A file of the system's namespace that is none of its components.
+     (%write-fixture-file dir "extra.lisp"
+                          (format nil "(defpackage #:fiveam-keep-probe/extra ~
+                                         (:use #:cl #:fiveam))~%~
+                                       (in-package #:fiveam-keep-probe/extra)~%~
+                                       (test (loaded-by-hand :suite nil) (is (= 1 1)))~%"))
+     (unwind-protect
+          (progn
+            (load (uiop:merge-pathnames* "extra.lisp" dir))
+            (let ((name (uiop:find-symbol* '#:loaded-by-hand '#:fiveam-keep-probe/extra)))
+              (run-tests "fiveam-keep-probe")
+              (ok (uiop:symbol-call :fiveam :get-test name)
+                  "a test of a package the reload does not define stays registered")))
+       (let ((name (ignore-errors
+                    (uiop:find-symbol* '#:loaded-by-hand '#:fiveam-keep-probe/extra))))
+         (when name (uiop:symbol-call :fiveam :rem-test name)))
+       (ignore-errors (delete-package '#:fiveam-keep-probe/extra))))))
+
+(deftest reloaded-packages-are-the-cleared-systems-own
+  ;; A package-inferred system's file defines the package named like it, and
+  ;; a system's own source files define theirs; a dependency is not reloaded.
+  (let ((packages (cl-mcp/src/test-runner-core::%reloaded-packages
+                   '("cl-mcp/tests/test-runner-test"))))
+    (ok (member (find-package '#:cl-mcp/tests/test-runner-test) packages)
+        "the package named like the system")
+    (ok (not (member (find-package '#:cl-mcp/src/test-runner-core) packages))
+        "not a dependency's")))
 
 (deftest run-tests-counts-a-fiveam-dependency-as-run
   ;; Review of #218: a test the root suite reaches only as another test's

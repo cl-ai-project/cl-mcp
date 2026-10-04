@@ -266,6 +266,10 @@ Output fields:
   nothing was forced to recompile, and the text says so
 - `fasls_cleared_from` (string, with `clear_fasls`): the system whose directory was cleared —
   the primary system when a subsystem was named
+- `same_second_fasls_deleted` (integer, present when any, `force` without `clear_fasls`): FASLs
+  deleted because their source was written in the same second as them — ASDF's one-second
+  timestamps would have reused them, running the code from before the edit. The text says
+  `Recompiled N files written in the same second as their FASLs`
 - `message` (string|null): error or timeout message
 
 Solves three problems with using `ql:quickload` via `repl-eval`:
@@ -1258,15 +1262,18 @@ Output:
   system's packages that the run did not reach: held by no suite that ran, and neither
   started nor skipped by FiveAM during the run, a run nested in a test included (a test run
   only as another's `:depends-on` counts, the unneeded alternative of a satisfied `(or a b)`
-  does not) — typically a file
-  declaring its suite
-  `:in` the root suite that loaded before the root's file on a warm worker, so its suite hangs
-  from an earlier load of the root. The summary says `⚠ PASS, BUT N TESTS DID NOT RUN`, names
-  them, and gives the `:import-from` fix. Tests of a test file since deleted are not counted
+  does not). Two causes: a file declaring its suite `:in` the root suite that loaded before
+  the root's file on a warm worker, so its suite hangs from an earlier load of the root; or a
+  test in no suite (`:suite nil`) that no test that ran depends on. The summary says `⚠ PASS,
+  BUT N TESTS DID NOT RUN`, names them, and gives the fix for each cause. A test deleted from
+  its file is not counted: before reloading, run-tests drops from FiveAM the tests of the
+  packages the reload defines again, so one no longer in its file is gone (the tests of a test
+  file since deleted are not counted either)
 - `suites_outside_root` (array, FiveAM, present when any): suites of the run other than the
   root suite, the one named after the primary system. run-tests runs them, but a test-op that
   runs the root suite (the scaffold's does) skips them; the summary says `⚠ PASS, BUT N SUITES
-  ARE OUTSIDE THE ROOT SUITE` and how to nest them with `:in`
+  ARE OUTSIDE THE ROOT SUITE`, how to nest them with `:in`, and, for one that already says
+  `:in` the root, the `:import-from` that makes its file load after the root's
 - `framework` (string): Framework or outcome category used (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, `"load-error"`, `"unresolved"`, or `"timeout"`)
 - `counts_available` (boolean, ASDF fallback only): `false` — `asdf:test-system` reports no counts
 - `success` (boolean|null, ASDF fallback only): `false` when `asdf:test-system` signalled; `null` when it
