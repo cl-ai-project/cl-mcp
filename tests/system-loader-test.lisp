@@ -351,6 +351,56 @@
         (uiop:delete-directory-tree dir :validate t
                                         :if-does-not-exist :ignore)))))
 
+(deftest load-system-force-recompiles-a-same-second-edit
+  (testing "force=true recompiles a file written in the same second as its fasl"
+    ;; ASDF judges a fasl current when its source is not newer, to the second,
+    ;; so an edit landing in the second of the last compile ran the old code
+    ;; -- while run-tests, which deletes such a fasl, ran the new.  The
+    ;; source is given its fasl's own timestamp, so the case is not left to
+    ;; how fast the test runs.
+    (require :sb-posix)
+    (let* ((name "clmcp-same-second-fixture")
+           (dir (merge-pathnames (format nil "~A/" name) (uiop:temporary-directory)))
+           (main (merge-pathnames "src/main.lisp" dir))
+           (package (format nil "~:@(~A~)/SRC/MAIN" name)))
+      (unwind-protect
+          (flet ((write-main (value)
+                   (with-open-file (out main :direction :output :if-exists :supersede)
+                     (format out "(defpackage #:~A/src/main (:use #:cl) (:export #:answer))~%~
+                                  (in-package #:~A/src/main)~%~
+                                  (defun answer () ~A)~%"
+                             name name value)))
+                 (answer ()
+                   (funcall (find-symbol "ANSWER" package))))
+            (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)
+            (ensure-directories-exist main)
+            (with-open-file (out (merge-pathnames (format nil "~A.asd" name) dir)
+                                 :direction :output :if-exists :supersede)
+              (format out "(asdf:defsystem ~S :class :package-inferred-system ~
+                             :depends-on (~S))~%"
+                      name (format nil "~A/src/main" name)))
+            (write-main 1)
+            (asdf:load-asd (merge-pathnames (format nil "~A.asd" name) dir))
+            (ok (string= "loaded" (gethash "status" (load-system name))))
+            (ok (= 1 (answer)))
+            (write-main 2)
+            (let* ((fasl (asdf:apply-output-translations (compile-file-pathname main)))
+                   (unix (- (file-write-date fasl) (encode-universal-time 0 0 0 1 1 1970 0))))
+              (uiop:symbol-call :sb-posix :utimes (namestring main) unix unix))
+            (let ((ht (load-system name)))
+              (ok (string= "loaded" (gethash "status" ht)))
+              (ok (= 2 (answer)) "the edit is what runs")
+              (ok (eql 1 (gethash "same_second_fasls_deleted" ht))
+                  "the response counts the fasl it deleted")
+              (ok (search "Deleted 1 FASL whose source was written in the same second"
+                          (let ((content (gethash "content"
+                                                  (build-load-system-response name ht))))
+                            (gethash "text" (aref content 0))))
+                  "and the text says so")))
+        (ignore-errors (asdf:clear-system name))
+        (ignore-errors (asdf:clear-system (format nil "~A/src/main" name)))
+        (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
+
 (deftest load-system-clear-fasls-on-a-subsystem-clears-its-primary
   (testing "clear_fasls given a package-inferred subsystem recompiles its dependencies (#167)"
     ;; A subsystem such as fixture/src/contracts has no source directory of

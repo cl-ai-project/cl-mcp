@@ -275,7 +275,7 @@ Preserve not only the case of this bug but every other input, state and branch t
 **Editing a file does not update the definitions in the worker.**
 After saving, reload the systems that define the implementation and the contracts with `load-system`.
 
-Plain `force=true` recompiles only files whose source is newer than their FASL, so an edit made within the same second as the last compile can be missed.
+Plain `force=true` recompiles the files of the project whose source is newer than their FASL, or written in the same second as it; a changed file in another project, such as a dependency, can still be missed.
 For the acceptance check after a fix, use `clear_fasls=true`, which deletes every FASL under the source directory of the system you name.
 A package-inferred subsystem such as `my-app/src/contracts` has no source directory of its own, so its **primary** system's (the one the `.asd` defines) is cleared instead, which holds every FASL in the tree.
 Read `fasls_deleted` in the response: `0` means nothing was forced to recompile.

@@ -943,6 +943,9 @@ COMPILE-FILE-ERROR."
                 ;; so any deftest forms deleted from source since the
                 ;; previous load do not linger as ghost tests.
                 (ignore-errors (%rove-purge-ghost-suites system-name))
+                ;; FiveAM's, for the files the clearing below reloads.
+                (ignore-errors
+                  (%fiveam-purge-ghost-tests (cons system-name sub-systems)))
                 (asdf:clear-system system-name)
                 ;; Also clear test sub-systems so ASDF reloads them even
                 ;; when source files are unchanged.  Without this, deftest
@@ -1960,6 +1963,60 @@ a test file since deleted, which this worker still holds."
               (not (%removed-test-file-package-p (symbol-package name)))))
        ;; FiveAM lists a name again each time its test is redefined.
        (remove-duplicates (funcall test-names))))))
+
+(defun %reloaded-files (system-names)
+  "Return the namestrings of the files a reload of SYSTEM-NAMES, systems just
+cleared, loads again: each source file component of theirs, and its fasl.  A
+dependency is not followed -- a system not cleared is not reloaded."
+  (let ((files '()))
+    (labels ((note (path)
+               (when path
+                 (pushnew (namestring path) files :test #'string=)
+                 (let ((true (ignore-errors (probe-file path))))
+                   (when true (pushnew (namestring true) files :test #'string=)))))
+             (walk (component)
+               (cond ((typep component 'asdf:cl-source-file)
+                      (note (ignore-errors (asdf:component-pathname component)))
+                      (mapc #'note (ignore-errors
+                                    (asdf:output-files 'asdf:compile-op component))))
+                     ((typep component 'asdf:parent-component)
+                      (mapc #'walk (asdf:component-children component))))))
+      (dolist (name system-names)
+        (let ((system (ignore-errors (asdf:registered-system name))))
+          (when system (walk system)))))
+    files))
+
+(defun %fiveam-test-file (test)
+  "Return the namestring of the file that was loading when FiveAM made TEST, or
+NIL when it cannot be told.  FiveAM's REGISTER-TEST evaluates the test's
+NAMED-LAMBDA as the file loads, and SBCL names a function compiled then
+(LABELS NAME :IN \"<that file>\") -- the fasl, for a file ASDF compiled."
+  (let* ((slot (%fiveam-symbol "TEST-LAMBDA"))
+         (test-body (and slot (ignore-errors (slot-value test slot))))
+         (name (and (functionp test-body) (ignore-errors (sb-kernel:%fun-name test-body))))
+         (in (and (consp name) (member :in name))))
+    (and in (stringp (second in)) (second in))))
+
+(defun %fiveam-purge-ghost-tests (system-names)
+  "Remove from FiveAM the tests made by a file the reload of SYSTEM-NAMES loads
+again (%RELOADED-FILES, %FIVEAM-TEST-FILE), before that reload.  FiveAM keeps
+every test it was ever given, so a test deleted from its file would outlive it on
+this worker, reached by no suite and reported as never run; the reload makes the
+current ones again.  A test of any other file stays, whatever its package -- one
+a dependency defines, even in a package a reloaded file shares, would not come
+back -- and so does a test whose file cannot be told, and every suite: a
+def-suite replaces its suite when it runs again."
+  (let ((test-names (%fiveam-symbol "TEST-NAMES"))
+        (rem-test (%fiveam-symbol "REM-TEST")))
+    (when (and test-names rem-test (fboundp test-names) (fboundp rem-test))
+      (let ((files (%reloaded-files system-names)))
+        (when files
+          (dolist (name (remove-duplicates (funcall test-names)))
+            (let ((object (%fiveam-test-object name)))
+              (when (and object
+                         (not (%fiveam-suite-p object))
+                         (member (%fiveam-test-file object) files :test #'equal))
+                (funcall rem-test name)))))))))
 
 (defun %qualified-test-name (symbol)
   "Return SYMBOL written PACKAGE::NAME, or :NAME for a keyword."
