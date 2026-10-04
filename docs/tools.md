@@ -1234,7 +1234,7 @@ Notes:
 Run tests for a system and return structured results with pass/fail counts and failure details.
 
 Input:
-- `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`). A system ASDF does not know yet is looked for under the project root, as `load-system` does; a name found nowhere is reported as such, not as a broken worker
+- `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`). A system ASDF does not know yet is looked for under the project root, as `load-system` does; a name found nowhere is reported as such, not as a broken worker. The system is force-reloaded, and a file of its tree written in the same second as its fasl has the fasl deleted first, so an edit made right after a compile is what runs (ASDF's timestamps have one-second resolution)
 - `framework` (string, optional): Force a specific framework (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, or `"auto"` for auto-detect). Auto-detection reads the test system's own `:depends-on`: a framework the system declares directly wins, then one reached transitively, and only for a system ASDF has not registered does it fall back to guessing from the loaded packages. Detection never loads anything.
 - `test` (string, optional): Run only a specific test by fully qualified name (e.g., `"my-package::my-test-name"`)
 - `tests` (array of strings, optional): Run only the listed fully qualified tests
@@ -1254,6 +1254,19 @@ Output:
 - `skipped_tests` (array, Rove, present when any test skipped): `test_name` and `reasons` of every test that
   skipped anything, including one that passed on what it did check, so a skip is never hidden inside a
   pass; the summary text lists them under `Skipped`
+- `unreached_tests` (array, FiveAM whole-system run, present when any): tests defined in the
+  system's packages that the run did not reach: held by no suite that ran, and neither
+  started nor skipped by FiveAM during the run, a run nested in a test included (a test run
+  only as another's `:depends-on` counts, the unneeded alternative of a satisfied `(or a b)`
+  does not) — typically a file
+  declaring its suite
+  `:in` the root suite that loaded before the root's file on a warm worker, so its suite hangs
+  from an earlier load of the root. The summary says `⚠ PASS, BUT N TESTS DID NOT RUN`, names
+  them, and gives the `:import-from` fix. Tests of a test file since deleted are not counted
+- `suites_outside_root` (array, FiveAM, present when any): suites of the run other than the
+  root suite, the one named after the primary system. run-tests runs them, but a test-op that
+  runs the root suite (the scaffold's does) skips them; the summary says `⚠ PASS, BUT N SUITES
+  ARE OUTSIDE THE ROOT SUITE` and how to nest them with `:in`
 - `framework` (string): Framework or outcome category used (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, `"load-error"`, `"unresolved"`, or `"timeout"`)
 - `counts_available` (boolean, ASDF fallback only): `false` — `asdf:test-system` reports no counts
 - `success` (boolean|null, ASDF fallback only): `false` when `asdf:test-system` signalled; `null` when it
@@ -1264,7 +1277,7 @@ Output:
 - `debug_output` (string, present when non-empty): what the tests wrote to
   `cl-mcp/src/test-runner-core:*test-debug-output*`; shown in the summary text too
 
-The summary line in `content[].text` is `✓ PASS`, `✗ FAIL`, `✗ LOAD FAILED`, `✗ UNRESOLVED`, `✗ TIMEOUT`, `⚠ NO TESTS RAN`, `⚠ ALL SKIPPED`, or `⚠ RAN, RESULT UNKNOWN`. `⚠ ALL SKIPPED` means every test that ran only skipped: nothing was checked, so it is not a pass. `⚠ NO TESTS RAN` means the run completed but executed nothing — a system with no tests, or a selection that matched none. It is not a failure, but it is not a pass either. `⚠ RAN, RESULT UNKNOWN` is the ASDF fallback's: `asdf:test-system` returned without signalling, but it reports no counts, and a runner that reports failures by its return value (prove, `rove:run`) returns normally from a failing suite too. The text shows the last lines of the runner's `stdout` under that headline, since the runner's own summary is the only verdict there is.
+The summary line in `content[].text` is `✓ PASS`, `✗ FAIL`, `✗ LOAD FAILED`, `✗ UNRESOLVED`, `✗ TIMEOUT`, `⚠ NO TESTS RAN`, `⚠ ALL SKIPPED`, `⚠ RAN, RESULT UNKNOWN`, or, for a FiveAM run with nothing failed, `⚠ PASS, BUT N TESTS DID NOT RUN` / `⚠ PASS, BUT N SUITES ARE OUTSIDE THE ROOT SUITE` (see `unreached_tests` and `suites_outside_root`). `⚠ ALL SKIPPED` means every test that ran only skipped: nothing was checked, so it is not a pass. `⚠ NO TESTS RAN` means the run completed but executed nothing — a system with no tests, or a selection that matched none. It is not a failure, but it is not a pass either. `⚠ RAN, RESULT UNKNOWN` is the ASDF fallback's: `asdf:test-system` returned without signalling, but it reports no counts, and a runner that reports failures by its return value (prove, `rove:run`) returns normally from a failing suite too. The text shows the last lines of the runner's `stdout` under that headline, since the runner's own summary is the only verdict there is.
 
 Prove is supported for prove-asdf test systems (`:defsystem-depends-on ("prove-asdf")` and `(:test-file ...)` components): each test file is run and every assertion counted, a `subtest`'s one by one, with a failure detail per failed assertion (`description`, the tested `form`, `values` got and expected, `reason`). A prove system that runs its tests some other way falls back to ASDF. `test`/`tests` selection is not supported for prove.
 
