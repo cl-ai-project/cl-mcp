@@ -8,6 +8,8 @@
                 #:load-system)
   (:import-from #:cl-mcp/src/system-loader-core
                 #:%load-with-timeout)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:transient-error)
   (:import-from #:cl-mcp/src/tools/response-builders
                 #:build-load-system-response)
   (:import-from #:cl-mcp/src/utils/request-debugger-boundary
@@ -436,11 +438,17 @@ list, and the warning records."
          (ok (eql 11 (gethash "line" full)))
          (ok (equal "(defun wrong-arity)" (gethash "form" full))))))))
 
-(deftest a-warning-signalled-again-at-load-is-recorded-once
+(deftest warnings-that-read-the-same-are-each-recorded
+  ;; Nothing is merged.  A record made of class and text alone cannot tell a
+  ;; warning signalled twice from two warnings that read the same, and taking
+  ;; the second for a repeat of the first loses a warning.
   (%call-with-probe-files
-   '(("twice.lisp" . "(in-package #:clmcp-warn-probe)
-(defun dup () 1)
-(defun dup () 2)
+   '(("compile.lisp" . "(in-package #:clmcp-warn-probe)
+(eval-when (:compile-toplevel)
+  (warn 'cl-mcp/tests/system-loader-test::loader-probe-style-warning))
+")
+     ("load.lisp" . "(in-package #:clmcp-warn-probe)
+(warn 'cl-mcp/tests/system-loader-test::loader-probe-style-warning)
 ")
      ("same-text.lisp" . "(in-package #:clmcp-warn-probe)
 (defun first-one (y) 1)
@@ -448,14 +456,19 @@ list, and the warning records."
 (defun third-one () (clmcp-warn-missing-function))
 "))
    (lambda (path)
-     (testing "SBCL signals a duplicate definition compiling the file and again loading it"
+     (testing "one form warns while its file compiles, another while its file loads"
        (multiple-value-bind (values records)
-           (%suppressed (lambda () (load (compile-file (funcall path "twice.lisp")))))
+           (%suppressed (lambda ()
+                          (compile-file (funcall path "compile.lisp"))
+                          (load (funcall path "load.lisp"))))
          (declare (ignore values))
-         (ok (= 1 (count-if (lambda (record)
-                              (search "Duplicate definition" (gethash "message" record)))
-                            records)))))
-     (testing "warnings that read the same in two places are two, of one kind"
+         (ok (equal '("loader probe: a style warning" "loader probe: a style warning")
+                    (mapcar (lambda (record) (gethash "message" record)) records)))
+         (ok (search "compile.lisp" (gethash "file" (first records)))
+             "the first with the place the compiler knew")
+         (ok (null (gethash "file" (second records)))
+             "the second with none")))
+     (testing "the same text in two places is two warnings of one kind"
        (multiple-value-bind (values records)
            (%suppressed (lambda () (compile-file (funcall path "same-text.lisp"))))
          (declare (ignore values))
@@ -464,6 +477,24 @@ list, and the warning records."
              "the two unused variables")
          (ok (not (eql (gethash "kind" (first records)) (gethash "kind" (third records))))
              "the undefined function is another kind"))))))
+
+(deftest the-form-of-a-method-is-the-compilers-name-for-it
+  ;; SBCL names a method by its specializers, without the parameter names that
+  ;; lisp-edit-form's form_name is written with.  The record's form says where
+  ;; the warning is; it is not that argument.
+  (%call-with-probe-files
+   '(("method.lisp" . "(in-package #:clmcp-warn-probe)
+(defgeneric sample (x))
+(defmethod sample ((x integer))
+  (let ((unused 1))
+    x))
+"))
+   (lambda (path)
+     (multiple-value-bind (values records)
+         (%suppressed (lambda () (compile-file (funcall path "method.lisp"))))
+       (declare (ignore values))
+       (ok (equal "(defmethod sample (integer))" (gethash "form" (first records))))
+       (ok (eql 3 (gethash "line" (first records))))))))
 
 (deftest load-system-drops-redefinition-notices-on-first-load-and-reload
   ;; Through load-system itself: a first load (force=false) and a reload
@@ -596,6 +627,37 @@ that makes ASDF forget what it loaded of it, and remove everything again."
          (ok (search "ASDF refuses a file that compiles with a WARNING" text))
          (ok (null (nth-value 1 (gethash "compile_failed" ht)))
              "what the builder was told about the error is not left in the response"))))))
+
+(deftest a-load-that-never-started-reports-nothing-of-the-load-before-it
+  ;; What a failed load had recorded was kept where the next call could read
+  ;; it.  A load refused before it began -- the ASDF lock held by another load
+  ;; -- then reported the earlier system's warnings and compiler output as its
+  ;; own.
+  (%call-with-warning-system
+   "(defun two-arguments (a b) (+ a b))
+(defun wrong-arity () (two-arguments 1 2 3))"
+   (lambda (system forget)
+     (declare (ignore forget))
+     (let ((failed (load-system system :force nil)))
+       (ok (equal "error" (gethash "status" failed)))
+       (ok (eql 1 (length (gethash "warning_records" failed)))
+           "precondition: the first load recorded its warning")
+       (ok (search "TWO-ARGUMENTS" (gethash "compiler_output" failed))
+           "precondition: and kept the compiler's output"))
+     (let ((refused
+             (let ((cl-mcp/src/system-loader-core:*system-load-lock-wrapper*
+                     (lambda (thunk)
+                       (declare (ignore thunk))
+                       (error 'transient-error
+                              :format-control "the load lock is held by another load"))))
+               (load-system system :force nil :timeout-seconds 2))))
+       (ok (equal "error" (gethash "status" refused)))
+       (ok (search "the load lock is held" (gethash "message" refused)))
+       (ok (null (gethash "warning_records" refused)) "no records of the earlier load")
+       (ok (null (gethash "warnings" refused)) "no count of them")
+       (ok (null (gethash "compiler_output" refused)) "no compiler output of the earlier load")
+       (ok (null (search "TWO-ARGUMENTS" (%response-text system refused)))
+           "and nothing of it in the text")))))
 
 (deftest load-system-loads-style-warnings-and-sums-them-up-by-kind
   (%call-with-warning-system

@@ -54,8 +54,13 @@ a load: they are counted and summed up by kind.  SBCL 'redefining X
 in DEFUN' notifications are dropped, on a first load and a reload alike:
 redefining is ordinary Common Lisp development, and a reload exists to do it.
 Every warning kept is in the JSON warning_records, with its severity, class,
-message and, for one from a compilation, file, line and enclosing form -- which
-are lisp-edit-form's form_type and form_name.
+message and, for one from a compilation, file, line and form: the enclosing
+definition as the compiler names it, such as (defun wrong-arity).  form says
+where the warning is; it is not an argument for lisp-edit-form.  For a
+top-level defun, defmacro or defclass the two read alike, but a method is
+named by its specializers alone, (defmethod area (circle)), and a definition
+inside eval-when by itself rather than by the eval-when.  Read the form at
+file and line to address it.
 
 Examples:
   First-time load: system='my-project', force=false

@@ -267,8 +267,10 @@ Output fields:
 - `warnings` (integer): number of warnings kept, full and style together (when loaded; on an
   error, those recorded before it, when there were any). SBCL's `redefining X in DEFUN`
   notices are left out, on a first load and a reload alike: redefining is ordinary Common Lisp
-  development, and a reload exists to do it. A warning SBCL signals a second time when the
-  compiled file loads (a duplicate definition, a package at variance) is counted once
+  development, and a reload exists to do it. Nothing else is left out or merged: every warning
+  signalled is counted, so one that SBCL signals twice counts twice (an unused variable in a
+  `defmacro`, which it compiles once for the rest of the file and once for the FASL). Two
+  records that read the same may equally be two warnings, and nothing in them tells which
 - `warning_records` (array, when there are any): one object per warning kept, in the order
   signalled:
   - `severity`: `"warning"` or `"style-warning"`
@@ -278,8 +280,13 @@ Output fields:
     appearance. A kind is a class and, for the classes SBCL uses for many messages
     (`SIMPLE-WARNING`, `SIMPLE-STYLE-WARNING`), a message template
   - `file`, `line`, `form` (for a warning signalled during a compilation): the source file, the
-    line of the top-level form and the enclosing definition, e.g. `"(defun wrong-arity)"` —
-    which is `lisp-edit-form`'s `form_type` and `form_name`
+    line of the top-level form and the enclosing definition as the compiler names it, e.g.
+    `"(defun wrong-arity)"`. `form` says where the warning is; it is not an argument for
+    `lisp-edit-form`. For a top-level `defun`, `defmacro`, `defvar`, `defclass`, `defgeneric`,
+    `defstruct` or `define-condition` the two read alike, but a method is named by its
+    specializers alone (`"(defmethod sample (integer))"`, where `form_name` is
+    `sample ((x integer))`), and a definition inside `eval-when` by itself rather than by the
+    `eval-when`. Read the form at `file` and `line` to address it
 - `warning_details` (string|null): the messages of those warnings, one per line
 - `forced` (boolean, when loaded): whether force-reload was applied
 - `clear_fasls` (boolean, when loaded): whether `clear_fasls` was requested

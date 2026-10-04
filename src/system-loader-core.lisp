@@ -26,8 +26,7 @@
                 #:fasl-source-directory
                 #:delete-same-second-fasls)
   (:export #:load-system
-           #:*system-load-lock-wrapper*
-           #:*last-compiler-stderr*))
+           #:*system-load-lock-wrapper*))
 
 (in-package #:cl-mcp/src/system-loader-core)
 
@@ -93,12 +92,6 @@ See CALL-WITH-DEADLINE-THREAD for how the deadline is enforced."
       (error (c)
         (values (list c) nil t nil)))))
 
-(defvar *last-compiler-stderr* nil
-  "Captured compiler stderr from the most recent %call-with-suppressed-output call.
-Always set via unwind-protect so it survives error unwinds.  When the call
-completes normally this is set to NIL; on error it holds the stderr string
-accumulated up to the point of failure.")
-
 (defvar *auto-discovered-asd* nil
   "When non-NIL, holds the namestring of the .asd file that was auto-discovered
 and registered during the most recent load-system call.  Bound dynamically so
@@ -119,13 +112,6 @@ on other implementations so the filter still works in portable images."
              ;; with "redefining " (e.g. method-combination chatter)
              ;; are not mistakenly muffled.
              (search " in " text)))))
-
-(defvar *last-warning-records* nil
-  "The warning records of the most recent %CALL-WITH-SUPPRESSED-OUTPUT call that
-ended by unwinding: what had been recorded when the error struck, in the form
-the call returns them.  NIL after a call that completed.  Kept as
-*LAST-COMPILER-STDERR* is, so the caller that catches the error can still say
-which warnings came before it.")
 
 (defun %warning-severity (warning)
   "Return \"style-warning\" for a STYLE-WARNING and \"warning\" for any other
@@ -183,8 +169,13 @@ error."
 (defun %enclosing-form-label (context)
   "Return the top-level definition CONTEXT names as source text, such as
 \"(defun wrong-arity)\", or NIL.  CONTEXT is the list SBCL prints after \"in:\";
-its first element is the definition lisp-edit-form would address.  Printed in
-the package of the name it defines, so the name stands bare."
+its first element names the definition the code sits in.  Printed in the
+package of the name it defines, so the name stands bare.
+
+It is the compiler's name for the definition: it says where the warning is,
+and is not always what lisp-edit-form takes.  A method comes as
+\"(defmethod sample (integer))\", its specializers without the parameter names
+a form_name is written with."
   (let ((form (first context)))
     (when (consp form)
       (let* ((name (second form))
@@ -211,19 +202,6 @@ signalled, so it must not signal itself: a part that cannot be had is left out."
             :file (and (typep file '(or pathname string)) file)
             :position (and (integerp position) position)
             :form (ignore-errors (%enclosing-form-label context))))))
-
-(defun %repeated-at-load-p (record records)
-  "True when RECORD only says again what one of RECORDS says.  SBCL signals a
-duplicate definition, a package at variance and some others twice: compiling
-the file, where the compiler knows the place, and loading what it compiled,
-where nothing does.  The second, placeless one is the repeat."
-  (and (null (getf record :file))
-       (find-if (lambda (earlier)
-                  (and (getf earlier :file)
-                       (equal (getf earlier :class) (getf record :class))
-                       (equal (getf earlier :message) (getf record :message))))
-                records)
-       t))
 
 (defun %warning-record-tables (records)
   "Return RECORDS, property lists in the order signalled, as the JSON objects
@@ -262,18 +240,23 @@ before it reported records, kept for the clients that read it."
   (format nil "~{~A~%~}"
           (mapcar (lambda (table) (gethash "message" table)) tables)))
 
-(defun %call-with-suppressed-output (thunk)
+(defun %call-with-suppressed-output (thunk &key on-unwind)
   "Call THUNK with compilation and load output suppressed.
 Returns (values thunk-result warning-count warning-details compiler-stderr
-warning-records).  When THUNK unwinds, the stderr string and the records are
-saved to *LAST-COMPILER-STDERR* and *LAST-WARNING-RECORDS* instead, so a caller
-that catches the error can still report them.
+warning-records).
 
-Every warning is recorded (%MAKE-WARNING-RECORD) but two: a redefinition notice
+When THUNK unwinds there is nothing to return them through, so ON-UNWIND, a
+function of the compiler's output so far and the warning records, is called
+with them instead: the caller that catches the error can still report what
+came before it.  They are handed to that one caller, not kept anywhere a later
+call could read: a load refused before it reached this function would
+otherwise report the warnings of the load before it.
+
+Every warning is recorded (%MAKE-WARNING-RECORD) but a redefinition notice
 (%REDEFINITION-WARNING-P), dropped on a first load and a reload alike because
-redefining is ordinary Common Lisp development and a reload exists to do it,
-and a warning signalled a second time when the compiled file loads
-(%REPEATED-AT-LOAD-P).
+redefining is ordinary Common Lisp development and a reload exists to do it.
+Nothing is merged: two records that read the same may be one warning
+signalled twice or two warnings, and class and text cannot tell which.
 
 What is muffled is another matter, settled by what muffling does to the build.
 A STYLE-WARNING cannot fail a compile, so it is muffled once it is recorded:
@@ -284,21 +267,24 @@ file compiles \"cleanly\", ASDF loads it, and the FASL left behind makes every
 later load agree -- where ASDF by itself, and run-tests, refuse the file."
   (let ((records '())
         (stderr (make-string-output-stream)))
-    ;; Reset before each call so stale data from a previous run is not
-    ;; mistakenly attributed to this invocation.
-    (setf *last-compiler-stderr* nil
-          *last-warning-records* nil)
     (flet ((handle-warning (w)
              (let ((redefinition-p (%redefinition-warning-p w)))
                (unless redefinition-p
-                 (let ((record (%make-warning-record w)))
-                   (unless (%repeated-at-load-p record records)
-                     (push record records))))
+                 (push (%make-warning-record w) records))
                (when (and (or redefinition-p (typep w 'style-warning))
                           (find-restart 'muffle-warning))
                  (invoke-restart 'muffle-warning))))
            (finished-records ()
-             (%warning-record-tables (reverse records))))
+             (%warning-record-tables (reverse records)))
+           (unwound ()
+             ;; In a cleanup form, on the way out of an error: nothing here
+             ;; may signal over it.
+             (when on-unwind
+               (ignore-errors
+                (funcall on-unwind
+                         (ignore-errors (get-output-stream-string stderr))
+                         (ignore-errors (%warning-record-tables
+                                         (reverse records))))))))
       #+sbcl
       (let ((err-sym (find-symbol "*COMPILER-ERROR-OUTPUT*" "SB-C"))
             (note-sym (find-symbol "*COMPILER-NOTE-STREAM*" "SB-C"))
@@ -357,13 +343,8 @@ later load agree -- where ASDF by itself, and run-tests, refuse the file."
                           (%warning-details tables)
                           (get-output-stream-string stderr)
                           tables)))
-            ;; Always capture stderr and the records so they survive an error
-            ;; unwind.
             (unless completed-p
-              (setf *last-compiler-stderr*
-                    (ignore-errors (get-output-stream-string stderr))
-                    *last-warning-records*
-                    (ignore-errors (finished-records)))))))
+              (unwound)))))
       #-sbcl
       (let ((result nil)
             (completed-p nil))
@@ -392,13 +373,8 @@ later load agree -- where ASDF by itself, and run-tests, refuse the file."
                         (%warning-details tables)
                         (get-output-stream-string stderr)
                         tables)))
-          ;; Always capture stderr and the records so they survive an error
-          ;; unwind.
           (unless completed-p
-            (setf *last-compiler-stderr*
-                  (ignore-errors (get-output-stream-string stderr))
-                  *last-warning-records*
-                  (ignore-errors (finished-records)))))))))
+            (unwound)))))))
 
 (defun %delete-system-fasls (system-name)
   "Delete the cached fasls under SYSTEM-NAME's output-translation
@@ -461,7 +437,13 @@ registering it."
         ;; Set by the load thread; read after it has been joined.
         (fasls-deleted nil)
         (fasls-cleared-from nil)
-        (same-second-deleted nil))
+        (same-second-deleted nil)
+        ;; What the load had printed and recorded when it unwound.  This
+        ;; call's own, set by its own load: a load refused before it began
+        ;; has nothing here, where a place shared between calls would still
+        ;; hold what the load before it left.
+        (unwound-stderr nil)
+        (unwound-records nil))
     (setf *auto-discovered-asd* nil)
     (log-event :info "load-system" "system" system-name "force" force
                "clear_fasls" clear-fasls "timeout" timeout-seconds)
@@ -469,6 +451,9 @@ registering it."
         (%load-with-timeout
          (lambda ()
            (flet ((%do-load ()
+                    ;; A retry after auto-discovery starts clean.
+                    (setf unwound-stderr nil
+                          unwound-records nil)
                     (when clear-fasls
                       (multiple-value-bind (count from)
                           (%delete-system-fasls system-name)
@@ -502,7 +487,10 @@ registering it."
                            (asdf:load-asd asd-src)))))
                     (%call-with-suppressed-output
                      (lambda ()
-                       (asdf:load-system system-name :force clear-fasls)))))
+                       (asdf:load-system system-name :force clear-fasls))
+                     :on-unwind (lambda (stderr records)
+                                  (setf unwound-stderr stderr
+                                        unwound-records records)))))
              (handler-case (%do-load)
                (asdf/find-component:missing-component (c)
                  (let* ((missing (princ-to-string
@@ -549,7 +537,7 @@ registering it."
                   (saved-text
                     (when (request-debugger-escape-error-p err)
                       (request-debugger-escape-error-display-text err)))
-                  (compiler-stderr *last-compiler-stderr*))
+                  (compiler-stderr unwound-stderr))
              (setf (gethash "status" ht) "error")
              (setf (gethash "duration_ms" ht) elapsed-ms)
              ;; Carried so the response builder can withhold its standing
@@ -568,7 +556,7 @@ registering it."
                (setf (gethash "compile_failed" ht) t))
              ;; What had been recorded when the error struck: for a compile
              ;; that failed on a warning, the cause itself.
-             (let ((records *last-warning-records*))
+             (let ((records unwound-records))
                (when records
                  (setf (gethash "warnings" ht) (length records)
                        (gethash "warning_details" ht)
