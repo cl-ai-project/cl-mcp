@@ -116,19 +116,87 @@ on other implementations so the filter still works in portable images."
              ;; are not mistakenly muffled.
              (search " in " text)))))
 
+(defun %definition-file (object)
+  "Return the namestring of the source file OBJECT was defined in -- a function,
+a macro function, a generic function or a method -- or NIL when it cannot be told."
+  #+sbcl
+  (or (ignore-errors
+       (and (functionp object)
+            (not (typep object 'generic-function))
+            (sb-c::debug-source-namestring
+             (sb-c::debug-info-source
+              (sb-kernel:%code-debug-info
+               (sb-kernel:fun-code-header (sb-kernel:%fun-fun object)))))))
+      (ignore-errors
+       (sb-c:definition-source-location-namestring (sb-pcl::definition-source object))))
+  #-sbcl
+  (declare (ignore object))
+  #-sbcl
+  nil)
+
+(defun %redefined-definition (warning)
+  "Return the definition WARNING, an SBCL redefinition warning, is about to
+replace: the old method, macro function or function, or NIL."
+  #+sbcl
+  (ignore-errors
+   (let ((name (slot-value warning 'sb-kernel::name)))
+     (typecase warning
+       (sb-kernel:redefinition-with-defmethod (slot-value warning 'sb-kernel::old-method))
+       (sb-kernel:redefinition-with-defmacro (macro-function name))
+       (t (and (fboundp name) (fdefinition name))))))
+  #-sbcl
+  (declare (ignore warning))
+  #-sbcl
+  nil)
+
+(defun %bundled-module-source-p (source)
+  "True when SOURCE, a definition's source namestring, is a module SBCL ships:
+under the logical host SYS:CONTRIB; (UIOP and ASDF among them)."
+  (uiop:string-prefix-p "SYS:CONTRIB;" (string-upcase source)))
+
+(defun %same-file-redefinition-p (warning)
+  "True when WARNING redefines something the file being compiled or loaded made
+before -- that file is the old definition's source, or the fasl compiled from
+it -- or something a module SBCL ships defined (SYS:CONTRIB;), such as the UIOP
+a system's newer copy replaces.  Either is a reload, which says nothing.  A
+redefinition by another file of one's own -- two files defining one name -- is
+not one, nor is one whose old source or current file cannot be told.  A name
+defined twice in one file is told apart by SBCL's own DUPLICATE-DEFINITION
+warning, which this does not touch."
+  (let* ((source (%definition-file (%redefined-definition warning)))
+         (current (or *compile-file-truename* *load-truename*))
+         (current (and current (namestring current))))
+    (and source
+         (or ;; A newer version of a library SBCL ships, which a project can
+             ;; neither avoid nor act on.
+             (%bundled-module-source-p source)
+             (and current
+                  (or (string= current source)
+                      ;; Its fasl: ASDF's, under the output translations, or
+                      ;; one COMPILE-FILE wrote beside it.
+                      (let ((fasl (ignore-errors (compile-file-pathname source))))
+                        (and fasl
+                             (or (string= current (namestring fasl))
+                                 (let ((translated
+                                         (ignore-errors
+                                          (asdf:apply-output-translations fasl))))
+                                   (and translated
+                                        (string= current
+                                                 (namestring translated)))))))))))))
+
 (defun %decide-suppress-redefinition (flag cleared-prior-p)
   "Resolve the `suppress-redefinition-warnings` flag against whether a
 prior system instance was actually cleared.
 
-  :auto  - suppress only when CLEARED-PRIOR-P is true, meaning the
-           system was already loaded (per ASDF:ALREADY-LOADED-SYSTEMS)
-           and ASDF:CLEAR-SYSTEM was just invoked.  First-time loads
-           (discoverable via the registry but not previously loaded)
-           do NOT suppress, so legitimate duplicate-definition
-           warnings inside the source still surface.
+  :auto  - T when CLEARED-PRIOR-P is true, meaning the system was already
+           loaded (per ASDF:ALREADY-LOADED-SYSTEMS) and ASDF:CLEAR-SYSTEM
+           was just invoked.  Otherwise :SAME-FILE: a first-time load still
+           drops a redefinition by the file that made the old definition --
+           a dependency the worker had loaded, read again -- while a
+           duplicate definition across files still surfaces.
   T      - always suppress.
   NIL    - never suppress."
-  (cond ((eq flag :auto) cleared-prior-p)
+  (cond ((eq flag :auto) (if cleared-prior-p t :same-file))
         (t flag)))
 
 (defun %call-with-suppressed-output (thunk &key suppress-redefinition)
@@ -139,7 +207,8 @@ so it survives error unwinds and can be retrieved by callers that catch the erro
 
 When SUPPRESS-REDEFINITION is non-nil, warnings identified by
 %REDEFINITION-WARNING-P are silently muffled and do not increment the
-returned count.  Useful under force=true reloads where 'redefining X in
+returned count -- when it is :SAME-FILE, only those a file makes of what it
+made before (%SAME-FILE-REDEFINITION-P).  Useful under force=true reloads where 'redefining X in
 DEFUN' lines are noise that drown real warnings."
   (let ((warning-count 0)
         (warning-details (make-string-output-stream))
@@ -149,7 +218,10 @@ DEFUN' lines are noise that drown real warnings."
     (setf *last-compiler-stderr* nil)
     (flet ((handle-warning (w)
              (cond
-               ((and suppress-redefinition (%redefinition-warning-p w))
+               ((and suppress-redefinition
+                     (%redefinition-warning-p w)
+                     (or (not (eq suppress-redefinition :same-file))
+                         (%same-file-redefinition-p w)))
                 (when (find-restart 'muffle-warning)
                   (invoke-restart 'muffle-warning)))
                (t
@@ -293,12 +365,14 @@ or NIL (no timeout). Default is 120 seconds.
 SUPPRESS-REDEFINITION-WARNINGS controls whether SBCL
 'redefining X in DEFUN' style notifications are dropped from the
 captured warning stream.  Values:
-  :auto  - suppress only when the system was actually previously
+  :auto  - suppress all when the system was actually previously
            loaded (per ASDF:ALREADY-LOADED-SYSTEMS) and thus cleared
-           via ASDF:CLEAR-SYSTEM before reloading.  First-time loads
-           (systems merely discoverable in the source registry) do
-           not suppress, so legitimate duplicate-definition warnings
-           inside source still surface.
+           via ASDF:CLEAR-SYSTEM before reloading.  Any other load
+           (systems merely discoverable in the source registry, or loaded
+           only as another system's dependency) suppresses those a file
+           makes of what the same file defined before -- a dependency
+           read again -- so a duplicate definition across files still
+           surfaces (%DECIDE-SUPPRESS-REDEFINITION).
   T      - always suppress.
   NIL    - never suppress (preserve pre-change behavior).
 

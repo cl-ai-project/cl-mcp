@@ -45,9 +45,12 @@ guaranteed rebuild.
 Warning handling: when force=true triggers an actual ASDF:CLEAR-SYSTEM
 (i.e., the system was previously loaded), SBCL 'redefining X in DEFUN'
 notifications are dropped from the warnings count/details automatically
-(those redefinitions are exactly what a reload requests).  First-time
-loads and force=false loads keep redefining-warnings visible so
-legitimate duplicate-definition mistakes in source still surface.
+(those redefinitions are exactly what a reload requests).  Any other load
+drops the ones a file makes of what that same file defined before -- a
+dependency the worker already had, read again -- and keeps a redefinition
+by another file, so two files defining one name still surface (a name
+defined twice in one file is SBCL's separate 'Duplicate definition'
+warning, never dropped).
 Real warnings (style, type, package variance) always pass through
 unchanged.
 

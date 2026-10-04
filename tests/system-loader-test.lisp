@@ -238,10 +238,10 @@
       (ok (eq t
               (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
                :auto t))))
-    (testing ":auto with cleared-prior-p=nil does NOT suppress (first-time load)"
-      (ok (null
-           (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
-            :auto nil))))
+    (testing ":auto with cleared-prior-p=nil suppresses same-file reloads only"
+      (ok (eq :same-file
+              (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
+               :auto nil))))
     (testing "explicit T always suppresses"
       (ok (eq t
               (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
@@ -280,6 +280,61 @@
           (ok (= warning-count 1))
           (ok (null (search "redefining FOO" details)))
           (ok (search "something real" details)))))))
+
+(deftest same-file-redefinitions-are-dropped-and-cross-file-ones-kept
+  (testing "a module SBCL ships counts as reloaded when a newer copy replaces it"
+    ;; A fresh worker's first load-system replaced SBCL's own UIOP with the
+    ;; one cl-mcp depends on: 427 lines of nothing a project can act on.
+    (ok (cl-mcp/src/system-loader-core::%bundled-module-source-p
+         "SYS:CONTRIB;ASDF;UIOP.LISP.NEWEST"))
+    (ok (not (cl-mcp/src/system-loader-core::%bundled-module-source-p
+              "/home/u/src/sys/contrib/uiop.lisp"))))
+  (testing ":same-file drops a file's reload of its own definitions only"
+    ;; A dependency the worker had loaded, read again by a first-time
+    ;; load-system, warned once per definition it holds -- hundreds of lines.
+    ;; Two files defining one name is the mistake the warnings are kept for.
+    (let ((dir (uiop:ensure-directory-pathname
+                (uiop:merge-pathnames* (format nil "clmcp-redef-~A/" (random 100000))
+                                       (uiop:temporary-directory))))
+          (package-name "CLMCP-REDEF-PROBE"))
+      (flet ((write-file* (name text)
+               (with-open-file (out (uiop:merge-pathnames* name dir)
+                                    :direction :output :if-exists :supersede)
+                 (write-string text out)))
+             (compile* (name)
+               (let ((*error-output* (make-broadcast-stream)))
+                 (handler-bind ((warning #'muffle-warning))
+                   (compile-file (uiop:merge-pathnames* name dir)))))
+             (load* (fasl)
+               (cl-mcp/src/system-loader-core::%call-with-suppressed-output
+                (lambda () (load fasl))
+                :suppress-redefinition
+                (cl-mcp/src/system-loader-core::%decide-suppress-redefinition :auto nil))))
+        (unwind-protect
+             (progn
+               (ensure-directories-exist dir)
+               (write-file* "a.lisp" (format nil "(defpackage #:clmcp-redef-probe (:use #:cl))~%~
+                                                  (in-package #:clmcp-redef-probe)~%~
+                                                  (defun probe () 1)~%~
+                                                  (defmacro probe-macro () 1)~%~
+                                                  (defgeneric probe-gf (x))~%~
+                                                  (defmethod probe-gf ((x integer)) x)~%"))
+               (write-file* "b.lisp" (format nil "(in-package #:clmcp-redef-probe)~%~
+                                                  (defun probe () 2)~%"))
+               (let ((a (compile* "a.lisp")))
+                 (load* a)
+                 (multiple-value-bind (result count details) (load* a)
+                   (declare (ignore result))
+                   (ok (zerop count)
+                       (format nil "reloading a.lisp redefines nothing worth a word (~A)"
+                               details)))
+                 (let ((b (compile* "b.lisp")))
+                   (multiple-value-bind (result count details) (load* b)
+                     (declare (ignore result))
+                     (ok (= 1 count) "b.lisp redefining a.lisp's PROBE is still reported")
+                     (ok (search "PROBE" details) "and named")))))
+          (ignore-errors (delete-package package-name))
+          (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))))
 
 (deftest load-system-force-default-auto-suppresses-redefinition
   (testing "force=true on an already-loaded system reports zero warnings

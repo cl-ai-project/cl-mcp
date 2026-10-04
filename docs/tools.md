@@ -254,7 +254,11 @@ Output fields:
 - `system` (string): echoed system name
 - `status` (string): `"loaded"`, `"timeout"`, or `"error"`
 - `duration_ms` (integer): load time in milliseconds
-- `warnings` (integer): number of compiler warnings (when loaded)
+- `warnings` (integer): number of compiler warnings (when loaded). SBCL's `redefining X in
+  DEFUN` notices are left out when the load redefines what the same file defined before (or a
+  module SBCL ships, such as the UIOP a newer copy replaces) — a reload, or a dependency the
+  worker already had read again — and all of them when `force` reloads an already-loaded
+  system. A redefinition by another file, two files defining one name, is kept
 - `warning_details` (string|null): warning text (when warnings > 0)
 - `forced` (boolean, when loaded): whether force-reload was applied
 - `clear_fasls` (boolean, when loaded): whether `clear_fasls` was requested
