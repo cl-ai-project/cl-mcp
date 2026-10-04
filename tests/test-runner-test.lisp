@@ -1507,6 +1507,35 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
                   (coerce (gethash "unreached_tests" result) 'list))
            "the dependency the OR never reached is named")))))
 
+(deftest run-tests-keeps-what-ran-across-a-nested-fiveam-run
+  ;; Third review of #218: a test that calls fiveam:run itself resets every
+  ;; test's status, those that already ran included, so reading the statuses
+  ;; after the run named a passed test unreached.  A suite's own entries, with
+  ;; or without assertions, and every test a result came from count as run.
+  (%call-with-fiveam-fixture
+   "fiveam-nested-probe"
+   (list (cons "main.lisp"
+               (format nil "(defpackage #:fiveam-nested-probe/main (:use #:cl #:fiveam))~%~
+                            (in-package #:fiveam-nested-probe/main)~%~
+                            (def-suite :fiveam-nested-probe)~%~
+                            (in-suite :fiveam-nested-probe)~%~
+                            (test first-test (is (= 1 1)))~%~
+                            (test no-checks)~%~
+                            (test (helper :suite nil) (is (= 3 3)))~%~
+                            (test (prerequisite :suite nil) (is (= 4 4)))~%~
+                            (test (runs-nested :depends-on prerequisite) ~
+                            (is (eq t (let ((*test-dribble* (make-broadcast-stream))) ~
+                            (results-status (run 'helper))))))~%")))
+   (lambda (dir)
+     (declare (ignore dir))
+     (let ((result (run-tests "fiveam-nested-probe")))
+       ;; no-checks leaves FiveAM no result, so it is not among the counted.
+       (ok (= 3 (gethash "passed" result))
+           "first-test, prerequisite and runs-nested pass")
+       (ok (null (gethash "unreached_tests" result))
+           (format nil "nothing that ran is named unreached (~S)"
+                   (gethash "unreached_tests" result)))))))
+
 (deftest load-failure-hint-for-an-unknown-fiveam-suite-names-the-load-order
   ;; On a fresh worker the same mistake is loud -- `Unknown suite X' -- but the
   ;; hint blamed the worker's package state and sent the caller to replace it.

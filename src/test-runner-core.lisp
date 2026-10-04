@@ -1837,13 +1837,60 @@ an optional dependency."
   (let ((get-test (%fiveam-symbol "GET-TEST")))
     (and get-test (fboundp get-test) (ignore-errors (funcall get-test name)))))
 
+(defun %fiveam-suite-children (suite)
+  "Return SUITE's entries as (NAME . ENTRY) pairs, in order: ENTRY is a sub-suite
+object or the name of a test.  Current FiveAM keeps them in a TEST-BUNDLE, a list
+of NAMES with a TESTS hash table; older releases keep a bare hash table."
+  (let* ((tests-slot (%fiveam-symbol "TESTS"))
+         (names-slot (%fiveam-symbol "NAMES"))
+         (table (and tests-slot (ignore-errors (slot-value suite tests-slot)))))
+    (flet ((pairs-of (hash names)
+             (mapcar (lambda (name) (cons name (gethash name hash))) names)))
+      (cond ((hash-table-p table)
+             (pairs-of table (loop for name being the hash-keys of table collect name)))
+            (table
+             (let ((names (and names-slot (ignore-errors (slot-value table names-slot))))
+                   (hash (ignore-errors (slot-value table tests-slot))))
+               (and (hash-table-p hash) (pairs-of hash names))))))))
+
+(defun %fiveam-suite-test-names (suite-names)
+  "Return the names of the tests the suites SUITE-NAMES hold, through their
+sub-suites: running a suite runs each of them, or skips it with a result for a
+dependency not satisfied.  A test reached only as a :depends-on is not here --
+an (or a b) may never need it -- and is left to what the run recorded."
+  (let ((seen (make-hash-table :test 'eq))
+        (names '()))
+    (labels ((visit (name entry)
+               (let ((object (if (%fiveam-suite-p entry) entry (%fiveam-test-object name))))
+                 (when (and object (not (gethash object seen)))
+                   (setf (gethash object seen) t)
+                   (if (%fiveam-suite-p object)
+                       (loop for (child-name . child) in (%fiveam-suite-children object)
+                             do (visit child-name child))
+                       (push name names))))))
+      (dolist (suite suite-names)
+        (visit suite nil)))
+    (nreverse names)))
+
+(defun %fiveam-result-test-names (results)
+  "Return the names of the tests RESULTS, a FiveAM run's results, came from."
+  (let ((name-slot (%fiveam-symbol "NAME")))
+    (when name-slot
+      (remove-duplicates
+       (loop for result in results
+             for test = (%fiveam-result-test-case result)
+             for name = (and test (ignore-errors (slot-value test name-slot)))
+             when name collect name)))))
+
 (defun %fiveam-ran-test-names ()
   "Return the names of the FiveAM tests the last fiveam:run reached: those it ran,
 and those it skipped for a dependency not satisfied.  RUN sets every test's
 status to :UNKNOWN before it starts, and a test leaves :UNKNOWN only when that
 run gets to it, as a suite's entry or as a dependency it needed -- so the second
 test of a satisfied (or a b) stays :UNKNOWN, and so does a test with no
-assertions only when it was not run.  Read it after each RUN: the next resets it."
+assertions only when it was not run.  Read it after each RUN: the next resets it.
+So does a RUN a test makes itself, of the tests run before it: this alone does
+not tell what ran (%FIVEAM-REACHABILITY)."
   (let ((test-names (%fiveam-symbol "TEST-NAMES"))
         (status (%fiveam-symbol "STATUS")))
     (when (and test-names (fboundp test-names) status)
@@ -1891,8 +1938,11 @@ a test file since deleted, which this worker still holds."
 
 (defun %fiveam-reachability (system-name suite-symbols ran-names)
   "Return (values UNREACHED OUTSIDE) for a run of SYSTEM-NAME's SUITE-SYMBOLS that
-reached the tests RAN-NAMES (%FIVEAM-RAN-TEST-NAMES).
-UNREACHED: tests defined in the system's namespace the run did not reach.  A file
+recorded the tests RAN-NAMES as reached (%FIVEAM-RUN-AND-COLLECT).
+UNREACHED: tests defined in the system's namespace the run did not reach: neither
+held by a run suite (%FIVEAM-SUITE-TEST-NAMES) nor recorded.  Both are needed.  A
+suite's test with no assertions leaves no result, and a fiveam:run inside a later
+test resets its status; a test run only as a dependency is in no suite.  A file
 that declares its suite :in the root suite but loads before the root's file, on a
 worker that loaded both before, leaves its tests under the previous root suite
 object: the run then reports a pass without them.  So does a test only an OR's
@@ -1901,7 +1951,9 @@ OUTSIDE: run suites other than the root suite, the one named after the primary
 system.  run-tests runs them, but a test-op running the root suite -- the
 scaffold's does -- never reaches them, so the two runs differ unseen.
 Both are lists of qualified names; OUTSIDE is NIL when no root suite is found."
-  (let ((unreached (set-difference (%fiveam-system-test-names system-name) ran-names))
+  (let ((unreached (set-difference (%fiveam-system-test-names system-name)
+                                   (union (%fiveam-suite-test-names suite-symbols)
+                                          ran-names)))
         (root (find (asdf:primary-system-name system-name) suite-symbols
                     :key #'string :test #'string-equal)))
     (values (sort (mapcar #'%qualified-test-name unreached) #'string<)
@@ -1948,7 +2000,8 @@ crash, returns a failure result with one failed entry per CRASH-TEST-NAMES
 designator.  Shared by RUN-FIVEAM-TESTS and RUN-FIVEAM-SELECTED-TESTS so the
 stream-capture, crash-handling, and result-assembly logic lives in one place.
 Two more values follow the hash of a run that finished: the names of the tests
-it reached (%FIVEAM-RAN-TEST-NAMES), and T.  A crashed run returns its hash only.
+it reached (%FIVEAM-RAN-TEST-NAMES, and those its results came from), and T.
+A crashed run returns its hash only.
 
 Capture covers the thread the suite runs on.  Output from threads the suite
 spawns is not captured and reaches the process's own stdout: in SBCL a new
@@ -1973,8 +2026,11 @@ invisible to it.  The Rove backend has the same property."
                           (*standard-output* stdout-stream)
                           (*error-output* stderr-stream))
                       (%fiveam-run spec))))
-              ;; Now: the next spec's run resets what this one reached.
-              (setf ran-names (union ran-names (%fiveam-ran-test-names)))
+              ;; Now: the next spec's run resets what this one reached.  The
+              ;; results keep what a run inside a test reset already.
+              (setf ran-names (union ran-names
+                                     (union (%fiveam-ran-test-names)
+                                            (%fiveam-result-test-names results))))
               (when results
                 (setf all-results (append all-results results)))))
         (error (c)
