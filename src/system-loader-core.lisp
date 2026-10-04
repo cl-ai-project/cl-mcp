@@ -117,31 +117,17 @@ on other implementations so the filter still works in portable images."
              ;; are not mistakenly muffled.
              (search " in " text)))))
 
-(defun %decide-suppress-redefinition (flag cleared-prior-p)
-  "Resolve the `suppress-redefinition-warnings` flag against whether a
-prior system instance was actually cleared.
-
-  :auto  - suppress only when CLEARED-PRIOR-P is true, meaning the
-           system was already loaded (per ASDF:ALREADY-LOADED-SYSTEMS)
-           and ASDF:CLEAR-SYSTEM was just invoked.  First-time loads
-           (discoverable via the registry but not previously loaded)
-           do NOT suppress, so legitimate duplicate-definition
-           warnings inside the source still surface.
-  T      - always suppress.
-  NIL    - never suppress."
-  (cond ((eq flag :auto) cleared-prior-p)
-        (t flag)))
-
-(defun %call-with-suppressed-output (thunk &key suppress-redefinition)
+(defun %call-with-suppressed-output (thunk)
   "Call THUNK with compilation and load output suppressed.
 Returns (values thunk-result warning-count warning-details compiler-stderr).
 The stderr string is also saved to *last-compiler-stderr* via unwind-protect
 so it survives error unwinds and can be retrieved by callers that catch the error.
 
-When SUPPRESS-REDEFINITION is non-nil, warnings identified by
-%REDEFINITION-WARNING-P are silently muffled and do not increment the
-returned count.  Useful under force=true reloads where 'redefining X in
-DEFUN' lines are noise that drown real warnings."
+Redefinition notices (%REDEFINITION-WARNING-P) are muffled and not counted,
+on a first load and a reload alike: redefining is ordinary Common Lisp
+development, and a reload exists to do it.  Every other warning -- a
+duplicate definition in one file, a type conflict, an undefined function --
+is counted."
   (let ((warning-count 0)
         (warning-details (make-string-output-stream))
         (stderr (make-string-output-stream)))
@@ -150,7 +136,7 @@ DEFUN' lines are noise that drown real warnings."
     (setf *last-compiler-stderr* nil)
     (flet ((handle-warning (w)
              (cond
-               ((and suppress-redefinition (%redefinition-warning-p w))
+               ((%redefinition-warning-p w)
                 (when (find-restart 'muffle-warning)
                   (invoke-restart 'muffle-warning)))
                (t
@@ -273,14 +259,12 @@ cleared, or NIL."
 
 (declaim (ftype (function (string &key (:force boolean)
                                        (:clear-fasls boolean)
-                                       (:timeout-seconds (or null (real (0))))
-                                       (:suppress-redefinition-warnings t))
+                                       (:timeout-seconds (or null (real (0)))))
                           (values hash-table &rest t))
                 load-system))
 
 (defun load-system
-       (system-name &key (force t) (clear-fasls nil) (timeout-seconds 120)
-                         (suppress-redefinition-warnings :auto))
+       (system-name &key (force t) (clear-fasls nil) (timeout-seconds 120))
   "Load ASDF system SYSTEM-NAME with structured result.
 
 When FORCE is true (default), clears loaded state before loading so
@@ -293,17 +277,10 @@ package-inferred dependency subsystems that :FORCE T alone would not
 rebuild. TIMEOUT-SECONDS must be a positive number
 or NIL (no timeout). Default is 120 seconds.
 
-SUPPRESS-REDEFINITION-WARNINGS controls whether SBCL
-'redefining X in DEFUN' style notifications are dropped from the
-captured warning stream.  Values:
-  :auto  - suppress only when the system was actually previously
-           loaded (per ASDF:ALREADY-LOADED-SYSTEMS) and thus cleared
-           via ASDF:CLEAR-SYSTEM before reloading.  First-time loads
-           (systems merely discoverable in the source registry) do
-           not suppress, so legitimate duplicate-definition warnings
-           inside source still surface.
-  T      - always suppress.
-  NIL    - never suppress (preserve pre-change behavior).
+SBCL's 'redefining X in DEFUN' notifications are dropped from the
+captured warnings, on a first load and a reload alike, whatever FORCE is
+and wherever the old definition came from; every other warning is kept
+(%CALL-WITH-SUPPRESSED-OUTPUT).
 
 If ASDF signals MISSING-COMPONENT for the requested system, searches
 *project-root* for a matching .asd file and retries once after
@@ -342,27 +319,21 @@ registering it."
                                 (+ (or same-second-deleted 0) stale))
                           (log-event :info "load-system-same-second-fasls"
                                      "system" system-name "deleted" stale))))
-                    (let ((cleared-prior-p
-                            (when (and force
-                                       (member system-name
-                                               (asdf:already-loaded-systems)
-                                               :test #'string-equal))
-                              (let ((asd-src
-                                      (ignore-errors
-                                       (asdf:system-source-file
-                                        (asdf:find-system system-name nil)))))
-                                (asdf:clear-system system-name)
-                                (when asd-src
-                                  (ignore-errors
-                                   (asdf:load-asd asd-src))))
-                              t)))
-                      (%call-with-suppressed-output
-                       (lambda ()
-                         (asdf:load-system system-name :force clear-fasls))
-                       :suppress-redefinition
-                       (%decide-suppress-redefinition
-                        suppress-redefinition-warnings
-                        cleared-prior-p)))))
+                    (when (and force
+                               (member system-name
+                                       (asdf:already-loaded-systems)
+                                       :test #'string-equal))
+                      (let ((asd-src
+                              (ignore-errors
+                               (asdf:system-source-file
+                                (asdf:find-system system-name nil)))))
+                        (asdf:clear-system system-name)
+                        (when asd-src
+                          (ignore-errors
+                           (asdf:load-asd asd-src)))))
+                    (%call-with-suppressed-output
+                     (lambda ()
+                       (asdf:load-system system-name :force clear-fasls)))))
              (handler-case (%do-load)
                (asdf/find-component:missing-component (c)
                  (let* ((missing (princ-to-string

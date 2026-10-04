@@ -44,14 +44,11 @@ that FASL is deleted first, and the file is recompiled when this load reaches
 it (same_second_fasls_deleted counts the deletions).  clear_fasls=true is the
 guaranteed rebuild, of every file.
 
-Warning handling: when force=true triggers an actual ASDF:CLEAR-SYSTEM
-(i.e., the system was previously loaded), SBCL 'redefining X in DEFUN'
-notifications are dropped from the warnings count/details automatically
-(those redefinitions are exactly what a reload requests).  First-time
-loads and force=false loads keep redefining-warnings visible so
-legitimate duplicate-definition mistakes in source still surface.
-Real warnings (style, type, package variance) always pass through
-unchanged.
+Warning handling: SBCL 'redefining X in DEFUN' notifications are dropped
+from the warnings count/details, on a first load and a reload alike:
+redefining is ordinary Common Lisp development, and a reload exists to do
+it.  Other warnings (duplicate definition, type, undefined function or
+variable, package variance) always pass through unchanged.
 
 Examples:
   First-time load: system='my-project', force=false

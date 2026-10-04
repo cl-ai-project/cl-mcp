@@ -232,72 +232,176 @@
             (ok (cl-mcp/src/system-loader-core::%redefinition-warning-p hit)
                 "primary typep branch of %redefinition-warning-p matches")))))))
 
-(deftest decide-suppress-redefinition-helper
-  (testing "%decide-suppress-redefinition honors :auto, T, and NIL"
-    (testing ":auto with cleared-prior-p=t suppresses"
-      (ok (eq t
-              (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
-               :auto t))))
-    (testing ":auto with cleared-prior-p=nil does NOT suppress (first-time load)"
-      (ok (null
-           (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
-            :auto nil))))
-    (testing "explicit T always suppresses"
-      (ok (eq t
-              (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
-               t nil)))
-      (ok (eq t
-              (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
-               t t))))
-    (testing "explicit NIL never suppresses"
-      (ok (null
-           (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
-            nil t)))
-      (ok (null
-           (cl-mcp/src/system-loader-core::%decide-suppress-redefinition
-            nil nil))))))
-
 (deftest suppress-redefinition-warning-filter-behavior
-  (testing "%call-with-suppressed-output drops redefining-warnings when asked"
-    (let ((thunk
-           (lambda ()
-             (warn "redefining FOO in DEFUN")
-             (warn "redefining BAR in DEFMACRO")
-             (warn "something real and bad")
-             :done)))
-      (testing "without suppress: all three warnings counted"
-        (multiple-value-bind (result warning-count details)
-            (cl-mcp/src/system-loader-core::%call-with-suppressed-output thunk)
-          (ok (eq result :done))
-          (ok (= warning-count 3))
-          (ok (search "redefining FOO" details))
-          (ok (search "something real" details))))
-      (testing "with suppress: redefining-warnings filtered, real one remains"
-        (multiple-value-bind (result warning-count details)
-            (cl-mcp/src/system-loader-core::%call-with-suppressed-output
-             thunk :suppress-redefinition t)
-          (ok (eq result :done))
-          (ok (= warning-count 1))
-          (ok (null (search "redefining FOO" details)))
-          (ok (search "something real" details)))))))
+  (testing "%call-with-suppressed-output drops redefining-warnings and keeps the rest"
+    (multiple-value-bind (result warning-count details)
+        (cl-mcp/src/system-loader-core::%call-with-suppressed-output
+         (lambda ()
+           (warn "redefining FOO in DEFUN")
+           (warn "redefining BAR in DEFMACRO")
+           (warn "something real and bad")
+           :done))
+      (ok (eq result :done))
+      (ok (= warning-count 1))
+      (ok (null (search "redefining FOO" details)))
+      (ok (search "something real" details)))))
 
-(deftest load-system-force-default-auto-suppresses-redefinition
+(deftest redefinition-notices-are-dropped-and-other-warnings-kept
+  ;; Redefining is ordinary Common Lisp development, and a reload exists to
+  ;; do it: every redefinition notice is dropped -- a first load's, a
+  ;; reload's, another file's -- and no other warning is touched.  Each case
+  ;; is first run bare, to show SBCL does signal the notices it drops.
+  (let ((root (uiop:ensure-directory-pathname
+               (uiop:merge-pathnames*
+                (format nil "clmcp-redef-~36R/"
+                        (random most-positive-fixnum (make-random-state t)))
+                (uiop:temporary-directory))))
+        (package-name "CLMCP-REDEF-PROBE"))
+    (labels ((write-file* (name text)
+               (let ((path (uiop:merge-pathnames* name root)))
+                 (ensure-directories-exist path)
+                 (with-open-file (out path :direction :output :if-exists :supersede)
+                   (write-string text out))
+                 path))
+             (source (text)
+               (format nil "(in-package #:clmcp-redef-probe)~%~A~%" text))
+             (fresh-package ()
+               (ignore-errors (delete-package package-name))
+               (make-package package-name :use '(#:cl)))
+             (bare (thunk)
+               ;; The redefinition notices THUNK signals, counted and muffled.
+               (let ((count 0)
+                     (*error-output* (make-broadcast-stream)))
+                 (handler-bind ((warning (lambda (w)
+                                           (when (typep w 'sb-kernel:redefinition-warning)
+                                             (incf count))
+                                           (muffle-warning w))))
+                   (funcall thunk))
+                 count))
+             (suppressed (thunk)
+               (multiple-value-bind (result count details)
+                   (cl-mcp/src/system-loader-core::%call-with-suppressed-output
+                    (lambda ()
+                      (let ((*error-output* (make-broadcast-stream)))
+                        (funcall thunk))))
+                 (declare (ignore result))
+                 (values count details))))
+      (unwind-protect
+           (let* ((a (write-file* "a.lisp" (source "(defun probe () 1)
+(defmacro probe-macro () 1)
+(defgeneric probe-gf (x))
+(defmethod probe-gf ((x integer)) x)")))
+                  (b (write-file* "b.lisp" (source "(defun probe () 2)")))
+                  (other (write-file* "other.lisp" (source "(defun dup () 1)
+(defun dup () 2)
+(defun calls-missing () (clmcp-redef-missing-function))")))
+                  (load-a (lambda () (load (compile-file a))))
+                  (reload-a (lambda () (load (compile-file-pathname a))))
+                  (load-b (lambda () (load (compile-file b)))))
+             (testing "a first load: compile-file defines the macro, the fasl again"
+               (fresh-package)
+               (ok (plusp (bare load-a)) "SBCL signals it")
+               (fresh-package)
+               (multiple-value-bind (count details) (suppressed load-a)
+                 (ok (zerop count) (format nil "dropped (~A)" details))))
+             (testing "a reload"
+               (ok (<= 4 (bare reload-a)) "SBCL signals one per definition")
+               (multiple-value-bind (count details) (suppressed reload-a)
+                 (ok (zerop count) (format nil "dropped (~A)" details))))
+             (testing "another file's redefinition"
+               (ok (= 1 (bare load-b)) "SBCL signals it")
+               (bare reload-a)
+               (multiple-value-bind (count details) (suppressed load-b)
+                 (ok (zerop count) (format nil "dropped (~A)" details))))
+             (testing "warnings of other kinds are kept"
+               (multiple-value-bind (count details)
+                   (suppressed (lambda () (load (compile-file other))))
+                 (ok (not (search "redefining" details))
+                     (format nil "the second DUP's notice is dropped (~A)" details))
+                 (ok (search "Duplicate definition" details) "Duplicate definition is kept")
+                 (ok (search "CLMCP-REDEF-MISSING-FUNCTION" details)
+                     "an undefined function is kept")
+                 (ok (<= 2 count) (format nil "and counted (~A)" details)))))
+        (ignore-errors (delete-package package-name))
+        (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore)))))
+
+(deftest load-system-drops-redefinition-notices-on-first-load-and-reload
+  ;; Through load-system itself: a first load (force=false) and a reload
+  ;; (force=true) of a system whose second file redefines its first file's
+  ;; function, with a warning of another kind signalled while it loads.
+  (let ((root (uiop:ensure-directory-pathname
+               (uiop:merge-pathnames*
+                (format nil "clmcp-redef-system-~36R/"
+                        (random most-positive-fixnum (make-random-state t)))
+                (uiop:temporary-directory))))
+        (system "clmcp-redef-fixture")
+        (package-name "CLMCP-REDEF-FIXTURE"))
+    (flet ((write-file* (name text)
+             (let ((path (uiop:merge-pathnames* name root)))
+               (ensure-directories-exist path)
+               (with-open-file (out path :direction :output :if-exists :supersede)
+                 (write-string text out))
+               path))
+           (forget ()
+             (asdf:clear-system system)
+             (ignore-errors (delete-package package-name))
+             (asdf:load-asd (uiop:merge-pathnames* "clmcp-redef-fixture.asd" root)))
+           (bare-redefinitions (reload-p)
+             ;; What ASDF's own load signals, with nothing dropped.  A reload
+             ;; clears the system as load-system does: ASDF refuses :force in
+             ;; a call nested in another operation, such as rove's test-op.
+             (let ((count 0)
+                   (*error-output* (make-broadcast-stream))
+                   (*standard-output* (make-broadcast-stream)))
+               (when reload-p
+                 (asdf:clear-system system)
+                 (asdf:load-asd (uiop:merge-pathnames* "clmcp-redef-fixture.asd" root)))
+               (handler-bind ((warning (lambda (w)
+                                         (when (typep w 'sb-kernel:redefinition-warning)
+                                           (incf count))
+                                         (muffle-warning w))))
+                 (asdf:load-system system))
+               count)))
+      (unwind-protect
+           (progn
+             (write-file* "clmcp-redef-fixture.asd"
+                          "(defsystem \"clmcp-redef-fixture\" :serial t
+  :components ((:file \"package\") (:file \"a\") (:file \"b\") (:file \"other\")))")
+             (write-file* "package.lisp" "(defpackage #:clmcp-redef-fixture (:use #:cl))")
+             (write-file* "a.lisp" "(in-package #:clmcp-redef-fixture)
+(defun probe () 1)")
+             (write-file* "b.lisp" "(in-package #:clmcp-redef-fixture)
+(defun probe () 2)")
+             (write-file* "other.lisp" "(in-package #:clmcp-redef-fixture)
+(warn \"clmcp-redef-fixture: a warning of another kind\")")
+             (forget)
+             (ok (plusp (bare-redefinitions nil)) "a bare first load signals a redefinition")
+             (ok (plusp (bare-redefinitions t)) "and so does a bare reload")
+             (forget)
+             (dolist (force '(nil t))
+               (let* ((ht (load-system system :force force))
+                      (details (or (gethash "warning_details" ht) "")))
+                 (ok (string= "loaded" (gethash "status" ht))
+                     (format nil "~:[first load~;reload~] loaded" force))
+                 (ok (search "a warning of another kind" details)
+                     (format nil "~:[first load~;reload~]: the other warning is kept" force))
+                 (ok (and (= 1 (gethash "warnings" ht))
+                          (not (search "redefining" details)))
+                     (format nil "~:[first load~;reload~]: no redefinition (~A)"
+                             force details)))))
+        (asdf:clear-system system)
+        (ignore-errors (delete-package package-name))
+        (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore)))))
+
+(deftest load-system-force-reload-reports-no-redefinitions
   (testing "force=true on an already-loaded system reports zero warnings
-(the implied redefining-warnings are now auto-filtered)"
+(the redefinitions a reload makes are dropped)"
     (let ((ht (load-system "cl-mcp" :force t)))
       (ok (hash-table-p ht))
       (ok (string= "loaded" (gethash "status" ht)))
       (ok (integerp (gethash "warnings" ht)))
       (ok (zerop (gethash "warnings" ht))
           "reloading an already-loaded system must not surface noise"))))
-
-(deftest load-system-explicit-suppress-nil-is-honored
-  (testing "explicit :suppress-redefinition-warnings nil is wired through without errors"
-    (let ((ht (load-system "cl-mcp"
-                           :force t
-                           :suppress-redefinition-warnings nil)))
-      (ok (hash-table-p ht))
-      (ok (string= "loaded" (gethash "status" ht))))))
 
 (deftest load-system-clear-fasls-recompiles-package-inferred
   (testing "clear_fasls recompiles dependency subsystems regardless of timestamps"

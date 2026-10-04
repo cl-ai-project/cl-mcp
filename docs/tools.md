@@ -254,7 +254,10 @@ Output fields:
 - `system` (string): echoed system name
 - `status` (string): `"loaded"`, `"timeout"`, or `"error"`
 - `duration_ms` (integer): load time in milliseconds
-- `warnings` (integer): number of compiler warnings (when loaded)
+- `warnings` (integer): number of compiler warnings (when loaded). SBCL's `redefining X in
+  DEFUN` notices are left out, on a first load and a reload alike: redefining is ordinary
+  Common Lisp development, and a reload exists to do it. Other warnings (duplicate
+  definition, type, undefined function or variable, package variance) are counted
 - `warning_details` (string|null): warning text (when warnings > 0)
 - `forced` (boolean, when loaded): whether force-reload was applied
 - `clear_fasls` (boolean, when loaded): whether `clear_fasls` was requested
