@@ -369,7 +369,22 @@
                       :suppress-redefinition :same-file)
                    (declare (ignore result))
                    (ok (and (= 1 count) (search "DEFMETHOD" details))
-                       "a method another file replaces while one compiles is reported"))))
+                       "a method another file replaces while one compiles is reported"))
+                 ;; Review of #220 (160da27): code compiled inside repl-eval's
+                 ;; compilation unit records the source name "repl-eval" for
+                 ;; every file; two files then shared one name, and b.lisp's
+                 ;; replacement of a.lisp's PROBE looked like a.lisp's reload.
+                 (write-file* "a.lisp" (format nil "(in-package #:clmcp-redef-probe)~%~
+                                                    (defun probe () 1)~%"))
+                 (flet ((compile-as-repl (name)
+                          (with-compilation-unit (:override t :source-namestring "repl-eval")
+                            (compile* name))))
+                   (load* (compile-as-repl "a.lisp"))
+                   (multiple-value-bind (result count)
+                       (load* (compile-as-repl "b.lisp"))
+                     (declare (ignore result))
+                     (ok (= 1 count)
+                         "a source name that is no file proves nothing")))))
           (ignore-errors (delete-package package-name))
           (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))))
 

@@ -118,21 +118,32 @@ on other implementations so the filter still works in portable images."
 
 (defun %definition-file (object)
   "Return the namestring of the source file OBJECT was defined in -- a function,
-a macro function, a generic function or a method -- or NIL when it cannot be told."
-  #+sbcl
-  (or (ignore-errors
-       (and (functionp object)
-            (not (typep object 'generic-function))
-            (sb-c::debug-source-namestring
-             (sb-c::debug-info-source
-              (sb-kernel:%code-debug-info
-               (sb-kernel:fun-code-header (sb-kernel:%fun-fun object)))))))
-      (ignore-errors
-       (sb-c:definition-source-location-namestring (sb-pcl::definition-source object))))
-  #-sbcl
-  (declare (ignore object))
-  #-sbcl
-  nil)
+a macro function, a generic function or a method -- or NIL when it cannot be told.
+Only a name that is a file counts: an absolute path to an existing file, or a
+module SBCL ships (%BUNDLED-MODULE-SOURCE-P).  Code compiled inside another
+compilation unit can carry that unit's name instead -- repl-eval gives every file
+compiled in it \"repl-eval\" -- and two files would then look like one."
+  (let ((name
+          #+sbcl
+          (or (ignore-errors
+               (and (functionp object)
+                    (not (typep object 'generic-function))
+                    (sb-c::debug-source-namestring
+                     (sb-c::debug-info-source
+                      (sb-kernel:%code-debug-info
+                       (sb-kernel:fun-code-header (sb-kernel:%fun-fun object)))))))
+              (ignore-errors
+               (sb-c:definition-source-location-namestring
+                (sb-pcl::definition-source object))))
+          #-sbcl
+          (progn object nil)))
+    (and (stringp name)
+         (or (%bundled-module-source-p name)
+             (let ((path (ignore-errors (uiop:parse-native-namestring name))))
+               (and path
+                    (uiop:absolute-pathname-p path)
+                    (ignore-errors (probe-file path)))))
+         name)))
 
 (defun %redefined-definition (warning)
   "Return the definition WARNING, an SBCL redefinition warning, is about to
