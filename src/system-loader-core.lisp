@@ -103,7 +103,7 @@ that response builders can include an informational hint.")
 
 (defun %redefinition-warning-p (warning)
   "Return T when WARNING is an SBCL \"redefining X in DEFUN/DEFMACRO/...\"
-notification that is pure noise under force=true reloads. Uses the
+notification, which LOAD-SYSTEM drops on a first load and a reload alike. Uses the
 condition class where available and falls back to a textual prefix match
 on other implementations so the filter still works in portable images."
   (or #+sbcl
