@@ -392,7 +392,7 @@
               (ok (= 2 (answer)) "the edit is what runs")
               (ok (eql 1 (gethash "same_second_fasls_deleted" ht))
                   "the response counts the fasl it deleted")
-              (ok (search "Recompiled 1 file written in the same second as its FASL"
+              (ok (search "Deleted 1 FASL whose source was written in the same second"
                           (let ((content (gethash "content"
                                                   (build-load-system-response name ht))))
                             (gethash "text" (aref content 0))))

@@ -1513,15 +1513,60 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
          (when name (uiop:symbol-call :fiveam :rem-test name)))
        (ignore-errors (delete-package '#:fiveam-keep-probe/extra))))))
 
-(deftest reloaded-packages-are-the-cleared-systems-own
-  ;; A package-inferred system's file defines the package named like it, and
-  ;; a system's own source files define theirs; a dependency is not reloaded.
-  (let ((packages (cl-mcp/src/test-runner-core::%reloaded-packages
-                   '("cl-mcp/tests/test-runner-test"))))
-    (ok (member (find-package '#:cl-mcp/tests/test-runner-test) packages)
-        "the package named like the system")
-    (ok (not (member (find-package '#:cl-mcp/src/test-runner-core) packages))
-        "not a dependency's")))
+(deftest run-tests-keeps-a-dependency-fiveam-test-of-a-shared-package
+  ;; Review of #219: a package is no proof a test comes back.  A dependency,
+  ;; not reloaded, made a failing test in the package named like the system
+  ;; under test; purging by package lost it, and the run went green.
+  (%call-with-fiveam-fixture
+   "fiveam-shared-probe"
+   (list (cons "main.lisp" (format nil "(in-package #:fiveam-shared-probe)~%~
+                                        (in-suite :fiveam-shared-probe)~%~
+                                        (test in-main (is (= 1 1)))~%")))
+   (lambda (dir)
+     (%write-fixture-file dir "dep.lisp"
+                          (format nil "(defpackage #:fiveam-shared-probe (:use #:cl #:fiveam))~%~
+                                       (in-package #:fiveam-shared-probe)~%~
+                                       (def-suite :fiveam-shared-probe)~%~
+                                       (in-suite :fiveam-shared-probe)~%~
+                                       (test from-dependency (is (= 1 2)))~%"))
+     (%write-fixture-file dir "fiveam-shared-probe-dep.asd"
+                          (format nil "(asdf:defsystem \"fiveam-shared-probe-dep\" ~
+                                         :depends-on (\"fiveam\") ~
+                                         :components ((:file \"dep\")))~%"))
+     (%write-fixture-file dir "fiveam-shared-probe.asd"
+                          (format nil "(asdf:defsystem \"fiveam-shared-probe\" ~
+                                         :depends-on (\"fiveam\" \"fiveam-shared-probe-dep\") ~
+                                         :components ((:file \"main\")))~%"))
+     (unwind-protect
+          (progn
+            (asdf:load-asd (uiop:merge-pathnames* "fiveam-shared-probe-dep.asd" dir))
+            (asdf:load-asd (uiop:merge-pathnames* "fiveam-shared-probe.asd" dir))
+            (let ((first (run-tests "fiveam-shared-probe")))
+              (ok (and (= 1 (gethash "passed" first)) (= 1 (gethash "failed" first)))
+                  (format nil "the first run fails on the dependency's test (~D/~D)"
+                          (gethash "passed" first) (gethash "failed" first))))
+            ;; Older than its fasl, or the same-second check deletes that fasl
+            ;; and the dependency is compiled and loaded again after all.
+            (require :sb-posix)
+            (let* ((source (uiop:merge-pathnames* "dep.lisp" dir))
+                   (fasl (asdf:apply-output-translations (compile-file-pathname source)))
+                   (unix (- (file-write-date fasl) 2
+                            (encode-universal-time 0 0 0 1 1 1970 0))))
+              (uiop:symbol-call :sb-posix :utimes (namestring source) unix unix))
+            (let ((second (run-tests "fiveam-shared-probe")))
+              (ok (= 1 (gethash "failed" second))
+                  "a warm run still runs it, and still fails")))
+       (ignore-errors (asdf:clear-system "fiveam-shared-probe-dep"))
+       (ignore-errors (delete-package '#:fiveam-shared-probe))))))
+
+(deftest reloaded-files-are-the-cleared-systems-own
+  ;; The files of the cleared systems and their fasls; a dependency's are not
+  ;; reloaded, so a test made by one of them would not come back.
+  (let ((files (cl-mcp/src/test-runner-core::%reloaded-files
+                '("cl-mcp/tests/test-runner-test"))))
+    (ok (find "test-runner-test.lisp" files :test #'search) "the system's own source")
+    (ok (find "test-runner-test.fasl" files :test #'search) "and its fasl")
+    (ok (not (find "test-runner-core" files :test #'search)) "not a dependency's")))
 
 (deftest run-tests-counts-a-fiveam-dependency-as-run
   ;; Review of #218: a test the root suite reaches only as another test's

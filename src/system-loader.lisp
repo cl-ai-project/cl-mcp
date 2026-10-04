@@ -40,8 +40,9 @@ loaded (the response then carries auto_discovered_asd).
 force=true clears ASDF's loaded state, but ASDF still recompiles only the files
 it judges stale by their timestamps (one-second resolution).  A file of the
 project's tree written in the same second as its FASL would look current, so
-that FASL is deleted first and the file recompiled (same_second_fasls_deleted
-counts them).  clear_fasls=true is the guaranteed rebuild, of every file.
+that FASL is deleted first, and the file is recompiled when this load reaches
+it (same_second_fasls_deleted counts the deletions).  clear_fasls=true is the
+guaranteed rebuild, of every file.
 
 Warning handling: when force=true triggers an actual ASDF:CLEAR-SYSTEM
 (i.e., the system was previously loaded), SBCL 'redefining X in DEFUN'

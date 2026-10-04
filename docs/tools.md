@@ -267,9 +267,11 @@ Output fields:
 - `fasls_cleared_from` (string, with `clear_fasls`): the system whose directory was cleared —
   the primary system when a subsystem was named
 - `same_second_fasls_deleted` (integer, present when any, `force` without `clear_fasls`): FASLs
-  deleted because their source was written in the same second as them — ASDF's one-second
-  timestamps would have reused them, running the code from before the edit. The text says
-  `Recompiled N files written in the same second as their FASLs`
+  of the project's tree deleted because their source was written in the same second as them —
+  ASDF's one-second timestamps would have reused them, running the code from before the edit.
+  A count of deletions, not of compilations: a file this load reaches is compiled from source,
+  one in a sibling subsystem it never reaches only when something loads it. The text says
+  `Deleted N FASLs whose source was written in the same second`
 - `message` (string|null): error or timeout message
 
 Solves three problems with using `ql:quickload` via `repl-eval`:
@@ -1266,9 +1268,10 @@ Output:
   the root's file on a warm worker, so its suite hangs from an earlier load of the root; or a
   test in no suite (`:suite nil`) that no test that ran depends on. The summary says `⚠ PASS,
   BUT N TESTS DID NOT RUN`, names them, and gives the fix for each cause. A test deleted from
-  its file is not counted: before reloading, run-tests drops from FiveAM the tests of the
-  packages the reload defines again, so one no longer in its file is gone (the tests of a test
-  file since deleted are not counted either)
+  its file is not counted: before reloading, run-tests drops from FiveAM the tests made by the
+  files the reload loads again, so one no longer in its file is gone. A test made by any other
+  file stays, even in a package a reloaded file shares: a dependency's would not come back (the
+  tests of a test file since deleted are not counted either)
 - `suites_outside_root` (array, FiveAM, present when any): suites of the run other than the
   root suite, the one named after the primary system. run-tests runs them, but a test-op that
   runs the root suite (the scaffold's does) skips them; the summary says `⚠ PASS, BUT N SUITES

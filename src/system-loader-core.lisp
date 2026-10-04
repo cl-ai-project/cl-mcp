@@ -455,8 +455,8 @@ registering it."
         ;; What clear_fasls did, not only that it was asked: a request that
         ;; deleted nothing forced no recompilation, and the caller must be
         ;; able to see that.
-        ;; Fasls a same-second edit made look current: their sources were
-        ;; recompiled although ASDF's timestamps alone would not have done it.
+        ;; Fasls a same-second edit made look current, deleted: the files this
+        ;; load reached among them were compiled from source.
         (when same-second-deleted
           (setf (gethash "same_second_fasls_deleted" ht) same-second-deleted))
         (when (and clear-fasls fasls-deleted)

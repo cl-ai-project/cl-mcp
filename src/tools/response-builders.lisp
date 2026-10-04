@@ -334,9 +334,13 @@ or its primary system" system)))))))
 Use pool-kill-worker to get a fresh worker, then re-run load-system."))))))
                 (let ((same-second (gethash "same_second_fasls_deleted" ht)))
                   (when same-second
-                    (format s "~%Recompiled ~D file~:P written in the same second as ~
-~:[their FASLs~;its FASL~], which ASDF would have kept"
-                            same-second (= 1 same-second)))))
+                    ;; Deleted, not recompiled: the project's tree is checked
+                    ;; whole, and a sibling subsystem this load never reaches
+                    ;; is compiled only when something loads it.
+                    (format s "~%Deleted ~D FASL~:P whose source was written in the ~
+same second, which ASDF would have kept; every file this load reached without a FASL ~
+was compiled from source"
+                            same-second))))
                ((string= status "timeout")
                 (format s "~A" (gethash "message" ht)))
                ((string= status "error")
