@@ -251,9 +251,13 @@ Output fields:
 - `content`: summary text. Every full warning is written whole, with its place
   (`file:line (defun name)`). Style warnings are summed up by kind: how many there are, the
   first one's first line and up to three places; at most eight kinds are listed and the rest
-  counted. A load that failed on a compile ASDF refused lists the full warnings as its cause
-  and says to fix them; a package-variance warning ("also exports") or any other error adds a
-  hint to get a fresh worker with `pool-kill-worker`
+  counted. A load that failed on a compile ASDF refused gives as its cause the full warnings
+  signalled while a file compiled (`fails_compile`) and says to fix them. A full warning
+  signalled earlier, while another file loaded, is listed apart as `Other warnings before the
+  error`; when the refused compile had no warning of its own (it failed on an error, which the
+  compiler output shows) no warning is blamed for it. A package at variance ("also exports")
+  that refused the compile, or any other error, adds a hint to get a fresh worker with
+  `pool-kill-worker`
 - `system` (string): echoed system name
 - `status` (string): `"loaded"`, `"timeout"`, or `"error"`. A full `WARNING` signalled while
   a file compiles (wrong argument count, duplicate definition, type conflict, package
@@ -279,7 +283,14 @@ Output fields:
   - `kind` (integer): shared by the warnings of one kind, counted from 1 in order of first
     appearance. A kind is a class and, for the classes SBCL uses for many messages
     (`SIMPLE-WARNING`, `SIMPLE-STYLE-WARNING`), a message template
-  - `file`, `line`, `form` (for a warning signalled during a compilation): the source file, the
+  - `fails_compile` (boolean, present when true): a full warning signalled while a file was
+    being compiled. `compile-file` reports that compile as failed, which is what ASDF refuses a
+    file for, so these are the warnings a refused compile is blamed on. Absent from a style
+    warning and from a full warning signalled at any other time: while a file loads, or when
+    the compiler reports an undefined variable as the compilation unit ends (which has a
+    `file` and `line` all the same)
+  - `file`, `line`, `form` (for a warning the compiler has a place for: one signalled while a
+    file compiles, or an undefined variable or function reported at the end): the source file, the
     line of the top-level form and the enclosing definition as the compiler names it, e.g.
     `"(defun wrong-arity)"`. `form` says where the warning is; it is not an argument for
     `lisp-edit-form`. For a top-level `defun`, `defmacro`, `defvar`, `defclass`, `defgeneric`,

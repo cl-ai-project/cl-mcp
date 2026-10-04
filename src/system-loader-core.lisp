@@ -189,9 +189,14 @@ a form_name is written with."
 
 (defun %make-warning-record (warning)
   "Return WARNING as a property list: :SEVERITY, :CLASS, :MESSAGE, the :KIND-KEY
-that groups it and, when it was signalled during a compilation, the :FILE, the
-octet :POSITION and the enclosing :FORM.  Runs in the handler, inside whatever
-signalled, so it must not signal itself: a part that cannot be had is left out."
+that groups it, whether a file was :COMPILING when it was signalled and, when
+the compiler has a place for it, the :FILE, the octet :POSITION and the
+enclosing :FORM.  Runs in the handler, inside whatever signalled, so it must not
+signal itself: a part that cannot be had is left out.
+
+:COMPILING is true inside COMPILE-FILE and nowhere else.  It is not the same as
+having a place: an undefined variable is reported when the compilation unit
+ends, after every COMPILE-FILE has returned, with the place of the reference."
   (let ((class (or (ignore-errors (%warning-class-name warning)) "WARNING")))
     (multiple-value-bind (file position context)
         (ignore-errors (%compiler-place))
@@ -199,6 +204,7 @@ signalled, so it must not signal itself: a part that cannot be had is left out."
             :class class
             :message (or (ignore-errors (princ-to-string warning)) class)
             :kind-key (ignore-errors (%warning-kind-key warning))
+            :compiling (and *compile-file-truename* t)
             :file (and (typep file '(or pathname string)) file)
             :position (and (integerp position) position)
             :form (ignore-errors (%enclosing-form-label context))))))
@@ -207,8 +213,13 @@ signalled, so it must not signal itself: a part that cannot be had is left out."
   "Return RECORDS, property lists in the order signalled, as the JSON objects
 load-system reports: \"severity\", \"class\", \"message\", \"kind\" -- a number
 the records of one kind share, counted from 1 in order of first appearance --
-and, for a warning from a compilation, \"file\", \"line\" and \"form\".  The line
-is that of the top-level form; SBCL keeps no finer place."
+and, for a warning the compiler has a place for, \"file\", \"line\" and \"form\".
+The line is that of the top-level form; SBCL keeps no finer place.
+
+\"fails_compile\" is true on a full warning signalled while a file compiled, and
+absent from every other record.  COMPILE-FILE reports failure for such a
+warning and for no other, so it is what tells the warnings a file was refused
+for from the ones that only came before."
   (let ((kinds '()))
     (mapcar
      (lambda (record)
@@ -217,10 +228,13 @@ is that of the top-level form; SBCL keeps no finer place."
                         (progn (setf kinds (append kinds (list key)))
                                (1- (length kinds)))))
               (file (getf record :file))
-              (table (make-ht "severity" (getf record :severity)
+              (severity (getf record :severity))
+              (table (make-ht "severity" severity
                               "class" (sanitize-for-json (getf record :class))
                               "message" (sanitize-for-json (getf record :message))
                               "kind" (1+ kind))))
+         (when (and (getf record :compiling) (equal severity "warning"))
+           (setf (gethash "fails_compile" table) t))
          (when file
            (let ((shown (ignore-errors (normalize-path-for-display file)))
                  (line (ignore-errors (%offset->line file (getf record :position))))

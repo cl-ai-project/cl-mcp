@@ -300,6 +300,11 @@ list in the order they were signalled."
   (remove-if-not (lambda (record) (equal severity (gethash "severity" record)))
                  (coerce (gethash "warning_records" ht) 'list)))
 
+(defun %fails-compile-p (record)
+  "True when RECORD, one of load-system's warning records, is a full warning
+signalled while a file compiled: the kind COMPILE-FILE reports failure for."
+  (gethash "fails_compile" record))
+
 (defun %load-warning-place (record)
   "Return RECORD's place as \"file:line (defun name)\", with as much of it as
 RECORD has, or NIL for a warning that was not signalled during a compilation."
@@ -382,7 +387,10 @@ warnings summed up by kind (%WRITE-FULL-WARNINGS, %WRITE-STYLE-WARNINGS).  An
 HT with warning_details but no warning_records -- one built by hand, or by a
 worker older than the records -- gets that text instead, cut at ~2KB.  When
 the load failed, the full warnings recorded before the failure are written the
-same way: for a compile ASDF refused, they are the cause."
+same way.  For a compile ASDF refused, those signalled while a file compiled
+(\"fails_compile\") are given as the cause and the rest apart from them, as
+what came before; a compile refused with none of the first kind failed for
+something else, and no warning is blamed for it."
   (let* ((status (gethash "status" ht))
          (full (%load-warning-records ht "warning"))
          (style (%load-warning-records ht "style-warning"))
@@ -460,18 +468,28 @@ was compiled from source"
                ((string= status "error")
                 (format s "Error loading ~A: ~A"
                         system (gethash "message" ht))
-                (let ((compile-failed (gethash "compile_failed" ht)))
-                  (when full
-                    ;; A warning signalled before some other error is told
-                    ;; apart from one the compile was refused for: only the
-                    ;; second is the thing to fix.
-                    (format s "~%~%~:[Warnings before the error (~D):~;~
-Warnings (~D) -- ASDF refuses a file that compiles with a WARNING:~]"
-                            compile-failed (length full))
-                    (%write-full-warnings s full)
-                    (when style
-                      (format s "~%(and ~D style warning~:P, in warning_records)"
-                              (length style))))
+                (let* ((compile-failed (gethash "compile_failed" ht))
+                       ;; What a compile is refused for is a full warning
+                       ;; signalled while a file compiled.  One signalled as an
+                       ;; earlier file loaded came before the error and is not
+                       ;; its cause: removing it changes nothing.
+                       (refusing (and compile-failed
+                                      (remove-if-not #'%fails-compile-p full)))
+                       (others (if refusing
+                                   (remove-if #'%fails-compile-p full)
+                                   full)))
+                  (when refusing
+                    (format s "~%~%Warnings (~D) -- ASDF refuses a file that compiles ~
+with a WARNING:"
+                            (length refusing))
+                    (%write-full-warnings s refusing))
+                  (when others
+                    (format s "~%~%~:[Warnings~;Other warnings~] before the error (~D):"
+                            refusing (length others))
+                    (%write-full-warnings s others))
+                  (when (and full style)
+                    (format s "~%(and ~D style warning~:P, in warning_records)"
+                            (length style)))
                   (let ((co (gethash "compiler_output" ht)))
                     (when (and (stringp co) (plusp (length co)))
                       (let* ((limit 2048)
@@ -493,20 +511,24 @@ Warnings (~D) -- ASDF refuses a file that compiles with a WARNING:~]"
                     (cond
                       ;; Nothing in the file is wrong: the worker still
                       ;; exports what the file no longer declares.
-                      ((and compile-failed full
+                      ((and refusing
                             (every (lambda (record)
                                      (equal "SB-INT:PACKAGE-AT-VARIANCE"
                                             (gethash "class" record)))
-                                   full))
+                                   refusing))
                        (format s "~%~%~A" *package-variance-hint*))
                       ;; The warning is the cause, and a fresh worker would
                       ;; meet it again -- unless it is about what this
                       ;; worker holds, which only a fresh worker cures.
-                      ((and compile-failed full)
-                       (format s "~%~%Hint: fix the warning~P above and load again. ~
-A warning about a definition this worker already holds -- a structure's layout, ~
-say -- needs a fresh worker instead: pool-kill-worker, then load-system."
-                               (length full)))
+                      ;; Named as the one the file was refused for, not as
+                      ;; "the warning above": the warnings from before the
+                      ;; error are above too.
+                      (refusing
+                       (format s "~%~%Hint: fix the warning~P ASDF refused the file for ~
+and load again. A warning about a definition this worker already holds -- a ~
+structure's layout, say -- needs a fresh worker instead: pool-kill-worker, then ~
+load-system."
+                               (length refusing)))
                       (t
                        (format s "~%~%Hint: the worker process may now have a broken ~
 package state. Use pool-kill-worker to get a fresh worker, then retry load-system."))))))))))
