@@ -278,20 +278,127 @@ execution_status is \"execution-unknown\"."
                  enriched))))
     ht))
 
+(defparameter *package-variance-hint*
+  (format nil "Hint: package-variance warnings mean the running image has stale exports. ~
+Use pool-kill-worker to get a fresh worker, then re-run load-system.")
+  "What load-system says when a package is at variance with its DEFPACKAGE: the
+file is as its author wants it, and the worker is what is out of date.")
+
+(defparameter *load-full-warnings-shown* 20
+  "Full warnings listed one by one in load-system's text; the rest are counted.")
+
+(defparameter *load-style-kinds-shown* 8
+  "Kinds of style warning listed in load-system's text; the rest are counted.")
+
+(defparameter *load-warning-places-shown* 3
+  "Places listed for one kind of style warning in load-system's text; the rest
+are counted.")
+
+(defun %load-warning-records (ht severity)
+  "Return HT's warning records of SEVERITY, \"warning\" or \"style-warning\", as a
+list in the order they were signalled."
+  (remove-if-not (lambda (record) (equal severity (gethash "severity" record)))
+                 (coerce (gethash "warning_records" ht) 'list)))
+
+(defun %load-warning-place (record)
+  "Return RECORD's place as \"file:line (defun name)\", with as much of it as
+RECORD has, or NIL for a warning that was not signalled during a compilation."
+  (let ((file (gethash "file" record)))
+    (when file
+      (format nil "~A~@[:~D~]~@[ ~A~]"
+              file (gethash "line" record) (gethash "form" record)))))
+
+(defun %load-warning-count-text (full style)
+  "Return \"1 warning, 3 style warnings\" for FULL and STYLE, two counts, or NIL
+when both are zero."
+  (let ((parts (remove nil
+                       (list (and (plusp full) (format nil "~D warning~:P" full))
+                             (and (plusp style)
+                                  (format nil "~D style warning~:P" style))))))
+    (when parts
+      (format nil "~{~A~^, ~}" parts))))
+
+(defun %write-full-warnings (stream records)
+  "Write RECORDS, full warnings, to STREAM: each message whole, its further
+lines indented under the first, then its place.  A full warning is what a build
+fails on, so none is summed up; *LOAD-FULL-WARNINGS-SHOWN* only bounds a flood."
+  (loop for record in records
+        for shown from 1 to *load-full-warnings-shown*
+        do (with-input-from-string (in (or (gethash "message" record) ""))
+             (loop for line = (read-line in nil)
+                   for first-p = t then nil
+                   while line
+                   do (format stream "~%~:[    ~;  ~]~A" first-p line)))
+           (let ((place (%load-warning-place record)))
+             (when place
+               (format stream "~%    at ~A" place))))
+  (let ((hidden (- (length records) *load-full-warnings-shown*)))
+    (when (plusp hidden)
+      (format stream "~%  ... and ~D more warning~:P (all are in warning_records)"
+              hidden))))
+
+(defun %write-style-warnings (stream records)
+  "Write RECORDS, style warnings, to STREAM summed up by kind: how many there are
+of the kind, the first one's first line, and the places of the first
+*LOAD-WARNING-PLACES-SHOWN* of them.  *LOAD-STYLE-KINDS-SHOWN* kinds are
+written; the rest are counted.  Every record stays in warning_records."
+  (let ((kinds '()))
+    (dolist (record records)
+      (let ((entry (assoc (gethash "kind" record) kinds :test #'equal)))
+        (if entry
+            (setf (cdr entry) (append (cdr entry) (list record)))
+            (setf kinds (append kinds (list (list (gethash "kind" record) record)))))))
+    (loop for (nil . members) in kinds
+          for shown from 1 to *load-style-kinds-shown*
+          do (let* ((message (or (gethash "message" (first members)) ""))
+                    (headline (subseq message 0 (or (position #\Newline message)
+                                                    (length message))))
+                    (places (remove nil (mapcar #'%load-warning-place members)))
+                    (listed (subseq places 0 (min *load-warning-places-shown*
+                                                  (length places)))))
+               ;; "2x", not the multiplication sign: that is the mark a test
+               ;; runner's log gives a failure, and this text ends up in one.
+               (format stream "~%  ~@[~Dx ~]~A"
+                       (and (rest members) (length members))
+                       headline)
+               (when listed
+                 (format stream "~%    at ~{~A~^; ~}~@[ (+~D more)~]"
+                         listed
+                         (let ((hidden (- (length places) (length listed))))
+                           (and (plusp hidden) hidden))))))
+    (let ((hidden (- (length kinds) *load-style-kinds-shown*)))
+      (when (plusp hidden)
+        (format stream "~%  ... and ~D more kind~:P (all are in warning_records)"
+                hidden)))))
+
 (defun build-load-system-response (system ht)
   "Build the standard load-system response with summary text.
 HT is the hash-table returned by load-system core.  Adds a content
 key with a human-readable summary and returns the same HT.
-When warnings were captured, includes the warning text in the summary
-(truncated at ~2KB) so MCP clients rendering only content[].text can
-still see what was warned about."
+
+The warnings HT carries are written into the summary, since MCP clients render
+content[].text alone: every full warning whole and with its place, the style
+warnings summed up by kind (%WRITE-FULL-WARNINGS, %WRITE-STYLE-WARNINGS).  An
+HT with warning_details but no warning_records -- one built by hand, or by a
+worker older than the records -- gets that text instead, cut at ~2KB.  When
+the load failed, the full warnings recorded before the failure are written the
+same way: for a compile ASDF refused, they are the cause."
   (let* ((status (gethash "status" ht))
+         (full (%load-warning-records ht "warning"))
+         (style (%load-warning-records ht "style-warning"))
          (summary
            (with-output-to-string (s)
              (cond
                ((string= status "loaded")
                 (format s "System ~A loaded successfully in ~Dms"
                         system (gethash "duration_ms" ht))
+                (let ((wc (gethash "warnings" ht 0)))
+                  (cond
+                    ((or full style)
+                     (format s " (~A)"
+                             (%load-warning-count-text (length full) (length style))))
+                    ((plusp wc)
+                     (format s " (~D warning~:P)" wc))))
                 (multiple-value-bind (deleted presentp)
                     (gethash "fasls_deleted" ht)
                   (when presentp
@@ -314,24 +421,31 @@ or its primary system" system)))))))
                     (format s
                             "~%Auto-registered ~A (was not on ASDF search path)"
                             discovered)))
-                (let ((wc (gethash "warnings" ht 0))
-                      (wd (gethash "warning_details" ht)))
-                  (when (plusp wc)
-                    (format s " (~D warning~:P)" wc)
-                    (when (and (stringp wd) (plusp (length wd)))
-                      (let* ((limit 2048)
-                             (truncated-p (> (length wd) limit))
-                             (body (if truncated-p
-                                       (concatenate 'string
-                                                    (subseq wd 0 limit)
-                                                    (format nil
-                                                            "~%... [~D more characters truncated]"
-                                                            (- (length wd) limit)))
-                                       wd)))
-                        (format s "~%⚠ ~A" (string-right-trim '(#\Newline) body))
-                      (when (search "also exports" wd)
-                        (format s "~%~%Hint: package-variance warnings mean the running image has stale exports. ~
-Use pool-kill-worker to get a fresh worker, then re-run load-system."))))))
+                (let ((wd (gethash "warning_details" ht)))
+                  (cond
+                    ((or full style)
+                     (when full
+                       (format s "~%⚠ Warnings (~D):" (length full))
+                       (%write-full-warnings s full))
+                     (when style
+                       (format s "~%⚠ Style warnings (~D)~:[~;, by kind~]:"
+                               (length style) (rest style))
+                       (%write-style-warnings s style)))
+                    ((and (plusp (gethash "warnings" ht 0))
+                          (stringp wd)
+                          (plusp (length wd)))
+                     (let* ((limit 2048)
+                            (truncated-p (> (length wd) limit))
+                            (body (if truncated-p
+                                      (concatenate 'string
+                                                   (subseq wd 0 limit)
+                                                   (format nil
+                                                           "~%... [~D more characters truncated]"
+                                                           (- (length wd) limit)))
+                                      wd)))
+                       (format s "~%⚠ ~A" (string-right-trim '(#\Newline) body)))))
+                  (when (and (stringp wd) (search "also exports" wd))
+                    (format s "~%~%~A" *package-variance-hint*)))
                 (let ((same-second (gethash "same_second_fasls_deleted" ht)))
                   (when same-second
                     ;; Deleted, not recompiled: the project's tree is checked
@@ -346,28 +460,59 @@ was compiled from source"
                ((string= status "error")
                 (format s "Error loading ~A: ~A"
                         system (gethash "message" ht))
-                (let ((co (gethash "compiler_output" ht)))
-                  (when (and (stringp co) (plusp (length co)))
-                    (let* ((limit 2048)
-                           (truncated-p (> (length co) limit))
-                           (body (if truncated-p
-                                     (concatenate
-                                      'string (subseq co 0 limit)
-                                      (format nil
-                                              "~%... [~D more characters truncated]"
-                                              (- (length co) limit)))
-                                     co)))
-                      (format s "~%~%Compiler output:~%~A"
-                              (string-right-trim '(#\Newline) body)))))
-                ;; Withheld when this load never started -- a concurrent
-                ;; load still holding the ASDF lock, say.  There the advice
-                ;; is actively harmful: following it aborts work that was
-                ;; about to finish.
-                (unless (gethash "load_not_started" ht)
-                  (format s "~%~%Hint: the worker process may now have a broken package state. ~
-Use pool-kill-worker to get a fresh worker, then retry load-system.")))))))
-    ;; An internal classification for the hint above, not a field.
+                (let ((compile-failed (gethash "compile_failed" ht)))
+                  (when full
+                    ;; A warning signalled before some other error is told
+                    ;; apart from one the compile was refused for: only the
+                    ;; second is the thing to fix.
+                    (format s "~%~%~:[Warnings before the error (~D):~;~
+Warnings (~D) -- ASDF refuses a file that compiles with a WARNING:~]"
+                            compile-failed (length full))
+                    (%write-full-warnings s full)
+                    (when style
+                      (format s "~%(and ~D style warning~:P, in warning_records)"
+                              (length style))))
+                  (let ((co (gethash "compiler_output" ht)))
+                    (when (and (stringp co) (plusp (length co)))
+                      (let* ((limit 2048)
+                             (truncated-p (> (length co) limit))
+                             (body (if truncated-p
+                                       (concatenate
+                                        'string (subseq co 0 limit)
+                                        (format nil
+                                                "~%... [~D more characters truncated]"
+                                                (- (length co) limit)))
+                                       co)))
+                        (format s "~%~%Compiler output:~%~A"
+                                (string-right-trim '(#\Newline) body)))))
+                  ;; Withheld when this load never started -- a concurrent
+                  ;; load still holding the ASDF lock, say.  There the advice
+                  ;; is actively harmful: following it aborts work that was
+                  ;; about to finish.
+                  (unless (gethash "load_not_started" ht)
+                    (cond
+                      ;; Nothing in the file is wrong: the worker still
+                      ;; exports what the file no longer declares.
+                      ((and compile-failed full
+                            (every (lambda (record)
+                                     (equal "SB-INT:PACKAGE-AT-VARIANCE"
+                                            (gethash "class" record)))
+                                   full))
+                       (format s "~%~%~A" *package-variance-hint*))
+                      ;; The warning is the cause, and a fresh worker would
+                      ;; meet it again -- unless it is about what this
+                      ;; worker holds, which only a fresh worker cures.
+                      ((and compile-failed full)
+                       (format s "~%~%Hint: fix the warning~P above and load again. ~
+A warning about a definition this worker already holds -- a structure's layout, ~
+say -- needs a fresh worker instead: pool-kill-worker, then load-system."
+                               (length full)))
+                      (t
+                       (format s "~%~%Hint: the worker process may now have a broken ~
+package state. Use pool-kill-worker to get a fresh worker, then retry load-system."))))))))))
+    ;; Internal classifications for the hints above, not fields.
     (remhash "load_not_started" ht)
+    (remhash "compile_failed" ht)
     (setf (gethash "content" ht) (text-content summary))
     ht))
 

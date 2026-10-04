@@ -44,11 +44,18 @@ that FASL is deleted first, and the file is recompiled when this load reaches
 it (same_second_fasls_deleted counts the deletions).  clear_fasls=true is the
 guaranteed rebuild, of every file.
 
-Warning handling: SBCL 'redefining X in DEFUN' notifications are dropped
-from the warnings count/details, on a first load and a reload alike:
-redefining is ordinary Common Lisp development, and a reload exists to do
-it.  Other warnings (duplicate definition, type, undefined function or
-variable, package variance) always pass through unchanged.
+Warning handling: a file that compiles with a full WARNING (wrong argument
+count, duplicate definition, type conflict, package variance) fails the load,
+exactly as it does under asdf:load-system and run-tests; the warning and its
+place are in the error.  A full warning signalled outside a compilation (while
+a file loads, or an undefined variable reported at the end) is listed and the
+load goes on.  STYLE-WARNINGs (unused variable, undefined function) never fail
+a load: they are counted and summed up by kind.  SBCL 'redefining X
+in DEFUN' notifications are dropped, on a first load and a reload alike:
+redefining is ordinary Common Lisp development, and a reload exists to do it.
+Every warning kept is in the JSON warning_records, with its severity, class,
+message and, for one from a compilation, file, line and enclosing form -- which
+are lisp-edit-form's form_type and form_name.
 
 Examples:
   First-time load: system='my-project', force=false

@@ -18,7 +18,10 @@
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/utils/paths
-                #:discover-asd-in-project)
+                #:discover-asd-in-project
+                #:normalize-path-for-display)
+  (:import-from #:cl-mcp/src/code-core
+                #:%offset->line)
   (:import-from #:cl-mcp/src/utils/fasls
                 #:fasl-source-directory
                 #:delete-same-second-fasls)
@@ -117,33 +120,185 @@ on other implementations so the filter still works in portable images."
              ;; are not mistakenly muffled.
              (search " in " text)))))
 
+(defvar *last-warning-records* nil
+  "The warning records of the most recent %CALL-WITH-SUPPRESSED-OUTPUT call that
+ended by unwinding: what had been recorded when the error struck, in the form
+the call returns them.  NIL after a call that completed.  Kept as
+*LAST-COMPILER-STDERR* is, so the caller that catches the error can still say
+which warnings came before it.")
+
+(defun %warning-severity (warning)
+  "Return \"style-warning\" for a STYLE-WARNING and \"warning\" for any other
+warning.  It is the distinction a build turns on: only the second makes
+COMPILE-FILE report a failure."
+  (if (typep warning 'style-warning) "style-warning" "warning"))
+
+(defun %warning-class-name (warning)
+  "Return the name of WARNING's class with its package, as SB-INT:TYPE-WARNING
+is written."
+  (let ((*package* (find-package :keyword))
+        (*print-case* :upcase))
+    (prin1-to-string (type-of warning))))
+
+(defun %warning-kind-key (warning)
+  "Return what tells one kind of warning from another: WARNING's class and, for a
+SIMPLE-CONDITION, its format control too.  SBCL signals \"defined but never
+used\", \"undefined function\" and a good many more as one class, so the
+control is all that separates them.  The key is compared, never shown."
+  (cons (type-of warning)
+        (when (typep warning 'simple-condition)
+          (let ((control (simple-condition-format-control warning)))
+            (if (stringp control)
+                control
+                ;; SBCL hands over a tokenized control; its string is what two
+                ;; warnings of one kind share.
+                (let ((reader (and (find-package "SB-FORMAT")
+                                   (find-symbol "FMT-CONTROL-STRING" "SB-FORMAT"))))
+                  (or (and reader
+                           (fboundp reader)
+                           (ignore-errors (funcall reader control)))
+                      control)))))))
+
+(defun %compiler-place ()
+  "Return three values saying where the compiler is: the file it is reading, the
+octet position at which it began to read the top-level form it is compiling,
+and the definitions that enclose the code -- what SBCL prints after \"in:\".
+No values when no compilation is under way.
+
+Read from the compiler's own error context, as SLIME reads it.  Each accessor
+is looked up by name, so an SBCL that lacks one yields no place rather than an
+error."
+  (let ((package (find-package "SB-C")))
+    (flet ((call (name &rest arguments)
+             (let ((function (and package (find-symbol name package))))
+               (when (and function (fboundp function))
+                 (ignore-errors (apply function arguments))))))
+      (let ((context (call "FIND-ERROR-CONTEXT" nil)))
+        (if context
+            (values (call "COMPILER-ERROR-CONTEXT-FILE-NAME" context)
+                    (call "COMPILER-ERROR-CONTEXT-FILE-POSITION" context)
+                    (call "COMPILER-ERROR-CONTEXT-CONTEXT" context))
+            (values))))))
+
+(defun %enclosing-form-label (context)
+  "Return the top-level definition CONTEXT names as source text, such as
+\"(defun wrong-arity)\", or NIL.  CONTEXT is the list SBCL prints after \"in:\";
+its first element is the definition lisp-edit-form would address.  Printed in
+the package of the name it defines, so the name stands bare."
+  (let ((form (first context)))
+    (when (consp form)
+      (let* ((name (second form))
+             (symbol (cond ((symbolp name) name)
+                           ((and (consp name) (symbolp (second name)))
+                            (second name))))
+             (*package* (or (and symbol (symbol-package symbol)) *package*))
+             (*print-case* :downcase)
+             (*print-pretty* nil))
+        (ignore-errors (prin1-to-string form))))))
+
+(defun %make-warning-record (warning)
+  "Return WARNING as a property list: :SEVERITY, :CLASS, :MESSAGE, the :KIND-KEY
+that groups it and, when it was signalled during a compilation, the :FILE, the
+octet :POSITION and the enclosing :FORM.  Runs in the handler, inside whatever
+signalled, so it must not signal itself: a part that cannot be had is left out."
+  (let ((class (or (ignore-errors (%warning-class-name warning)) "WARNING")))
+    (multiple-value-bind (file position context)
+        (ignore-errors (%compiler-place))
+      (list :severity (%warning-severity warning)
+            :class class
+            :message (or (ignore-errors (princ-to-string warning)) class)
+            :kind-key (ignore-errors (%warning-kind-key warning))
+            :file (and (typep file '(or pathname string)) file)
+            :position (and (integerp position) position)
+            :form (ignore-errors (%enclosing-form-label context))))))
+
+(defun %repeated-at-load-p (record records)
+  "True when RECORD only says again what one of RECORDS says.  SBCL signals a
+duplicate definition, a package at variance and some others twice: compiling
+the file, where the compiler knows the place, and loading what it compiled,
+where nothing does.  The second, placeless one is the repeat."
+  (and (null (getf record :file))
+       (find-if (lambda (earlier)
+                  (and (getf earlier :file)
+                       (equal (getf earlier :class) (getf record :class))
+                       (equal (getf earlier :message) (getf record :message))))
+                records)
+       t))
+
+(defun %warning-record-tables (records)
+  "Return RECORDS, property lists in the order signalled, as the JSON objects
+load-system reports: \"severity\", \"class\", \"message\", \"kind\" -- a number
+the records of one kind share, counted from 1 in order of first appearance --
+and, for a warning from a compilation, \"file\", \"line\" and \"form\".  The line
+is that of the top-level form; SBCL keeps no finer place."
+  (let ((kinds '()))
+    (mapcar
+     (lambda (record)
+       (let* ((key (getf record :kind-key))
+              (kind (or (position key kinds :test #'equal)
+                        (progn (setf kinds (append kinds (list key)))
+                               (1- (length kinds)))))
+              (file (getf record :file))
+              (table (make-ht "severity" (getf record :severity)
+                              "class" (sanitize-for-json (getf record :class))
+                              "message" (sanitize-for-json (getf record :message))
+                              "kind" (1+ kind))))
+         (when file
+           (let ((shown (ignore-errors (normalize-path-for-display file)))
+                 (line (ignore-errors (%offset->line file (getf record :position))))
+                 (form (getf record :form)))
+             (when shown
+               (setf (gethash "file" table) (sanitize-for-json shown)))
+             (when line
+               (setf (gethash "line" table) line))
+             (when form
+               (setf (gethash "form" table) (sanitize-for-json form)))))
+         table))
+     records)))
+
+(defun %warning-details (tables)
+  "Return the messages of TABLES one per line: the text load-system reported
+before it reported records, kept for the clients that read it."
+  (format nil "~{~A~%~}"
+          (mapcar (lambda (table) (gethash "message" table)) tables)))
+
 (defun %call-with-suppressed-output (thunk)
   "Call THUNK with compilation and load output suppressed.
-Returns (values thunk-result warning-count warning-details compiler-stderr).
-The stderr string is also saved to *last-compiler-stderr* via unwind-protect
-so it survives error unwinds and can be retrieved by callers that catch the error.
+Returns (values thunk-result warning-count warning-details compiler-stderr
+warning-records).  When THUNK unwinds, the stderr string and the records are
+saved to *LAST-COMPILER-STDERR* and *LAST-WARNING-RECORDS* instead, so a caller
+that catches the error can still report them.
 
-Redefinition notices (%REDEFINITION-WARNING-P) are muffled and not counted,
-on a first load and a reload alike: redefining is ordinary Common Lisp
-development, and a reload exists to do it.  Every other warning -- a
-duplicate definition in one file, a type conflict, an undefined function --
-is counted."
-  (let ((warning-count 0)
-        (warning-details (make-string-output-stream))
+Every warning is recorded (%MAKE-WARNING-RECORD) but two: a redefinition notice
+(%REDEFINITION-WARNING-P), dropped on a first load and a reload alike because
+redefining is ordinary Common Lisp development and a reload exists to do it,
+and a warning signalled a second time when the compiled file loads
+(%REPEATED-AT-LOAD-P).
+
+What is muffled is another matter, settled by what muffling does to the build.
+A STYLE-WARNING cannot fail a compile, so it is muffled once it is recorded:
+left alone it would be printed, and ASDF would add a warning of its own about
+the file.  A full WARNING is never muffled.  COMPILE-FILE offers a warning to
+outer handlers before it counts it, and one muffled there is not counted: the
+file compiles \"cleanly\", ASDF loads it, and the FASL left behind makes every
+later load agree -- where ASDF by itself, and run-tests, refuse the file."
+  (let ((records '())
         (stderr (make-string-output-stream)))
     ;; Reset before each call so stale data from a previous run is not
     ;; mistakenly attributed to this invocation.
-    (setf *last-compiler-stderr* nil)
+    (setf *last-compiler-stderr* nil
+          *last-warning-records* nil)
     (flet ((handle-warning (w)
-             (cond
-               ((%redefinition-warning-p w)
-                (when (find-restart 'muffle-warning)
-                  (invoke-restart 'muffle-warning)))
-               (t
-                (incf warning-count)
-                (format warning-details "~A~%" w)
-                (when (find-restart 'muffle-warning)
-                  (invoke-restart 'muffle-warning))))))
+             (let ((redefinition-p (%redefinition-warning-p w)))
+               (unless redefinition-p
+                 (let ((record (%make-warning-record w)))
+                   (unless (%repeated-at-load-p record records)
+                     (push record records))))
+               (when (and (or redefinition-p (typep w 'style-warning))
+                          (find-restart 'muffle-warning))
+                 (invoke-restart 'muffle-warning))))
+           (finished-records ()
+             (%warning-record-tables (reverse records))))
       #+sbcl
       (let ((err-sym (find-symbol "*COMPILER-ERROR-OUTPUT*" "SB-C"))
             (note-sym (find-symbol "*COMPILER-NOTE-STREAM*" "SB-C"))
@@ -196,13 +351,19 @@ is counted."
                               (with-compilation-unit (:override t)
                                 (funcall thunk))))))
                 (setf completed-p t)
-                (values result warning-count
-                        (get-output-stream-string warning-details)
-                        (get-output-stream-string stderr)))
-            ;; Always capture stderr so it survives error unwind.
+                (let ((tables (finished-records)))
+                  (values result
+                          (length tables)
+                          (%warning-details tables)
+                          (get-output-stream-string stderr)
+                          tables)))
+            ;; Always capture stderr and the records so they survive an error
+            ;; unwind.
             (unless completed-p
               (setf *last-compiler-stderr*
-                    (ignore-errors (get-output-stream-string stderr)))))))
+                    (ignore-errors (get-output-stream-string stderr))
+                    *last-warning-records*
+                    (ignore-errors (finished-records)))))))
       #-sbcl
       (let ((result nil)
             (completed-p nil))
@@ -225,13 +386,19 @@ is counted."
                              (*query-io* interactive))
                         (funcall thunk))))
               (setf completed-p t)
-              (values result warning-count
-                      (get-output-stream-string warning-details)
-                      (get-output-stream-string stderr)))
-          ;; Always capture stderr so it survives error unwind.
+              (let ((tables (finished-records)))
+                (values result
+                        (length tables)
+                        (%warning-details tables)
+                        (get-output-stream-string stderr)
+                        tables)))
+          ;; Always capture stderr and the records so they survive an error
+          ;; unwind.
           (unless completed-p
             (setf *last-compiler-stderr*
-                  (ignore-errors (get-output-stream-string stderr)))))))))
+                  (ignore-errors (get-output-stream-string stderr))
+                  *last-warning-records*
+                  (ignore-errors (finished-records)))))))))
 
 (defun %delete-system-fasls (system-name)
   "Delete the cached fasls under SYSTEM-NAME's output-translation
@@ -277,10 +444,12 @@ package-inferred dependency subsystems that :FORCE T alone would not
 rebuild. TIMEOUT-SECONDS must be a positive number
 or NIL (no timeout). Default is 120 seconds.
 
-SBCL's 'redefining X in DEFUN' notifications are dropped from the
-captured warnings, on a first load and a reload alike, whatever FORCE is
-and wherever the old definition came from; every other warning is kept
-(%CALL-WITH-SUPPRESSED-OUTPUT).
+Warnings are recorded with their class, severity and place and reported as
+\"warning_records\" (%CALL-WITH-SUPPRESSED-OUTPUT).  SBCL's 'redefining X in
+DEFUN' notifications are dropped, on a first load and a reload alike, whatever
+FORCE is and wherever the old definition came from.  A full WARNING signalled
+while a file compiles fails the load, as it does under ASDF itself: the result
+is an \"error\" that carries the records made up to then.
 
 If ASDF signals MISSING-COMPONENT for the requested system, searches
 *project-root* for a matching .asd file and retries once after
@@ -392,6 +561,19 @@ registering it."
              ;; the key; it is not part of the response.
              (when (typep err 'transient-error)
                (setf (gethash "load_not_started" ht) t))
+             ;; For the builder as well, and consumed by it: the compiler's
+             ;; verdict is what stopped the load.  With a full warning among
+             ;; the records, that warning is the thing to fix.
+             (when (typep err 'uiop:compile-file-error)
+               (setf (gethash "compile_failed" ht) t))
+             ;; What had been recorded when the error struck: for a compile
+             ;; that failed on a warning, the cause itself.
+             (let ((records *last-warning-records*))
+               (when records
+                 (setf (gethash "warnings" ht) (length records)
+                       (gethash "warning_details" ht)
+                       (sanitize-for-json (%warning-details records))
+                       (gethash "warning_records" ht) (coerce records 'vector))))
              (setf (gethash "message" ht)
                    (sanitize-for-json
                     (or saved-text
@@ -408,7 +590,7 @@ registering it."
           (t
            (destructuring-bind
                (load-result warning-count warning-details
-                &optional compiler-stderr)
+                &optional compiler-stderr warning-records)
                result-list
              (declare (ignore load-result compiler-stderr))
              (setf (gethash "status" ht) "loaded")
@@ -419,6 +601,9 @@ registering it."
              (when (plusp warning-count)
                (setf (gethash "warning_details" ht)
                      (sanitize-for-json warning-details)))
+             (when warning-records
+               (setf (gethash "warning_records" ht)
+                     (coerce warning-records 'vector)))
              (log-event :info "load-system-complete" "system" system-name
                         "duration_ms" elapsed-ms "warnings" warning-count))))
         (when *auto-discovered-asd*

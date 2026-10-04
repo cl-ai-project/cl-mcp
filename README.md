@@ -321,6 +321,11 @@ endpoint. `pool-kill-worker` restarts the runtime without dropping `/mcp`.
 
 - The init runs on a background thread under a worker-global ASDF load lock,
   so it never races a `load-system` RPC.
+- `MCP_WORKER_INIT_SYSTEM` is loaded the way the `load-system` tool loads: a
+  file that compiles with a full `WARNING` is refused, as `asdf:load-system`
+  refuses it, and the init fails. `ql:quickload` muffles such warnings, so an
+  app that has only ever been quickloaded can meet this the first time its
+  files are compiled here; `load-system` on it names the warning and its place.
 - Init failures never trip the crash circuit breaker; a failed init leaves a
   plain, usable REPL worker. Check `pool-status` (`init_owner_session`,
   `init_disabled`, `init_failures`) to see runtime state.
