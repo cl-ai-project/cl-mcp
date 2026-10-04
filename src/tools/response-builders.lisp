@@ -331,7 +331,16 @@ or its primary system" system)))))))
                         (format s "~%⚠ ~A" (string-right-trim '(#\Newline) body))
                       (when (search "also exports" wd)
                         (format s "~%~%Hint: package-variance warnings mean the running image has stale exports. ~
-Use pool-kill-worker to get a fresh worker, then re-run load-system.")))))))
+Use pool-kill-worker to get a fresh worker, then re-run load-system."))))))
+                (let ((same-second (gethash "same_second_fasls_deleted" ht)))
+                  (when same-second
+                    ;; Deleted, not recompiled: the project's tree is checked
+                    ;; whole, and a sibling subsystem this load never reaches
+                    ;; is compiled only when something loads it.
+                    (format s "~%Deleted ~D FASL~:P whose source was written in the ~
+same second, which ASDF would have kept; every file this load reached without a FASL ~
+was compiled from source"
+                            same-second))))
                ((string= status "timeout")
                 (format s "~A" (gethash "message" ht)))
                ((string= status "error")
@@ -455,18 +464,23 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                                (coerce (gethash "reasons" entry) 'list))))
             (when unreached
               (format s "~%Did not run (~D): ~{~A~^, ~}~%  Defined in this system's ~
-                         packages, but the run did not reach them. Usually a file ~
-                         declaring its suite :in the root suite that loads before the ~
-                         root's file: its suite joined an earlier load of the root, ~
-                         which the new one replaced. Add (:import-from <the root ~
+                         packages, but the run did not reach them. Two causes: (1) a ~
+                         file declaring its suite :in the root suite loaded before the ~
+                         root's file, so its suite joined an earlier load of the root, ~
+                         which the new one replaced -- add (:import-from <the root ~
                          suite file's package>) to that file's defpackage, or put it ~
-                         after the root's file in the .asd.~%"
+                         after the root's file in the .asd; (2) a test in no suite, ~
+                         (test (NAME :suite nil) ...), that no test that ran depends ~
+                         on -- put it in a suite, or name it in a :depends-on.~%"
                       (length unreached) unreached))
             (when outside
               (format s "~%Suites outside the root suite (~D): ~{~A~^, ~}~%  run-tests ~
                          ran them, but a test-op that runs the root suite -- the ~
                          scaffold's runs (fiveam:run! :<system>) -- skips them. Nest ~
-                         each with (def-suite NAME :in <the root suite>).~%"
+                         each with (def-suite NAME :in <the root suite>). One that ~
+                         already says so loaded before the root's file on this worker ~
+                         and joined an earlier load of the root: add (:import-from ~
+                         <the root suite file's package>) to its file's defpackage.~%"
                       (length outside) outside))
             (when (plusp (length failed-tests-vector))
               (format s "~%Failures:~%")

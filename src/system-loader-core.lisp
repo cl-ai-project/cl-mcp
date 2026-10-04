@@ -20,7 +20,8 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:discover-asd-in-project)
   (:import-from #:cl-mcp/src/utils/fasls
-                #:fasl-source-directory)
+                #:fasl-source-directory
+                #:delete-same-second-fasls)
   (:export #:load-system
            #:*system-load-lock-wrapper*
            #:*last-compiler-stderr*))
@@ -267,7 +268,9 @@ cleared, or NIL."
   "Load ASDF system SYSTEM-NAME with structured result.
 
 When FORCE is true (default), clears loaded state before loading so
-changed files are picked up. When CLEAR-FASLS is true, deletes the
+changed files are picked up -- a file written in the same second as its fasl
+too, whose fasl is deleted first (DELETE-SAME-SECOND-FASLS), since ASDF's
+one-second timestamps would keep it. When CLEAR-FASLS is true, deletes the
 system's cached fasls (its output-translation directory) before
 loading, guaranteeing recompilation from source — including
 package-inferred dependency subsystems that :FORCE T alone would not
@@ -288,7 +291,8 @@ registering it."
         (start-time (get-internal-real-time))
         ;; Set by the load thread; read after it has been joined.
         (fasls-deleted nil)
-        (fasls-cleared-from nil))
+        (fasls-cleared-from nil)
+        (same-second-deleted nil))
     (setf *auto-discovered-asd* nil)
     (log-event :info "load-system" "system" system-name "force" force
                "clear_fasls" clear-fasls "timeout" timeout-seconds)
@@ -302,6 +306,19 @@ registering it."
                         ;; Summed: a retry after auto-discovery clears again.
                         (setf fasls-deleted (+ (or fasls-deleted 0) count)
                               fasls-cleared-from (or from fasls-cleared-from))))
+                    ;; A file edited in the second its fasl was written looks
+                    ;; current to ASDF, so a reload would run the code from
+                    ;; before the edit; that fasl goes.  Before the clearing
+                    ;; below, which unregisters what this reads, as run-tests
+                    ;; does.  clear_fasls has removed them all already.
+                    (when (and force (not clear-fasls))
+                      (let ((stale (ignore-errors
+                                    (delete-same-second-fasls system-name))))
+                        (when (and stale (plusp stale))
+                          (setf same-second-deleted
+                                (+ (or same-second-deleted 0) stale))
+                          (log-event :info "load-system-same-second-fasls"
+                                     "system" system-name "deleted" stale))))
                     (when (and force
                                (member system-name
                                        (asdf:already-loaded-systems)
@@ -409,6 +426,10 @@ registering it."
         ;; What clear_fasls did, not only that it was asked: a request that
         ;; deleted nothing forced no recompilation, and the caller must be
         ;; able to see that.
+        ;; Fasls a same-second edit made look current, deleted: the files this
+        ;; load reached among them were compiled from source.
+        (when same-second-deleted
+          (setf (gethash "same_second_fasls_deleted" ht) same-second-deleted))
         (when (and clear-fasls fasls-deleted)
           (setf (gethash "fasls_deleted" ht) fasls-deleted)
           (when fasls-cleared-from

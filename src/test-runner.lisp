@@ -57,9 +57,10 @@ Returns:
   defined in the system's packages that the run did not reach: in no suite
   that ran, and neither started nor skipped by FiveAM during the run (a test
   run as another's :depends-on, or by a run nested in a test, counts):
-  typically a file declaring its suite :in the root suite that loaded before
-  the root's file, on a warm worker.  The summary then says PASS, BUT N TESTS
-  DID NOT RUN
+  a file declaring its suite :in the root suite that loaded before the root's
+  file, on a warm worker, or a test in no suite that no test that ran depends
+  on.  The summary then says PASS, BUT N TESTS DID NOT RUN.  A test deleted
+  from its file is dropped from FiveAM before the reload, not reported here
 - suites_outside_root (array, FiveAM, present when any) -- run suites other than
   the root suite (the one named after the primary system): run here, but a
   test-op that runs the root suite skips them.  The summary then says PASS, BUT

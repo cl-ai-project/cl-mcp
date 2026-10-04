@@ -38,9 +38,11 @@ is not, a matching <name>.asd under the project root is found, registered and
 loaded (the response then carries auto_discovered_asd).
 
 force=true clears ASDF's loaded state, but ASDF still recompiles only the files
-it judges stale by their timestamps (one-second resolution): an edit made in the
-same second as the last compile can be missed. clear_fasls=true is the
-guaranteed rebuild.
+it judges stale by their timestamps (one-second resolution).  A file of the
+project's tree written in the same second as its FASL would look current, so
+that FASL is deleted first, and the file is recompiled when this load reaches
+it (same_second_fasls_deleted counts the deletions).  clear_fasls=true is the
+guaranteed rebuild, of every file.
 
 Warning handling: SBCL 'redefining X in DEFUN' notifications are dropped
 from the warnings count/details, on a first load and a reload alike:
