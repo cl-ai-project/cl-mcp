@@ -42,15 +42,16 @@ it judges stale by their timestamps (one-second resolution): an edit made in the
 same second as the last compile can be missed. clear_fasls=true is the
 guaranteed rebuild.
 
-Warning handling: when force=true triggers an actual ASDF:CLEAR-SYSTEM
-(i.e., the system was previously loaded), SBCL 'redefining X in DEFUN'
-notifications are dropped from the warnings count/details automatically
-(those redefinitions are exactly what a reload requests).  Any other load
-drops the ones a file makes of what that same file defined before -- a
-dependency the worker already had, read again -- and keeps a redefinition
-by another file, so two files defining one name still surface (a name
-defined twice in one file is SBCL's separate 'Duplicate definition'
-warning, never dropped).
+Warning handling: SBCL 'redefining X in DEFUN' notifications are dropped
+from the warnings count/details -- a reload redefines what it reloads, and a
+dependency the worker already had is read again -- except a conflict the
+project can act on: a file under the system's directory replacing what
+another file defined (two files defining one name, or a DEFUN on a
+library's symbol inherited by :use).  Such a warning stays, naming both
+files.  A definition moved to another file is reported once, by the load
+that moves it.  A name defined twice in one file is SBCL's separate 'Duplicate
+definition' warning for a DEFUN or DEFMACRO; one DEFMETHOD written twice in
+a file is not reported.
 Real warnings (style, type, package variance) always pass through
 unchanged.
 
