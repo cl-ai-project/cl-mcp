@@ -248,17 +248,57 @@ Input:
 - `timeout_seconds` (number, default `120`): timeout for the load operation; must be positive
 
 Output fields:
-- `content`: summary text. Warning text in it is cut at 2048 characters; a package-variance
-  warning ("also exports") or an error that happened during the load adds a hint to get a
-  fresh worker with `pool-kill-worker`
+- `content`: summary text. Every full warning is written whole, with its place
+  (`file:line (defun name)`). Style warnings are summed up by kind: how many there are, the
+  first one's first line and up to three places; at most eight kinds are listed and the rest
+  counted. A load that failed on a compile ASDF refused gives as its cause the full warnings
+  signalled while a file compiled (`fails_compile`) and says to fix them. A full warning
+  signalled earlier, while another file loaded, is listed apart as `Other warnings before the
+  error`; when the refused compile had no warning of its own (it failed on an error, which the
+  compiler output shows) no warning is blamed for it. A package at variance ("also exports")
+  that refused the compile, or any other error, adds a hint to get a fresh worker with
+  `pool-kill-worker`
 - `system` (string): echoed system name
-- `status` (string): `"loaded"`, `"timeout"`, or `"error"`
+- `status` (string): `"loaded"`, `"timeout"`, or `"error"`. A full `WARNING` signalled while
+  a file compiles (wrong argument count, duplicate definition, type conflict, package
+  variance) makes it `"error"`, as it makes `asdf:load-system` and `run-tests` fail: ASDF
+  refuses the file and keeps no FASL of it. (`ql:quickload` muffles such a warning, so a
+  system that has only ever been quickloaded can fail here until the warning is fixed.) A
+  `STYLE-WARNING` (unused variable, undefined
+  function) never does, and neither does a full warning signalled outside a compilation
+  (while a file loads, or an undefined variable reported at the end)
 - `duration_ms` (integer): load time in milliseconds
-- `warnings` (integer): number of compiler warnings (when loaded). SBCL's `redefining X in
-  DEFUN` notices are left out, on a first load and a reload alike: redefining is ordinary
-  Common Lisp development, and a reload exists to do it. Other warnings (duplicate
-  definition, type, undefined function or variable, package variance) are counted
-- `warning_details` (string|null): warning text (when warnings > 0)
+- `warnings` (integer): number of warnings kept, full and style together (when loaded; on an
+  error, those recorded before it, when there were any). SBCL's `redefining X in DEFUN`
+  notices are left out, on a first load and a reload alike: redefining is ordinary Common Lisp
+  development, and a reload exists to do it. Nothing else is left out or merged: every warning
+  signalled is counted, so one that SBCL signals twice counts twice (an unused variable in a
+  `defmacro`, which it compiles once for the rest of the file and once for the FASL). Two
+  records that read the same may equally be two warnings, and nothing in them tells which
+- `warning_records` (array, when there are any): one object per warning kept, in the order
+  signalled:
+  - `severity`: `"warning"` or `"style-warning"`
+  - `class`: the condition's class, e.g. `"SB-INT:TYPE-WARNING"`
+  - `message`: its text
+  - `kind` (integer): shared by the warnings of one kind, counted from 1 in order of first
+    appearance. A kind is a class and, for the classes SBCL uses for many messages
+    (`SIMPLE-WARNING`, `SIMPLE-STYLE-WARNING`), a message template
+  - `fails_compile` (boolean, present when true): a full warning signalled while a file was
+    being compiled. `compile-file` reports that compile as failed, which is what ASDF refuses a
+    file for, so these are the warnings a refused compile is blamed on. Absent from a style
+    warning and from a full warning signalled at any other time: while a file loads, or when
+    the compiler reports an undefined variable as the compilation unit ends (which has a
+    `file` and `line` all the same)
+  - `file`, `line`, `form` (for a warning the compiler has a place for: one signalled while a
+    file compiles, or an undefined variable or function reported at the end): the source file, the
+    line of the top-level form and the enclosing definition as the compiler names it, e.g.
+    `"(defun wrong-arity)"`. `form` says where the warning is; it is not an argument for
+    `lisp-edit-form`. For a top-level `defun`, `defmacro`, `defvar`, `defclass`, `defgeneric`,
+    `defstruct` or `define-condition` the two read alike, but a method is named by its
+    specializers alone (`"(defmethod sample (integer))"`, where `form_name` is
+    `sample ((x integer))`), and a definition inside `eval-when` by itself rather than by the
+    `eval-when`. Read the form at `file` and `line` to address it
+- `warning_details` (string|null): the messages of those warnings, one per line
 - `forced` (boolean, when loaded): whether force-reload was applied
 - `clear_fasls` (boolean, when loaded): whether `clear_fasls` was requested
 - `auto_discovered_asd` (string, when it happened): the system was not known to ASDF, and this

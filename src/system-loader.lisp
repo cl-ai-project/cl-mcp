@@ -44,11 +44,25 @@ that FASL is deleted first, and the file is recompiled when this load reaches
 it (same_second_fasls_deleted counts the deletions).  clear_fasls=true is the
 guaranteed rebuild, of every file.
 
-Warning handling: SBCL 'redefining X in DEFUN' notifications are dropped
-from the warnings count/details, on a first load and a reload alike:
-redefining is ordinary Common Lisp development, and a reload exists to do
-it.  Other warnings (duplicate definition, type, undefined function or
-variable, package variance) always pass through unchanged.
+Warning handling: a file that compiles with a full WARNING (wrong argument
+count, duplicate definition, type conflict, package variance) fails the load,
+exactly as it does under asdf:load-system and run-tests; the error gives that
+warning and its place as the cause, apart from any warning that only came
+before it.  A full warning signalled outside a compilation (while
+a file loads, or an undefined variable reported at the end) is listed and the
+load goes on.  STYLE-WARNINGs (unused variable, undefined function) never fail
+a load: they are counted and summed up by kind.  SBCL 'redefining X
+in DEFUN' notifications are dropped, on a first load and a reload alike:
+redefining is ordinary Common Lisp development, and a reload exists to do it.
+Every warning kept is in the JSON warning_records, with its severity, class
+and message, fails_compile when it is a full warning signalled while a file
+compiled, and, where the compiler has a place for it, file, line and form: the
+enclosing definition as the compiler names it, such as (defun wrong-arity).
+form says where the warning is; it is not an argument for lisp-edit-form.  For
+a top-level defun, defmacro or defclass the two read alike, but a method is
+named by its specializers alone, (defmethod area (circle)), and a definition
+inside eval-when by itself rather than by the eval-when.  Read the form at
+file and line to address it.
 
 Examples:
   First-time load: system='my-project', force=false

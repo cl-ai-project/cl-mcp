@@ -8,6 +8,8 @@
                 #:load-system)
   (:import-from #:cl-mcp/src/system-loader-core
                 #:%load-with-timeout)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:transient-error)
   (:import-from #:cl-mcp/src/tools/response-builders
                 #:build-load-system-response)
   (:import-from #:cl-mcp/src/utils/request-debugger-boundary
@@ -325,6 +327,217 @@
         (ignore-errors (delete-package package-name))
         (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore)))))
 
+(define-condition loader-probe-warning (warning)
+  ()
+  (:report "loader probe: a full warning"))
+
+(define-condition loader-probe-style-warning (style-warning)
+  ()
+  (:report "loader probe: a style warning"))
+
+(defun %call-with-probe-files (files thunk)
+  "Write FILES, an alist of (name . text), into a fresh temporary directory, call
+THUNK with a function from a name to its path, and remove the directory.  The
+package CLMCP-WARN-PROBE exists, empty, for the files to be in."
+  (let ((root (uiop:ensure-directory-pathname
+               (uiop:merge-pathnames*
+                (format nil "clmcp-warn-~36R/"
+                        (random most-positive-fixnum (make-random-state t)))
+                (uiop:temporary-directory)))))
+    (unwind-protect
+         (progn
+           (ignore-errors (delete-package "CLMCP-WARN-PROBE"))
+           (make-package "CLMCP-WARN-PROBE" :use '(#:cl))
+           (loop for (name . text) in files
+                 for path = (uiop:merge-pathnames* name root)
+                 do (ensure-directories-exist path)
+                    (with-open-file (out path :direction :output :if-exists :supersede
+                                              :external-format :utf-8)
+                      (write-string text out)))
+           (funcall thunk (lambda (name) (uiop:merge-pathnames* name root))))
+      (ignore-errors (delete-package "CLMCP-WARN-PROBE"))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+
+(defun %suppressed (thunk)
+  "Call THUNK under %CALL-WITH-SUPPRESSED-OUTPUT.  Return THUNK's values as a
+list, and the warning records."
+  (multiple-value-bind (result count details stderr records)
+      (cl-mcp/src/system-loader-core::%call-with-suppressed-output
+       (lambda () (multiple-value-list (funcall thunk))))
+    (declare (ignore count details stderr))
+    (values result records)))
+
+(deftest a-full-warning-is-left-to-the-compiler
+  ;; compile-file's failure flag is what ASDF fails a build on.  A handler that
+  ;; muffles a full WARNING clears it, and load-system then loads what ASDF --
+  ;; and run-tests -- refuse.
+  (%call-with-probe-files
+   '(("full.lisp" . "(in-package #:clmcp-warn-probe)
+(defun two-arguments (a b) (+ a b))
+(defun wrong-arity () (two-arguments 1 2 3))
+")
+     ("style.lisp" . "(in-package #:clmcp-warn-probe)
+(defun unused-argument (x y) (* x 2))
+"))
+   (lambda (path)
+     (testing "a full warning: the compile is reported as failed"
+       (let ((values (%suppressed (lambda () (compile-file (funcall path "full.lisp"))))))
+         (ok (eq t (third values)) "failure-p")))
+     (testing "a style warning: the compile is reported as clean"
+       (let ((values (%suppressed (lambda () (compile-file (funcall path "style.lisp"))))))
+         (ok (null (second values)) "warnings-p")
+         (ok (null (third values)) "failure-p"))))))
+
+(deftest a-warning-is-recorded-with-its-class-and-severity
+  (multiple-value-bind (values records)
+      (%suppressed (lambda ()
+                     (warn 'loader-probe-warning)
+                     (warn 'loader-probe-style-warning)
+                     :done))
+    (ok (equal '(:done) values))
+    (ok (= 2 (length records)))
+    (let ((full (first records))
+          (style (second records)))
+      (ok (equal "warning" (gethash "severity" full)))
+      (ok (equal "CL-MCP/TESTS/SYSTEM-LOADER-TEST::LOADER-PROBE-WARNING"
+                 (gethash "class" full)))
+      (ok (equal "loader probe: a full warning" (gethash "message" full)))
+      (ok (null (gethash "file" full)) "signalled outside a compile: no place")
+      (ok (equal "style-warning" (gethash "severity" style)))
+      (ok (equal "loader probe: a style warning" (gethash "message" style))))))
+
+(deftest a-compile-time-warning-is-recorded-with-its-place
+  ;; The first line is in Japanese: SBCL gives the place in octets, and a
+  ;; position read as characters lands on another line.
+  (%call-with-probe-files
+   '(("place.lisp" . ";;;; 警告の位置を数える — 日本語のコメントが先頭にあるファイル
+(in-package #:clmcp-warn-probe)
+
+(defun unused-argument (x y)
+  (* x 2))
+
+;;; A comment between two forms: the place is the form's, not the comment's.
+(defun two-arguments (a b)
+  (+ a b))
+
+(defun wrong-arity ()
+  (two-arguments 1 2 3))
+"))
+   (lambda (path)
+     (multiple-value-bind (values records)
+         (%suppressed (lambda () (compile-file (funcall path "place.lisp"))))
+       (declare (ignore values))
+       (ok (= 2 (length records)))
+       (let ((style (first records))
+             (full (second records)))
+         (ok (equal "style-warning" (gethash "severity" style)))
+         (ok (eql 4 (gethash "line" style)))
+         (ok (equal "(defun unused-argument)" (gethash "form" style)))
+         (ok (search "place.lisp" (gethash "file" style)))
+         (ok (equal "warning" (gethash "severity" full)))
+         (ok (eql 11 (gethash "line" full)))
+         (ok (equal "(defun wrong-arity)" (gethash "form" full))))))))
+
+(deftest only-a-full-warning-from-inside-a-compile-is-marked-as-failing-it
+  ;; COMPILE-FILE reports failure for a full warning signalled while it runs,
+  ;; and for no other.  That, not having a place, is what tells the warning a
+  ;; file was refused for from one that merely came earlier.
+  (%call-with-probe-files
+   '(("compiling.lisp" . "(in-package #:clmcp-warn-probe)
+(eval-when (:compile-toplevel)
+  (warn 'cl-mcp/tests/system-loader-test::loader-probe-warning))
+(defun unused-argument (x y) (* x 2))
+")
+     ("loading.lisp" . "(in-package #:clmcp-warn-probe)
+(warn 'cl-mcp/tests/system-loader-test::loader-probe-warning)
+")
+     ("deferred.lisp" . "(in-package #:clmcp-warn-probe)
+(defun reads-undefined () (list *clmcp-warn-never-defined*))
+"))
+   (lambda (path)
+     (flet ((marked-p (record)
+              (eq t (gethash "fails_compile" record))))
+       (testing "a full warning signalled while the file compiles"
+         (multiple-value-bind (values records)
+             (%suppressed (lambda () (compile-file (funcall path "compiling.lisp"))))
+           (ok (eq t (third values)) "the compile is reported as failed")
+           (ok (equal '("warning" "style-warning")
+                      (mapcar (lambda (record) (gethash "severity" record)) records)))
+           (ok (marked-p (first records)) "and the warning is marked")
+           (ok (not (marked-p (second records))) "a style warning never is")))
+       (testing "the same warning signalled while a file loads"
+         (multiple-value-bind (values records)
+             (%suppressed (lambda () (load (funcall path "loading.lisp"))))
+           (declare (ignore values))
+           (ok (equal "warning" (gethash "severity" (first records))))
+           (ok (not (marked-p (first records))))))
+       (testing "an undefined variable, reported when the unit ends"
+         (multiple-value-bind (values records)
+             (%suppressed (lambda () (compile-file (funcall path "deferred.lisp"))))
+           (ok (null (third values)) "the compile is reported as clean")
+           (ok (equal "warning" (gethash "severity" (first records))))
+           (ok (search "deferred.lisp" (gethash "file" (first records)))
+               "it has a place")
+           (ok (not (marked-p (first records))) "and has failed no compile")))))))
+
+(deftest warnings-that-read-the-same-are-each-recorded
+  ;; Nothing is merged.  A record made of class and text alone cannot tell a
+  ;; warning signalled twice from two warnings that read the same, and taking
+  ;; the second for a repeat of the first loses a warning.
+  (%call-with-probe-files
+   '(("compile.lisp" . "(in-package #:clmcp-warn-probe)
+(eval-when (:compile-toplevel)
+  (warn 'cl-mcp/tests/system-loader-test::loader-probe-style-warning))
+")
+     ("load.lisp" . "(in-package #:clmcp-warn-probe)
+(warn 'cl-mcp/tests/system-loader-test::loader-probe-style-warning)
+")
+     ("same-text.lisp" . "(in-package #:clmcp-warn-probe)
+(defun first-one (y) 1)
+(defun second-one (y) 2)
+(defun third-one () (clmcp-warn-missing-function))
+"))
+   (lambda (path)
+     (testing "one form warns while its file compiles, another while its file loads"
+       (multiple-value-bind (values records)
+           (%suppressed (lambda ()
+                          (compile-file (funcall path "compile.lisp"))
+                          (load (funcall path "load.lisp"))))
+         (declare (ignore values))
+         (ok (equal '("loader probe: a style warning" "loader probe: a style warning")
+                    (mapcar (lambda (record) (gethash "message" record)) records)))
+         (ok (search "compile.lisp" (gethash "file" (first records)))
+             "the first with the place the compiler knew")
+         (ok (null (gethash "file" (second records)))
+             "the second with none")))
+     (testing "the same text in two places is two warnings of one kind"
+       (multiple-value-bind (values records)
+           (%suppressed (lambda () (compile-file (funcall path "same-text.lisp"))))
+         (declare (ignore values))
+         (ok (equal '(2 3 4) (mapcar (lambda (record) (gethash "line" record)) records)))
+         (ok (eql (gethash "kind" (first records)) (gethash "kind" (second records)))
+             "the two unused variables")
+         (ok (not (eql (gethash "kind" (first records)) (gethash "kind" (third records))))
+             "the undefined function is another kind"))))))
+
+(deftest the-form-of-a-method-is-the-compilers-name-for-it
+  ;; SBCL names a method by its specializers, without the parameter names that
+  ;; lisp-edit-form's form_name is written with.  The record's form says where
+  ;; the warning is; it is not that argument.
+  (%call-with-probe-files
+   '(("method.lisp" . "(in-package #:clmcp-warn-probe)
+(defgeneric sample (x))
+(defmethod sample ((x integer))
+  (let ((unused 1))
+    x))
+"))
+   (lambda (path)
+     (multiple-value-bind (values records)
+         (%suppressed (lambda () (compile-file (funcall path "method.lisp"))))
+       (declare (ignore values))
+       (ok (equal "(defmethod sample (integer))" (gethash "form" (first records))))
+       (ok (eql 3 (gethash "line" (first records))))))))
+
 (deftest load-system-drops-redefinition-notices-on-first-load-and-reload
   ;; Through load-system itself: a first load (force=false) and a reload
   ;; (force=true) of a system whose second file redefines its first file's
@@ -392,6 +605,341 @@
         (asdf:clear-system system)
         (ignore-errors (delete-package package-name))
         (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore)))))
+
+(defun %call-with-warning-system (body thunk &key then)
+  "Make the ASDF system clmcp-warn-fixture, whose one source file holds BODY in
+the package CLMCP-WARN-FIXTURE, call THUNK with the system's name and a function
+that makes ASDF forget what it loaded of it, and remove everything again.  THEN,
+when given, is the text of a second file, compiled once the first has loaded."
+  (let ((root (uiop:ensure-directory-pathname
+               (uiop:merge-pathnames*
+                (format nil "clmcp-warn-system-~36R/"
+                        (random most-positive-fixnum (make-random-state t)))
+                (uiop:temporary-directory))))
+        (system "clmcp-warn-fixture")
+        (package-name "CLMCP-WARN-FIXTURE"))
+    (flet ((write-file* (name text)
+             (let ((path (uiop:merge-pathnames* name root)))
+               (ensure-directories-exist path)
+               (with-open-file (out path :direction :output :if-exists :supersede)
+                 (write-string text out))))
+           (forget ()
+             (asdf:clear-system system)
+             (ignore-errors (delete-package package-name))
+             (asdf:load-asd (uiop:merge-pathnames* "clmcp-warn-fixture.asd" root))))
+      (unwind-protect
+           (progn
+             (write-file* "clmcp-warn-fixture.asd"
+                          (format nil "(defsystem \"clmcp-warn-fixture\" :serial t
+  :components ((:file \"package\") (:file \"body\")~:[~; (:file \"then\")~]))"
+                                  then))
+             (write-file* "package.lisp" "(defpackage #:clmcp-warn-fixture (:use #:cl))")
+             (write-file* "body.lisp"
+                          (format nil "(in-package #:clmcp-warn-fixture)~%~A~%" body))
+             (when then
+               (write-file* "then.lisp"
+                            (format nil "(in-package #:clmcp-warn-fixture)~%~A~%" then)))
+             (forget)
+             (funcall thunk system #'forget))
+        (asdf:clear-system system)
+        (ignore-errors (delete-package package-name))
+        (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore)))))
+
+(defun %response-text (system ht)
+  "Return the text a client reads for HT, load-system's result for SYSTEM."
+  (gethash "text" (aref (gethash "content" (build-load-system-response system ht)) 0)))
+
+(deftest load-system-fails-on-a-full-warning-as-asdf-does
+  (%call-with-warning-system
+   "(defun two-arguments (a b) (+ a b))
+(defun wrong-arity () (two-arguments 1 2 3))"
+   (lambda (system forget)
+     (testing "ASDF's own load refuses the file"
+       (ok (typep (nth-value 1 (ignore-errors
+                                (let ((*error-output* (make-broadcast-stream))
+                                      (*standard-output* (make-broadcast-stream)))
+                                  (asdf:load-system system))))
+                  'uiop:compile-file-error)))
+     (funcall forget)
+     (testing "and so does load-system, naming the warning and its place"
+       (let* ((ht (load-system system :force nil))
+              (records (gethash "warning_records" ht))
+              (text (%response-text system ht)))
+         (ok (equal "error" (gethash "status" ht)))
+         (ok (eql 1 (length records)))
+         (ok (equal "warning" (gethash "severity" (aref records 0))))
+         (ok (eql 3 (gethash "line" (aref records 0))))
+         (ok (search "called with three arguments" text))
+         (ok (search "body.lisp:3 (defun wrong-arity)" text))
+         (ok (search "ASDF refuses a file that compiles with a WARNING" text))
+         (ok (null (nth-value 1 (gethash "compile_failed" ht)))
+             "what the builder was told about the error is not left in the response"))))))
+
+(deftest a-load-that-never-started-reports-nothing-of-the-load-before-it
+  ;; What a failed load had recorded was kept where the next call could read
+  ;; it.  A load refused before it began -- the ASDF lock held by another load
+  ;; -- then reported the earlier system's warnings and compiler output as its
+  ;; own.
+  (%call-with-warning-system
+   "(defun two-arguments (a b) (+ a b))
+(defun wrong-arity () (two-arguments 1 2 3))"
+   (lambda (system forget)
+     (declare (ignore forget))
+     (let ((failed (load-system system :force nil)))
+       (ok (equal "error" (gethash "status" failed)))
+       (ok (eql 1 (length (gethash "warning_records" failed)))
+           "precondition: the first load recorded its warning")
+       (ok (search "TWO-ARGUMENTS" (gethash "compiler_output" failed))
+           "precondition: and kept the compiler's output"))
+     (let ((refused
+             (let ((cl-mcp/src/system-loader-core:*system-load-lock-wrapper*
+                     (lambda (thunk)
+                       (declare (ignore thunk))
+                       (error 'transient-error
+                              :format-control "the load lock is held by another load"))))
+               (load-system system :force nil :timeout-seconds 2))))
+       (ok (equal "error" (gethash "status" refused)))
+       (ok (search "the load lock is held" (gethash "message" refused)))
+       (ok (null (gethash "warning_records" refused)) "no records of the earlier load")
+       (ok (null (gethash "warnings" refused)) "no count of them")
+       (ok (null (gethash "compiler_output" refused)) "no compiler output of the earlier load")
+       (ok (null (search "TWO-ARGUMENTS" (%response-text system refused)))
+           "and nothing of it in the text")))))
+
+(deftest load-system-blames-a-refused-compile-on-its-own-warnings-only
+  ;; The first file warns as it loads; the second is the one ASDF refuses.
+  ;; Every full warning recorded so far used to be given as the cause, with the
+  ;; advice to fix it -- for a warning whose removal changes nothing.
+  (testing "the refused file has an error and no warning: the earlier warning is not the cause"
+    (%call-with-warning-system
+     "(warn \"runtime-only advisory\")"
+     (lambda (system forget)
+       (declare (ignore forget))
+       (let* ((ht (load-system system :force nil))
+              (records (gethash "warning_records" ht))
+              (text (%response-text system ht)))
+         (ok (equal "error" (gethash "status" ht)))
+         (ok (search "COMPILE-FILE-ERROR" (gethash "message" ht)))
+         (ok (eql 1 (length records)))
+         (ok (equal "runtime-only advisory" (gethash "message" (aref records 0))))
+         (ok (null (gethash "fails_compile" (aref records 0))))
+         (ok (search "Warnings before the error (1)" text))
+         (ok (null (search "ASDF refuses" text)))
+         (ok (null (search "fix the warning" text)))
+         (ok (search "return for unknown block" text)
+             "the compiler's output names what the file was refused for")))
+     :then "(defun broken () (return-from absent-block 1))"))
+  (testing "the refused file has a warning of its own: that one is the cause"
+    (%call-with-warning-system
+     "(warn \"runtime-only advisory\")"
+     (lambda (system forget)
+       (declare (ignore forget))
+       (let* ((ht (load-system system :force nil))
+              (records (coerce (gethash "warning_records" ht) 'list))
+              (text (%response-text system ht))
+              (cause (search "Warnings (1) -- ASDF refuses" text))
+              (apart (search "Other warnings before the error (1)" text)))
+         (ok (equal "error" (gethash "status" ht)))
+         (ok (equal '(nil t)
+                    (mapcar (lambda (record) (gethash "fails_compile" record)) records))
+             "the advisory, then the warning the compile failed on")
+         (ok (and cause apart
+                  (< cause (search "called with three arguments" text)
+                     apart (search "runtime-only advisory" text)))
+             "the cause first, the advisory apart from it")
+         (ok (search "fix the warning ASDF refused the file for" text)
+             "the advice names the one to fix, with two lists of warnings above it")))
+     :then "(defun two-arguments (a b) (+ a b))
+(defun wrong-arity () (two-arguments 1 2 3))")))
+
+(deftest load-system-loads-style-warnings-and-sums-them-up-by-kind
+  (%call-with-warning-system
+   "(defun first-one (y) 1)
+(defun second-one (y) 2)
+(defun third-one () (clmcp-warn-missing-function))"
+   (lambda (system forget)
+     (declare (ignore forget))
+     (let* ((ht (load-system system :force nil))
+            (text (%response-text system ht)))
+       (ok (equal "loaded" (gethash "status" ht)))
+       (ok (eql 3 (gethash "warnings" ht)))
+       (ok (search "(3 style warnings)" text))
+       (ok (search "2x The variable Y is defined but never used." text))
+       (ok (search "body.lisp:2 (defun first-one)" text))
+       (ok (search "body.lisp:3 (defun second-one)" text))
+       (ok (search "CLMCP-WARN-MISSING-FUNCTION" text))))))
+
+(defun %warning-record (&rest fields)
+  "Return a warning record as load-system's core makes them, from FIELDS, a
+property list of its JSON keys and values."
+  (let ((record (make-hash-table :test #'equal)))
+    (loop for (key value) on fields by #'cddr
+          do (setf (gethash key record) value))
+    record))
+
+(defun %loaded-with (records)
+  "Return a successful load-system result that carries RECORDS."
+  (let ((ht (make-hash-table :test #'equal)))
+    (setf (gethash "status" ht) "loaded"
+          (gethash "duration_ms" ht) 7
+          (gethash "warnings" ht) (length records)
+          (gethash "warning_records" ht) (coerce records 'vector))
+    ht))
+
+(deftest load-system-response-shows-a-full-warning-whole
+  (let ((text (%response-text
+               "fake-system"
+               (%loaded-with
+                (list (%warning-record "severity" "warning"
+                                       "class" "SIMPLE-WARNING"
+                                       "message" (format nil "first line of it~%second line of it")
+                                       "kind" 1))))))
+    (ok (search "(1 warning)" text))
+    (ok (search "first line of it" text))
+    (ok (search "second line of it" text))))
+
+(deftest load-system-response-bounds-what-it-lists-of-style-warnings
+  (flet ((style (kind message &optional (line kind))
+           (%warning-record "severity" "style-warning"
+                            "class" "SB-INT:SIMPLE-STYLE-WARNING"
+                            "message" message
+                            "kind" kind
+                            "file" "src/a.lisp"
+                            "line" line
+                            "form" (format nil "(defun f~D)" line))))
+    (testing "kinds past the limit are counted, not listed"
+      (let ((text (let ((cl-mcp/src/tools/response-builders::*load-style-kinds-shown* 3))
+                    (%response-text
+                     "fake-system"
+                     (%loaded-with
+                      (loop for kind from 1 to 5
+                            collect (style kind (format nil "style kind ~D" kind))))))))
+        (ok (search "(5 style warnings)" text))
+        (ok (search "style kind 3" text))
+        (ok (null (search "style kind 4" text)))
+        (ok (search "2 more kinds" text))))
+    (testing "places past the limit are counted, not listed"
+      (let ((text (let ((cl-mcp/src/tools/response-builders::*load-warning-places-shown* 2))
+                    (%response-text
+                     "fake-system"
+                     (%loaded-with (loop for line from 11 to 14
+                                         collect (style 1 "the same kind" line)))))))
+        (ok (search "4x the same kind" text))
+        (ok (search "src/a.lisp:12 (defun f12)" text))
+        (ok (null (search "src/a.lisp:13" text)))
+        (ok (search "2 more" text))))
+    (testing "a style warning is shown by its first line"
+      (let ((text (%response-text
+                   "fake-system"
+                   (%loaded-with
+                    (list (style 1 (format nil "the headline~%a paragraph of advice")))))))
+        (ok (search "the headline" text))
+        (ok (null (search "a paragraph of advice" text)))))))
+
+(defun %failed-with (records &key compile-failed)
+  "Return a failed load-system result that carries RECORDS, as the core builds
+one: COMPILE-FAILED when the error was the compiler's verdict on a file."
+  (let ((ht (make-hash-table :test #'equal)))
+    (setf (gethash "status" ht) "error"
+          (gethash "duration_ms" ht) 7
+          (gethash "message" ht) "the load stopped"
+          (gethash "warnings" ht) (length records)
+          (gethash "warning_records" ht) (coerce records 'vector))
+    (when compile-failed
+      (setf (gethash "compile_failed" ht) t))
+    ht))
+
+(deftest load-system-response-bounds-a-flood-of-full-warnings
+  (let ((text (let ((cl-mcp/src/tools/response-builders::*load-full-warnings-shown* 2))
+                (%response-text
+                 "fake-system"
+                 (%loaded-with
+                  (loop for n from 1 to 5
+                        collect (%warning-record
+                                 "severity" "warning"
+                                 "class" "COMMON-LISP:SIMPLE-WARNING"
+                                 "message" (format nil "full warning number ~D" n)
+                                 "kind" 1)))))))
+    (ok (search "full warning number 2" text))
+    (ok (null (search "full warning number 3" text)))
+    (ok (search "3 more warnings" text))))
+
+(deftest load-system-response-tells-a-refused-compile-from-another-error
+  (flet ((refusing ()
+           (%warning-record "severity" "warning"
+                            "class" "COMMON-LISP:SIMPLE-WARNING"
+                            "message" "a warning signalled while compiling"
+                            "kind" 1
+                            "fails_compile" t))
+         (earlier ()
+           (%warning-record "severity" "warning"
+                            "class" "COMMON-LISP:SIMPLE-WARNING"
+                            "message" "a warning signalled while loading"
+                            "kind" 2))
+         (style ()
+           (%warning-record "severity" "style-warning"
+                            "class" "SB-INT:SIMPLE-STYLE-WARNING"
+                            "message" "a style warning"
+                            "kind" 3))
+         (variance (&rest more)
+           (apply #'%warning-record
+                  "severity" "warning"
+                  "class" "SB-INT:PACKAGE-AT-VARIANCE"
+                  "message" "FAKE also exports the following symbols: (FAKE:GONE)"
+                  "kind" 4
+                  more)))
+    (testing "the compiler's verdict: the warning is the cause, the style warnings are counted"
+      (let ((text (%response-text
+                   "fake-system"
+                   (%failed-with (list (refusing) (style)) :compile-failed t))))
+        (ok (search "ASDF refuses a file that compiles with a WARNING" text))
+        (ok (search "a warning signalled while compiling" text))
+        (ok (search "1 style warning" text))
+        (ok (search "fix the warning ASDF refused the file for" text))))
+    (testing "a warning from before the refused compile is listed apart from the cause"
+      (let* ((text (%response-text
+                    "fake-system"
+                    (%failed-with (list (earlier) (refusing)) :compile-failed t)))
+             (cause (search "Warnings (1) -- ASDF refuses" text))
+             (cause-text (search "a warning signalled while compiling" text))
+             (apart (search "Other warnings before the error (1)" text))
+             (apart-text (search "a warning signalled while loading" text)))
+        (ok (and cause cause-text apart apart-text) "both are listed")
+        (ok (and cause cause-text apart apart-text
+                 (< cause cause-text apart apart-text))
+            "each under its own heading, the cause first")
+        (ok (search "fix the warning ASDF refused the file for" text)
+            "and the advice is about the cause alone")))
+    (testing "a compile refused for something else: no warning is blamed for it"
+      (let ((text (%response-text
+                   "fake-system"
+                   (%failed-with (list (earlier)) :compile-failed t))))
+        (ok (search "Warnings before the error (1)" text))
+        (ok (search "a warning signalled while loading" text))
+        (ok (null (search "ASDF refuses" text)))
+        (ok (null (search "fix the warning" text)))))
+    (testing "a package at variance: nothing in the file is wrong, the worker is stale"
+      (let ((text (%response-text
+                   "fake-system"
+                   (%failed-with (list (variance "fails_compile" t)) :compile-failed t))))
+        (ok (search "FAKE also exports the following symbols" text))
+        (ok (search "the running image has stale exports" text))
+        (ok (search "pool-kill-worker" text))))
+    (testing "a package at variance met while an earlier file loaded is not the cause"
+      (let ((text (%response-text
+                   "fake-system"
+                   (%failed-with (list (variance)) :compile-failed t))))
+        (ok (search "Warnings before the error (1)" text))
+        (ok (null (search "ASDF refuses" text)))
+        (ok (null (search "the running image has stale exports" text)))))
+    (testing "another error: the warnings came before it and are not blamed for it"
+      (let ((text (%response-text "fake-system"
+                                  (%failed-with (list (earlier) (refusing))))))
+        (ok (search "Warnings before the error (2)" text))
+        (ok (search "a warning signalled while loading" text))
+        (ok (search "a warning signalled while compiling" text))
+        (ok (null (search "ASDF refuses" text)))
+        (ok (search "pool-kill-worker" text))))))
 
 (deftest load-system-force-reload-reports-no-redefinitions
   (testing "force=true on an already-loaded system reports zero warnings
