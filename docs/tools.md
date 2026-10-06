@@ -249,9 +249,12 @@ Input:
 
 Output fields:
 - `content`: summary text. Every full warning is written whole, with its place
-  (`file:line (defun name)`). Style warnings are summed up by kind: how many there are, the
-  first one's first line and up to three places; at most eight kinds are listed and the rest
-  counted. A load that failed on a compile ASDF refused gives as its cause the full warnings
+  (`file:line (defun name)`). Style warnings are summed up by kind: how many there are and up
+  to three of them, in file and line order. A kind whose warnings all read the same is headed
+  by that first line and lists their places; one whose messages differ -- SBCL signals every
+  unused variable and every undefined function as one kind -- is headed `Nx of one kind:` and
+  gives each listed warning its place and its own first line. At most eight kinds are listed
+  and the rest counted. A load that failed on a compile ASDF refused gives as its cause the full warnings
   signalled while a file compiled (`fails_compile`) and says to fix them. A full warning
   signalled earlier, while another file loaded, is listed apart as `Other warnings before the
   error`; when the refused compile had no warning of its own (it failed on an error, which the
