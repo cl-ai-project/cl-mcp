@@ -342,11 +342,30 @@ fails on, so none is summed up; *LOAD-FULL-WARNINGS-SHOWN* only bounds a flood."
       (format stream "~%  ... and ~D more warning~:P (all are in warning_records)"
               hidden))))
 
+(defun %first-line (text)
+  "Return TEXT up to its first newline."
+  (subseq text 0 (or (position #\Newline text) (length text))))
+
+(defun %place-precedes-p (a b)
+  "True when load-system warning record A is listed before B: by file, then by
+line, and a record with a place before one without."
+  (let ((file-a (gethash "file" a))
+        (file-b (gethash "file" b)))
+    (cond ((null file-a) nil)
+          ((null file-b) t)
+          ((string< file-a file-b) t)
+          ((string< file-b file-a) nil)
+          (t (< (or (gethash "line" a) 0) (or (gethash "line" b) 0))))))
+
 (defun %write-style-warnings (stream records)
   "Write RECORDS, style warnings, to STREAM summed up by kind: how many there are
-of the kind, the first one's first line, and the places of the first
-*LOAD-WARNING-PLACES-SHOWN* of them.  *LOAD-STYLE-KINDS-SHOWN* kinds are
-written; the rest are counted.  Every record stays in warning_records."
+of the kind and the first *LOAD-WARNING-PLACES-SHOWN* of them in file and line
+order.  A kind whose warnings all read the same is headed by that first line and
+lists their places; otherwise no one message stands for the kind -- SBCL signals
+every unused variable with one format control, whatever the variable -- so each
+listed warning gives its place and its own first line.  *LOAD-STYLE-KINDS-SHOWN*
+kinds are written; the rest are counted.  Every record stays in
+warning_records."
   (let ((kinds '()))
     (dolist (record records)
       (let ((entry (assoc (gethash "kind" record) kinds :test #'equal)))
@@ -355,22 +374,35 @@ written; the rest are counted.  Every record stays in warning_records."
             (setf kinds (append kinds (list (list (gethash "kind" record) record)))))))
     (loop for (nil . members) in kinds
           for shown from 1 to *load-style-kinds-shown*
-          do (let* ((message (or (gethash "message" (first members)) ""))
-                    (headline (subseq message 0 (or (position #\Newline message)
-                                                    (length message))))
-                    (places (remove nil (mapcar #'%load-warning-place members)))
-                    (listed (subseq places 0 (min *load-warning-places-shown*
-                                                  (length places)))))
+          do (let* ((ordered (stable-sort (copy-list members) #'%place-precedes-p))
+                    (headlines (mapcar (lambda (record)
+                                         (%first-line (or (gethash "message" record) "")))
+                                       ordered))
+                    (listed (min *load-warning-places-shown* (length ordered)))
+                    (hidden (- (length ordered) listed)))
                ;; "2x", not the multiplication sign: that is the mark a test
                ;; runner's log gives a failure, and this text ends up in one.
-               (format stream "~%  ~@[~Dx ~]~A"
-                       (and (rest members) (length members))
-                       headline)
-               (when listed
-                 (format stream "~%    at ~{~A~^; ~}~@[ (+~D more)~]"
-                         listed
-                         (let ((hidden (- (length places) (length listed))))
-                           (and (plusp hidden) hidden))))))
+               (if (every (lambda (headline) (string= headline (first headlines)))
+                          headlines)
+                   (let ((places (remove nil (mapcar #'%load-warning-place ordered))))
+                     (format stream "~%  ~@[~Dx ~]~A"
+                             (and (rest members) (length members))
+                             (first headlines))
+                     (when places
+                       (let ((at (subseq places 0 (min listed (length places)))))
+                         (format stream "~%    at ~{~A~^; ~}~@[ (+~D more)~]"
+                                 at
+                                 (let ((more (- (length places) (length at))))
+                                   (and (plusp more) more))))))
+                   (progn
+                     (format stream "~%  ~Dx of one kind:" (length members))
+                     (loop for record in ordered
+                           for headline in headlines
+                           repeat listed
+                           do (format stream "~%    ~@[~A: ~]~A"
+                                      (%load-warning-place record) headline))
+                     (when (plusp hidden)
+                       (format stream "~%    (+~D more)" hidden))))))
     (let ((hidden (- (length kinds) *load-style-kinds-shown*)))
       (when (plusp hidden)
         (format stream "~%  ... and ~D more kind~:P (all are in warning_records)"

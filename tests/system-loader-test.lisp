@@ -836,6 +836,72 @@ property list of its JSON keys and values."
         (ok (search "the headline" text))
         (ok (null (search "a paragraph of advice" text)))))))
 
+(deftest load-system-response-names-each-style-warning-by-its-own-message
+  (flet ((style (message line &key (kind 1) (file "src/a.lisp"))
+           (%warning-record "severity" "style-warning"
+                            "class" "SB-INT:SIMPLE-STYLE-WARNING"
+                            "message" message
+                            "kind" kind
+                            "file" file
+                            "line" line
+                            "form" (format nil "(defun f~D)" line)))
+         (placeless (message)
+           (%warning-record "severity" "style-warning"
+                            "class" "SB-INT:SIMPLE-STYLE-WARNING"
+                            "message" message
+                            "kind" 1)))
+    (testing "a kind whose messages differ gives each place its own message"
+      ;; SBCL signals every unused variable with one format control, so they
+      ;; are one kind; the first one's text names a variable the others lack.
+      (let ((text (%response-text
+                   "fake-system"
+                   (%loaded-with
+                    (list (style "The variable B is defined but never used." 8)
+                          (style "The variable C is defined but never used." 9)
+                          (style "The variable B is defined but never used." 12))))))
+        (ok (search "3x of one kind:" text))
+        (ok (null (search "3x The variable B" text))
+            "no message stands for the kind")
+        (ok (search "src/a.lisp:8 (defun f8): The variable B is defined but never used." text))
+        (ok (search "src/a.lisp:9 (defun f9): The variable C is defined but never used." text))
+        (ok (search "src/a.lisp:12 (defun f12): The variable B is defined but never used."
+                    text))))
+    (testing "past the limit the rest of a mixed kind is counted"
+      (let ((text (let ((cl-mcp/src/tools/response-builders::*load-warning-places-shown* 2))
+                    (%response-text
+                     "fake-system"
+                     (%loaded-with
+                      (loop for line from 1 to 4
+                            collect (style (format nil "undefined function: F~D" line)
+                                           line)))))))
+        (ok (search "4x of one kind:" text))
+        (ok (search "undefined function: F2" text))
+        (ok (null (search "undefined function: F3" text)))
+        (ok (search "(+2 more)" text))))
+    (testing "a warning without a place is shown by its message, after those with one"
+      (let* ((text (%response-text
+                    "fake-system"
+                    (%loaded-with
+                     (list (placeless "undefined function: LATE")
+                           (style "undefined function: EARLY" 3)))))
+             (early (search "src/a.lisp:3 (defun f3): undefined function: EARLY" text))
+             (late (search "undefined function: LATE" text)))
+        (ok (and early late (< early late)))))
+    (testing "places are listed in file and line order, not in the order signalled"
+      ;; SBCL reports undefined functions when the compilation unit ends, in an
+      ;; order of its own.
+      (let ((text (%response-text
+                   "fake-system"
+                   (%loaded-with
+                    (list (style "the same kind" 15)
+                          (style "the same kind" 3 :file "src/b.lisp")
+                          (style "the same kind" 13)))))
+            (expected (concatenate 'string
+                                   "at src/a.lisp:13 (defun f13); src/a.lisp:15 (defun f15); "
+                                   "src/b.lisp:3 (defun f3)")))
+        (ok (search "3x the same kind" text))
+        (ok (search expected text))))))
+
 (defun %failed-with (records &key compile-failed)
   "Return a failed load-system result that carries RECORDS, as the core builds
 one: COMPILE-FAILED when the error was the compiler's verdict on a file."
