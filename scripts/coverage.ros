@@ -23,7 +23,8 @@ exec ros -Q -- $0 "$@"
 ;;; 使い方（リポジトリのルートから実行する）:
 ;;;   ./scripts/coverage.ros --smoke   既知の答えで計測パイプラインを検算する（約4〜6分。
 ;;;                                    毎回キャッシュを空にしてから計測するため）
-;;;   ./scripts/coverage.ros           全スイートを計装実行する（約20〜30分）
+;;;   ./scripts/coverage.ros           全スイートを process tier 込みで計装実行する
+;;;                                    （2026-10-07 の実測で約11分。初回は約20〜30分）
 ;;;
 ;;; ワーカー子プロセス内の実行は計測できない。盲点は scripts/coverage-scope.md を見ること。
 
@@ -134,14 +135,22 @@ HTML レポートの数字と必ず一致する。"
            1))))
 
 (defun test-package-names ()
-  "cl-mcp/tests が依存するテストパッケージ名の一覧を返す。
+  "全スイートのテストパッケージ名の一覧を返し、process tier のスイートをロードする。
 
-tests.lisp の test-op フックと同じ選び方をしている。テストを 1 つ追加したときに
-ここだけ更新し忘れる事故を防ぐため、一覧をハードコードしない。"
-  (remove-if-not (lambda (dependency)
-                   (and (stringp dependency)
-                        (uiop:string-prefix-p "cl-mcp/tests/" dependency)))
-                 (asdf:system-depends-on (asdf:find-system :cl-mcp/tests))))
+tests.lisp の test-op フックが full tier で回すのと同じ一覧である。cl-mcp/tests の
+:depends-on には quick tier しか入っていないので、それだけを回すとワーカーや
+サーバを起動するスイート（cl-mcp/tests::*process-tier-suites*）が抜け、
+pool・proxy・tcp・http などの数値が実態より大きく下がる。テストを 1 つ
+追加したときにここだけ更新し忘れる事故を防ぐため、一覧をハードコードしない。"
+  (let ((quick (remove-if-not (lambda (dependency)
+                                (and (stringp dependency)
+                                     (uiop:string-prefix-p "cl-mcp/tests/" dependency)))
+                              (asdf:system-depends-on (asdf:find-system :cl-mcp/tests))))
+        (process-tier (symbol-value
+                       (uiop:find-symbol* '#:*process-tier-suites* '#:cl-mcp/tests))))
+    (dolist (suite process-tier)
+      (asdf:load-system suite))
+    (append quick process-tier)))
 
 (defun percentage (ok all)
   "OK/ALL をパーセントで返す。ALL が 0 のときは sb-cover の percent と同じく NIL。"
