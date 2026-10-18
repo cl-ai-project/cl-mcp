@@ -44,8 +44,8 @@ project's tree written in the same second as its FASL would look current, so
 that FASL is deleted first, and the file is recompiled when this load reaches
 it (same_second_fasls_deleted counts the deletions).  clear_fasls=true is the
 guaranteed rebuild, of every file.  force=true clears the named system and
-re-reads its .asd, so every system defined there is loaded again: a stale file
-is recompiled, a current FASL loaded as it is, and either replaces a definition
+re-reads its .asd, so every system defined there that this load reaches (the
+named one and its dependencies) is loaded again: a stale file is recompiled, a current FASL loaded as it is, and either replaces a definition
 made in repl-eval.  In a package-inferred system the code lives in per-file
 subsystems that are neither cleared nor re-read, so a file of one is loaded
 again only when it is stale, and a definition made in repl-eval stays until it

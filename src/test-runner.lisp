@@ -31,8 +31,8 @@
 The system is reloaded from disk first, so no load-system is needed after an
 edit, and test/tests names resolve against the freshly loaded packages.  The
 test system and its direct <system>/... dependencies are cleared and their .asd
-read again, so every system defined there is loaded again.  A file of a
-package-inferred system, or of a system defined in another .asd, is loaded
+read again, so every system defined there that the test system reaches is loaded
+again.  Any other file of a package-inferred system, or of a system defined in another .asd, is loaded
 again only when its FASL is stale, so a definition made in repl-eval there
 stays in effect for the run (load-system on its file's system or with
 clear_fasls=true, or pool-kill-worker, drops it).  A
