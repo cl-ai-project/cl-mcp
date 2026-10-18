@@ -32,6 +32,7 @@
                 #:ensure-trailing-newline)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%feature-prefix-end
+                #:%skip-blank-and-comments
                 #:%parse-readtable-designator
                 #:file-unparseable-error
                 #:file-unparseable-message
@@ -477,30 +478,44 @@ object across multiple positions in the form tree."
   "Return TEXT with each run of whitespace made a single space, trimmed."
   (string-trim " " (cl-ppcre:regex-replace-all "\\s+" text " ")))
 
+(defun %feature-spans-text (text spans)
+  "Return the feature expressions SPANS, (START . END) pairs into TEXT, each as
+written with its whitespace made single spaces, separated by a space."
+  (format nil "~{~A~^ ~}"
+          (mapcar (lambda (span)
+                    (%collapse-whitespace-runs (subseq text (car span) (cdr span))))
+                  spans)))
+
 (defun %feature-prefix-display (text start &optional end)
   "Return the #+/#- feature expressions written in front of the form at START in
 TEXT, each as written (its whitespace made single spaces) and separated by a
 space, or NIL when there are none.  A form read under them carries no trace of
 them, so a collapsed signature printed from it would read as unconditional.
-With END, the end of the node the form is read as, they are returned only when
-the form after them is that node's whole: a node can start at the # of a form
-the reader skipped -- an inner #- under an outer #+ that holds, or anything the
-CL reader returned no value for -- and those expressions are not this form's."
-  (multiple-value-bind (form-start spans) (%feature-prefix-end text start)
-    (when (and spans
-               (or (null end)
-                   (eql end (ignore-errors
-                             (let ((*read-suppress* t)
-                                   (*read-eval* nil)
-                                   (*readtable* *standard-readtable*))
-                               (nth-value 1 (read-from-string
-                                             text t nil
-                                             :start form-start
-                                             :preserve-whitespace t)))))))
-      (format nil "~{~A~^ ~}"
-              (mapcar (lambda (span)
-                        (%collapse-whitespace-runs (subseq text (car span) (cdr span))))
-                      spans)))))
+With END, the end of the node the form is read as, they are the expressions of
+the form that ends there: a node can start at the # of a form the reader
+skipped -- an inner #- under an outer #+ that holds, or a false twin the CL
+reader returned no value for -- and the forms after it are walked to the one
+that is the node's, whose own expressions they are (NIL when it has none)."
+  (flet ((suppressed-end (from)
+           (ignore-errors
+            (let ((*read-suppress* t)
+                  (*read-eval* nil)
+                  (*readtable* *standard-readtable*))
+              (nth-value 1 (read-from-string text t nil
+                                             :start from
+                                             :preserve-whitespace t))))))
+    (loop
+      (multiple-value-bind (form-start spans) (%feature-prefix-end text start)
+        (when (null end)
+          (return (and spans (%feature-spans-text text spans))))
+        (let ((form-end (suppressed-end form-start)))
+          (cond ((or (null form-end) (> form-end end)) (return nil))
+                ((= form-end end)
+                 (return (and spans (%feature-spans-text text spans))))
+                ;; A skipped form, not the node's: walk on to the next one.
+                (t (let ((next (%skip-blank-and-comments text form-end)))
+                     (when (>= next end) (return nil))
+                     (setf start next)))))))))
 
 (defparameter *skipped-form-max-chars* 80
   "Characters of a form the reader skipped shown in its collapsed line.")
@@ -901,7 +916,9 @@ expressions written in front of its form, a variable's value is cut at 80
 characters, and a form the reader skipped because its feature expression is
 false in the server (the other implementation's twin) is listed by the start of
 its text, marked [not read ...]; it is never expanded and not counted in
-total_forms.  Read it with collapsed=false.
+total_forms.  Read it with collapsed=false.  A file read by the CL reader (with
+readtable, or after an in-readtable) lists no such twin: that reader returns
+nothing for it.
 When reading in raw mode (collapsed=false) and output is truncated, a
 '[Showing lines A-B of N. Use offset=B to read more.]' footer is appended
 to guide pagination. Use the suggested offset value in a follow-up call.

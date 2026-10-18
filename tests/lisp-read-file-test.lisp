@@ -460,6 +460,29 @@ tests/tmp/NAME.lisp."
       (ok (notany (lambda (line) (search "#-sbcl (defun sig-rt-plain" line)) lines)
           (format nil "the next definition carries no prefix: ~S" lines)))))
 
+(deftest lisp-read-file-collapsed-view-keeps-the-prefix-after-a-skipped-twin
+  ;; The false half of a twin pair first: the node starts at its #, and the
+  ;; held form's own expression was dropped, so the pair read as one
+  ;; unconditional definition.
+  (testing "a file read by the CL reader"
+    (let ((lines (%collapsed-lines
+                  "tests/tmp/sig-twin-first.lisp"
+                  (format nil "~{~A~%~}"
+                          '("(in-package :cl-user)"
+                            "(named-readtables:in-readtable :standard)"
+                            "#-sbcl (defun sig-twin-a () 1)"
+                            "#+sbcl (defun sig-twin-a () 2)")))))
+      (ok (some (lambda (line) (search "#+sbcl (defun sig-twin-a" line)) lines)
+          (format nil "the held form keeps its prefix: ~S" lines))))
+  (testing "an inner expression that does not hold, then a prefixed form"
+    (let ((lines (%collapsed-lines
+                  "tests/tmp/sig-nested-then-prefixed.lisp"
+                  (format nil "~{~A~%~}"
+                          '("#+sbcl #+cl-mcp-no-such-feature (defun sig-nest-a () 1)"
+                            "#+sbcl (defun sig-nest-c () 3)")))))
+      (ok (some (lambda (line) (search "#+sbcl (defun sig-nest-c" line)) lines)
+          (format nil "the held form keeps its prefix: ~S" lines)))))
+
 (deftest lisp-read-file-collapsed-view-bounds-a-variables-value
   ;; A variable's initial value was printed whole, however long, while the
   ;; docstring beside it was cut to 80 characters.

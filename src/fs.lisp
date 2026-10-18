@@ -799,8 +799,8 @@ collapsed signatures view that saves ~70% of context window tokens."
                            ((eql limit 0) "[Nothing read: limit is 0.]")
                            ((and offset (plusp offset))
                             (format nil "[Nothing read: offset ~D is at or past the end of ~
-                                         the file.]"
-                                    offset))
+                                         the file~@[ (a ~:D-byte file)~].]"
+                                    offset file-length))
                            (t "[The file is empty.]")))
                         "text" content-string
                         "path" path
