@@ -61,14 +61,18 @@ restart is distinguishable from a symbol-named one."
 inner binding that shadows an argument, or the variables of a LABELS helper the
 compiler merged into its caller -- and SBCL tells them apart only by that id,
 so without it two locals read PATTERN with nothing to say which is which.
-A variable the compiler introduced -- the key CASE binds is SB-C::X -- is
-written with its package, so it does not read as a variable of the user's."
+A variable the compiler introduced or renamed -- the key CASE binds is
+SB-C::X -- is written with its package, and one a macro made with a gensym
+(LOOP's, DOLIST's) as #:NAME, so neither reads as a variable of the user's.
+SBCL's own packages are told by their SB- prefix, the naming convention a user
+package is not expected to follow."
   (let* ((symbol (sb-di:debug-var-symbol var))
          (package (symbol-package symbol))
-         (name (if (and package
-                        (eql 0 (search "SB-" (package-name package))))
-                   (format nil "~A::~A" (package-name package) (symbol-name symbol))
-                   (symbol-name symbol)))
+         (name (cond ((null package)
+                      (format nil "#:~A" (symbol-name symbol)))
+                     ((eql 0 (search "SB-" (package-name package)))
+                      (format nil "~A::~A" (package-name package) (symbol-name symbol)))
+                     (t (symbol-name symbol))))
          (id (sb-di:debug-var-id var)))
     (if (zerop id)
         name
@@ -490,8 +494,11 @@ When LOCALS-PREVIEW-SKIP-INTERNAL is true, only USER frames are counted and
 receive previews; internal frames are skipped entirely for preview purposes.
 When FILTER-INTERNAL is true, internal frames are excluded from the result
 entirely, keeping backtraces focused on user code.
-PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation."
+PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation.
+The second value is true when the stack held more than MAX-FRAMES frames to
+collect, so the last one collected is not the outermost."
   (let ((frames '())
+        (truncated nil)
         (index 0)
         (user-frame-index 0)
         (preview-frames (or locals-preview-frames 0))
@@ -503,7 +510,8 @@ PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation."
           (when map-fn
             (funcall map-fn
                      (lambda (frame)
-                       (when (< index max-frames)
+                       (if (>= index max-frames)
+                           (setf truncated t)
                          (let* ((function-name (%frame-function-name frame))
                                 (source-loc (%frame-source-location frame))
                                 (is-internal (%internal-frame-p function-name)))
@@ -531,7 +539,7 @@ PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation."
                                (incf user-frame-index))
                              (incf index))))))))
       (error () nil))
-    (nreverse frames)))
+    (values (nreverse frames) truncated)))
 
 #+sbcl
 (defun %collect-frames-for-debugger (max-frames print-level print-length
@@ -539,8 +547,11 @@ PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation."
                                           preview-max-elements
                                           locals-preview-skip-internal
                                           filter-internal)
-  "Walk the SBCL stack while letting every diagnostic condition escape."
+  "Walk the SBCL stack while letting every diagnostic condition escape.
+Returns what %COLLECT-FRAMES does: the frames, and whether MAX-FRAMES cut the
+walk short."
   (let ((frames '())
+        (truncated nil)
         (index 0)
         (user-frame-index 0)
         (preview-frames (or locals-preview-frames 0))
@@ -548,7 +559,8 @@ PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation."
         (map-fn (fdefinition (find-symbol "MAP-BACKTRACE" "SB-DEBUG"))))
     (funcall map-fn
              (lambda (frame)
-               (when (< index max-frames)
+               (if (>= index max-frames)
+                   (setf truncated t)
                  (let* ((function-name (%frame-function-name-for-debugger frame))
                         (source-loc (%frame-source-location-for-debugger frame))
                         (is-internal (%internal-frame-p function-name)))
@@ -572,7 +584,7 @@ PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation."
                      (unless is-internal
                        (incf user-frame-index))
                      (incf index))))))
-    (nreverse frames)))
+    (values (nreverse frames) truncated)))
 
 #-sbcl
 (defun %collect-frames (max-frames print-level print-length
@@ -623,18 +635,23 @@ Returns a plist with:
   :message - formatted error message
   :restarts - list of (:name STRING :description STRING)
   :frames - list of frame plists (SBCL only, NIL on other implementations)
-            When LOCALS-PREVIEW-FRAMES > 0, locals in top frames include :preview field."
-  (list :error t :condition-type (prin1-to-string (type-of condition)) :message
-        (handler-case (princ-to-string condition)
-                      (error nil "<error formatting condition>"))
-        :restarts (%collect-restarts) :frames
-        (%collect-frames max-frames print-level print-length
-                         :locals-preview-frames locals-preview-frames
-                         :preview-max-depth preview-max-depth
-                         :preview-max-elements preview-max-elements
-                         :locals-preview-skip-internal
-                         locals-preview-skip-internal
-                         :filter-internal filter-internal)))
+            When LOCALS-PREVIEW-FRAMES > 0, locals in top frames include :preview field.
+  :frames-truncated - true when the stack had more than MAX-FRAMES frames to
+            collect, so the last of :FRAMES is not the outermost."
+  (multiple-value-bind (frames truncated)
+      (%collect-frames max-frames print-level print-length
+                       :locals-preview-frames locals-preview-frames
+                       :preview-max-depth preview-max-depth
+                       :preview-max-elements preview-max-elements
+                       :locals-preview-skip-internal
+                       locals-preview-skip-internal
+                       :filter-internal filter-internal)
+    (list :error t :condition-type (prin1-to-string (type-of condition)) :message
+          (handler-case (princ-to-string condition)
+                        (error nil "<error formatting condition>"))
+          :restarts (%collect-restarts)
+          :frames frames
+          :frames-truncated truncated)))
 
 (defun %debugger-condition-type-name (condition)
   "Return CONDITION's type text while the diagnostic handler-bind is active."
@@ -656,14 +673,17 @@ This is for the request debugger hook only. ON-DIAGNOSTIC-CONDITION is
 expected to escape; it is deliberately not an ordinary recovery callback."
   (handler-bind
       ((condition on-diagnostic-condition))
-    (list :error t
-          :condition-type (%debugger-condition-type-name condition)
-          :message (princ-to-string condition)
-          :restarts (%collect-restarts-for-debugger)
-          :frames (%collect-frames-for-debugger
-                   max-frames print-level print-length
-                   :locals-preview-frames locals-preview-frames
-                   :preview-max-depth preview-max-depth
-                   :preview-max-elements preview-max-elements
-                   :locals-preview-skip-internal locals-preview-skip-internal
-                   :filter-internal filter-internal))))
+    (multiple-value-bind (frames truncated)
+        (%collect-frames-for-debugger
+         max-frames print-level print-length
+         :locals-preview-frames locals-preview-frames
+         :preview-max-depth preview-max-depth
+         :preview-max-elements preview-max-elements
+         :locals-preview-skip-internal locals-preview-skip-internal
+         :filter-internal filter-internal)
+      (list :error t
+            :condition-type (%debugger-condition-type-name condition)
+            :message (princ-to-string condition)
+            :restarts (%collect-restarts-for-debugger)
+            :frames frames
+            :frames-truncated truncated))))

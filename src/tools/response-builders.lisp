@@ -257,28 +257,35 @@ execution_status is \"execution-unknown\"."
                                       for fn = (or (getf frame :function) "")
                                       unless (%internal-frame-p fn)
                                         collect frame)))
+                         (limit (max 1 *backtrace-frames-shown*))
                          (display-frames (or user-frames
                                              (and frames (subseq frames 0
-                                                          (min 5 (length frames)))))))
+                                                          (min limit (length frames)))))))
                     (when display-frames
                       (format s "~&Backtrace:")
                       ;; Past the limit the outermost frame is kept: a recursive
                       ;; LABELS fills the first frames, and the function the
-                      ;; user called is the last of theirs.
-                      (let* ((limit *backtrace-frames-shown*)
-                             (count (length display-frames))
+                      ;; user called is the last of theirs -- or of those the
+                      ;; capture reached, when its cap cut the walk short.
+                      (let* ((count (length display-frames))
                              (shown (if (> count limit)
                                         (append (subseq display-frames 0 (1- limit))
                                                 (last display-frames))
                                         display-frames))
-                             (left-out (- count (length shown))))
+                             (left-out (- count (length shown)))
+                             (truncated (getf error-context :frames-truncated)))
                         (loop for frame in shown
                               for position from 1
                               do (when (and (plusp left-out) (= position limit))
+                                   ;; error_context.frames holds the user frames
+                                   ;; (%BUILD-ERROR-CONTEXT-HT), so they are what
+                                   ;; is counted.
                                    (format s "~&  ... ~D more of your frames left out ~
-                                              here; error_context.frames has all ~D ~
-                                              frames captured"
-                                           left-out (length frames)))
+                                              here; error_context.frames has ~
+                                              ~:[all ~D of them~;the ~D captured -- the ~
+                                              stack went deeper, so the next frame is the ~
+                                              outermost captured~]"
+                                           left-out truncated count))
                                  (format s "~&  ~A: ~A~@[ (~A~@[:~A~])~]"
                                          (or (getf frame :index) "?")
                                          (sanitize-for-json

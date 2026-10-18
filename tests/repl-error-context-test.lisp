@@ -221,22 +221,44 @@
   ;; Five user frames were listed and the text ended there, with no word of
   ;; the rest.  A recursive LABELS fills all five, so the function the user
   ;; called -- the outermost user frame -- never appeared.
-  (let* ((frames (append
-                  (loop for index from 1 to 9
-                        collect (list :index index
-                                      :function "(LABELS APP::DOWN :IN APP::OUTER)"
-                                      :locals nil))
-                  (list (list :index 10 :function "APP::OUTER" :locals nil)
-                        (list :index 11 :function "SB-INT:SIMPLE-EVAL-IN-LEXENV"
-                              :locals nil))))
-         (text (cl-mcp/tests/repl-error-context-test::%response-text
-                (list :error t :condition-type "SIMPLE-ERROR" :message "bottom"
-                      :restarts nil :frames frames))))
-    (ok (search "10: APP::OUTER" text)
-        (format nil "the outermost user frame is shown: ~A" text))
-    (ok (search "more of your frames" text) "and the ones left out are counted")
-    (ok (search "error_context.frames" text) "with where to find them")
-    (ok (null (search "  5: " text)) "the middle of the run is what is left out")))
+  (flet ((context (truncated)
+           (list :error t :condition-type "SIMPLE-ERROR" :message "bottom"
+                 :restarts nil :frames-truncated truncated
+                 :frames (append
+                          (loop for index from 1 to 9
+                                collect (list :index index
+                                              :function "(LABELS APP::DOWN :IN APP::OUTER)"
+                                              :locals nil))
+                          (list (list :index 10 :function "APP::OUTER" :locals nil)
+                                (list :index 11 :function "SB-INT:SIMPLE-EVAL-IN-LEXENV"
+                                      :locals nil))))))
+    (let ((text (cl-mcp/tests/repl-error-context-test::%response-text (context nil))))
+      (ok (search "10: APP::OUTER" text)
+          (format nil "the outermost user frame is shown: ~A" text))
+      (ok (search "5 more of your frames left out here" text)
+          "the ones left out are counted")
+      (ok (search "error_context.frames has all 10 of them" text)
+          "with where to find them, counted as that field holds them: the user's")
+      (ok (null (search "  5: " text)) "the middle of the run is what is left out"))
+    (let ((text (cl-mcp/tests/repl-error-context-test::%response-text (context t))))
+      (ok (null (search "has all" text))
+          "a capture its cap cut short does not claim to hold them all")
+      (ok (search "outermost captured" text)
+          (format nil "and says the last frame shown is the outermost captured: ~A" text)))))
+
+(deftest backtrace-text-falls-back-to-the-same-limit-without-your-frames
+  ;; With no user frame the first frames are shown, as many as the limit, and
+  ;; a count of the rest does not call them yours.
+  (let* ((frames (loop for index from 0 below 8
+                       collect (list :index index :function (format nil "SB-INT::F~D" index)
+                                     :locals nil)))
+         (text (let ((cl-mcp/src/tools/response-builders::*backtrace-frames-shown* 3))
+                 (cl-mcp/tests/repl-error-context-test::%response-text
+                  (list :error t :condition-type "SIMPLE-ERROR" :message "x"
+                        :restarts nil :frames frames)))))
+    (ok (search "SB-INT::F2" text) "the first frames are shown")
+    (ok (null (search "SB-INT::F3" text)) "up to the limit")
+    (ok (null (search "of your frames" text)) "and none is called yours")))
 
 (defun %response-text (error-context &key max-output-length)
   "Return the content text BUILD-EVAL-RESPONSE renders for ERROR-CONTEXT.
