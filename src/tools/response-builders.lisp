@@ -83,6 +83,10 @@ useful debug information."
               display-frames)
       'vector))))
 
+(defparameter *backtrace-frames-shown* 5
+  "User frames listed in repl-eval's backtrace text: the first ones less one, and
+the outermost; those between are counted, and all are in error_context.frames.")
+
 (defparameter *locals-shown-per-frame* 10
   "Locals listed per backtrace frame in repl-eval's content text; the rest are
 counted.  A frame compiled at (debug 3) can hold more names than a reader
@@ -258,17 +262,31 @@ execution_status is \"execution-unknown\"."
                                                           (min 5 (length frames)))))))
                     (when display-frames
                       (format s "~&Backtrace:")
-                      (loop for frame in display-frames
-                            for shown from 1
-                            do (format s "~&  ~A: ~A~@[ (~A~@[:~A~])~]"
-                                       (or (getf frame :index) "?")
-                                       (sanitize-for-json
-                                        (or (getf frame :function) ""))
-                                       (sanitize-for-json
-                                        (getf frame :source-file))
-                                       (getf frame :source-line))
-                               (%write-frame-locals s frame 5)
-                            until (>= shown 5)))))))))
+                      ;; Past the limit the outermost frame is kept: a recursive
+                      ;; LABELS fills the first frames, and the function the
+                      ;; user called is the last of theirs.
+                      (let* ((limit *backtrace-frames-shown*)
+                             (count (length display-frames))
+                             (shown (if (> count limit)
+                                        (append (subseq display-frames 0 (1- limit))
+                                                (last display-frames))
+                                        display-frames))
+                             (left-out (- count (length shown))))
+                        (loop for frame in shown
+                              for position from 1
+                              do (when (and (plusp left-out) (= position limit))
+                                   (format s "~&  ... ~D more of your frames left out ~
+                                              here; error_context.frames has all ~D ~
+                                              frames captured"
+                                           left-out (length frames)))
+                                 (format s "~&  ~A: ~A~@[ (~A~@[:~A~])~]"
+                                         (or (getf frame :index) "?")
+                                         (sanitize-for-json
+                                          (or (getf frame :function) ""))
+                                         (sanitize-for-json
+                                          (getf frame :source-file))
+                                         (getf frame :source-line))
+                                 (%write-frame-locals s frame 5))))))))))
       (setf (gethash "content" ht)
             (text-content
              (if (> (length enriched) effective-limit)

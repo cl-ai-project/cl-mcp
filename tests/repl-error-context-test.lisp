@@ -217,6 +217,27 @@
      (ok (search "SB-KERNEL::ERROR" text)
          "fallback includes the first would-be-filtered frame"))))
 
+(deftest backtrace-text-says-what-it-leaves-out-and-keeps-the-outermost-frame
+  ;; Five user frames were listed and the text ended there, with no word of
+  ;; the rest.  A recursive LABELS fills all five, so the function the user
+  ;; called -- the outermost user frame -- never appeared.
+  (let* ((frames (append
+                  (loop for index from 1 to 9
+                        collect (list :index index
+                                      :function "(LABELS APP::DOWN :IN APP::OUTER)"
+                                      :locals nil))
+                  (list (list :index 10 :function "APP::OUTER" :locals nil)
+                        (list :index 11 :function "SB-INT:SIMPLE-EVAL-IN-LEXENV"
+                              :locals nil))))
+         (text (cl-mcp/tests/repl-error-context-test::%response-text
+                (list :error t :condition-type "SIMPLE-ERROR" :message "bottom"
+                      :restarts nil :frames frames))))
+    (ok (search "10: APP::OUTER" text)
+        (format nil "the outermost user frame is shown: ~A" text))
+    (ok (search "more of your frames" text) "and the ones left out are counted")
+    (ok (search "error_context.frames" text) "with where to find them")
+    (ok (null (search "  5: " text)) "the middle of the run is what is left out")))
+
 (defun %response-text (error-context &key max-output-length)
   "Return the content text BUILD-EVAL-RESPONSE renders for ERROR-CONTEXT.
 MAX-OUTPUT-LENGTH is passed through, so a test can put the text under the same

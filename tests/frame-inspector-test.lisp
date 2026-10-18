@@ -382,6 +382,33 @@ captured by CAPTURE, called with the condition inside the signalling handler."
                          #'string<))
             "and each name carries its own value")))))
 
+(defun frame-probe-case-key (items)
+  "Signal from inside a CASE, whose key the compiler binds to a variable of its
+own, SB-C::X."
+  (declare (optimize (debug 3)))
+  (case (first items)
+    (:a (error "frame probe case ~S" items))
+    (t nil)))
+
+(deftest a-compiler-variable-is-named-with-its-package
+  ;; Printed by its bare name, the variable CASE binds read as a user variable X
+  ;; the function does not have.  SBCL's debugger writes SB-C::X.
+  (let ((context nil))
+    (block caught
+      (handler-bind ((error (lambda (e)
+                              (setf context (capture-error-context e :max-frames 30))
+                              (return-from caught))))
+        (frame-probe-case-key '(:a 1))))
+    (let* ((frame (find-if (lambda (frame)
+                             (search "FRAME-PROBE-CASE-KEY" (getf frame :function)))
+                           (getf context :frames)))
+           (names (mapcar (lambda (local) (getf local :name)) (getf frame :locals))))
+      (ok (member "ITEMS" names :test #'string=) "the user's variable keeps its bare name")
+      (ok (not (member "X" names :test #'string=))
+          (format nil "no bare X: ~S" names))
+      (ok (member "SB-C::X" names :test #'string=)
+          "the compiler's variable is named with its package"))))
+
 (deftest internal-frame-p-local-functions-follow-their-outer-function
   (testing "a local or anonymous function inside a user's function is the user's frame"
     ;; SBCL names it (FLET NAME :IN OUTER), (LABELS NAME :IN OUTER) or

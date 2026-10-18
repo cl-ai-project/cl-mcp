@@ -60,9 +60,16 @@ restart is distinguishable from a symbol-named one."
 #ID when ID is not zero.  A frame can hold several variables of one name -- an
 inner binding that shadows an argument, or the variables of a LABELS helper the
 compiler merged into its caller -- and SBCL tells them apart only by that id,
-so without it two locals read PATTERN with nothing to say which is which."
-  (let ((name (symbol-name (sb-di:debug-var-symbol var)))
-        (id (sb-di:debug-var-id var)))
+so without it two locals read PATTERN with nothing to say which is which.
+A variable the compiler introduced -- the key CASE binds is SB-C::X -- is
+written with its package, so it does not read as a variable of the user's."
+  (let* ((symbol (sb-di:debug-var-symbol var))
+         (package (symbol-package symbol))
+         (name (if (and package
+                        (eql 0 (search "SB-" (package-name package))))
+                   (format nil "~A::~A" (package-name package) (symbol-name symbol))
+                   (symbol-name symbol)))
+         (id (sb-di:debug-var-id var)))
     (if (zerop id)
         name
         (format nil "~A#~D" name id))))
