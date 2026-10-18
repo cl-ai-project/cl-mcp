@@ -26,6 +26,8 @@
            #:next-top-level-hint-line
            #:format-bracket-warning
            #:format-overwrite-recovery
+           #:unreadable-dispatch-position
+           #:format-unreadable-dispatch
            #:format-relocation-note
            #:reparented-forms
            #:format-reparent-note))
@@ -1000,6 +1002,53 @@ symbol character with no ) typo behind it."
                       part of a symbol name, so check that it is what you meant."
                  target (getf scan :found) (getf scan :expected)
                  (getf scan :line) (getf scan :column) (getf scan :found)))))
+
+(defun unreadable-dispatch-position (text)
+  "Return (values LINE COLUMN SUB-CHAR), 1-based, of the first # in TEXT that
+the standard makes the reader reject in any readtable that keeps its standard
+dispatch -- #< (an object printed unreadably, such as #<HASH-TABLE ...>), #)
+or # followed by whitespace -- or NIL when there is none or TEXT declares a
+readtable of its own (any mention of in-readtable, which may define them).
+The text is read with the standard readtable and *READ-SUPPRESS* on, so an
+unknown dispatch such as #? passes, and any other failure means NIL: only
+these three are evidence that no readtable makes the file readable."
+  ;; Read only when such a # is there at all: the reader recurses, and a form
+  ;; nested deep enough to stop the parser would exhaust the stack here.
+  (when (and (not (search "in-readtable" text :test #'char-equal))
+             (loop for i = (position #\# text) then (position #\# text :start (1+ i))
+                   while (and i (< (1+ i) (length text)))
+                   thereis (member (char text (1+ i))
+                                   '(#\< #\) #\Space #\Tab #\Newline #\Page #\Return))))
+    (with-input-from-string (in text)
+      (handler-case
+          (let ((*readtable* (copy-readtable nil))
+                (*read-suppress* t)
+                (*read-eval* nil))
+            (loop until (eq in (read in nil in)))
+            nil)
+        (reader-error ()
+          (let* ((after (file-position in))
+                 (hash (and after (- after 2)))
+                 (sub (and hash (>= hash 0) (char text (1+ hash)))))
+            (when (and sub
+                       (char= #\# (char text hash))
+                       (member sub '(#\< #\) #\Space #\Tab #\Newline #\Page #\Return)))
+              (let ((line-start (or (position #\Newline text :end hash :from-end t) -1)))
+                (values (1+ (count #\Newline text :end hash))
+                        (- hash line-start)
+                        sub)))))
+        (error () nil)
+        (storage-condition () nil)))))
+
+(defun format-unreadable-dispatch (line column sub-char)
+  "Return the sentence naming the # at LINE and COLUMN that the reader rejects
+for SUB-CHAR (UNREADABLE-DISPATCH-POSITION)."
+  (format nil "The reader rejects #~A at line ~D, column ~D in every standard ~
+               readtable~:[~; (an object printed unreadably, such as #<HASH-TABLE ...>, ~
+               pasted as source: write code that builds the value instead)~]."
+          (if (char= sub-char #\<) "<"
+              (if (char= sub-char #\)) ")" " followed by whitespace"))
+          line column (char= sub-char #\<)))
 
 (defun format-overwrite-recovery (relative-path &key have-fix (where "below") form-line fix-line)
   "Return the recovery steps for a file that fails on a delimiter no readtable

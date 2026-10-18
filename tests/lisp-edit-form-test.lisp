@@ -1850,6 +1850,35 @@ text and LISP-EDIT-FORM's ninth value, the feature expressions it kept."
           (ok (null (search "overwriting is allowed" err))
               "must not promise an overwrite that the guard will refuse"))))))
 
+(deftest file-unparseable-hook-opens-for-a-hash-no-readtable-reads
+  ;; #< is an error in every standard readtable, so a file holding one and no
+  ;; readtable of its own is broken for good -- it was classified as custom
+  ;; syntax, and no tool could change it.
+  (with-temp-file "tests/tmp/edit-form-hash-angle.lisp"
+      (format nil "(defun a () 1)~%(defun b ()~%  (eq nil #<ledger>))~%")
+    (lambda (path)
+      (multiple-value-bind (unparseable why)
+          (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p (pathname path))
+        (ok unparseable)
+        (ok (eq :unreadable-dispatch why)))
+      (let ((err (handler-case (progn (lisp-edit-form :file-path path
+                                                      :form-type "defun"
+                                                      :form-name "a"
+                                                      :operation "delete")
+                                      nil)
+                   (error (e) (princ-to-string e)))))
+        (ok (search "#< at line 3, column 11" err) err)
+        (ok (search "allow_unparseable_overwrite=true" err))
+        (ok (null (search "keeps refusing" err))))))
+  (testing "#? is still custom syntax, and an in-readtable keeps the guard"
+    (dolist (text (list (format nil "(defun a ()~%  #?\"x\")~%")
+                        (format nil "(named-readtables:in-readtable :standard)~%(eq nil #<x>)~%")))
+      (with-temp-file "tests/tmp/edit-form-hash-angle-2.lisp" text
+        (lambda (path)
+          (ok (null (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                     (pathname path)))
+              text))))))
+
 (deftest file-unparseable-message-for-open-block-comment
   (testing "a file ending inside #| gets closing guidance, not a reference to a likely fix"
     (with-temp-file "tests/tmp/edit-form-open-block-comment.lisp"
