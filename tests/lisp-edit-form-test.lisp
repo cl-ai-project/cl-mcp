@@ -277,7 +277,28 @@ text and LISP-EDIT-FORM's ninth value, the feature expressions it kept."
       (ok (eql 3 (nth-value 10 (lisp-edit-form :file-path path :form-type "defun"
                                                :form-name "other" :operation "replace"
                                                :content "(defun other () 9)")))
-          "and so does an applied edit"))))
+          "and so does an applied edit")
+      (ok (eql 3 (gethash "line" (lisp-edit-form :file-path path :form-type "defun"
+                                                 :form-name "other" :operation "delete"
+                                                 :dry-run t)))
+          "and a delete"))))
+
+(deftest lisp-edit-form-takes-no-comment-from-the-form-before
+  ;; The comment block was found by walking lines upward, blind to the forms:
+  ;; a string or #| |# comment whose last line starts with ; was taken for the
+  ;; target's comment, and an insert_before landed inside it.
+  (dolist (before (list (format nil "(defparameter *h* \"~%;;;; generated\")")
+                        (format nil "#| note~%; end |#")))
+    (testing before
+      (with-temp-file "tests/tmp/edit-form-floor.lisp"
+        (format nil "~A~%(defun b () 2)~%" before)
+        (lambda (path)
+          (lisp-edit-form :file-path path :form-type "defun" :form-name "b"
+                          :operation "insert_before" :content "(defun new () 1)")
+          (let ((text (fs-read-file path)))
+            (ok (search before text) (format nil "the form before is untouched: ~S" text))
+            (ok (< (search before text) (search "(defun new" text))
+                "the new form goes after it")))))))
 
 (deftest lisp-edit-form-replace-with-the-same-form-changes-nothing
   ;; It reported `(would change)' with the original and the preview identical,

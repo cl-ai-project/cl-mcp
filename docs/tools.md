@@ -697,9 +697,11 @@ Input:
   written with no blank line between them are set apart -- the summary says so and the
   result carries `blank_lines_normalized: true`; pass `false` to leave them as they were. A
   comment written directly above the form (`;` lines with no blank line between them and
-  the form) is the form's in either mode: `replace` keeps it attached, and `insert_before`
-  puts the new form above it; `delete` leaves it. Every summary names the line the matched
-  form starts on (`Applied replace to defun beta (line 4) in …`, also the result's `line`),
+  the form, a `;;;` header among them) is the form's in either mode: `replace` keeps it
+  attached, and `insert_before` puts the new form above it; `delete` leaves it. A comment
+  in the content of a `replace` is put after the file's, which stays. Every summary names the line the matched
+  form starts on, its `#+` line when it has one (`Applied replace to defun beta (line 4) in
+  …`, also the result's `line`),
   and a "Multiple matches" error lists each candidate with its line
 - `readtable` (string, optional): named-readtable designator for files using custom reader
   macros. **The readtable must be registered in the cl-mcp server process**, which is where

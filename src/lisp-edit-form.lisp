@@ -774,19 +774,34 @@ form itself that the summary would otherwise leave unmentioned."
     (format nil "~%The blank lines around the form were normalized too; pass ~
                  normalize_blank_lines=false to leave them as they were.")))
 
-(defun %attached-comment-start (text start)
+(defun %comment-floor (nodes target)
+  "Return where the last node before TARGET among NODES ends, line comments left
+out, or 0 for the first: the comment block %ATTACHED-COMMENT-START may take for
+TARGET's lies after it."
+  (let ((floor 0))
+    (dolist (node nodes floor)
+      (when (eq node target)
+        (return floor))
+      (unless (and (eq (cst-node-kind node) :skipped)
+                   (consp (cst-node-value node))
+                   (eq (car (cst-node-value node)) :line-comment))
+        (setf floor (cst-node-end node))))))
+
+(defun %attached-comment-start (text start &optional (floor 0))
   "Return where the comment block written directly above the form at START in TEXT
 begins: the first of the ; lines that run, with no blank line between them, down
 to the line the form starts on.  START when there is none, or when the form does
 not start a line of its own.  Such a comment describes the form below it, so the
-edits keep the two together."
+edits keep the two together.  FLOOR is where the node before the form ends
+(%COMMENT-FLOOR): a line before it is that node's -- the last line of a string or
+of a #| |# comment can start with ; too -- and is never taken."
   (let ((line-start (let ((newline (position #\Newline text :end start :from-end t)))
                       (if newline (1+ newline) 0))))
     (if (find-if-not (lambda (ch) (member ch '(#\Space #\Tab))) text
                      :start line-start :end start)
         start
         (let ((block-start nil))
-          (loop while (plusp line-start)
+          (loop while (> line-start floor)
                 do (let* ((previous-end (1- line-start))
                           (previous-start
                             (let ((newline (position #\Newline text
@@ -794,13 +809,16 @@ edits keep the two together."
                               (if newline (1+ newline) 0)))
                           (line (string-trim '(#\Space #\Tab #\Return)
                                              (subseq text previous-start previous-end))))
-                     (if (and (plusp (length line)) (char= (char line 0) #\;))
+                     (if (and (>= previous-start floor)
+                              (plusp (length line))
+                              (char= (char line 0) #\;))
                          (setf block-start previous-start
                                line-start previous-start)
                          (return))))
           (or block-start start)))))
 
-(defun %apply-operation-preserve-spacing (text node operation content)
+(defun %apply-operation-preserve-spacing (text node operation content
+                                          &optional (comment-floor 0))
   (let ((start (cst-node-start node))
         (end (cst-node-end node)))
     (ecase operation
@@ -809,7 +827,7 @@ edits keep the two together."
       ((:insert-before)
        ;; Above the comment written directly over the target, and a blank line
        ;; apart from it, so the comment still reads as the target's.
-       (let* ((comment-start (%attached-comment-start text start))
+       (let* ((comment-start (%attached-comment-start text start comment-floor))
               (snippet (concatenate 'string (ensure-trailing-newline content)
                                     (if (< comment-start start) (string #\Newline) "")))
               (prefix (subseq text 0 comment-start))
@@ -844,7 +862,8 @@ edits keep the two together."
          (concatenate 'string (subseq text 0 start)
                       (subseq suffix ws-end)))))))
 
-(defun %apply-operation-normalized (text node operation content)
+(defun %apply-operation-normalized (text node operation content
+                                    &optional (comment-floor 0))
   (let ((start (cst-node-start node))
         (end (cst-node-end node)))
     (ecase operation
@@ -852,7 +871,7 @@ edits keep the two together."
       ;; blank lines are set around the two, and an inserted form goes above it.
       ((:replace)
        (let* ((snippet (%trim-outer-whitespace content))
-              (comment-start (%attached-comment-start text start))
+              (comment-start (%attached-comment-start text start comment-floor))
               (comment (string-right-trim '(#\Space #\Tab)
                                           (subseq text comment-start start)))
               (front (concatenate 'string comment snippet)))
@@ -868,7 +887,7 @@ edits keep the two together."
                           suffix-core)))))
       ((:insert-before)
        (let ((snippet (%trim-outer-whitespace content))
-             (comment-start (%attached-comment-start text start)))
+             (comment-start (%attached-comment-start text start comment-floor)))
          (multiple-value-bind (prefix-core _)
              (%split-trailing-whitespace (subseq text 0 comment-start))
            (declare (ignore _))
@@ -906,11 +925,13 @@ edits keep the two together."
                           (%normalized-separator prefix-core suffix-core)
                           suffix-core)))))))))
 
-(defun %apply-operation (text node operation content normalize-blank-lines)
-  "Apply OPERATION to NODE within TEXT, optionally normalizing blank lines."
+(defun %apply-operation (text node operation content normalize-blank-lines
+                         &optional (comment-floor 0))
+  "Apply OPERATION to NODE within TEXT, optionally normalizing blank lines.
+COMMENT-FLOOR bounds the comment block taken as NODE's (%COMMENT-FLOOR)."
   (if normalize-blank-lines
-      (%apply-operation-normalized text node operation content)
-      (%apply-operation-preserve-spacing text node operation content)))
+      (%apply-operation-normalized text node operation content comment-floor)
+      (%apply-operation-preserve-spacing text node operation content comment-floor)))
 
 (defconstant +dry-run-snippet-limit+ 2048
   "Maximum characters of one form snippet inlined into a dry-run summary.")
@@ -1020,15 +1041,16 @@ accepted, and put back in front of it.
 A replace by the form already there changes nothing, normalized spacing
 included.
 
-For non-delete operations without DRY-RUN, returns ten values: the updated
+For non-delete operations without DRY-RUN, returns eleven values -- a delete
+the first three and the eleventh -- : the updated
 file text, the parinfer warning or NIL, whether the file changed, the repair
 line diff or NIL, the validated content that was spliced in, a bracket
 warning (a ] or } found where ) was expected, in content that still reads)
 or NIL, the forms the repair moved out of the form the content's own
 parens put them in (REPARENTED-FORMS) or NIL, the number of forms an
 insert put in when it was more than one, or NIL, the feature expressions
-a replace kept, or NIL, and whether normalizing moved the blank lines around a
-replaced form. A dry run carries the reparented forms as
+a replace kept, or NIL, whether normalizing moved the blank lines around a
+replaced form, and the line the matched form starts on. A dry run carries the reparented forms as
 \"repair_reparented\", that number as \"forms\", the expressions as
 \"kept_feature_expression\" and the last as \"blank_lines_normalized\"."
   (unless
@@ -1075,11 +1097,14 @@ replaced form. A dry run carries the reparented forms as
                         (gethash "preview_form" result)
                         (%preview-form-text op-key nil normalize-blank-lines)
                         (gethash "file_path" result) (namestring abs)
-                        (gethash "operation" result) op-normalized)
+                        (gethash "operation" result) op-normalized
+                        (gethash "line" result) (cst-node-start-line target))
                   result))
                (would-change (fs-write-file rel updated)
-                (values updated nil t))
-               (t (values updated nil nil))))
+                (values updated nil t nil nil nil nil nil nil nil
+                        (cst-node-start-line target)))
+               (t (values updated nil nil nil nil nil nil nil nil nil
+                          (cst-node-start-line target)))))
             ;; Non-delete path: validate and repair content
             ;; Content is validated under the readtable in effect at the target:
             ;; the caller's argument, or an (in-readtable ...) earlier in the
@@ -1143,7 +1168,8 @@ replaced form. A dry run carries the reparented forms as
                          (if same-form
                              original
                              (%apply-operation original target op-key spliced
-                                               normalize-blank-lines)))
+                                               normalize-blank-lines
+                                               (%comment-floor nodes target))))
                        ;; Whether normalising moved the blank lines around a
                        ;; replaced form, compared with leaving them as they were.
                        (blank-lines-normalized
