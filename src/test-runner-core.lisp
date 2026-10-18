@@ -316,7 +316,9 @@ comparison is exactly where it matters."
               ;; A condition's report alone hides what was signalled -- unless
               ;; it names the class itself, as SBCL's arithmetic errors do.
               (condition
-               (let ((report (princ-to-string reason)))
+               ;; On one line: SBCL's pretty-printed reports otherwise break
+               ;; flush left under the "Error: " they follow.
+               (let ((report (let ((*print-pretty* nil)) (princ-to-string reason))))
                  (if (search (symbol-name (type-of reason)) report :test #'char-equal)
                      report
                      (format nil "~S: ~A" (type-of reason) report))))
@@ -418,7 +420,8 @@ test.  NIL when no frame of the test's code is above it, or dissect is absent."
                                                "CL-MCP/SRC/" "UIOP" "UIOP/" "ASDF"
                                                "ASDF/"))))
                 (t
-                 (let ((text (ignore-errors (prin1-to-string call)))
+                 (let ((text (ignore-errors (let ((*print-pretty* nil))
+                                              (prin1-to-string call))))
                        (file (and file-fn (ignore-errors (funcall file-fn frame))))
                        (line (and line-fn (ignore-errors (funcall line-fn frame)))))
                    (when text

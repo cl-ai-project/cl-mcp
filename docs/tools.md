@@ -1406,8 +1406,9 @@ Prove is supported for prove-asdf test systems (`:defsystem-depends-on ("prove-a
   - `signalled` (Rove, present when true): the failure is an error that escaped the test
     body; the summary prints its reason as `Error:`
   - `error_frame` (Rove, with `signalled`, when found): where it was signalled, the first
-    frame of the test's own code -- frames are judged by the package of the name they run,
-    CL's, SBCL's and cl-mcp's passed over, and Rove's first one ends the search -- as
+    frame that is neither the runner's nor the implementation's -- frames are judged by the
+    package of the name they run, CL's, SBCL's, ASDF's and cl-mcp's passed over, and Rove's
+    first one ends the search -- as
     `NAME`, `NAME (file)` or `NAME (file:line)`, the file relative to the project root;
     the summary prints it as `In:`
   - `source`: Source location, file and line (**Rove only** — FiveAM records no
