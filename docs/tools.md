@@ -271,9 +271,15 @@ Output fields:
   signalled earlier, while another file loaded, is listed apart as `Other warnings before the
   error`; when the refused compile had no warning of its own (it failed on an error, which the
   compiler output shows) no warning is blamed for it; a warning a compile was refused for is
-  written whole wherever it comes from. A package at variance ("also exports") that refused
-  the compile, or one of the project's at variance on a load that went on, or any other
-  error, adds a hint to get a fresh worker with `pool-kill-worker`
+  written whole wherever it comes from. The text ends with a hint by cause, the same one
+  `run-tests` gives: a package at variance (an export, use or shadow the file no longer
+  declares) that refused the compile, or one of the project's on a load that went on, gets a
+  fresh worker with `pool-kill-worker`, which only that cures; a dependency ASDF cannot find
+  is named, with where to register it; a system named that ASDF knows nowhere, the name to
+  check; a `DEFCONSTANT` given a value not `EQL` to its own (a list or string is a new object
+  on each compile), `defparameter` or `alexandria:define-constant`; a compile that failed on
+  an error, the file to fix; any other error, a fresh worker only if the error is about what
+  this worker holds
 - `system` (string): echoed system name
 - `status` (string): `"loaded"`, `"timeout"`, or `"error"`. A full `WARNING` signalled while
   a file compiles (a duplicate definition, a type conflict, package variance, a wrong argument

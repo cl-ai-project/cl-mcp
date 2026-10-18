@@ -1370,6 +1370,18 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
       (ignore-errors (asdf:clear-system name))
       (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))
 
+(deftest load-system-tells-a-missing-system-from-a-missing-dependency
+  ;; A name ASDF knows nowhere, with no .asd under the project root, is a
+  ;; typo in the request, not a :depends-on entry.
+  (let* ((ht (load-system "clmcp-no-such-system-at-all"))
+         (text (progn (cl-mcp/src/tools/response-builders:build-load-system-response
+                       "clmcp-no-such-system-at-all" ht)
+                      (gethash "text" (aref (gethash "content" ht) 0)))))
+    (ok (string= "error" (gethash "status" ht)))
+    (ok (search "ASDF knows no system clmcp-no-such-system-at-all" text) text)
+    (ok (null (search ":depends-on" text)))
+    (ok (null (gethash "failure_kind" ht)) "the classification stays internal")))
+
 (deftest load-system-force-reload-reports-no-redefinitions
   (testing "force=true on an already-loaded system reports zero warnings
 (the redefinitions a reload makes are dropped)"

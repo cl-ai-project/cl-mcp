@@ -411,7 +411,10 @@ cases apart, and the hint is still given when a compile is refused for it."
                    ;; is one as much as "also exports".
                    (equal "SB-INT:PACKAGE-AT-VARIANCE" (gethash "class" record))))
             full)
-      (and (stringp details) (search "also exports" details) t)))
+      (and (stringp details)
+           (some (lambda (phrase) (search phrase details))
+                 '("also exports" "also uses" "also shadows"))
+           t)))
 
 (defun %place-precedes-p (a b)
   "True when load-system warning record A is listed before B: by file, then by
@@ -474,6 +477,13 @@ warning_records."
       (when (plusp hidden)
         (format stream "~%  ... and ~D more kind~:P (all are in warning_records)"
                 hidden)))))
+
+(defun %failure-kind-keyword (text)
+  "Return the LOAD-FAILURE-HINT kind TEXT, a load-system failure_kind, names, or
+NIL when it names none."
+  (cond ((equal text "missing-dependency") :missing-dependency)
+        ((equal text "missing-system") :missing-system)
+        ((equal text "defconstant") :defconstant)))
 
 (defun build-load-system-response (system ht)
   "Build the standard load-system response with summary text.
@@ -630,12 +640,10 @@ structure's layout, say -- needs a fresh worker instead: pool-kill-worker, then 
 load-system."
                                (length refusing)))
                       ;; Causes a fresh worker meets again: name what to fix.
-                      ((gethash "failure_kind" ht)
+                      ((%failure-kind-keyword (gethash "failure_kind" ht))
                        (format s "~%~%~A"
                                (load-failure-hint
-                                (if (equal "missing-dependency" (gethash "failure_kind" ht))
-                                    :missing-dependency
-                                    :defconstant)
+                                (%failure-kind-keyword (gethash "failure_kind" ht))
                                 "load-system" (gethash "failure_detail" ht))))
                       (compile-failed
                        (format s "~%~%~A" (load-failure-hint :did-not-compile "load-system")))
@@ -644,6 +652,8 @@ load-system."
     ;; Internal classifications for the hints above, not fields.
     (remhash "load_not_started" ht)
     (remhash "compile_failed" ht)
+    (remhash "failure_kind" ht)
+    (remhash "failure_detail" ht)
     (setf (gethash "content" ht) (text-content summary))
     ht))
 

@@ -579,11 +579,8 @@ them."
                   ((typep condition 'transient-error) text)
                   ;; Nothing is wrong with the worker: the name is unknown.
                   ((typep condition 'test-system-not-found)
-                   (format nil "~A~%~%Hint: ASDF knows no system ~A, and no ~A.asd was ~
-                                found under the project root. Check the name, or ~
-                                register its .asd with load-system or asdf:load-asd, ~
-                                then retry run-tests."
-                           text system-name (asdf:primary-system-name system-name)))
+                   (format nil "~A~%~%~A" text
+                           (load-failure-hint :missing-system "run-tests" system-name)))
                   ;; Nothing in the file is wrong: the worker still exports what
                   ;; the file no longer declares, and only a fresh worker cures
                   ;; that.
