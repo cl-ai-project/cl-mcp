@@ -360,7 +360,10 @@ Output fields:
 - `message` (string|null): error or timeout message
 
 Solves three problems with using `ql:quickload` via `repl-eval`:
-1. **Staleness**: `force=true` (default) clears loaded state before reloading
+1. **Staleness**: `force=true` (default) reloads the files changed since their FASL. A file
+   whose FASL is current is not loaded again (in a package-inferred system only the named
+   system is cleared, not its per-file subsystems), so a definition made in `repl-eval`
+   stays until its file is loaded again: `clear_fasls=true` or `pool-kill-worker` drops it
 2. **Output noise**: suppresses verbose compilation/load output
 3. **Timeout**: dedicated timeout prevents hanging on large systems
 
@@ -1328,7 +1331,7 @@ Notes:
 Run tests for a system and return structured results with pass/fail counts and failure details.
 
 Input:
-- `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`). A system ASDF does not know yet is looked for under the project root, as `load-system` does; a name found nowhere is reported as such, not as a broken worker. The system is force-reloaded, and a file of its tree written in the same second as its fasl has the fasl deleted first, so an edit made right after a compile is what runs (ASDF's timestamps have one-second resolution)
+- `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`). A system ASDF does not know yet is looked for under the project root, as `load-system` does; a name found nowhere is reported as such, not as a broken worker. The system and its test subsystems are reloaded -- a source file whose FASL is current is not, so a definition made in `repl-eval` stays for the run until its file changes -- and a file of its tree written in the same second as its fasl has the fasl deleted first, so an edit made right after a compile is what runs (ASDF's timestamps have one-second resolution)
 - `framework` (string, optional): Force a specific framework (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, or `"auto"` for auto-detect). Auto-detection reads the test system's own `:depends-on`: a framework the system declares directly wins, then one reached transitively, and only for a system ASDF has not registered does it fall back to guessing from the loaded packages. Detection never loads anything.
 - `test` (string, optional): Run only a specific test by fully qualified name (e.g., `"my-package::my-test-name"`)
 - `tests` (array of strings, optional): Run only the listed fully qualified tests

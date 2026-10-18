@@ -28,8 +28,12 @@
 (define-tool "run-tests"
   :description "Run tests for a system and return structured results.
 
-The system is force-reloaded from disk first, so no load-system is needed after
-an edit, and test/tests names resolve against the freshly loaded packages.  A
+The system is reloaded from disk first, so no load-system is needed after an
+edit, and test/tests names resolve against the freshly loaded packages.  The
+test system and its test subsystems are loaded again; a source file whose FASL
+is current is not, so a definition made in repl-eval stays in effect for the
+run until its file changes (load-system clear_fasls=true, or pool-kill-worker,
+drops it).  A
 file of the system's tree written in the same second as its fasl is recompiled
 too: ASDF's one-second timestamps would otherwise keep the code from before
 the edit.
