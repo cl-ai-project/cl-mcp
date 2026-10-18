@@ -410,7 +410,18 @@
       (ok (search "In: DEQUEUE-EMPTY" text))
       (ok (null (search "Form: T" text))))
     (testing "a NIL form"
-      (ok (equal "NIL" (gethash "form" nil-form))))))
+      (ok (equal "NIL" (gethash "form" nil-form))))
+    (testing "a frame of CL's or of the runner's is never named"
+      ;; The printed call was matched by prefix, so LENGTH, and below the
+      ;; test's own frame Rove's or ASDF's (RUN-SYSTEM, LOAD), were named.
+      (let* ((in-cl (find "CL-FUNCTION-ERRS" failures
+                          :key (lambda (f) (gethash "test_name" f)) :test #'string=))
+             (frame (and in-cl (gethash "error_frame" in-cl))))
+        (ok in-cl)
+        (ok (or (null frame)
+                (notany (lambda (name) (search name frame))
+                        '("LENGTH" "RUN-SYSTEM" "LOAD" "ROVE" "ASDF")))
+            frame)))))
 
 (deftest run-tests-handles-undefined-function
   (testing "run-tests captures undefined function errors"
@@ -581,7 +592,15 @@
                                              :format-arguments '(probe-local))
                      :package (find-package '#:cl-mcp/tests/test-runner-test))))
         ;; With its class in front: the report alone hides what was signalled.
-        (ok (equal "SIMPLE-ERROR: PROBE-LOCAL is unbound" (gethash "reason" detail))))))
+        (ok (equal "SIMPLE-ERROR: PROBE-LOCAL is unbound" (gethash "reason" detail)))))
+    (let ((detail (cl-mcp/src/test-runner-core::make-failure-detail
+                   :test-name "t"
+                   :reason (make-condition 'division-by-zero :operation '/ :operands '(1 0)))))
+      (let ((reason (gethash "reason" detail)))
+        (ok (= 1 (loop for start = (search "DIVISION-BY-ZERO" reason)
+                         then (search "DIVISION-BY-ZERO" reason :start2 (1+ start))
+                       while start count t))
+            (format nil "the class is not written twice: ~A" reason)))))
   (testing "a keyword test name does not make every symbol print qualified"
     (let ((*package* (find-package '#:cl-user)))
       (ok (null (cl-mcp/src/test-runner-core::%test-name-package :some-test)))
@@ -978,9 +997,7 @@ everything again."
      ;; A definition from elsewhere, so the compile-time one redefines it.
      (setf (fdefinition (intern "WARM" "CLMCP-TEST-WARN-FIXTURE")) (lambda () 1))
      (let ((reason (%first-failure-reason (run-tests system))))
-       ;; SBCL's own block, its lines starting "; ", may report it; the bare
-       ;; line the capture added may not.
-       (ok (null (search (format nil "~%redefining") reason)) reason)
+       (ok (null (search "redefining" reason)) reason)
        (ok (eql 1 (loop for start = (search "Duplicate definition for HELPER" reason)
                           then (search "Duplicate definition for HELPER" reason
                                        :start2 (1+ start))

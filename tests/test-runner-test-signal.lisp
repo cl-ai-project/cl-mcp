@@ -22,3 +22,12 @@
 
 (deftest nil-form-fails
   (ok nil "a NIL form"))
+
+(declaim (notinline opaque))
+
+(defun opaque (x)
+  x)
+
+(deftest cl-function-errs
+  (testing "An error inside a CL function."
+    (length (opaque 5))))

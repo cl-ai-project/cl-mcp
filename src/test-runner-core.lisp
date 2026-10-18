@@ -313,8 +313,13 @@ comparison is exactly where it matters."
       (setf (gethash "reason" ht)
             (typecase reason
               (string reason)
-              ;; A condition's report alone hides what was signalled.
-              (condition (format nil "~S: ~A" (type-of reason) reason))
+              ;; A condition's report alone hides what was signalled -- unless
+              ;; it names the class itself, as SBCL's arithmetic errors do.
+              (condition
+               (let ((report (princ-to-string reason)))
+                 (if (search (symbol-name (type-of reason)) report :test #'char-equal)
+                     report
+                     (format nil "~S: ~A" (type-of reason) report))))
               (t (princ-to-string reason)))))
     (when source
       (setf (gethash "source" ht)
@@ -353,11 +358,50 @@ no such function: dissect comes with Rove and is resolved at run time."
   (let ((symbol (and package (find-symbol name package))))
     (and symbol (fboundp symbol) (fdefinition symbol))))
 
+(defun %frame-owner-package (call)
+  "Return the package of the name a backtrace frame's CALL runs, or NIL when it
+names none: a symbol's own; for (:METHOD NAME ...), (FLET NAME :IN OUTER) and
+the like, NAME's, or OUTER's when NAME is no symbol; for (LAMBDA ... :IN
+OUTER), OUTER's when it is a symbol.  (SETF NAME) counts as NAME."
+  (labels ((owner (designator)
+             (typecase designator
+               (null nil)
+               (symbol (symbol-package designator))
+               (cons (if (and (eq (first designator) 'setf) (symbolp (second designator)))
+                         (symbol-package (second designator))
+                         (owner-of-call designator)))
+               (t nil)))
+           (owner-of-call (form)
+             (let ((in (member :in form)))
+               (case (first form)
+                 ((lambda) (and in (symbolp (second in)) (owner (second in))))
+                 ((flet labels) (or (owner (second form)) (and in (owner (second in)))))
+                 (t (owner (second form)))))))
+    (typecase call
+      (symbol (symbol-package call))
+      (cons (owner-of-call call))
+      (t nil))))
+
+(defun %package-named-p (package names)
+  "True when PACKAGE's name is one of NAMES, an entry ending in / or - being a
+prefix (\"SB-\", \"ROVE/\") and any other a whole name (\"ROVE\"), so ROVER-APP
+is not Rove's."
+  (and package
+       (let ((name (package-name package)))
+         (some (lambda (entry)
+                 (if (find (char entry (1- (length entry))) "/-")
+                     (uiop:string-prefix-p entry name)
+                     (string= entry name)))
+               names))))
+
 (defun %rove-first-user-frame (stacks package)
   "Return where the error in STACKS, a Rove assertion's dissect frames, was
-signalled: the first frame not Rove's, dissect's, SBCL's or cl-mcp's, as
-\"NAME\" or \"NAME (file:line)\", printed as PACKAGE reads it; NIL when there is
-none or dissect is absent."
+signalled: the first frame of the test's own code, as \"NAME\", \"NAME (file)\"
+or \"NAME (file:line)\", printed as PACKAGE reads it.  Frames are told apart by
+the package of the name they run (%FRAME-OWNER-PACKAGE), not by how it prints:
+CL's, SBCL's, dissect's and cl-mcp's are passed over, and the first of Rove's
+ends the walk, since below it is the runner, whose frames say nothing about the
+test.  NIL when no frame of the test's code is above it, or dissect is absent."
   (let* ((dissect (find-package :dissect))
          (call-fn (%dissect-function dissect "CALL"))
          (file-fn (%dissect-function dissect "FILE"))
@@ -366,15 +410,24 @@ none or dissect is absent."
     (when call-fn
       (dolist (frame stacks)
         (let* ((call (ignore-errors (funcall call-fn frame)))
-               (text (and call (ignore-errors (prin1-to-string call))))
-               (upper (and text (string-upcase text))))
-          (when (and text
-                     (notany (lambda (prefix) (search prefix upper))
-                             '("ROVE/" "ROVE:" "DISSECT" "SB-" "CL-MCP/")))
-            (let ((file (and file-fn (ignore-errors (funcall file-fn frame))))
-                  (line (and line-fn (ignore-errors (funcall line-fn frame)))))
-              (return (format nil "~A~@[ (~A~@[:~D~])~]"
-                              text (and file (ignore-errors (namestring file))) line)))))))))
+               (owner (%frame-owner-package call)))
+          (cond ((%package-named-p owner '("ROVE" "ROVE/")) (return nil))
+                ((or (null call)
+                     (stringp call)
+                     (%package-named-p owner '("COMMON-LISP" "SB-" "DISSECT" "CL-MCP"
+                                               "CL-MCP/SRC/" "UIOP" "UIOP/" "ASDF"
+                                               "ASDF/"))))
+                (t
+                 (let ((text (ignore-errors (prin1-to-string call)))
+                       (file (and file-fn (ignore-errors (funcall file-fn frame))))
+                       (line (and line-fn (ignore-errors (funcall line-fn frame)))))
+                   (when text
+                     (return (format nil "~A~@[ (~A~@[:~D~])~]"
+                                     text
+                                     (and file (or (ignore-errors
+                                                    (normalize-path-for-display file))
+                                                   (ignore-errors (namestring file))))
+                                     line)))))))))))
 
 (defun %rove-failure-detail (assertion package)
   "Return the failure detail for ASSERTION, a Rove FAILED-ASSERTION of a test
@@ -576,7 +629,9 @@ named by the source it was compiled from, when a registered system has it."
   (when erring-file
     (destructuring-bind (verb pathname) erring-file
       (let ((source (or (and (equal verb "loading")
-                             (gethash (namestring pathname) (registered-fasl-sources)))
+                             ;; Never over the load's own error.
+                             (ignore-errors
+                              (gethash (namestring pathname) (registered-fasl-sources))))
                         pathname)))
         (format nil "while ~A ~A" verb (or (normalize-path-for-display source)
                                            (namestring source)))))))
@@ -1042,7 +1097,9 @@ COMPILE-FILE-ERROR."
         ;; The file being compiled or loaded when the last error was
         ;; signalled, as (VERB PATHNAME): an error FiveAM signals there, such
         ;; as "Unknown suite", names no file of its own.
-        (erring-file nil))
+        (erring-file nil)
+        ;; True while ASDF:LOAD-SYSTEM runs with *ERROR-OUTPUT* captured.
+        (loading nil))
     (handler-case
         (handler-bind
             ((error
@@ -1054,16 +1111,20 @@ COMPILE-FILE-ERROR."
                   (when file (setf erring-file file)))))
              (warning
               (lambda (c)
-                ;; Not a redefinition notice, which load-system drops too, and
-                ;; not one signalled while a file compiles: the compiler writes
-                ;; that one with its place in its own block, so a bare copy
-                ;; here only repeats it.
-                (unless (or *compile-file-truename* (%redefinition-warning-p c))
+                ;; A bare copy only where nothing else writes the warning: the
+                ;; compiler writes one signalled while a file compiles, with
+                ;; its place, and WARN one signalled during the load into
+                ;; CAPTURED-STDERR.  A redefinition notice is muffled below.
+                (unless (or *compile-file-truename* loading (%redefinition-warning-p c))
                   (format captured-warnings "~A~%" c))
                 (when (and *compile-file-truename*
                            (not (typep c 'style-warning))
                            (not (%redefinition-warning-p c)))
-                  (push (%make-warning-record c) refusing)))))
+                  (push (%make-warning-record c) refusing))
+                ;; Dropped as load-system drops it: redefining is what a reload
+                ;; does.  A style warning, so no compile's failure-p changes.
+                (when (and (%redefinition-warning-p c) (find-restart 'muffle-warning c))
+                  (invoke-restart 'muffle-warning)))))
           (progn
             ;; As load-system does: a system nobody has registered yet --
             ;; its .asd freshly written under the project root -- is found
@@ -1108,6 +1169,7 @@ COMPILE-FILE-ERROR."
                 ;; and other system metadata are picked up.
                 (when asd-src
                   (ignore-errors (asdf:load-asd asd-src)))))
+            (setf loading t)
             (let ((*error-output* captured-stderr))
               (call-with-own-compilation-unit
                (lambda () (asdf:load-system system-name))))))
