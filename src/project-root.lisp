@@ -14,7 +14,8 @@
            #:forget-session-project-root
            #:call-with-session-project-root
            #:with-session-project-root
-           #:register-project-root-source-registry))
+           #:register-project-root-source-registry
+           #:system-left-by-root-change))
 
 (in-package #:cl-mcp/src/project-root)
 
@@ -122,6 +123,19 @@ via REGISTER-PROJECT-ROOT-SOURCE-REGISTRY. Tracked so a root change removes the
 old entry instead of leaving stale project roots in the search list (which would
 leak the previous project's systems into the new root).")
 
+(defvar *systems-left-by-root-change* (make-hash-table :test #'equal)
+  "Maps the name of each system %CLEAR-SYSTEMS-UNDER unregistered to the system
+object it was.  Its packages, and the tests its files defined, outlive the
+registration.")
+
+(defun system-left-by-root-change (name)
+  "Return the system named NAME as it was when a root change unregistered it, or
+NIL when no root change did.  Code that walks what a system loaded -- to purge
+the tests its files defined before they are reloaded -- reads this when
+ASDF:REGISTERED-SYSTEM answers NIL: a system that is not registered may still
+have been loaded, before a root change."
+  (values (gethash name *systems-left-by-root-change*)))
+
 (defun %clear-systems-under (root)
   "Unregister every ASDF system whose pathname lives under ROOT (a canonical
 directory), so a project's systems do not linger in ASDF's registry after the
@@ -129,12 +143,15 @@ worker moves to a different root. Iterates REGISTERED-SYSTEMS (every found
 system, not just loaded ones — a bare FIND-SYSTEM also caches the definition)
 and tests COMPONENT-PATHNAME, which — unlike SYSTEM-SOURCE-DIRECTORY — is
 non-NIL for package-inferred subsystems (e.g. foo/tests, foo/src/bar) and points
-at the project root. Libraries and systems outside ROOT are untouched."
+at the project root. Libraries and systems outside ROOT are untouched.
+Each system unregistered is kept for SYSTEM-LEFT-BY-ROOT-CHANGE: what it
+loaded stays in the image."
   (let ((root (uiop:ensure-directory-pathname root)))
     (dolist (name (asdf:registered-systems))
-      (let ((path (ignore-errors
-                    (asdf:component-pathname (asdf:find-system name nil)))))
+      (let* ((system (ignore-errors (asdf:find-system name nil)))
+             (path (and system (ignore-errors (asdf:component-pathname system)))))
         (when (and path (uiop:subpathp path root))
+          (setf (gethash name *systems-left-by-root-change*) system)
           (ignore-errors (asdf:clear-system name)))))))
 
 (defun register-project-root-source-registry (root)
