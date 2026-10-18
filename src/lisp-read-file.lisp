@@ -9,7 +9,8 @@
                 #:cst-node-value
                 #:cst-node-start
                 #:cst-node-end
-                #:cst-node-start-line)
+                #:cst-node-start-line
+                #:*standard-readtable*)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-resolve-read-path)
@@ -421,11 +422,11 @@ object across multiple positions in the form tree."
                               (write args :stream out :pretty t :case :downcase)))
                           "()")))
             ;; A variable's initial value can be any length; a signature
-            ;; summarizes it, bounded as the docstring beside it is.
+            ;; summarizes it, bounded as the docstring beside it is.  The
+            ;; signature's own " ..." follows, so no marker of its own.
             (if (and (member head '(defvar defparameter defconstant))
                      (> (length text) *variable-value-max-chars*))
-                (concatenate 'string
-                             (subseq text 0 (- *variable-value-max-chars* 3)) "...")
+                (string-right-trim " " (subseq text 0 *variable-value-max-chars*))
                 text)))
          (doc (%truncate-doc (%definition-docstring form)))
          ;; Use ~S to preserve colon for keyword qualifiers
@@ -476,13 +477,26 @@ object across multiple positions in the form tree."
   "Return TEXT with each run of whitespace made a single space, trimmed."
   (string-trim " " (cl-ppcre:regex-replace-all "\\s+" text " ")))
 
-(defun %feature-prefix-display (text start)
+(defun %feature-prefix-display (text start &optional end)
   "Return the #+/#- feature expressions written in front of the form at START in
 TEXT, each as written (its whitespace made single spaces) and separated by a
 space, or NIL when there are none.  A form read under them carries no trace of
-them, so a collapsed signature printed from it would read as unconditional."
-  (let ((spans (nth-value 1 (%feature-prefix-end text start))))
-    (when spans
+them, so a collapsed signature printed from it would read as unconditional.
+With END, the end of the node the form is read as, they are returned only when
+the form after them is that node's whole: a node can start at the # of a form
+the reader skipped -- an inner #- under an outer #+ that holds, or anything the
+CL reader returned no value for -- and those expressions are not this form's."
+  (multiple-value-bind (form-start spans) (%feature-prefix-end text start)
+    (when (and spans
+               (or (null end)
+                   (eql end (ignore-errors
+                             (let ((*read-suppress* t)
+                                   (*read-eval* nil)
+                                   (*readtable* *standard-readtable*))
+                               (nth-value 1 (read-from-string
+                                             text t nil
+                                             :start form-start
+                                             :preserve-whitespace t)))))))
       (format nil "~{~A~^ ~}"
               (mapcar (lambda (span)
                         (%collapse-whitespace-runs (subseq text (car span) (cdr span))))
@@ -514,7 +528,9 @@ unread.  It was never read, so it has no signature to print, only its text."
             (%feature-prefix-display source-text start)
             (if (> (length form-text) *skipped-form-max-chars*)
                 (concatenate 'string
-                             (subseq form-text 0 (- *skipped-form-max-chars* 4)) " ...")
+                             (string-right-trim
+                              " " (subseq form-text 0 (- *skipped-form-max-chars* 4)))
+                             " ...")
                 form-text))))
 
 (defun %format-lisp-form (node source-text name-scanner content-scanner
@@ -551,7 +567,8 @@ whitespace."
          ;; An expanded form is echoed with its prefix; a collapsed one is
          ;; printed from the form as read, which has none.
          (prefix (and (not expand?)
-                      (%feature-prefix-display source-text (cst-node-start node))))
+                      (%feature-prefix-display source-text (cst-node-start node)
+                                               (cst-node-end node))))
          (display (cond
                     (expand?
                      (%add-line-numbers (%node-source-text node source-text)
@@ -879,7 +896,12 @@ verbatim, comments inside it included, and each 'NNN:' prefix is that line of
 the file -- so text copied out of an expanded form can be used directly as
 lisp-patch-form's 'old_text', which matches raw text exactly. Collapsed
 signature lines are printed rather than quoted, as is the form
-content_pattern matches against.
+content_pattern matches against.  A collapsed line starts with the #+/#- feature
+expressions written in front of its form, a variable's value is cut at 80
+characters, and a form the reader skipped because its feature expression is
+false in the server (the other implementation's twin) is listed by the start of
+its text, marked [not read ...]; it is never expanded and not counted in
+total_forms.  Read it with collapsed=false.
 When reading in raw mode (collapsed=false) and output is truncated, a
 '[Showing lines A-B of N. Use offset=B to read more.]' footer is appended
 to guide pagination. Use the suggested offset value in a follow-up call.

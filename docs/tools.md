@@ -517,7 +517,9 @@ Inputs:
   its signature (`49: #+sbcl (defun float-epsilon () ...)`), and one the reader skipped
   because its expression is false in the server -- the other implementation's twin -- is
   listed by the start of its text and `[not read: its feature expression is false in this
-  server]`.
+  server]` (never expanded; read it with `collapsed=false`). A file read by the CL reader --
+  with `readtable`, or after an `in-readtable` -- lists no such twin, since that reader
+  returns nothing for it.
 - `name_pattern` (string, optional): CL-PPCRE regex; matching definition names are
   expanded even in collapsed mode.
 - `content_pattern` (string, optional): CL-PPCRE regex applied to form bodies; if

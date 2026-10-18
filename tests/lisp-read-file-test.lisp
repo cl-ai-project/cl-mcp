@@ -433,6 +433,33 @@ tests/tmp/NAME.lisp."
     (ok (some (lambda (line) (scan "^ *9: \\(defun sig-plain " line)) lines)
         "a form without one is shown as before")))
 
+(deftest lisp-read-file-collapsed-view-gives-a-prefix-only-to-its-own-form
+  ;; A node can start at a # whose form is not the node's: the skipped twin's,
+  ;; when an outer #+ held and an inner #- did not, or when the CL reader read
+  ;; the file and returned nothing for the twin.  Its expression was then
+  ;; printed in front of the next, unconditional, definition.
+  (testing "an inner expression that does not hold"
+    (let ((lines (%collapsed-lines
+                  "tests/tmp/sig-nested-features.lisp"
+                  (format nil "~{~A~%~}"
+                          '("#+sbcl #+cl-mcp-no-such-feature (defun sig-nested-a () 1)"
+                            "(defun sig-nested-b () 2)")))))
+      (ok (notany (lambda (line)
+                    (search "#+sbcl #+cl-mcp-no-such-feature (defun sig-nested-b" line))
+                  lines)
+          (format nil "the next definition carries no prefix: ~S" lines))))
+  (testing "a file read by the CL reader"
+    (let ((lines (%collapsed-lines
+                  "tests/tmp/sig-in-readtable.lisp"
+                  (format nil "~{~A~%~}"
+                          '("(in-package :cl-user)"
+                            "(named-readtables:in-readtable :standard)"
+                            "#-sbcl"
+                            "(defun sig-rt-twin () 1)"
+                            "(defun sig-rt-plain () 2)")))))
+      (ok (notany (lambda (line) (search "#-sbcl (defun sig-rt-plain" line)) lines)
+          (format nil "the next definition carries no prefix: ~S" lines)))))
+
 (deftest lisp-read-file-collapsed-view-bounds-a-variables-value
   ;; A variable's initial value was printed whole, however long, while the
   ;; docstring beside it was cut to 80 characters.
