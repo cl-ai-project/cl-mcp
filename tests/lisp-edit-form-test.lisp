@@ -1869,7 +1869,9 @@ text and LISP-EDIT-FORM's ninth value, the feature expressions it kept."
                    (error (e) (princ-to-string e)))))
         (ok (search "#< at line 3, column 11" err) err)
         (ok (search "allow_unparseable_overwrite=true" err))
-        (ok (null (search "keeps refusing" err))))))
+        (ok (null (search "keeps refusing" err)))
+        (ok (null (search "specify the 'readtable' parameter" err))
+            "no advice the next sentence takes back"))))
   (testing "#? is still custom syntax, and an in-readtable keeps the guard"
     (dolist (text (list (format nil "(defun a ()~%  #?\"x\")~%")
                         (format nil "(named-readtables:in-readtable :standard)~%(eq nil #<x>)~%")))

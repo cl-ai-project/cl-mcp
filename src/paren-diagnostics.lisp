@@ -1007,30 +1007,50 @@ symbol character with no ) typo behind it."
   "Return (values LINE COLUMN SUB-CHAR), 1-based, of the first # in TEXT that
 the standard makes the reader reject in any readtable that keeps its standard
 dispatch -- #< (an object printed unreadably, such as #<HASH-TABLE ...>), #)
-or # followed by whitespace -- or NIL when there is none or TEXT declares a
-readtable of its own (any mention of in-readtable, which may define them).
-The text is read with the standard readtable and *READ-SUPPRESS* on, so an
-unknown dispatch such as #? passes, and any other failure means NIL: only
-these three are evidence that no readtable makes the file readable."
+or # followed by whitespace, with or without a numeric argument -- or NIL when
+there is none or TEXT declares a readtable of its own (any mention of
+in-readtable, which may define them).
+The text is read with the standard readtable and *READ-SUPPRESS* on, and any
+other failure means NIL: only these three are evidence that no readtable makes
+the file readable.  A # dispatch the standard readtable leaves undefined, such
+as #?, ends the read with NIL too: it is custom syntax, and the reader would
+read the text after it -- a regular expression, a heredoc -- as standard
+syntax, where a #< in it is no evidence of anything."
   ;; Read only when such a # is there at all: the reader recurses, and a form
   ;; nested deep enough to stop the parser would exhaust the stack here.
   (when (and (not (search "in-readtable" text :test #'char-equal))
              (loop for i = (position #\# text) then (position #\# text :start (1+ i))
-                   while (and i (< (1+ i) (length text)))
-                   thereis (member (char text (1+ i))
-                                   '(#\< #\) #\Space #\Tab #\Newline #\Page #\Return))))
+                   for sub = (and i (position-if-not #'digit-char-p text :start (1+ i)))
+                   while i
+                   thereis (and sub
+                                (member (char text sub)
+                                        '(#\< #\) #\Space #\Tab #\Newline #\Page #\Return)))))
     (with-input-from-string (in text)
       (handler-case
           (let ((*readtable* (copy-readtable nil))
                 (*read-suppress* t)
                 (*read-eval* nil))
+            (loop for code below 128
+                  for ch = (code-char code)
+                  unless (or (digit-char-p ch) (get-dispatch-macro-character #\# ch))
+                    do (set-dispatch-macro-character
+                        #\# ch
+                        (lambda (stream sub-char arg)
+                          (declare (ignore stream sub-char arg))
+                          (return-from unreadable-dispatch-position nil))))
             (loop until (eq in (read in nil in)))
             nil)
         (reader-error ()
           (let* ((after (file-position in))
-                 (hash (and after (- after 2)))
-                 (sub (and hash (>= hash 0) (char text (1+ hash)))))
-            (when (and sub
+                 (sub-at (and after (- after 1)))
+                 (sub (and sub-at (plusp sub-at) (char text sub-at)))
+                 ;; The # is in front of the sub-character's numeric argument.
+                 (hash (and sub
+                            (let ((i (1- sub-at)))
+                              (loop while (and (>= i 0) (digit-char-p (char text i)))
+                                    do (decf i))
+                              i))))
+            (when (and hash (>= hash 0)
                        (char= #\# (char text hash))
                        (member sub '(#\< #\) #\Space #\Tab #\Newline #\Page #\Return)))
               (let ((line-start (or (position #\Newline text :end hash :from-end t) -1)))

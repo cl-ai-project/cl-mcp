@@ -881,8 +881,10 @@ because %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P opens it for exactly that case."
       ((file-unparseable-unreadable-dispatch condition)
        ;; No readtable reads it, so the readtable parameter is no way round
        ;; it, and %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P opens the overwrite path.
-       (format nil "~A~%~A No structural edit of this file is possible. ~A"
-               head
+       ;; Not HEAD: the reader's message ends by recommending the readtable
+       ;; parameter, which cannot help here.
+       (format nil "Cannot parse ~A: ~A No structural edit of this file is possible. ~A"
+               path
                (apply #'format-unreadable-dispatch
                       (file-unparseable-unreadable-dispatch condition))
                (%rewrite-whole-file-instruction path)))

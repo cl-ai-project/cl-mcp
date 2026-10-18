@@ -304,9 +304,14 @@
     (with-open-file (out abs :direction :output :if-exists :supersede)
       (format out "(defun a () 1)~%(defun b ()~%  (eq nil #<ledger>))~%"))
     (unwind-protect
-         (let ((text (gethash "diagnosis_text" (lisp-check-parens :path (namestring abs)))))
+         (let* ((res (lisp-check-parens :path (namestring abs)))
+                (text (gethash "diagnosis_text" res)))
            (ok (search "#< at line 3, column 11" text) text)
-           (ok (search "allow_unparseable_overwrite=true" text)))
+           (ok (search "allow_unparseable_overwrite=true" text))
+           (ok (eql 11 (gethash "column" (gethash "position" res)))
+               "the position names the # as the sentence does")
+           (ok (eql 37 (gethash "offset" (gethash "position" res)))
+               (format nil "offset ~S" (gethash "offset" (gethash "position" res)))))
       (ignore-errors (delete-file abs)))))
 
 (deftest lisp-check-parens-guidance-names-a-relative-path-and-the-editable-prefix

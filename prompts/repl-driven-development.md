@@ -274,7 +274,9 @@ hand, and write the whole file back with `fs-write-file` with
 the error message prints that path) (it refuses to overwrite an existing `.lisp` file
 otherwise, and the flag never applies to a file that parses). If the file only looks
 broken because it uses custom reader syntax such as `#?"..."`, pass the `readtable`
-parameter to `lisp-edit-form` instead.
+parameter to `lisp-edit-form` instead. A `#<` pasted from printed output (`#<HASH-TABLE
+...>`) in a file that declares no readtable is no custom syntax: no readtable reads it, so
+the same whole-file rewrite applies, and the error names its line and column.
 
 ### lisp-macroexpand returns "NOT EXPANDED" or a package error
 - The macro must be **defined in the worker image**, not just present on disk. Run

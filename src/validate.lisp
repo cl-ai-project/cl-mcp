@@ -532,6 +532,19 @@ it is flagged in \"diagnosis_text\" as a likely artifact of the window."
                             (nth-value 1 (ignore-errors
                                           (%file-unparseable-by-edit-tools-p
                                            (fs-resolve-read-path path) text)))))
+               (multiple-value-bind (u-line u-column) (unreadable-dispatch-position text)
+                 ;; The headline names the # too, not the character after it
+                 ;; where the reader stopped.
+                 (when u-line
+                   (let ((pos (gethash "position" h)))
+                     (setf (gethash "line" pos) u-line
+                           (gethash "column" pos) u-column
+                           (gethash "offset" pos)
+                           (+ (loop with start = 0
+                                    repeat (1- u-line)
+                                    do (setf start (1+ (position #\Newline text :start start)))
+                                    finally (return start))
+                              (1- u-column))))))
                (setf (gethash "diagnosis_text" h)
                      (format nil "~A No structural edit of this file is possible: ~
                                   rewrite it whole with fs-write-file (path=~S, ~
