@@ -580,8 +580,26 @@ summary text and the result hash."
       (fs-write-file "tests/tmp/limit-marker.txt" (format nil "abc"))
       (multiple-value-bind (text payload)
           (%call-fs-read "tests/tmp/limit-marker.txt" :limit 0)
-        (ok (equal "" text))
+        (ok (equal "" (gethash "text" payload)))
+        (ok (search "Nothing read: limit is 0" text)
+            (format nil "an empty answer says why: ~S" text))
         (ok (null (gethash "next_offset" payload))))))
+  (testing "an offset at or past the end says so"
+    ;; An empty text with no word read like an empty file; lisp-read-file's raw
+    ;; mode already says "past end of file" for the same mistake.
+    (with-scratch-file ("tests/tmp/limit-marker.txt")
+      (fs-write-file "tests/tmp/limit-marker.txt" (format nil "ééabc"))
+      (dolist (offset '(5 500))
+        (multiple-value-bind (text payload)
+            (%call-fs-read "tests/tmp/limit-marker.txt" :offset offset)
+          (ok (equal "" (gethash "text" payload)))
+          (ok (search (format nil "offset ~D is at or past the end of the file" offset) text)
+              (format nil "offset ~D: ~S" offset text))))))
+  (testing "one character is one character"
+    (with-scratch-file ("tests/tmp/limit-marker.txt")
+      (fs-write-file "tests/tmp/limit-marker.txt" (format nil "abc"))
+      (let ((text (%call-fs-read "tests/tmp/limit-marker.txt" :limit 1)))
+        (ok (search "showing 1 character from" text) text))))
   (testing "a read that reaches the end carries no marker"
     (with-scratch-file ("tests/tmp/limit-marker.txt")
       (fs-write-file "tests/tmp/limit-marker.txt" (format nil "ééabcdef"))

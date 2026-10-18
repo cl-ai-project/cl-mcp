@@ -30,6 +30,7 @@
   (:import-from #:cl-mcp/src/utils/strings
                 #:ensure-trailing-newline)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:%feature-prefix-end
                 #:%parse-readtable-designator
                 #:file-unparseable-error
                 #:file-unparseable-message
@@ -381,6 +382,10 @@ only form of a function that returns one."
      (%body-docstring (rest (member-if #'listp (cddr form)))))
     (otherwise nil)))
 
+(defparameter *variable-value-max-chars* 80
+  "Characters of a defvar's, defparameter's or defconstant's value shown in its
+collapsed signature.")
+
 (defun %collapse-def-form (form)
   "Collapse a definition form to a signature line.
 For defmethod, includes qualifiers like :before, :after, :around.
@@ -410,11 +415,18 @@ object across multiple positions in the form tree."
             ((defstruct) (if (stringp (third form)) (fourth form) (third form)))
             (otherwise (third form))))
          (args-display
-          (if args
-              (with-output-to-string (out)
-                (let ((*print-right-margin* most-positive-fixnum))
-                  (write args :stream out :pretty t :case :downcase)))
-              "()"))
+          (let ((text (if args
+                          (with-output-to-string (out)
+                            (let ((*print-right-margin* most-positive-fixnum))
+                              (write args :stream out :pretty t :case :downcase)))
+                          "()")))
+            ;; A variable's initial value can be any length; a signature
+            ;; summarizes it, bounded as the docstring beside it is.
+            (if (and (member head '(defvar defparameter defconstant))
+                     (> (length text) *variable-value-max-chars*))
+                (concatenate 'string
+                             (subseq text 0 (- *variable-value-max-chars* 3)) "...")
+                text)))
          (doc (%truncate-doc (%definition-docstring form)))
          ;; Use ~S to preserve colon for keyword qualifiers
          (qual-str (when qualifiers (format nil "~{~(~S~)~^ ~}" qualifiers))))
@@ -460,6 +472,51 @@ object across multiple positions in the form tree."
             for idx from start-line do
               (format out "~VD: ~A~%" width idx line)))))
 
+(defun %collapse-whitespace-runs (text)
+  "Return TEXT with each run of whitespace made a single space, trimmed."
+  (string-trim " " (cl-ppcre:regex-replace-all "\\s+" text " ")))
+
+(defun %feature-prefix-display (text start)
+  "Return the #+/#- feature expressions written in front of the form at START in
+TEXT, each as written (its whitespace made single spaces) and separated by a
+space, or NIL when there are none.  A form read under them carries no trace of
+them, so a collapsed signature printed from it would read as unconditional."
+  (let ((spans (nth-value 1 (%feature-prefix-end text start))))
+    (when spans
+      (format nil "~{~A~^ ~}"
+              (mapcar (lambda (span)
+                        (%collapse-whitespace-runs (subseq text (car span) (cdr span))))
+                      spans)))))
+
+(defparameter *skipped-form-max-chars* 80
+  "Characters of a form the reader skipped shown in its collapsed line.")
+
+(defun %skipped-feature-node-p (node)
+  "True when NODE is a form the reader skipped for its #+ or #- feature
+expression: a definition for another implementation or configuration."
+  (and (typep node 'cst-node)
+       (eq (cst-node-kind node) :skipped)
+       (let ((reason (cst-node-value node)))
+         (and (consp reason)
+              (member (car reason) '(:sharpsign-plus :sharpsign-minus))))))
+
+(defun %format-skipped-feature-form (node source-text line-width)
+  "Return the collapsed line for NODE, a form skipped for its feature expression
+(%SKIPPED-FEATURE-NODE-P): its expressions and the start of its text, said to be
+unread.  It was never read, so it has no signature to print, only its text."
+  (let* ((start (cst-node-start node))
+         (form-start (%feature-prefix-end source-text start))
+         (form-text (%collapse-whitespace-runs
+                     (subseq source-text (min form-start (cst-node-end node))
+                             (cst-node-end node)))))
+    (format nil "~VD: ~@[~A ~]~A  [not read: its feature expression is false in this server]"
+            line-width (cst-node-start-line node)
+            (%feature-prefix-display source-text start)
+            (if (> (length form-text) *skipped-form-max-chars*)
+                (concatenate 'string
+                             (subseq form-text 0 (- *skipped-form-max-chars* 4)) " ...")
+                form-text))))
+
 (defun %format-lisp-form (node source-text name-scanner content-scanner
                           line-width)
   "Return two values: display string and whether NODE was expanded.
@@ -491,17 +548,21 @@ whitespace."
                                (scan content-scanner repr))))
          (expand? (or name-match content-match (eq head 'in-package)))
          (start-line (cst-node-start-line node))
+         ;; An expanded form is echoed with its prefix; a collapsed one is
+         ;; printed from the form as read, which has none.
+         (prefix (and (not expand?)
+                      (%feature-prefix-display source-text (cst-node-start node))))
          (display (cond
                     (expand?
                      (%add-line-numbers (%node-source-text node source-text)
                                         start-line line-width))
                     ((member head '(defun defmacro defvar defparameter defconstant defclass
                                      defstruct defgeneric defmethod))
-                     (format nil "~VD: ~A" line-width start-line
+                     (format nil "~VD: ~@[~A ~]~A" line-width start-line prefix
                              (%collapse-def-form form)))
                     ((eq head 'in-package)
                      (%form->string form))
-                    (t (format nil "~VD: ~A" line-width start-line
+                    (t (format nil "~VD: ~@[~A ~]~A" line-width start-line prefix
                                (%collapse-generic form))))))
     (values display expand?)))
 
@@ -597,6 +658,16 @@ and, when the diagnosis names it, \"unparseable_from_line\"."
                                (let ((pkg (find-package pkg-name)))
                                  (when pkg
                                    (setf *package* pkg))))))))
+                      ;; Not read, so not counted, but listed: a definition
+                      ;; for another implementation is still in the file.
+                      ((%skipped-feature-node-p node)
+                       (when (and include-comments pending-comments)
+                         (dolist (comment (nreverse pending-comments))
+                           (write-string comment out))
+                         (setf pending-comments nil))
+                       (write-string (ensure-trailing-newline
+                                      (%format-skipped-feature-form node text line-width))
+                                     out))
                       (t (setf pending-comments nil))))
                   (when (and include-comments
                              (string/= comment-context "none")

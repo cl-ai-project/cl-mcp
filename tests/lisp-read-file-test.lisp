@@ -403,6 +403,46 @@ tests/tmp/NAME.lisp."
                            (format nil "(defmethod sig-doc-m :around ((x t)) \"Doc.\" x)~%")))
         "a method's docstring comes after its qualifiers and lambda list")))
 
+(deftest lisp-read-file-collapsed-view-keeps-feature-expressions
+  ;; The collapsed view printed the form as read, which carries no #+/#-, on
+  ;; the line of its #: a conditional definition read as unconditional, and its
+  ;; false-branch twin, skipped by the reader, was not listed at all.
+  (let ((lines (%collapsed-lines
+                "tests/tmp/sig-features.lisp"
+                (format nil "~{~A~%~}"
+                        '("#+sbcl"
+                          "(defun sig-epsilon () double-float-epsilon)"
+                          ""
+                          "#-sbcl"
+                          "(defun sig-epsilon () 1d-15)"
+                          ""
+                          "#+(or sbcl ccl) #+x86-64 (defun sig-impl () :fast)"
+                          ""
+                          "(defun sig-plain () nil)")))))
+    (ok (some (lambda (line) (scan "^ *1: #\\+sbcl \\(defun sig-epsilon " line)) lines)
+        (format nil "the true branch shows its feature expression: ~S" lines))
+    (ok (some (lambda (line)
+                (and (scan "^ *4: #-sbcl \\(defun sig-epsilon " line)
+                     (search "not read" line)))
+              lines)
+        "the false branch is listed, said to be not read")
+    (ok (some (lambda (line)
+                (scan "^ *7: #\\+\\(or sbcl ccl\\) #\\+x86-64 \\(defun sig-impl " line))
+              lines)
+        "stacked expressions are all shown")
+    (ok (some (lambda (line) (scan "^ *9: \\(defun sig-plain " line)) lines)
+        "a form without one is shown as before")))
+
+(deftest lisp-read-file-collapsed-view-bounds-a-variables-value
+  ;; A variable's initial value was printed whole, however long, while the
+  ;; docstring beside it was cut to 80 characters.
+  (let ((line (%collapsed-line "sig-long-value"
+                               (format nil "(defvar *sig-long* \"~A\" \"Doc.\")~%"
+                                       (make-string 400 :initial-element #\a)))))
+    (ok (< (length line) 200) (format nil "the line is bounded: ~D" (length line)))
+    (ok (search "(defvar *sig-long* \"aaa" line) "it still starts with the value")
+    (ok (search ";; Doc." line) "and keeps the docstring")))
+
 (defun %try-load (system)
   "Attempt to load SYSTEM via Quicklisp or ASDF. Returns T on success, NIL on failure."
   (handler-case

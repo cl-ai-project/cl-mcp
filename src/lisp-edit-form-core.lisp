@@ -19,6 +19,7 @@
                 #:stray-right-parenthesis
                 #:readtable-unavailable
                 #:readtable-unavailable-designator
+                #:%skip-whitespace-and-comments
                 #:*standard-readtable*)
   (:import-from #:cl-mcp/src/package-context
                 #:extract-in-package-name-from-text)
@@ -47,7 +48,9 @@
                 #:enough-pathname
                 #:native-namestring
                 #:subpathp)
-  (:export #:%normalize-string
+  (:export #:%skip-blank-and-comments
+           #:%feature-prefix-end
+           #:%normalize-string
            #:%defmethod-candidates
            #:%definition-candidates
            #:%normalize-paths
@@ -221,6 +224,47 @@ than a symbol, a string, a method signature or a DEFSTRUCT's (NAME OPTIONS...)."
 
 (defun %whitespace-char-p (ch)
   (member ch '(#\Space #\Tab #\Newline #\Return)))
+
+(defun %skip-blank-and-comments (text start)
+  "Return the index of the first character at or after START in TEXT that is
+neither whitespace nor inside a comment, reading the standard syntax; START when
+a block comment there is never closed."
+  (with-input-from-string (in text :start start)
+    (if (%skip-whitespace-and-comments in *standard-readtable*)
+        start
+        ;; A string input stream counts its position from START.
+        (+ start (file-position in)))))
+
+(defun %feature-prefix-end (text start)
+  "Return the index in TEXT where the form at START begins once the #+ and #-
+feature expressions in front of it are passed, with the whitespace and comments
+after each; START when there are none.  The second value lists each expression's
+span, (START . END) from its # to the end of its feature expression, in order.
+The expressions are read with *READ-SUPPRESS* on, which interns nothing, and
+under the standard syntax, as feature expressions are read whatever the file's
+readtable.  Shared by lisp-edit-form, which keeps a replaced form's prefix, and
+lisp-read-file, which shows it in the collapsed view."
+  (let ((pos start)
+        (spans '())
+        (length (length text)))
+    (loop while (and (< (1+ pos) length)
+                     (char= (char text pos) #\#)
+                     (member (char text (1+ pos)) '(#\+ #\-)))
+          do (let ((after (handler-case
+                              (let ((*read-suppress* t)
+                                    ;; #. is not evaluated while suppressing;
+                                    ;; this says so and keeps it that way.
+                                    (*read-eval* nil)
+                                    (*readtable* *standard-readtable*))
+                                (nth-value 1 (read-from-string text t nil
+                                                               :start (+ pos 2)
+                                                               :preserve-whitespace t)))
+                            (error () nil))))
+               (unless after
+                 (return-from %feature-prefix-end (values start '())))
+               (push (cons pos after) spans)
+               (setf pos (%skip-blank-and-comments text after))))
+    (values pos (nreverse spans))))
 
 (defun %normalize-paths (file-path)
   "Return two values: absolute path (pathname) and relative namestring for FS tools.
