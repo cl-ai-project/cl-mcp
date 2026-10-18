@@ -370,7 +370,7 @@ a sentence that ends."
            (headline (format nil "~{~A~^ ~}" lines))
            (limit (max *headline-max-chars* (length (or (first lines) "")))))
       (if (> (length headline) limit)
-          (concatenate 'string (subseq headline 0 limit) "...")
+          (concatenate 'string (string-right-trim " " (subseq headline 0 limit)) "...")
           headline))))
 
 (defun %in-project-p (record)
@@ -533,7 +533,7 @@ stays in warning_records."
                                   (length members) headline place)))))
         (let ((unnamed (- (length rest) *load-style-kinds-shown*)))
           (when (plusp unnamed)
-            (format stream "~%    ... and ~D more kind~:P" unnamed)))))))
+            (format stream "~%    ... and ~D more kind~:P, not named" unnamed)))))))
 
 (defun build-load-system-response (system ht)
   "Build the standard load-system response with summary text.

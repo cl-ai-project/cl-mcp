@@ -1179,7 +1179,7 @@ convention (names like *FOO*) for special variables")))))))
         (ok (search "5 more kinds" text))
         (ok (search "kind 4." text) "the first kinds past the limit are named")
         (ok (null (search "kind 5." text)) "the ones past those are not")
-        (ok (search "... and 3 more kinds" text) "but counted")))
+        (ok (search "... and 3 more kinds, not named" text) "but counted")))
     (testing "a kind of identical warnings says whose place it gives"
       (let ((text (let ((cl-mcp/src/tools/response-builders::*load-style-kinds-shown* 1))
                     (%response-text
