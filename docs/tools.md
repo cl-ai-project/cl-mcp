@@ -141,14 +141,15 @@ Output fields:
   `compile`, or the compile behind an evaluated `defun`) is the compiler's: it is
   written with its place and counted, so `(asdf:load-system ...)` fails with
   `COMPILE-FILE-ERROR` on a full `WARNING`, and `compile` returns its warnings-p and
-  failure-p. Any other is written by `warn` (`WARNING: ...`), and evaluation goes on.
-  A redefinition SBCL itself keeps quiet, such as a file loaded again redefining its
-  own definitions, is not shown. A refused compile's `compilation unit aborted`
-  trailer is included; it counts the abort once more than plain ASDF does, for
-  `repl-eval`'s own compilation unit. An undefined variable or function is reported
-  at the end of that unit, after a `compile-file` it called has returned, so that
-  `compile-file`'s failure-p does not count it (`asdf:load-system` loads such a file
-  everywhere)
+  failure-p. A refused compile's `caught 1 fatal ERROR condition` trailer is included.
+  Any other warning is written by `warn` to `*error-output*` (`WARNING: ...` or
+  `STYLE-WARNING: ...`), which is this stream unless the evaluated code rebinds it, and
+  evaluation goes on. No `redefining ...` notice is shown: SBCL keeps quiet about a
+  redefinition from the same source file, and everything `repl-eval` compiles or loads
+  is recorded as coming from the source `repl-eval` (#249). An undefined variable is
+  reported at the end of `repl-eval`'s compilation unit, after a `compile-file` it
+  called has returned, so that `compile-file`'s failure-p does not count it
+  (`asdf:load-system` loads such a file everywhere)
 - `result_object_id` (string|null): an opaque id, such as `"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-17"`; when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
 - `result_preview` (object, with `result_object_id`): a lightweight structural preview of the
   result — its kind, type and first elements or slots — shaped like `inspect-object`'s output

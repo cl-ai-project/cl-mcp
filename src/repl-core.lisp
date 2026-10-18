@@ -165,8 +165,19 @@ a caller than knowing only that something was lost."
   #-sbcl
   (funcall thunk))
 
-(defun %eval-forms (forms package stdout stderr safe-read)
-  (let ((last-value nil))
+(defun %eval-forms (forms package stdout stderr safe-read on-error)
+  "Evaluate FORMS in PACKAGE with output captured in STDOUT and STDERR, and
+return (values LAST-VALUE COMPLETED-P).  An error (other than a package or
+reader error, which the caller handles) is passed to ON-ERROR, a function of
+the condition, while its frames are live, and ends the evaluation: COMPLETED-P
+is then NIL.  It is caught inside the compilation unit
+%CALL-WITH-COMPILER-STREAMS opens, so leaving it does not abort that unit -- an
+aborted unit reports 'caught 1 fatal ERROR condition' for an evaluation that
+compiled nothing wrong, and counts a refused COMPILE-FILE a second time.  A
+cleanup form that takes over the unwind for an exit of its own lets the
+evaluation complete, and COMPLETED-P says so."
+  (let ((last-value nil)
+        (completed nil))
     (let ((*package* package)
           (*read-eval* (not safe-read))
           (*print-readably* nil)
@@ -211,9 +222,15 @@ a caller than knowing only that something was lost."
          stdout
          stderr
          (lambda ()
-           (dolist (form forms)
-             (setf last-value (eval form)))))))
-    last-value))
+           (block evaluation
+             (handler-bind ((error (lambda (e)
+                                     (unless (typep e '(or package-error reader-error))
+                                       (funcall on-error e)
+                                       (return-from evaluation)))))
+               (dolist (form forms)
+                 (setf last-value (eval form)))
+               (setf completed t)))))))
+    (values last-value completed)))
 
 (defun %live-package-p (package)
   "Return true when PACKAGE is a package object that has not been deleted.
@@ -246,7 +263,7 @@ pretty-printed at a 100-column margin, so it reads as source.
 ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL otherwise."
   (let ((last-value nil)
         (error-context nil)
-        (errorp nil)
+        (error-message nil)
         (eval-package nil)
         (stdout (%make-capture-stream max-output-length))
         (stderr (%make-capture-stream max-output-length)))
@@ -255,14 +272,32 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
     (when output-streams
       (setf (car output-streams) stdout
             (cdr output-streams) stderr))
-    ;; No WARNING handler: a warning is Lisp's to report, as outside repl-eval.
-    ;; One signalled while the compiler runs is the compiler's -- it writes it
-    ;; to stderr with its place and counts it, so COMPILE's and COMPILE-FILE's
-    ;; flags, and ASDF's refusal of a file, are what they are elsewhere.  Any
-    ;; other is WARN's, which writes it to stderr, unless it is one SBCL
-    ;; muffles (SB-EXT:*MUFFLED-WARNINGS*) -- that applies only to a warning
-    ;; no handler took, so a handler here would print every redefinition.
-    (block evaluation
+    (flet ((note-error (e)
+             ;; Capture structured error context while the frames are live.
+             (setf error-context
+                   (capture-error-context
+                    e
+                    :max-frames 20
+                    :print-level (or print-level 3)
+                    :print-length (or print-length 10)
+                    :locals-preview-frames (or locals-preview-frames 0)
+                    :preview-max-depth (or locals-preview-max-depth 1)
+                    :preview-max-elements (or locals-preview-max-elements 5)
+                    :locals-preview-skip-internal locals-preview-skip-internal)
+                   error-message
+                   (let ((*print-readably* nil))
+                     (handler-case (format nil "~A" e)
+                       (error ()
+                         (format nil "<error formatting ~A>" (type-of e))))))))
+      ;; No WARNING handler: a warning is Lisp's to report, as outside repl-eval.
+      ;; One signalled while the compiler runs is the compiler's -- it writes it
+      ;; to stderr with its place and counts it, so COMPILE's and COMPILE-FILE's
+      ;; flags, and ASDF's refusal of a file, are what they are elsewhere.  Any
+      ;; other is WARN's, which writes it to *ERROR-OUTPUT*, unless it is one SBCL
+      ;; muffles (SB-EXT:*MUFFLED-WARNINGS*) -- that applies only to a warning
+      ;; no handler took, so a handler here would print every redefinition.
+      ;; The ERROR handler here serves the read phase; an error while the forms
+      ;; are evaluated is caught inside %EVAL-FORMS, within its compilation unit.
       (handler-bind ((package-error
                        (lambda (e)
                          (let* ((raw-msg (format nil "Package error: ~A" e))
@@ -288,29 +323,13 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                            :restarts nil
                                            :frames nil))))))
                      (error (lambda (e)
-                              ;; Capture structured error context
-                              (setf error-context
-                                    (capture-error-context
-                                     e
-                                     :max-frames 20
-                                     :print-level (or print-level 3)
-                                     :print-length (or print-length 10)
-                                     :locals-preview-frames (or locals-preview-frames 0)
-                                     :preview-max-depth (or locals-preview-max-depth 1)
-                                     :preview-max-elements (or locals-preview-max-elements 5)
-                                     :locals-preview-skip-internal
-                                     locals-preview-skip-internal))
-                              (setf last-value
-                                    (let ((*print-readably* nil))
-                                      (handler-case (format nil "~A" e)
-                                        (error ()
-                                          (format nil "<error formatting ~A>"
-                                                  (type-of e)))))
-                                    errorp t)
-                              ;; Out of the evaluation before stderr is read: a
-                              ;; compilation unit it unwinds -- a refused
-                              ;; COMPILE-FILE's -- writes its trailer then.
-                              (return-from evaluation))))
+                              (note-error e)
+                              (return-from %do-repl-eval
+                                (values (%truncate-output error-message max-output-length)
+                                        error-message
+                                        (%captured-output stdout)
+                                        (%captured-output stderr)
+                                        error-context)))))
         (let ((pkg (%resolve-eval-package package)))
           (setf eval-package pkg)
           (let ((forms (handler-case
@@ -332,14 +351,18 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                              :message msg
                                              :restarts nil
                                              :frames nil))))))))
-            (setf last-value (%eval-forms forms pkg stdout stderr safe-read))))))
-    (when errorp
-      (return-from %do-repl-eval
-        (values (%truncate-output last-value max-output-length)
-                last-value
-                (%captured-output stdout)
-                (%captured-output stderr)
-                error-context)))
+            (multiple-value-bind (value completed)
+                (%eval-forms forms pkg stdout stderr safe-read #'note-error)
+              ;; Read once the evaluation is over, its compilation unit's
+              ;; report included.
+              (unless completed
+                (return-from %do-repl-eval
+                  (values (%truncate-output error-message max-output-length)
+                          error-message
+                          (%captured-output stdout)
+                          (%captured-output stderr)
+                          error-context)))
+              (setf last-value value))))))
     ;; This block is a SIBLING of the HANDLER-BIND above, not nested inside
     ;; it, so PKG's binding has already unwound by the time we get here and
     ;; *PACKAGE* is whatever the caller had.  EVAL-PACKAGE carries the

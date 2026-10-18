@@ -278,13 +278,33 @@ remove everything again."
          (ok (search "COMPILE-FILE-ERROR" (getf error-context :condition-type)))
          (ok (search "called with three arguments" stderr)
              "the warning's text is still in stderr")
-         ;; Printed while the compilation unit unwinds, after the error was
-         ;; signalled: stderr is read once that unwinding is done.  (It counts
-         ;; the abort twice, once for ASDF's unit and once for repl-eval's own,
-         ;; which SBCL's count includes; plain ASDF says 1.)
-         (ok (search "compilation unit aborted" stderr)
-             (format nil "the compilation unit's trailer is in stderr: ~A" stderr))
-         (ok (search "fatal ERROR condition" stderr) "and its count of the refusal"))))))
+         ;; Printed when repl-eval's compilation unit ends, which it now does
+         ;; before stderr is read; the error is caught inside that unit, so
+         ;; only ASDF's unit is aborted and the count is plain ASDF's.
+         (ok (search "caught 1 fatal ERROR condition" stderr)
+             (format nil "the compilation unit's trailer is in stderr: ~A" stderr)))))))
+
+(deftest repl-eval-error-leaves-no-compilation-trailer
+  ;; Caught outside repl-eval's own compilation unit, an error aborted that
+  ;; unit, which then reported "compilation unit aborted / caught 1 fatal ERROR
+  ;; condition" for an evaluation that compiled nothing wrong.
+  (multiple-value-bind (printed value stdout stderr error-context)
+      (repl-eval "(error \"boom\")")
+    (declare (ignore value stdout))
+    (ok (search "boom" printed))
+    (ok (getf error-context :condition-type) "it is reported as an error")
+    (ok (string= "" stderr) (format nil "stderr is empty: ~S" stderr))))
+
+(deftest repl-eval-an-unwind-a-cleanup-takes-over-is-a-result
+  ;; A cleanup form may leave for an exit point of its own, abandoning the
+  ;; unwind repl-eval's error handler began (CLHS 5.2).  The evaluation then
+  ;; completes, and its value is the result -- not an error, and not a
+  ;; TYPE-ERROR from treating that value as the error's message.
+  (multiple-value-bind (printed value stdout stderr error-context)
+      (repl-eval "(block b (unwind-protect (error \"a\") (return-from b :cleaned)))")
+    (declare (ignore value stdout stderr))
+    (ok (equal ":cleaned" printed) (format nil "the value is the result: ~A" printed))
+    (ok (null error-context) "and no error is reported")))
 
 (deftest repl-eval-writes-a-full-warning-outside-a-compile-once
   (testing "a WARN in evaluated code is written once to stderr and evaluation goes on"
@@ -326,10 +346,11 @@ remove everything again."
            (format nil "with the form it is in: ~A" stderr))))))
 
 (deftest repl-eval-leaves-uninteresting-redefinitions-to-sbcl
-  ;; SBCL muffles a file's redefinition of its own definition
-  ;; (sb-ext:*muffled-warnings*), but only a warning no handler took.  repl-eval
-  ;; took every one, so loading a file twice printed `redefining ...' for each
-  ;; definition in it.
+  ;; SBCL muffles a redefinition from the same source (sb-ext:*muffled-warnings*),
+  ;; but only a warning no handler took.  repl-eval took every one, so loading a
+  ;; file twice printed `redefining ...' for each definition in it.  (Under
+  ;; repl-eval every definition's source is recorded as "repl-eval" (#249), so
+  ;; loading two different files would be quiet too.)
   (%call-with-warning-system
    "(defun loaded-twice () 1)"
    (lambda (system file)
