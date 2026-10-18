@@ -2083,7 +2083,8 @@ DEFPACKAGE or DEFINE-PACKAGE, as far as they exist in this image."
     (unwind-protect
          (remove-duplicates
           (loop for file in files
-                when (and (equalp "lisp" (pathname-type (uiop:parse-native-namestring file)))
+                when (and (member (pathname-type (uiop:parse-native-namestring file))
+                                  '("lisp" "cl" "lsp") :test #'equalp)
                           (probe-file file))
                   append (loop for name in (%extract-defpackage-names-from-file
                                             file scan-package)
@@ -2142,6 +2143,28 @@ sub-suites, itself included: what running it runs."
       (visit (%fiveam-test-object suite-name)))
     seen))
 
+(defun %fiveam-root-suite (system-name suite-symbols)
+  "Return the root suite among SUITE-SYMBOLS: the one named after SYSTEM-NAME's
+primary system, or NIL."
+  (find (asdf:primary-system-name system-name) suite-symbols
+        :key #'string :test #'string-equal))
+
+(defun %fiveam-specs-to-run (system-name suite-symbols)
+  "Return SUITE-SYMBOLS without the suites the root suite's tree already holds,
+the root itself kept: running both would run those suites twice.  SUITE-SYMBOLS
+unchanged when there is no root suite, or when FiveAM's internals are not what
+%FIVEAM-SUITES-UNDER expects."
+  (let ((root (%fiveam-root-suite system-name suite-symbols)))
+    (if (null root)
+        suite-symbols
+        (handler-case
+            (let ((under-root (%fiveam-suites-under root)))
+              (remove-if (lambda (suite)
+                           (and (not (eq suite root))
+                                (gethash (%fiveam-test-object suite) under-root)))
+                         suite-symbols))
+          (error () suite-symbols)))))
+
 (defun %fiveam-reachability (system-name suite-symbols ran-names)
   "Return (values UNREACHED OUTSIDE) for a run of SYSTEM-NAME's SUITE-SYMBOLS that
 recorded the tests RAN-NAMES as reached (%FIVEAM-RUN-AND-COLLECT).
@@ -2161,8 +2184,7 @@ Both are lists of qualified names; OUTSIDE is NIL when no root suite is found."
   (let ((unreached (set-difference (%fiveam-system-test-names system-name)
                                    (union (%fiveam-suite-test-names suite-symbols)
                                           ran-names)))
-        (root (find (asdf:primary-system-name system-name) suite-symbols
-                    :key #'string :test #'string-equal)))
+        (root (%fiveam-root-suite system-name suite-symbols)))
     (values (sort (mapcar #'%qualified-test-name unreached) #'string<)
             (and root
                  (let ((under-root (%fiveam-suites-under root)))
@@ -2303,6 +2325,10 @@ ways a FiveAM run and the system's test-op silently part (%FIVEAM-REACHABILITY).
                       ASDF system, so cl-mcp will not run every suite in the ~
                       image." system-name)
              :hint "Name a suite or its package after the system, or pass TEST/TESTS instead."))
+    ;; FiveAM never drops a name from *TOPLEVEL-SUITES*, so a suite nested
+    ;; since it was first defined is listed there too.  fiveam:run of it and of
+    ;; the root suite would run it twice; the root's run covers it.
+    (setf suite-symbols (%fiveam-specs-to-run system-name suite-symbols))
     (multiple-value-bind (result ran-names finished)
         (%fiveam-run-and-collect suite-symbols (list system-name))
       (multiple-value-bind (unreached outside)

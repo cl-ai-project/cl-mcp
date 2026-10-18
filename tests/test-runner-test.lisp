@@ -1609,10 +1609,11 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
 (deftest run-tests-forgets-a-suite-it-called-outside-once-it-is-nested
   ;; FiveAM never removes a name from *toplevel-suites*: a suite first defined
   ;; without :in stayed listed there after the file nested it, and run-tests
-  ;; kept calling it outside the root suite, advice the file already followed.
-  (flet ((sub-file (parent)
+  ;; kept calling it outside the root suite, advice the file already followed --
+  ;; and ran it twice, under its own name and under the root.
+  (flet ((sub-file (parent &optional (check "(= 1 1)"))
            (%fiveam-fixture-file "fiveam-nest-probe/sub" "sub-suite"
-                                 '(("sub-check" "(= 1 1)")) parent)))
+                                 `(("sub-check" ,check)) parent)))
     (%call-with-fiveam-fixture
      "fiveam-nest-probe"
      (list (cons "main.lisp" (%fiveam-fixture-file "fiveam-nest-probe/main"
@@ -1627,7 +1628,13 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
          (ok (null (gethash "suites_outside_root" result))
              (format nil "nested now, it is not called outside: ~S"
                      (gethash "suites_outside_root" result)))
-         (ok (equal "✓ PASS" (%headline result)) "a plain pass"))))))
+         (ok (equal "✓ PASS" (%headline result)) "a plain pass")
+         (ok (eql 2 (gethash "passed" result))))
+       (%write-fixture-file dir "sub.lisp" (sub-file ":fiveam-nest-probe" "(= 1 2)"))
+       (let ((result (run-tests "fiveam-nest-probe")))
+         (ok (eql 1 (length (gethash "failed_tests" result)))
+             (format nil "the nested suite runs once: ~D failure entries"
+                     (length (gethash "failed_tests" result)))))))))
 
 (deftest run-tests-forgets-a-fiveam-test-a-repl-eval-compile-left
   ;; repl-eval compiles under a compilation unit whose source namestring is

@@ -1359,8 +1359,9 @@ Output:
   its file is not counted: before reloading, run-tests drops from FiveAM the tests made by the
   files the reload loads again, so one no longer in its file is gone. A test made by any other
   file stays, even in a package a reloaded file shares: a dependency's would not come back (the
-  tests of a test file since deleted are not counted either). A test compiled through
-  `repl-eval`, which names no file, goes when a reloaded file defines its package
+  tests of a test file since deleted are not counted either). A test defined or compiled
+  through `repl-eval`, which names no file, goes when a reloaded file defines its package, also
+  when `test`/`tests` names it: put it in its file first
 - `suites_outside_root` (array, FiveAM, present when any): suites of the run other than the root
   suite, the one named after the primary system, that the root suite's tree does not hold (a
   suite nested with `:in` since an earlier load is not one). run-tests runs them, but a test-op
