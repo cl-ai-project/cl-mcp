@@ -15,6 +15,7 @@
                 #:code-describe-symbol
                 #:symbol-not-describable
                 #:symbol-not-describable-name
+                #:symbol-package-missing
                 #:code-find-references-report
                 #:generic-function-method-count)
   (:import-from #:cl-mcp/src/clos-core
@@ -50,6 +51,7 @@
                 #:build-code-find-response
                 #:build-code-describe-response
                 #:build-code-describe-not-found-response
+                #:build-tool-refusal-response
                 #:build-code-find-references-response
                 #:build-inspect-response
                 #:expand-and-build-response)
@@ -268,9 +270,12 @@ caller is answered at the deadline even while the suite is still blocked."
         (package (gethash "package" params)))
     (unless symbol
       (error "symbol is required"))
-    (multiple-value-bind (path line on-disk stale)
-        (code-find-definition symbol :package package)
-      (build-code-find-response symbol path line on-disk stale))))
+    (handler-case
+        (multiple-value-bind (path line on-disk stale)
+            (code-find-definition symbol :package package)
+          (build-code-find-response symbol path line on-disk stale))
+      (symbol-package-missing (condition)
+        (build-tool-refusal-response condition)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/code-describe
@@ -293,7 +298,9 @@ it can describe."
            :stale stale))
       (symbol-not-describable (condition)
         (build-code-describe-not-found-response
-         (symbol-not-describable-name condition))))))
+         (symbol-not-describable-name condition)))
+      (symbol-package-missing (condition)
+        (build-tool-refusal-response condition)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; worker/code-find-references
