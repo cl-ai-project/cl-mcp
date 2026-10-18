@@ -171,6 +171,13 @@ While the root is switched, every path argument (`lisp-edit-form file_path`,
 (`fs-set-project-root` asks for the directory you are working in; for the
 length of this step that is the experiment, so the call is in scope.)
 
+**Reload after switching back.** Switching the root unregisters the systems
+loaded from the previous root. On a server without the fix for #241, the next
+`run-tests` then runs (Rove) or reports as not run (FiveAM) a test you deleted
+from its file before the switch. Run `load-system` on the project right after
+switching back, before `run-tests`, and do not read a `run-tests` that follows a
+bare switch as evidence about deleted tests.
+
 ### 6. Triage each candidate, then record
 
 Friction you notice is a **candidate**, not a feedback item. It becomes a
@@ -201,8 +208,17 @@ entirely. This is a shell command by definition — it is how this step is
 performed, and it is allowed here:
 
 ```bash
-ros run --non-interactive --eval '(progn <the smallest form that shows it>)'
+ros run --eval '(progn <the smallest form that shows it>)' --eval '(uiop:quit)' < /dev/null
 ```
+
+Without the `(uiop:quit)` and the `< /dev/null`, `ros run` does not exit until
+its standard input closes. A control run that loads the project from a copy
+must give the copy another system name: rename the `.asd` and replace the
+system and package names inside the copy before loading it. A copy that keeps
+the name compiles the live tree under `experiments/` instead -- Roswell's
+source registry finds it there, and `find-system` reloads that definition over
+the one `asdf:load-asd` registered -- and writes that tree's FASLs into the
+cache the worker shares.
 
 | Control run result | Layer | Promote? |
 |---|---|---|
