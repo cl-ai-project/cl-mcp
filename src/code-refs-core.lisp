@@ -490,52 +490,68 @@ in lower case, or NIL for NIL."
     (string-downcase (subseq text (let ((colon (position #\: text :from-end t)))
                                     (if colon (1+ colon) 0))))))
 
-(defun %form-name-head (form)
-  "Return the first token of FORM's :FORM-NAME, in lower case: the defined name
-of a defun, and of a defmethod before its specializers.  NIL without a name."
-  (let ((name (getf form :form-name)))
-    (when (and (stringp name) (plusp (length name)))
-      (string-downcase (subseq name 0 (or (position #\Space name) (length name)))))))
+(defun %name-tokens (text)
+  "Return TEXT split at whitespace and parentheses into lower-case tokens, each
+without a package prefix, a leading colon, or a quote."
+  (loop for token in (uiop:split-string (string-downcase text)
+                                        :separator '(#\Space #\Tab #\Newline #\( #\)))
+        for name = (string-left-trim ":'" (or (%symbol-text-name token) ""))
+        when (plusp (length name))
+          collect name))
 
-(defun %method-specializer-names (caller)
-  "Return the specializer class names of CALLER, an xref caller written as
-(defmethod name (class t)) or (SB-PCL::FAST-METHOD NAME (CLASS T)), in lower
-case, T and qualifiers left out; NIL for any other caller."
-  (when (and (stringp caller) (search "method " caller :test #'char-equal))
-    (let* ((open (position #\( caller :from-end t))
-           (close (and open (position #\) caller :start open))))
-      (when (and open close (plusp open))
-        (loop for token in (uiop:split-string (subseq caller (1+ open) close)
-                                              :separator '(#\Space))
-              for name = (%symbol-text-name token)
-              unless (or (zerop (length name)) (string= name "t"))
-                collect name)))))
+(defun %method-caller-signature (caller)
+  "Return (values QUALIFIERS SPECIALIZERS) for CALLER, an xref caller written as
+(defmethod name before (class t)): its qualifier and specializer names as
+%NAME-TOKENS gives them, T left out of the second.  Both NIL, with a third value
+NIL, for a caller that is no method."
+  (when (and (stringp caller)
+             (eql 0 (search "(defmethod " caller :test #'char-equal)))
+    (let* ((inner (position #\( caller :start 1))
+           (close (and inner (position #\) caller :start inner))))
+      (when close
+        (values (rest (%name-tokens (subseq caller (length "(defmethod ") inner)))
+                (remove "t" (%name-tokens (subseq caller inner close)) :test #'string=)
+                t)))))
+
+(defparameter *non-function-definers*
+  '("defclass" "defstruct" "define-condition" "deftype" "defvar" "defparameter"
+    "defconstant" "defpackage" "in-package")
+  "Form types that define no function, so no xref caller is one of them.")
 
 (defun %stale-entry-form (entry forms)
   "Return the one form among FORMS, those of ENTRY's file, that ENTRY's caller
-is: the form named after it and, among a generic function's methods, the one
-whose name holds its specializers.  NIL when none or several are.  An entry of
-a file written after its code was compiled cannot be met by index or line,
-which name a different form once forms were inserted above or removed."
+is, or NIL when none or several are.  A method is met only with a defmethod of
+its name whose qualifiers are its own and whose name holds every one of its
+specializers; any other caller with a form of its name that defines a function.
+An entry of a file written after its code was compiled cannot be met by index or
+line, which name a different form once forms were inserted above or removed."
   (let ((name (%symbol-text-name (getf entry :caller-symbol))))
     (when name
-      (let ((named (remove-if-not (lambda (form) (equal name (%form-name-head form)))
-                                  forms)))
-        (when (rest named)
-          (let ((specializers (%method-specializer-names (getf entry :caller))))
-            (when specializers
-              (setf named
-                    (remove-if-not
-                     (lambda (form)
-                       (let ((form-name (string-downcase (getf form :form-name))))
-                         (every (lambda (specializer)
-                                  (cl-ppcre:scan
-                                   (format nil "(?:^|[\\s(])~A[\\s)]"
-                                           (cl-ppcre:quote-meta-chars specializer))
-                                   form-name))
-                                specializers)))
-                     named)))))
-        (and named (null (rest named)) (first named))))))
+      (multiple-value-bind (qualifiers specializers method-p)
+          (%method-caller-signature (getf entry :caller))
+        (let ((named
+                (remove-if-not
+                 (lambda (form)
+                   (let* ((form-name (getf form :form-name))
+                          (tokens (and (stringp form-name) (%name-tokens form-name)))
+                          (form-type (string-downcase (or (getf form :form-type) ""))))
+                     (and (equal name (first tokens))
+                          (if method-p
+                              (and (equal form-type "defmethod")
+                                   ;; The qualifiers sit between the name and
+                                   ;; the lambda list.
+                                   (equal qualifiers
+                                          (%name-tokens
+                                           (subseq form-name
+                                                   (or (position #\Space form-name)
+                                                       (length form-name))
+                                                   (or (position #\( form-name)
+                                                       (length form-name)))))
+                                   (subsetp specializers (rest tokens) :test #'string=))
+                              (not (member form-type *non-function-definers*
+                                           :test #'string=))))))
+                 forms)))
+          (and named (null (rest named)) (first named)))))))
 
 (defun merge-references (xref-entries forms)
   "Merge XREF-ENTRIES with resolved scan FORMS into reference objects.
@@ -564,7 +580,11 @@ a form path, groups on its line, keyed (:LINE truename line).
 None of that holds for a :STALE entry, one of a file written after its code was
 compiled: forms inserted above it or removed move both its index and its line
 onto a neighbour.  It meets the form named after its caller instead
-(%STALE-ENTRY-FORM), or none, and every other form of that file is stale too.
+(%STALE-ENTRY-FORM), or none, and, when every entry of the file is stale -- an
+edit not reloaded -- every other form of that file is stale too.  A stale entry
+of a file that also has fresh ones is a definition the last reload did not
+compile again, one no longer in the file: it is no reference, and is returned as
+the second value, for the report to mention.
 
 An entry meets its form whatever sites the form holds.  When none of them shows
 the entry's type -- a call made by a macro expansion or through a function
@@ -579,6 +599,8 @@ Returns JSON-ready hash-tables, one per top-level form, in first-seen order."
         (forms-by-truename (make-hash-table :test #'equal))
         (xrefs-by-key (make-hash-table :test #'equal))
         (stale-files (make-hash-table :test #'equal))
+        (fresh-files (make-hash-table :test #'equal))
+        (gone-entries '())
         (order '()))
     (flet ((remember (key)
              (unless (gethash key seen)
@@ -589,16 +611,30 @@ Returns JSON-ready hash-tables, one per top-level form, in first-seen order."
           (remember key)
           (setf (gethash key form-by-key) form)
           (push form (gethash (getf form :truename) forms-by-truename))))
+      ;; Staleness is per definition: a file reloaded since an edit has fresh
+      ;; entries, and a stale one there is a definition the reload did not
+      ;; compile again -- one no longer in the file.
+      (dolist (entry xref-entries)
+        (unless (getf entry :stale)
+          (setf (gethash (getf entry :truename) fresh-files) t)))
       (dolist (entry xref-entries)
         (let* ((truename (getf entry :truename))
                (line (getf entry :line))
                (index (getf entry :form-index))
                (indexed (and index (gethash (list :form truename index) form-by-key)))
+               (stale (getf entry :stale))
+               (gone (and stale (gethash truename fresh-files)))
                (form (cond
-                       ((getf entry :stale)
+                       (gone nil)
+                       ;; A caller with a name is met by it; a lambda, a (setf f)
+                       ;; or a macro function has none, and is met by index and
+                       ;; span as before, which an edit above it can mislead.
+                       ((and stale (getf entry :caller-symbol))
                         (setf (gethash truename stale-files) t)
                         (%stale-entry-form entry (gethash truename forms-by-truename)))
                        (index
+                        (when stale
+                          (setf (gethash truename stale-files) t))
                         (if (and indexed (%span-contains-p indexed line))
                             indexed
                             (find-if (lambda (form) (%span-contains-p form line))
@@ -606,14 +642,19 @@ Returns JSON-ready hash-tables, one per top-level form, in first-seen order."
                (key (if form
                         (list :form truename (getf form :index))
                         (list :line truename line))))
-          (remember key)
-          (push entry (gethash key xrefs-by-key)))))
-    (mapcar (lambda (key)
-              (let ((form (gethash key form-by-key)))
-                (%reference form
-                            (reverse (gethash key xrefs-by-key))
-                            (and form (gethash (getf form :truename) stale-files)))))
-            (reverse order))))
+          (if gone
+              (push entry gone-entries)
+              (progn
+                (remember key)
+                (push entry (gethash key xrefs-by-key)))))))
+    (values
+     (mapcar (lambda (key)
+               (let ((form (gethash key form-by-key)))
+                 (%reference form
+                             (reverse (gethash key xrefs-by-key))
+                             (and form (gethash (getf form :truename) stale-files)))))
+             (reverse order))
+     (nreverse gone-entries))))
 
 (defun %reference< (a b)
   "Order references by path, then by line."
@@ -677,9 +718,9 @@ docs/tools.md describes every field."
       (dolist (ref sorted)
         (when (equal *note-macro-expansion* (gethash "note" ref))
           (setf (gethash "note" ref)
-                (format nil "call not visible in source (produced by a macro expansion: ~
-                             ~{~A~^, ~} expand~:[s~;~] to code naming it)"
-                        via-macros (rest via-macros))))))
+                (format nil "call not visible in source (produced by a macro expansion, ~
+                             possibly of ~{~A~^ or ~}, whose expansion names it)"
+                        via-macros)))))
     (make-ht "symbol" symbol
              "resolved_symbol" resolved-symbol
              "symbol_status" (%status-string status)

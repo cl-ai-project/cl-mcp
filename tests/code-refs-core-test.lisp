@@ -293,7 +293,10 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
 (deftest merge-references-groups-types-and-prefers-named-callers
   (testing "one form, two xref kinds, a lambda and a named caller"
     (let* ((refs (merge-references
-                  (list (%xref "/abs/a.lisp" 1 :type "call" :caller "(lambda)")
+                  ;; Both stale, as an edit not yet reloaded leaves a file's
+                  ;; entries: a stale entry beside a fresh one is a definition
+                  ;; gone from the file.
+                  (list (%xref "/abs/a.lisp" 1 :type "call" :caller "(lambda)" :stale t)
                         (%xref "/abs/a.lisp" 1 :type "reference" :caller "named"
                                                :caller-symbol "P::NAMED" :stale t))
                   ;; Named after the stale entry's caller: a stale entry meets
@@ -382,12 +385,12 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
                   ;; Written as %FORMAT-XREF-CALLER writes a method's name.
                   (list (%xref "/abs/a.lisp" 5 :caller "(defmethod eval-node (binop-node t))"
                                                :caller-symbol "P::EVAL-NODE" :line 50 :stale t))
-                  (list (%resolved "/abs/a.lisp" 5
-                                   :start-line 50
-                                   :form-name "eval-node ((node num-node) env)")
-                        (%resolved "/abs/a.lisp" 6
-                                   :start-line 60
-                                   :form-name "eval-node ((node binop-node) env)"))))
+                  (list (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
+                                           "eval-node ((node num-node) env)"
+                                           :start-line 50)
+                        (%resolved-of-type "/abs/a.lisp" 6 "defmethod"
+                                           "eval-node ((node binop-node) env)"
+                                           :start-line 60))))
            (met (first (%with-origin refs "xref+source"))))
       (ok (and met (equal "eval-node ((node binop-node) env)" (gethash "form_name" met)))
           (format nil "met with the binop-node method: ~S"
@@ -405,6 +408,62 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
           "it is not met with the test now at its line")
       (ok (and temp (search "fresh worker" (gethash "note" temp)))
           "and its note says a deleted definition stays until a fresh worker"))))
+
+(defun %resolved-of-type (truename index form-type form-name &key (start-line (* 10 index)))
+  "Return a resolved form plist like %RESOLVED's, of FORM-TYPE."
+  (let ((form (%resolved truename index :start-line start-line :form-name form-name)))
+    (setf (getf form :form-type) form-type)
+    form))
+
+(deftest merge-references-meets-a-stale-method-only-with-its-own-specializers
+  ;; With one method of the name left, the entry of a deleted method was met
+  ;; with it, specializers unchecked: a method that does not call the symbol
+  ;; was listed as its caller.
+  (let* ((refs (merge-references
+                (list (%xref "/abs/a.lisp" 5 :caller "(defmethod eval-node (binop-node t))"
+                                             :caller-symbol "P::EVAL-NODE" :line 50 :stale t))
+                (list (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
+                                         "eval-node ((node num-node) env)" :start-line 50))))
+         (num (find "eval-node ((node num-node) env)" refs
+                    :key (lambda (ref) (gethash "form_name" ref)) :test #'equal)))
+    (ok (and num (equal "source" (gethash "origin" num)))
+        "the num-node method is not taken for the binop-node one"))
+  (testing "a qualifier tells two methods of one specializer apart"
+    (let* ((refs (merge-references
+                  (list (%xref "/abs/a.lisp" 5 :caller "(defmethod gf before (node t))"
+                                               :caller-symbol "P::GF" :line 50 :stale t))
+                  (list (%resolved-of-type "/abs/a.lisp" 5 "defmethod" "gf ((x node) y)"
+                                           :start-line 50)
+                        (%resolved-of-type "/abs/a.lisp" 6 "defmethod" "gf :before ((x node) y)"
+                                           :start-line 60))))
+           (met (first (%with-origin refs "xref+source"))))
+      (ok (and met (equal "gf :before ((x node) y)" (gethash "form_name" met)))
+          (format nil "met with the :before method: ~S" (and met (gethash "form_name" met))))))
+  (testing "a function's entry is not met with a class of its name"
+    (let ((refs (merge-references
+                 (list (%xref "/abs/a.lisp" 5 :caller "foo" :caller-symbol "P::FOO"
+                                              :line 50 :stale t))
+                 (list (%resolved-of-type "/abs/a.lisp" 5 "defclass" "foo" :start-line 50)))))
+      (ok (null (%with-origin refs "xref+source")) "the defclass is not its caller"))))
+
+(deftest merge-references-leaves-out-a-definition-gone-from-a-reloaded-file
+  ;; Staleness is per definition: after a reload, a definition deleted from the
+  ;; file keeps its old date, and that one entry made every form of the file
+  ;; stale, for as long as the worker lived.
+  (multiple-value-bind (refs gone)
+      (merge-references
+       (list (%xref "/abs/a.lisp" 1 :caller "kept" :caller-symbol "P::KEPT" :line 12)
+             (%xref "/abs/a.lisp" 2 :caller "deleted" :caller-symbol "P::DELETED"
+                                    :line 22 :stale t))
+       (list (%resolved "/abs/a.lisp" 1 :form-name "kept")
+             (%resolved "/abs/a.lisp" 3 :start-line 30 :form-name "*top*")))
+    (ok (notany (lambda (ref) (eq t (gethash "stale" ref))) refs)
+        "no form of the reloaded file is stale")
+    (ok (null (find "P::DELETED" refs :key (lambda (ref) (gethash "caller_symbol" ref))
+                                       :test #'equal))
+        "the deleted definition is not listed")
+    (ok (equal '("P::DELETED") (mapcar (lambda (entry) (getf entry :caller-symbol)) gone))
+        "but returned, for the report to mention")))
 
 (deftest build-references-report-names-the-macros-a-hidden-call-may-come-from
   ;; A call xref recorded but no site shows was said to be "produced by a macro
