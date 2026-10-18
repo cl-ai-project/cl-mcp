@@ -454,6 +454,7 @@ to the relevant inner name:
                                           string (a top-level form's source,
                                           such as \"repl-eval\") is internal
 - Any other (...) wrapper              -> always internal
+- A \"...\" name, SBCL's for a foreign frame -> always internal
 - Bare symbol name matching an internal package prefix -> internal
 - Name in *STANDARD-SIGNALING-FRAMES*, unqualified or
   COMMON-LISP-qualified                                -> internal
@@ -478,6 +479,9 @@ Empty strings are treated as non-internal (caller's responsibility to filter)."
         (outer (or (char= (char outer 0) #\")
                    (%internal-frame-p outer)))
         ((char= (char function-name 0) #\() t)
+        ;; SBCL's name for a foreign frame, at the bottom of every thread:
+        ;; "foreign function: call_into_lisp", "funcall1".
+        ((char= (char function-name 0) #\") t)
         ((%prefix-internal-p function-name) t)
         ((member (%common-lisp-name function-name) *standard-signaling-frames*
                  :test #'string-equal)
@@ -495,8 +499,10 @@ receive previews; internal frames are skipped entirely for preview purposes.
 When FILTER-INTERNAL is true, internal frames are excluded from the result
 entirely, keeping backtraces focused on user code.
 PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation.
-The second value is true when the stack held more than MAX-FRAMES frames to
-collect, so the last one collected is not the outermost."
+The second value is true when a frame of the user's (not %INTERNAL-FRAME-P) lies
+past the MAX-FRAMES collected, so the last of the user's collected is not their
+outermost.  Internal frames past the cap -- every thread ends in its own -- do
+not count."
   (let ((frames '())
         (truncated nil)
         (index 0)
@@ -511,7 +517,11 @@ collect, so the last one collected is not the outermost."
             (funcall map-fn
                      (lambda (frame)
                        (if (>= index max-frames)
-                           (setf truncated t)
+                           ;; Cut short only if a frame of the user's lies past
+                           ;; the cap: every stack ends in the thread's own.
+                           (unless truncated
+                             (setf truncated
+                                   (not (%internal-frame-p (%frame-function-name frame)))))
                          (let* ((function-name (%frame-function-name frame))
                                 (source-loc (%frame-source-location frame))
                                 (is-internal (%internal-frame-p function-name)))
@@ -560,7 +570,10 @@ walk short."
     (funcall map-fn
              (lambda (frame)
                (if (>= index max-frames)
-                   (setf truncated t)
+                   (unless truncated
+                     (setf truncated
+                           (not (%internal-frame-p
+                                 (%frame-function-name-for-debugger frame)))))
                  (let* ((function-name (%frame-function-name-for-debugger frame))
                         (source-loc (%frame-source-location-for-debugger frame))
                         (is-internal (%internal-frame-p function-name)))
@@ -636,8 +649,8 @@ Returns a plist with:
   :restarts - list of (:name STRING :description STRING)
   :frames - list of frame plists (SBCL only, NIL on other implementations)
             When LOCALS-PREVIEW-FRAMES > 0, locals in top frames include :preview field.
-  :frames-truncated - true when the stack had more than MAX-FRAMES frames to
-            collect, so the last of :FRAMES is not the outermost."
+  :frames-truncated - true when a user frame lies past the MAX-FRAMES collected,
+            so the last user frame of :FRAMES is not the outermost."
   (multiple-value-bind (frames truncated)
       (%collect-frames max-frames print-level print-length
                        :locals-preview-frames locals-preview-frames

@@ -158,21 +158,21 @@ Output fields:
   (your frames only, or every frame when none is yours). The content text carries the same thing
   for up to five of your frames: the first four and the outermost (a recursive `labels` helper
   would otherwise fill the list and hide the function you called), with a line counting those
-  left out between them. At most 20 frames are captured; when the stack was deeper the line says
-  so, and the frame after it is the outermost captured, not the function you called. The text is
-  cut at `max_output_length` from its end, so with a small budget that line and the outermost
-  frame go first. Each displayed frame is followed by its locals as `NAME = VALUE`, with
-  `[object-id: ID]` on a non-primitive one, capped at 10 per frame. Two variables of one name in
-  a frame -- an inner binding shadowing an argument, or a `labels` helper's variables merged
-  into its caller -- are named as SBCL's debugger names them, `PATTERN` and `PATTERN#1`, here
-  and in the JSON `name`; a variable the compiler introduced or renamed, such as the key `case`
-  binds, is written with its package, `SB-C::X`, and a macro's gensym (`dolist`'s list) as
-  `#:LIST0`. `locals_preview_frames` expands the entries, elements or slots of a non-primitive
-  local in the top N frames underneath it, nested as deep as `locals_preview_max_depth` reached.
-  A value over 200 characters is cut with its full length noted, and a preview over 20 lines
-  likewise: `print_level`/`print_length` bound a structure's depth and width but not a string,
-  so one large local would otherwise spend the whole `max_output_length` budget and drop the
-  frames below it
+  left out between them. At most 20 frames are captured, the capture's own five among them; when
+  a frame of yours lay deeper the line says so, and the frame after it is the outermost
+  captured, not the function you called. The text is cut at `max_output_length` from its end, so
+  with a small budget that line and the outermost frame go first. Each displayed frame is
+  followed by its locals as `NAME = VALUE`, with `[object-id: ID]` on a non-primitive one,
+  capped at 10 per frame. Two variables of one name in a frame -- an inner binding shadowing an
+  argument, or a `labels` helper's variables merged into its caller -- are named as SBCL's
+  debugger names them, `PATTERN` and `PATTERN#1`, here and in the JSON `name`; a variable the
+  compiler introduced or renamed, such as the key `case` binds, is written with its package,
+  `SB-C::X`, and a macro's gensym (`dolist`'s list) as `#:LIST0`. `locals_preview_frames`
+  expands the entries, elements or slots of a non-primitive local in the top N frames underneath
+  it, nested as deep as `locals_preview_max_depth` reached. A value over 200 characters is cut
+  with its full length noted, and a preview over 20 lines likewise: `print_level`/`print_length`
+  bound a structure's depth and width but not a string, so one large local would otherwise spend
+  the whole `max_output_length` budget and drop the frames below it
 
 When this request-level debugger boundary is used, condition type/message,
 frames, locals when available, and restarts are captured before unwind.

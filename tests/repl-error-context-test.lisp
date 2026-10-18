@@ -260,6 +260,33 @@
     (ok (null (search "SB-INT::F3" text)) "up to the limit")
     (ok (null (search "of your frames" text)) "and none is called yours")))
 
+(deftest backtrace-text-counts-a-real-recursion-truthfully
+  ;; Through repl-eval's own path: every stack ends in the thread's frames, so
+  ;; a flag set by any frame past the cap said every error's walk was cut short.
+  (cl-mcp/src/repl:repl-eval
+   "(defun rec-probe-outer (n)
+      (declare (optimize (debug 3)))
+      (labels ((rec-probe-down (k)
+                 (if (zerop k) (error \"bottom\") (1+ (rec-probe-down (1- k))))))
+        (rec-probe-down n)))")
+  (flet ((text-for (n)
+           ;; With a deadline, as the tool calls it: the evaluation then runs on
+           ;; a thread of its own, so this test's frames are not on its stack.
+           (multiple-value-bind (printed value stdout stderr context)
+               (cl-mcp/src/repl:repl-eval (format nil "(rec-probe-outer ~D)" n)
+                                          :timeout-seconds 60)
+             (gethash "text"
+                      (aref (gethash "content"
+                                     (cl-mcp/src/tools/response-builders:build-eval-response
+                                      printed value stdout stderr context))
+                            0)))))
+    (let ((text (text-for 8)))
+      (ok (search "has all" text) (format nil "a walk that reached the user's outermost: ~A" text))
+      (ok (search "REC-PROBE-OUTER (repl-eval)" text) "which is shown"))
+    (let ((text (text-for 40)))
+      (ok (search "outermost captured" text)
+          (format nil "a walk the cap cut short says so: ~A" text)))))
+
 (defun %response-text (error-context &key max-output-length)
   "Return the content text BUILD-EVAL-RESPONSE renders for ERROR-CONTEXT.
 MAX-OUTPUT-LENGTH is passed through, so a test can put the text under the same

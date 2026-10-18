@@ -45,43 +45,47 @@ and :frames as returned by repl-eval.
 Internal/infrastructure frames (CL-MCP, SBCL internals, ASDF, etc.) are
 filtered out so that the user-visible backtrace focuses on application code.
 If filtering would remove ALL frames, the filter is skipped to preserve
-useful debug information."
+useful debug information.  frames_truncated is present, true, when the capture
+stopped before a frame of the user's (:FRAMES-TRUNCATED)."
   (let* ((all-frames (getf error-context :frames))
          (user-frames
            (remove-if (lambda (f)
                         (%internal-frame-p (or (getf f :function) "")))
                       all-frames))
          ;; Fall back to all frames when filtering removes everything
-         (display-frames (if user-frames user-frames all-frames)))
-    (make-ht
-     "condition_type" (sanitize-for-json (getf error-context :condition-type))
-     "message" (sanitize-for-json (getf error-context :message))
-     "restarts"
-     (mapcar (lambda (r)
-               (make-ht "name" (sanitize-for-json (getf r :name))
-                        "description" (sanitize-for-json (getf r :description))))
-             (getf error-context :restarts))
-     "frames"
-     (coerce
-      (mapcar (lambda (f)
-                (make-ht
-                 "index" (getf f :index)
-                 "function" (sanitize-for-json (getf f :function))
-                 "source_file" (getf f :source-file)
-                 "source_line" (getf f :source-line)
-                 "locals"
-                 (mapcar (lambda (l)
-                           (let ((lht (make-ht
-                                       "name" (sanitize-for-json (getf l :name))
-                                       "value" (sanitize-for-json (getf l :value)))))
-                             (when (getf l :object-id)
-                               (setf (gethash "object_id" lht) (getf l :object-id)))
-                             (when (getf l :preview)
-                               (setf (gethash "preview" lht) (getf l :preview)))
-                             lht))
-                         (getf f :locals))))
-              display-frames)
-      'vector))))
+         (display-frames (if user-frames user-frames all-frames))
+         (ht (make-ht
+              "condition_type" (sanitize-for-json (getf error-context :condition-type))
+              "message" (sanitize-for-json (getf error-context :message))
+              "restarts"
+              (mapcar (lambda (r)
+                        (make-ht "name" (sanitize-for-json (getf r :name))
+                                 "description" (sanitize-for-json (getf r :description))))
+                      (getf error-context :restarts))
+              "frames"
+              (coerce
+               (mapcar (lambda (f)
+                         (make-ht
+                          "index" (getf f :index)
+                          "function" (sanitize-for-json (getf f :function))
+                          "source_file" (getf f :source-file)
+                          "source_line" (getf f :source-line)
+                          "locals"
+                          (mapcar (lambda (l)
+                                    (let ((lht (make-ht
+                                                "name" (sanitize-for-json (getf l :name))
+                                                "value" (sanitize-for-json (getf l :value)))))
+                                      (when (getf l :object-id)
+                                        (setf (gethash "object_id" lht) (getf l :object-id)))
+                                      (when (getf l :preview)
+                                        (setf (gethash "preview" lht) (getf l :preview)))
+                                      lht))
+                                  (getf f :locals))))
+                       display-frames)
+               'vector))))
+    (when (getf error-context :frames-truncated)
+      (setf (gethash "frames_truncated" ht) t))
+    ht))
 
 (defparameter *backtrace-frames-shown* 5
   "User frames listed in repl-eval's backtrace text: the first ones less one, and
