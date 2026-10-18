@@ -141,14 +141,16 @@ Output fields:
   `compile`, or the compile behind an evaluated `defun`) is the compiler's: it is
   written with its place and counted, so `(asdf:load-system ...)` fails with
   `COMPILE-FILE-ERROR` on a full `WARNING`, and `compile` returns its warnings-p and
-  failure-p. A refused compile's `caught 1 fatal ERROR condition` trailer is included.
-  Any other warning is written by `warn` to `*error-output*` (`WARNING: ...` or
-  `STYLE-WARNING: ...`), which is this stream unless the evaluated code rebinds it, and
-  evaluation goes on. No `redefining ...` notice is shown: SBCL keeps quiet about a
-  redefinition from the same source file, and everything `repl-eval` compiles or loads
-  is recorded as coming from the source `repl-eval` (#249). An undefined variable is
-  reported at the end of `repl-eval`'s compilation unit, after a `compile-file` it
-  called has returned, so that `compile-file`'s failure-p does not count it
+  failure-p. Any error that unwinds through a nested compilation unit (a refused compile,
+  say) leaves its `caught 1 fatal ERROR condition` trailer here, even when the code
+  handled the error itself. Any other warning is written by `warn` to `*error-output*`
+  (`WARNING: ...`, a style warning too), which is this stream unless the evaluated code
+  rebinds it, and evaluation goes on. A `WARNING: redefining ...` notice is shown when the
+  earlier definition came from a file, as `load-system` loads it; everything `repl-eval`
+  compiles or loads is recorded as coming from the source `repl-eval` (#249), and SBCL keeps
+  quiet about a redefinition from the same source, so redefining it there again is quiet.
+  An undefined variable is reported at the end of `repl-eval`'s compilation unit, after a
+  `compile-file` it called has returned, so that `compile-file`'s failure-p does not count it
   (`asdf:load-system` loads such a file everywhere)
 - `result_object_id` (string|null): an opaque id, such as `"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-17"`; when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
 - `result_preview` (object, with `result_object_id`): a lightweight structural preview of the

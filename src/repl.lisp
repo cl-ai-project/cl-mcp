@@ -36,11 +36,15 @@ Warnings are reported as they are outside repl-eval.  One signalled while the
 compiler runs (compile-file, compile, or the compile behind an evaluated defun) is
 the compiler's: it writes it to stderr with its place and counts it, so
 (asdf:load-system ...) fails on a full WARNING and compile returns its warnings-p
-and failure-p.  Any other is written by WARN to *error-output* ('WARNING: ...' or
-'STYLE-WARNING: ...'), which is stderr unless the code rebinds it, and evaluation
-goes on.  No 'redefining ...' notice is shown: SBCL keeps quiet about a
-redefinition from the same source file, and everything repl-eval compiles or loads
-is recorded as coming from the source 'repl-eval' (#249).  An undefined variable
+and failure-p.  Any other is written by WARN to *error-output* ('WARNING: ...', a
+style warning too), which is stderr unless the code rebinds it, and evaluation
+goes on.  A 'WARNING: redefining ...' notice is shown when the earlier definition
+came from a file, as load-system loads it; everything repl-eval compiles or loads
+is recorded as coming from the source 'repl-eval' (#249), and SBCL keeps quiet
+about a redefinition from the same source, so redefining it there again is
+quiet.  Any error that unwinds through a nested compilation unit (a refused
+compile, say) leaves its 'caught 1 fatal ERROR condition' trailer in stderr, even
+when the code handled the error itself.  An undefined variable
 is reported at the end of repl-eval's compilation unit, after a compile-file it
 called has returned, so that compile-file's failure-p does not count it.
 
