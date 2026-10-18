@@ -32,11 +32,15 @@ to save changes to files.
 IMPORTANT: For loading ASDF systems, prefer the dedicated 'load-system' tool.
 It handles staleness (force-reload), output suppression, and timeouts automatically.
 Only use repl-eval with (asdf:load-system ...) if you need non-standard load options.
-A full WARNING signalled while a file compiles is left to the compiler, which
-writes it to stderr and counts it, so (asdf:load-system ...) fails on it as it does
-outside repl-eval.  Any other warning is written to stderr as 'Warning: ...' and
-evaluation goes on: an undefined variable, too, which is reported at the end of
-repl-eval's compilation unit, after compile-file has returned.
+Warnings are reported as they are outside repl-eval.  One signalled while the
+compiler runs (compile-file, compile, or the compile behind an evaluated defun) is
+the compiler's: it writes it to stderr with its place and counts it, so
+(asdf:load-system ...) fails on a full WARNING and compile returns its warnings-p
+and failure-p.  Any other is written to stderr by WARN, and evaluation goes on.  A
+redefinition SBCL itself keeps quiet, such as a file loaded again redefining its
+own definitions, is not shown.  An undefined variable or function is reported at
+the end of repl-eval's compilation unit, after a compile-file it called has
+returned, so that compile-file's failure-p does not count it.
 
 When the result is a non-primitive object (not a number, string, symbol, or character),
 the response includes:

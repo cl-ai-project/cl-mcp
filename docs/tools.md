@@ -136,14 +136,18 @@ Input schema (JSON):
 Output fields:
 - `content`: last value as text
 - `stdout`: concatenated standard output from evaluation
-- `stderr`: concatenated standard error from evaluation. A warning is written here
-  as `Warning: ...` and evaluation goes on, except a full `WARNING` signalled while a
-  file compiles: that one is left to the compiler, which reports it here with its
-  place and counts it, so `(asdf:load-system ...)` fails with `COMPILE-FILE-ERROR`,
-  as it does outside `repl-eval`. An undefined variable is the exception: it is
-  reported at the end of `repl-eval`'s compilation unit, after `compile-file` has
-  returned, so it is written as `Warning: ...` and a `compile-file` called
-  directly returns a false failure-p for it (`asdf:load-system` loads such a file
+- `stderr`: concatenated standard error from evaluation. Warnings are reported here as
+  they are outside `repl-eval`. One signalled while the compiler runs (`compile-file`,
+  `compile`, or the compile behind an evaluated `defun`) is the compiler's: it is
+  written with its place and counted, so `(asdf:load-system ...)` fails with
+  `COMPILE-FILE-ERROR` on a full `WARNING`, and `compile` returns its warnings-p and
+  failure-p. Any other is written by `warn` (`WARNING: ...`), and evaluation goes on.
+  A redefinition SBCL itself keeps quiet, such as a file loaded again redefining its
+  own definitions, is not shown. A refused compile's `compilation unit aborted`
+  trailer is included; it counts the abort once more than plain ASDF does, for
+  `repl-eval`'s own compilation unit. An undefined variable or function is reported
+  at the end of that unit, after a `compile-file` it called has returned, so that
+  `compile-file`'s failure-p does not count it (`asdf:load-system` loads such a file
   everywhere)
 - `result_object_id` (string|null): an opaque id, such as `"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-17"`; when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
 - `result_preview` (object, with `result_object_id`): a lightweight structural preview of the

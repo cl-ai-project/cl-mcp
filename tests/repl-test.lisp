@@ -277,9 +277,16 @@ remove everything again."
          (ok (search "COMPILE-FILE-ERROR" printed))
          (ok (search "COMPILE-FILE-ERROR" (getf error-context :condition-type)))
          (ok (search "called with three arguments" stderr)
-             "the warning's text is still in stderr"))))))
+             "the warning's text is still in stderr")
+         ;; Printed while the compilation unit unwinds, after the error was
+         ;; signalled: stderr is read once that unwinding is done.  (It counts
+         ;; the abort twice, once for ASDF's unit and once for repl-eval's own,
+         ;; which SBCL's count includes; plain ASDF says 1.)
+         (ok (search "compilation unit aborted" stderr)
+             (format nil "the compilation unit's trailer is in stderr: ~A" stderr))
+         (ok (search "fatal ERROR condition" stderr) "and its count of the refusal"))))))
 
-(deftest repl-eval-muffles-a-full-warning-outside-a-compile
+(deftest repl-eval-writes-a-full-warning-outside-a-compile-once
   (testing "a WARN in evaluated code is written once to stderr and evaluation goes on"
     (multiple-value-bind (printed value stdout stderr)
         (repl-eval "(progn (warn \"plain probe warning\") :after)")
@@ -289,6 +296,51 @@ remove everything again."
         (ok first "the warning is in stderr")
         (ok (eql first (search "plain probe warning" stderr :from-end t))
             "and only once")))))
+
+(deftest repl-eval-compile-counts-a-full-warning-as-sbcl-does
+  ;; Muffled by repl-eval, the warning never reached the compiler, and COMPILE
+  ;; said there was none: (f NIL NIL) where SBCL says (f T T).
+  (multiple-value-bind (printed value stdout stderr)
+      (repl-eval "(rest (multiple-value-list
+                         (compile nil '(lambda () (the fixnum \"not a number\")))))")
+    (declare (ignore value stdout))
+    (ok (equal "(t t)" printed) (format nil "warnings-p and failure-p: ~A" printed))
+    (ok (search "not a number" stderr) "the compiler wrote the warning to stderr")))
+
+(deftest repl-eval-style-warning-in-a-compile-keeps-its-place
+  ;; Written as `Warning: ...', a compiler's style warning lost the form it was
+  ;; in; left to the compiler, it is reported with it, as outside repl-eval.
+  (%call-with-warning-system
+   "(defun style-only () (let ((unused 1)) 2))"
+   (lambda (system file)
+     (declare (ignore system))
+     (multiple-value-bind (printed value stdout stderr)
+         (repl-eval (format nil "(nth-value 1 (compile-file ~S :output-file ~S))"
+                            (namestring file)
+                            (namestring (make-pathname :name "style" :type "fasl"
+                                                       :defaults file))))
+       (declare (ignore value stdout))
+       (ok (equal "t" printed) "compile-file reports the style warning")
+       (ok (search "UNUSED" stderr) "the warning is in stderr")
+       (ok (search "in: DEFUN STYLE-ONLY" stderr)
+           (format nil "with the form it is in: ~A" stderr))))))
+
+(deftest repl-eval-leaves-uninteresting-redefinitions-to-sbcl
+  ;; SBCL muffles a file's redefinition of its own definition
+  ;; (sb-ext:*muffled-warnings*), but only a warning no handler took.  repl-eval
+  ;; took every one, so loading a file twice printed `redefining ...' for each
+  ;; definition in it.
+  (%call-with-warning-system
+   "(defun loaded-twice () 1)"
+   (lambda (system file)
+     (declare (ignore system))
+     (multiple-value-bind (printed value stdout stderr)
+         (repl-eval (format nil "(progn (load ~S) (load ~S) :loaded)"
+                            (namestring file) (namestring file)))
+       (declare (ignore value stdout))
+       (ok (equal ":loaded" printed) "both loads ran")
+       (ok (not (search "redefining" stderr))
+           (format nil "no redefinition notice: ~A" stderr))))))
 
 (deftest repl-eval-suppresses-compiler-trace-output
   (testing "compiler trace output is discarded"
