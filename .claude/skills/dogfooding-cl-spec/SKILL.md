@@ -410,8 +410,8 @@ Measured, not guessed. Cite these instead of filing duplicates.
   over the inputs drawn, under the definitions as they stand now.
 - **Promoting a candidate whose layer you never established.** A form that was
   rejected, a value that came back wrong, a framework that behaved oddly: that
-  is a note until a control run outside cl-mcp (`ros run --eval '<smallest
-  form>' --eval '(uiop:quit)' < /dev/null`) says whether the layer
+  is a note until a control run outside cl-mcp
+  (`ros run --eval '<smallest form>' --eval '(uiop:quit)' < /dev/null`) says whether the layer
   is cl-spec, cl-mcp's worker, ANSI CL or your own code. `dogfooding-cl-mcp`'s
   step 6 carries the procedure; the layers are the same here.
 - **Same project every cycle.** Vary the contract shape, or you measure habit.
