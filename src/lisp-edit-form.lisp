@@ -9,6 +9,7 @@
                           #:cst-node-start
                           #:cst-node-end)
   (:import-from #:cl-mcp/src/cst
+                #:cst-node-start-line
                 #:%skip-whitespace-and-comments
                 #:stray-right-parenthesis
                 #:*standard-readtable*)
@@ -741,13 +742,27 @@ to whatever follows in the file, or break its read at the end."
                          form-start)))
           (concatenate 'string (subseq content 0 start) prefix (subseq content form-start))))))
 
+(defun %feature-expressions-text (prefix)
+  "Return PREFIX, the text %TARGET-FEATURE-PREFIX returns, as its feature
+expressions alone: the comments between them and the form left out, the rest on
+one line."
+  (format nil "~{~A~^ ~}"
+          (loop for line in (uiop:split-string prefix :separator '(#\Newline))
+                for code = (string-trim '(#\Space #\Tab #\Return)
+                                        (subseq line 0 (or (position #\; line)
+                                                           (length line))))
+                when (plusp (length code))
+                  collect code)))
+
 (defun %kept-feature-note (kept)
   "Return the summary line saying a replace kept KEPT, the target's feature
-expressions (%TARGET-FEATURE-PREFIX) put back, or NIL when it kept none."
+expressions (%FEATURE-EXPRESSIONS-TEXT) put back, or NIL when it kept none."
   (when kept
-    (format nil "~%Kept ~A in front of the form: the content did not carry it. ~
-                 To change or drop the condition, start the content with the ~
-                 feature expression it should have."
+    (format nil "~%Kept ~A in front of the form, with anything written between it and ~
+                 the form: the content did not carry it. To change the condition, start ~
+                 the content with the feature expression it should have; to drop it, ~
+                 delete the form and insert the bare definition with insert_before or ~
+                 insert_after on a neighbouring form."
             kept)))
 
 (defun %blank-lines-note (normalized)
@@ -759,6 +774,32 @@ form itself that the summary would otherwise leave unmentioned."
     (format nil "~%The blank lines around the form were normalized too; pass ~
                  normalize_blank_lines=false to leave them as they were.")))
 
+(defun %attached-comment-start (text start)
+  "Return where the comment block written directly above the form at START in TEXT
+begins: the first of the ; lines that run, with no blank line between them, down
+to the line the form starts on.  START when there is none, or when the form does
+not start a line of its own.  Such a comment describes the form below it, so the
+edits keep the two together."
+  (let ((line-start (let ((newline (position #\Newline text :end start :from-end t)))
+                      (if newline (1+ newline) 0))))
+    (if (find-if-not (lambda (ch) (member ch '(#\Space #\Tab))) text
+                     :start line-start :end start)
+        start
+        (let ((block-start nil))
+          (loop while (plusp line-start)
+                do (let* ((previous-end (1- line-start))
+                          (previous-start
+                            (let ((newline (position #\Newline text
+                                                     :end previous-end :from-end t)))
+                              (if newline (1+ newline) 0)))
+                          (line (string-trim '(#\Space #\Tab #\Return)
+                                             (subseq text previous-start previous-end))))
+                     (if (and (plusp (length line)) (char= (char line 0) #\;))
+                         (setf block-start previous-start
+                               line-start previous-start)
+                         (return))))
+          (or block-start start)))))
+
 (defun %apply-operation-preserve-spacing (text node operation content)
   (let ((start (cst-node-start node))
         (end (cst-node-end node)))
@@ -766,13 +807,17 @@ form itself that the summary would otherwise leave unmentioned."
       ((:replace)
        (concatenate 'string (subseq text 0 start) content (subseq text end)))
       ((:insert-before)
-       (let* ((snippet (ensure-trailing-newline content))
-              (prefix (subseq text 0 start))
+       ;; Above the comment written directly over the target, and a blank line
+       ;; apart from it, so the comment still reads as the target's.
+       (let* ((comment-start (%attached-comment-start text start))
+              (snippet (concatenate 'string (ensure-trailing-newline content)
+                                    (if (< comment-start start) (string #\Newline) "")))
+              (prefix (subseq text 0 comment-start))
               (sep
-               (if (zerop start)
+               (if (zerop comment-start)
                    ""
                    (%ensure-blank-separation prefix ""))))
-         (concatenate 'string prefix sep snippet (subseq text start))))
+         (concatenate 'string prefix sep snippet (subseq text comment-start))))
       ((:insert-after)
        (let* ((snippet (ensure-trailing-newline content))
               (suffix (subseq text end))
@@ -803,24 +848,31 @@ form itself that the summary would otherwise leave unmentioned."
   (let ((start (cst-node-start node))
         (end (cst-node-end node)))
     (ecase operation
+      ;; The comment written directly above the form is the form's: the
+      ;; blank lines are set around the two, and an inserted form goes above it.
       ((:replace)
-       (let ((snippet (%trim-outer-whitespace content)))
+       (let* ((snippet (%trim-outer-whitespace content))
+              (comment-start (%attached-comment-start text start))
+              (comment (string-right-trim '(#\Space #\Tab)
+                                          (subseq text comment-start start)))
+              (front (concatenate 'string comment snippet)))
          (multiple-value-bind (prefix-core _)
-             (%split-trailing-whitespace (subseq text 0 start))
+             (%split-trailing-whitespace (subseq text 0 comment-start))
            (declare (ignore _))
            (multiple-value-bind (_ suffix-core)
                (%split-leading-whitespace (subseq text end))
              (declare (ignore _))
              (concatenate 'string prefix-core
-                          (%normalized-separator prefix-core snippet) snippet
+                          (%normalized-separator prefix-core front) front
                           (%normalized-separator snippet suffix-core)
                           suffix-core)))))
       ((:insert-before)
-       (let ((snippet (%trim-outer-whitespace content)))
+       (let ((snippet (%trim-outer-whitespace content))
+             (comment-start (%attached-comment-start text start)))
          (multiple-value-bind (prefix-core _)
-             (%split-trailing-whitespace (subseq text 0 start))
+             (%split-trailing-whitespace (subseq text 0 comment-start))
            (declare (ignore _))
-           (let ((target (subseq text start end)) (suffix (subseq text end)))
+           (let ((target (subseq text comment-start end)) (suffix (subseq text end)))
              (concatenate 'string prefix-core
                           (%normalized-separator prefix-core snippet) snippet
                           (%normalized-separator snippet target) target
@@ -1076,10 +1128,10 @@ replaced form. A dry run carries the reparented forms as
                                   (target-prefix
                                    (%put-feature-prefix block-spliced target-prefix))
                                   (t block-spliced)))
+                       ;; The expressions alone: a comment between them and
+                       ;; the form is kept in the file but is no part of them.
                        (kept-feature (and target-prefix (%form-start block-spliced)
-                                          (string-right-trim '(#\Space #\Tab #\Newline
-                                                               #\Return)
-                                                             target-prefix)))
+                                          (%feature-expressions-text target-prefix)))
                        (several-forms (and form-count (> form-count 1) form-count))
                        ;; A replace by the form already there changes nothing:
                        ;; normalising its surroundings would rewrite the file
@@ -1118,7 +1170,10 @@ replaced form. A dry run carries the reparented forms as
                             ;; refer to, for the relocation note in the summary.
                             (gethash "validated_content" result) validated-content
                             (gethash "file_path" result) (namestring abs)
-                            (gethash "operation" result) op-normalized)
+                            (gethash "operation" result) op-normalized
+                            ;; Where the matched form starts: with two forms of
+                            ;; one name it is what tells them apart.
+                            (gethash "line" result) (cst-node-start-line target))
                       (when parinfer-warning
                         (setf (gethash "parinfer_warning" result) parinfer-warning
                               (gethash "repair_fixes" result) repair-fixes
@@ -1135,10 +1190,11 @@ replaced form. A dry run carries the reparented forms as
                    (would-change (fs-write-file rel updated)
                     (values updated parinfer-warning t repair-fixes validated-content
                             bracket-warning reparented several-forms kept-feature
-                            blank-lines-normalized))
+                            blank-lines-normalized (cst-node-start-line target)))
                    (t (values updated parinfer-warning nil repair-fixes
                               validated-content bracket-warning reparented
-                              several-forms kept-feature nil)))))))))))
+                              several-forms kept-feature nil
+                              (cst-node-start-line target))))))))))))
 
 (defun %resolve-guard-argument (args guard guard-token)
   "Return the guard LISP-EDIT-FORM should run with, or NIL for an unguarded
@@ -1262,7 +1318,7 @@ without a guard."))
     (handler-case
         (multiple-value-bind (updated parinfer-warning changed-p repair-fixes
                               repaired-form bracket-warning reparented forms
-                              kept-feature blank-lines-normalized)
+                              kept-feature blank-lines-normalized target-line)
             (lisp-edit-form :file-path file_path
                             :form-type form_type
                             :form-name form_name
@@ -1288,12 +1344,13 @@ without a guard."))
                      (dry-kept (gethash "kept_feature_expression" updated))
                      (dry-blank-lines (gethash "blank_lines_normalized" updated))
                      (summary
-                      (format nil "Dry-run ~A~@[ of ~D forms~] on ~A ~A in ~A ~
+                      (format nil "Dry-run ~A~@[ of ~D forms~] on ~A ~A~@[ (line ~D)~] in ~A ~
                                    (~:[no change~;would change~])~
                                    ~@[~A~]~@[~A~]~@[~A~]~@[~%WARNING: ~A~]~
                                    ~@[~%~%--- original ---~%~A~]~
                                    ~@[~%~%--- preview ---~%~A~]"
-                              operation block-forms form_type form_name file_path
+                              operation block-forms form_type form_name
+                              (gethash "line" updated) file_path
                               would-change
                               (%kept-feature-note dry-kept)
                               (%blank-lines-note dry-blank-lines)
@@ -1322,6 +1379,8 @@ without a guard."))
                                   (list "bracket_warning" bw))
                                 (when block-forms
                                   (list "forms" block-forms))
+                                (when (gethash "line" updated)
+                                  (list "line" (gethash "line" updated)))
                                 (when dry-kept
                                   (list "kept_feature_expression" dry-kept))
                                 (when dry-blank-lines
@@ -1330,17 +1389,17 @@ without a guard."))
                      (cond
                        ((not changed-p)
                         (format nil
-                                "No change to ~A ~A in ~A (content matches existing form)~
-                                 ~@[~A~]~@[~%WARNING: ~A~]"
-                                form_type form_name file_path
+                                "No change to ~A ~A~@[ (line ~D)~] in ~A (content matches ~
+                                 existing form)~@[~A~]~@[~%WARNING: ~A~]"
+                                form_type form_name target-line file_path
                                 (%repair-summary parinfer-warning repair-fixes
                                                  repaired-form :include-form t
                                                  :moved reparented)
                                 bracket-warning))
                        (t
-                        (format nil "Applied ~A~@[ of ~D forms~] to ~A ~A in ~A ~
+                        (format nil "Applied ~A~@[ of ~D forms~] to ~A ~A~@[ (line ~D)~] in ~A ~
                                      (~D chars)~@[~A~]~@[~A~]~@[~A~]~@[~%WARNING: ~A~]"
-                                operation forms form_type form_name file_path
+                                operation forms form_type form_name target-line file_path
                                 (length updated)
                                 (%kept-feature-note kept-feature)
                                 (%blank-lines-note blank-lines-normalized)
@@ -1362,6 +1421,8 @@ without a guard."))
                                   (list "bracket_warning" bracket-warning))
                                 (when forms
                                   (list "forms" forms))
+                                (when target-line
+                                  (list "line" target-line))
                                 (when kept-feature
                                   (list "kept_feature_expression" kept-feature))
                                 (when blank-lines-normalized

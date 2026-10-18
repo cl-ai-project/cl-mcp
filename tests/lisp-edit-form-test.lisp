@@ -192,6 +192,93 @@ text and LISP-EDIT-FORM's ninth value, the feature expressions it kept."
                (define-unit :cm :length 1/100)~%")
   "One-line forms written with no blank line between them.")
 
+(defparameter *commented-forms-source*
+  (format nil "(defun alpha () 1)~%~%;; Comment describing beta.~%;; A second line of it.~%~
+               (defun beta () 2)~%")
+  "A form with a comment written directly above it, no blank line between.")
+
+(deftest lisp-edit-form-keeps-a-comment-touching-the-form-with-it
+  ;; normalize_blank_lines set the form apart from the text before it, the
+  ;; comment included, so a replace left a blank line under the comment and an
+  ;; insert_before put the new form between the comment and its definition.
+  (testing "replace keeps the comment attached"
+    (with-temp-file "tests/tmp/edit-form-comment.lisp" *commented-forms-source*
+      (lambda (path)
+        (lisp-edit-form :file-path path :form-type "defun" :form-name "beta"
+                        :operation "replace" :content "(defun beta () 22)")
+        (ok (search (format nil ";; A second line of it.~%(defun beta () 22)")
+                    (fs-read-file path))
+            (fs-read-file path)))))
+  (testing "insert_before puts the new form above the comment"
+    (with-temp-file "tests/tmp/edit-form-comment.lisp" *commented-forms-source*
+      (lambda (path)
+        (lisp-edit-form :file-path path :form-type "defun" :form-name "beta"
+                        :operation "insert_before" :content "(defun alpha-2 () 12)")
+        (ok (equal (format nil "(defun alpha () 1)~%~%(defun alpha-2 () 12)~%~%~
+                                ;; Comment describing beta.~%;; A second line of it.~%~
+                                (defun beta () 2)~%")
+                   (fs-read-file path))
+            (fs-read-file path)))))
+  (testing "insert_before without normalization does the same"
+    (with-temp-file "tests/tmp/edit-form-comment.lisp" *commented-forms-source*
+      (lambda (path)
+        (lisp-edit-form :file-path path :form-type "defun" :form-name "beta"
+                        :operation "insert_before" :content "(defun alpha-2 () 12)"
+                        :normalize-blank-lines nil)
+        (ok (search (format nil "(defun alpha-2 () 12)~%~%;; Comment describing beta.")
+                    (fs-read-file path))
+            (fs-read-file path))))))
+
+(deftest lisp-edit-form-reports-a-kept-prefix-without-the-comment-after-it
+  ;; The kept prefix was reported with the comment after it, as if the comment
+  ;; were part of the feature expression.
+  (multiple-value-bind (text kept)
+      (%replace-in-feature-fixture
+       (format nil "#+sbcl~%;; SBCL has a good sqrt.~%(defun fast-sqrt (x) (sqrt x))~%")
+       "fast-sqrt" "(defun fast-sqrt (x) (sqrt (float x)))")
+    (ok (equal "#+sbcl" kept) (format nil "kept_feature_expression is the expression: ~S" kept))
+    (ok (search (format nil "#+sbcl~%;; SBCL has a good sqrt.~%~
+                             (defun fast-sqrt (x) (sqrt (float x)))")
+                text)
+        "and the comment is still in the file")))
+
+(deftest lisp-edit-form-not-found-names-the-file-as-the-other-messages-do
+  ;; It printed the absolute path, the only message of these tools that did,
+  ;; and ran into the next sentence with no full stop.
+  (with-temp-file "tests/tmp/edit-form-not-found.lisp" (format nil "(defun alpha () 1)~%")
+    (lambda (path)
+      (let ((message (handler-case
+                         (progn (lisp-edit-form :file-path path :form-type "defun"
+                                                :form-name "no-such" :operation "replace"
+                                                :content "(defun no-such () 1)")
+                                nil)
+                       (error (e) (princ-to-string e)))))
+        (ok (search "not found in tests/tmp/edit-form-not-found.lisp." message)
+            (format nil "relative path and a full stop: ~S" message))))))
+
+(deftest lisp-edit-form-names-the-line-of-the-form-it-matched
+  ;; Two definitions of one name were told apart by an index alone, and no
+  ;; answer said which line the form it edited started on.
+  (with-temp-file "tests/tmp/edit-form-lines.lisp"
+    (format nil "(defun twice () 1)~%~%(defun other () 0)~%~%(defun twice () 2)~%")
+    (lambda (path)
+      (let ((message (handler-case
+                         (progn (lisp-edit-form :file-path path :form-type "defun"
+                                                :form-name "twice" :operation "replace"
+                                                :content "(defun twice () 3)")
+                                nil)
+                       (error (e) (princ-to-string e)))))
+        (ok (search "twice, line 5" message)
+            (format nil "the listing gives each match its line: ~S" message)))
+      (let ((preview (lisp-edit-form :file-path path :form-type "defun"
+                                     :form-name "twice[1]" :operation "replace"
+                                     :content "(defun twice () 3)" :dry-run t)))
+        (ok (eql 5 (gethash "line" preview)) "the dry run says where the form starts"))
+      (ok (eql 3 (nth-value 10 (lisp-edit-form :file-path path :form-type "defun"
+                                               :form-name "other" :operation "replace"
+                                               :content "(defun other () 9)")))
+          "and so does an applied edit"))))
+
 (deftest lisp-edit-form-replace-with-the-same-form-changes-nothing
   ;; It reported `(would change)' with the original and the preview identical,
   ;; and, applied, put a blank line on each side of the form, splitting the run.
