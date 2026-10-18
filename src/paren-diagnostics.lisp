@@ -1013,31 +1013,31 @@ in-readtable, which may define them).
 The text is read with the standard readtable and *READ-SUPPRESS* on, and any
 other failure means NIL: only these three are evidence that no readtable makes
 the file readable.  A # dispatch the standard readtable leaves undefined, such
-as #?, ends the read with NIL too: it is custom syntax, and the reader would
-read the text after it -- a regular expression, a heredoc -- as standard
-syntax, where a #< in it is no evidence of anything."
+as #? or #!, anywhere in the raw text means NIL too: it is custom syntax, and
+the reader would read the text after it -- a regular expression, a heredoc --
+as standard syntax, where a #< in it is no evidence of anything."
   ;; Read only when such a # is there at all: the reader recurses, and a form
   ;; nested deep enough to stop the parser would exhaust the stack here.
   (when (and (not (search "in-readtable" text :test #'char-equal))
-             (loop for i = (position #\# text) then (position #\# text :start (1+ i))
+             (loop with standard = (copy-readtable nil)
+                   with found = nil
+                   for i = (position #\# text) then (position #\# text :start (1+ i))
                    for sub = (and i (position-if-not #'digit-char-p text :start (1+ i)))
-                   while i
-                   thereis (and sub
-                                (member (char text sub)
-                                        '(#\< #\) #\Space #\Tab #\Newline #\Page #\Return)))))
+                   while (and i sub)
+                   do (let ((ch (char text sub)))
+                        (cond ((member ch '(#\< #\) #\Space #\Tab #\Newline #\Page #\Return))
+                               (setf found t))
+                              ;; Undefined anywhere in the raw text -- a string
+                              ;; or a comment included, to be safe -- means
+                              ;; custom syntax: no verdict.
+                              ((null (get-dispatch-macro-character #\# ch standard))
+                               (return nil))))
+                   finally (return found)))
     (with-input-from-string (in text)
       (handler-case
           (let ((*readtable* (copy-readtable nil))
                 (*read-suppress* t)
                 (*read-eval* nil))
-            (loop for code below 128
-                  for ch = (code-char code)
-                  unless (or (digit-char-p ch) (get-dispatch-macro-character #\# ch))
-                    do (set-dispatch-macro-character
-                        #\# ch
-                        (lambda (stream sub-char arg)
-                          (declare (ignore stream sub-char arg))
-                          (return-from unreadable-dispatch-position nil))))
             (loop until (eq in (read in nil in)))
             nil)
         (reader-error ()

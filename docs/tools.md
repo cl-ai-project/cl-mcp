@@ -414,19 +414,20 @@ overwritten by default (`existing_lisp_overwrite_forbidden`; use `lisp-edit-form
 `allow_unparseable_overwrite: true` the file is parsed first, and the write is allowed in three
 cases: the parse fails on a delimiter (a missing or stray `)`, or an unterminated string or `#|`
 comment) that no readtable could fix; the file declares no readtable (no `in-readtable` anywhere
-in it) and holds a `#<`, `#)` or `#` followed by whitespace, which the standard makes every
-standard readtable reject -- an object printed unreadably, such as `#<HASH-TABLE ...>`, pasted
-as source (the warning after the first write, lisp-check-parens and the edit tools' error name
-its line and column); **or** the parser reached a top-level `(in-readtable ...)` naming a
-readtable this server process does not have — nothing can parse past that point here and the
-`readtable` argument resolves in this same process, so refusing would leave the file with no
-write path while pointing at `lisp-edit-form`, which points back. The evidence is the parser's,
-not a scan of the text, so a mention in a comment, a string or a quoted list does not open the
-guard, and neither does a declaration past the point the reader reached. A file that parses, one
-that fails at reader level while the readtable it needs *is* available here, a truncated read,
-or an unreadable file is still refused. The intended recovery loop is `lisp-check-parens` →
-`fs-read-file` → `fs-write-file` with the flag; `path` must be relative to the project root, and
-the guidance the tools print gives it in that form. The plain refusal (no flag) carries
+in it), uses no `#` dispatch the standard readtable lacks (such as `#?`), and holds a `#<`, `#)`
+or `#` followed by whitespace, which the standard makes every standard readtable reject -- an
+object printed unreadably, such as `#<HASH-TABLE ...>`, pasted as source (the warning after the
+first write, lisp-check-parens and the edit tools' error name its line and column); **or** the
+parser reached a top-level `(in-readtable ...)` naming a readtable this server process does not
+have — nothing can parse past that point here and the `readtable` argument resolves in this same
+process, so refusing would leave the file with no write path while pointing at `lisp-edit-form`,
+which points back. The evidence is the parser's, not a scan of the text, so a mention in a
+comment, a string or a quoted list does not open the guard, and neither does a declaration past
+the point the reader reached. A file that parses, one that fails at reader level while the
+readtable it needs *is* available here, a truncated read, or an unreadable file is still
+refused. The intended recovery loop is `lisp-check-parens` → `fs-read-file` → `fs-write-file`
+with the flag; `path` must be relative to the project root, and the guidance the tools print
+gives it in that form. The plain refusal (no flag) carries
 `allow_unparseable_overwrite_available: true` in its error data so a client can discover the
 opt-in.
 

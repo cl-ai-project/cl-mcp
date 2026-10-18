@@ -1021,7 +1021,10 @@ parens (min count room) is the IF's else branch; by indentation it is not.")
       (ok (equal '(nil) (position-of (format nil "(defun a ()~%  (scan #?/foo #<bar>/ x))")))
           "#? first")
       (ok (equal '(nil) (position-of "#?/(?x) \\d+ # <digits>/")))
-      (ok (equal '(nil) (position-of "#>eof>text #<obj> eof"))))
+      (ok (equal '(nil) (position-of "#>eof>text #<obj> eof")))
+      (ok (equal '(nil) (position-of (format nil "(list #~Cfoo #<bar>~C)"
+                                             (code-char 171) (code-char 187))))
+          "a non-ASCII dispatch character too"))
     (testing "inside a string, a comment or a character, no position"
       (dolist (text '("\"#<x>\"" "; #<x>" "#| #<x> |#" "#\\#<" "|a#<b|"))
         (ok (equal '(nil) (position-of text)) text)))))
