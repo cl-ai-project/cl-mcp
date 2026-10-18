@@ -296,7 +296,9 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
                   (list (%xref "/abs/a.lisp" 1 :type "call" :caller "(lambda)")
                         (%xref "/abs/a.lisp" 1 :type "reference" :caller "named"
                                                :caller-symbol "P::NAMED" :stale t))
-                  (list (%resolved "/abs/a.lisp" 1 :test-name "a-test"))))
+                  ;; Named after the stale entry's caller: a stale entry meets
+                  ;; its form by name.
+                  (list (%resolved "/abs/a.lisp" 1 :test-name "a-test" :form-name "named"))))
            (ref (first refs)))
       (ok (= 1 (length refs)))
       (ok (equal '("call" "reference") (coerce (gethash "types" ref) 'list)))
@@ -353,6 +355,70 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
           "a form in another file never holds the line")
       (ok (and source-only (equal "b" (gethash "form_name" source-only)))
           "the form the index named is left to the source scan"))))
+
+(deftest merge-references-meets-a-stale-entry-by-its-callers-name
+  ;; After forms are inserted above a caller and the file is not reloaded, the
+  ;; entry's index and line both land in a shifted neighbour: by index and span
+  ;; the merge listed non-callers as callers and the real callers as "not in
+  ;; xref".
+  (testing "a defun meets the form of its name, wherever it moved"
+    (let* ((refs (merge-references
+                  (list (%xref "/abs/a.lisp" 5 :caller "b" :caller-symbol "P::B"
+                                               :line 50 :stale t))
+                  (list (%resolved "/abs/a.lisp" 5 :start-line 50 :form-name "inserted")
+                        (%resolved "/abs/a.lisp" 7 :start-line 70 :form-name "b"))))
+           (b (find "b" refs :key (lambda (ref) (gethash "form_name" ref)) :test #'equal))
+           (inserted (find "inserted" refs :key (lambda (ref) (gethash "form_name" ref))
+                           :test #'equal)))
+      (ok (and b (equal "xref+source" (gethash "origin" b)) (= 70 (gethash "line" b)))
+          "the caller is met with its own form")
+      (ok (and inserted (equal "source" (gethash "origin" inserted)))
+          "the form now at its old place is not taken for it")
+      (ok (and inserted (search "reload" (gethash "note" inserted))
+               (not (search "not in xref" (gethash "note" inserted))))
+          "and a form of a stale file is not said to be missing from xref")))
+  (testing "a method meets the form of its specializers"
+    (let* ((refs (merge-references
+                  ;; Written as %FORMAT-XREF-CALLER writes a method's name.
+                  (list (%xref "/abs/a.lisp" 5 :caller "(defmethod eval-node (binop-node t))"
+                                               :caller-symbol "P::EVAL-NODE" :line 50 :stale t))
+                  (list (%resolved "/abs/a.lisp" 5
+                                   :start-line 50
+                                   :form-name "eval-node ((node num-node) env)")
+                        (%resolved "/abs/a.lisp" 6
+                                   :start-line 60
+                                   :form-name "eval-node ((node binop-node) env)"))))
+           (met (first (%with-origin refs "xref+source"))))
+      (ok (and met (equal "eval-node ((node binop-node) env)" (gethash "form_name" met)))
+          (format nil "met with the binop-node method: ~S"
+                  (and met (gethash "form_name" met))))))
+  (testing "an entry no form of its name holds is left unplaced, not given a neighbour"
+    ;; A deftest deleted from its file: its line now lies in the next test.
+    (let* ((refs (merge-references
+                  (list (%xref "/abs/a.lisp" 3 :caller "temp-ref" :caller-symbol "P::TEMP-REF"
+                                               :line 32 :stale t))
+                  (list (%resolved "/abs/a.lisp" 3 :start-line 30 :form-name "kept-test"
+                                                   :test-name "kept-test"))))
+           (temp (find "P::TEMP-REF" refs :key (lambda (ref) (gethash "caller_symbol" ref))
+                                          :test #'equal)))
+      (ok (and temp (null (gethash "form_name" temp)))
+          "it is not met with the test now at its line")
+      (ok (and temp (search "fresh worker" (gethash "note" temp)))
+          "and its note says a deleted definition stays until a fresh worker"))))
+
+(deftest build-references-report-names-the-macros-a-hidden-call-may-come-from
+  ;; A call xref recorded but no site shows was said to be "produced by a macro
+  ;; expansion" without naming any macro, while the same report's via_macros
+  ;; named the project macro whose expansion writes the symbol.
+  (let* ((refs (merge-references
+                (list (%xref "/abs/m.lisp" 1 :caller "run-line" :caller-symbol "P::RUN-LINE"
+                                             :line 12))
+                '()))
+         (report (build-references-report :symbol "p::evaluate" :refs refs
+                                          :via-macros (list "P::CALC")))
+         (ref (aref (gethash "refs" report) 0)))
+    (ok (search "P::CALC" (gethash "note" ref))
+        (format nil "the note names the macro: ~S" (gethash "note" ref)))))
 
 (deftest merge-references-flags-xref-types-no-site-shows
   (flet ((site (kind &optional (line 11))
