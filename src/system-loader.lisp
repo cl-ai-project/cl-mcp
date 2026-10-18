@@ -2,7 +2,7 @@
 ;;;;
 ;;;; MCP tool for loading ASDF systems with structured output.
 ;;;; Solves three problems with raw (asdf:load-system) via repl-eval:
-;;;; 1. Staleness: force=true (default) reloads the files changed since their FASL
+;;;; 1. Staleness: force=true (default) reloads the named system and its .asd
 ;;;; 2. Output noise: suppresses verbose compilation/load output
 ;;;; 3. Timeout: dedicated timeout with worker-thread pattern
 
@@ -28,7 +28,8 @@
   "Load an ASDF system with structured output and reload support.
 
 Solves three problems with using (asdf:load-system) via repl-eval:
-1. Staleness: force=true (default) reloads the files changed since their FASL
+1. Staleness: force=true (default) reloads the named system; package-inferred
+   code only where it is stale
 2. Output noise: suppresses verbose compilation/load output
 3. Timeout: dedicated timeout prevents hanging on large systems
 
@@ -42,11 +43,14 @@ it judges stale by their timestamps (one-second resolution).  A file of the
 project's tree written in the same second as its FASL would look current, so
 that FASL is deleted first, and the file is recompiled when this load reaches
 it (same_second_fasls_deleted counts the deletions).  clear_fasls=true is the
-guaranteed rebuild, of every file.  A file whose FASL is current is not loaded
-again -- in a package-inferred system force=true clears only the named system,
-not the per-file subsystems that hold the code -- so a definition made in
-repl-eval stays until its file is loaded again: clear_fasls=true or a fresh
-worker (pool-kill-worker) drops it.
+guaranteed rebuild, of every file.  force=true clears the named system and
+re-reads its .asd, so every system defined there is loaded again: a stale file
+is recompiled, a current FASL loaded as it is, and either replaces a definition
+made in repl-eval.  In a package-inferred system the code lives in per-file
+subsystems that are neither cleared nor re-read, so a file of one is loaded
+again only when it is stale, and a definition made in repl-eval stays until it
+is: load-system on that file's own system (my-app/src/states), clear_fasls=true
+or a fresh worker (pool-kill-worker) drops it.
 
 Warning handling: a file that compiles with a full WARNING (a duplicate
 definition, a type conflict, package variance, a wrong argument count to a
