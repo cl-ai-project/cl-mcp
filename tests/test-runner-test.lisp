@@ -272,6 +272,22 @@
         (ok (search "the rest needs a network" (text mixed)))
         (ok (= 1 (length (gethash "skipped_tests" mixed))))))))
 
+(deftest run-tests-skipped-list-says-each-tests-outcome
+  ;; The Skipped list held pending tests and tests that passed the rest alike,
+  ;; with nothing to tell them apart.
+  (let* ((result (run-tests "cl-mcp/tests/test-runner-test-counts"
+                            :tests '("cl-mcp/tests/test-runner-test-counts::only-skipped"
+                                     "cl-mcp/tests/test-runner-test-counts::passes-and-skips")))
+         (statuses (map 'list (lambda (entry)
+                                (cons (string-downcase (gethash "test_name" entry))
+                                      (gethash "status" entry)))
+                        (gethash "skipped_tests" result)))
+         (text (gethash "text" (aref (gethash "content" (build-run-tests-response result)) 0))))
+    (ok (equal "pending" (cdr (assoc "only-skipped" statuses :test #'string=))) statuses)
+    (ok (equal "passed" (cdr (assoc "passes-and-skips" statuses :test #'string=))))
+    (ok (search "ONLY-SKIPPED (pending) —" text) text)
+    (ok (search "PASSES-AND-SKIPS (passed the rest) —" text))))
+
 (deftest run-tests-selected-captures-stdout
  (testing "run-tests with :test captures stdout"
   (let ((result
@@ -372,6 +388,29 @@
              (failure (aref failures 0))
              (reason (gethash "reason" failure)))
         (ok (stringp reason) "Reason should be a string, not a condition object")))))
+
+(deftest run-tests-reports-an-escaping-error-by-its-class-and-frame
+  ;; An error escaping a deftest was printed "Form: T" -- Rove's placeholder --
+  ;; with the report alone, and a NIL form was left out as if unknown.
+  (let* ((result (run-tests "cl-mcp/tests/test-runner-test-signal"))
+         (failures (coerce (gethash "failed_tests" result) 'list))
+         (escaped (find "ERROR-ESCAPES" failures
+                        :key (lambda (f) (gethash "test_name" f)) :test #'string=))
+         (nil-form (find "NIL-FORM-FAILS" failures
+                         :key (lambda (f) (gethash "test_name" f)) :test #'string=))
+         (text (gethash "text" (aref (gethash "content" (build-run-tests-response result)) 0))))
+    (ok (and escaped nil-form) (format nil "both failures: ~S" failures))
+    (testing "the escaping error"
+      (ok (null (gethash "form" escaped)) "no placeholder form")
+      (ok (equal "QUEUE-EMPTY: Queue queue is empty." (gethash "reason" escaped))
+          (gethash "reason" escaped))
+      (ok (search "DEQUEUE-EMPTY" (or (gethash "error_frame" escaped) ""))
+          (gethash "error_frame" escaped))
+      (ok (search "Error: QUEUE-EMPTY: Queue queue is empty." text) text)
+      (ok (search "In: DEQUEUE-EMPTY" text))
+      (ok (null (search "Form: T" text))))
+    (testing "a NIL form"
+      (ok (equal "NIL" (gethash "form" nil-form))))))
 
 (deftest run-tests-handles-undefined-function
   (testing "run-tests captures undefined function errors"
@@ -541,7 +580,8 @@
                                              :format-control "~S is unbound"
                                              :format-arguments '(probe-local))
                      :package (find-package '#:cl-mcp/tests/test-runner-test))))
-        (ok (equal "PROBE-LOCAL is unbound" (gethash "reason" detail))))))
+        ;; With its class in front: the report alone hides what was signalled.
+        (ok (equal "SIMPLE-ERROR: PROBE-LOCAL is unbound" (gethash "reason" detail))))))
   (testing "a keyword test name does not make every symbol print qualified"
     (let ((*package* (find-package '#:cl-user)))
       (ok (null (cl-mcp/src/test-runner-core::%test-name-package :some-test)))
@@ -923,6 +963,46 @@ everything again."
                      (lambda () (run-tests system)) 60))))
        (ok (search "caught 1 fatal ERROR condition" reason))
        (ok (null (search "caught 2 fatal ERROR conditions" reason)))))))
+
+(deftest run-tests-compiler-output-holds-no-redefinition-notice-or-repeat
+  ;; The compiler output of a refused load opened with a line per
+  ;; "redefining ... in DEFUN" and the refusing warning bare, before SBCL's own
+  ;; block wrote it again.
+  (%call-with-warning-test-system
+   "(eval-when (:compile-toplevel :load-toplevel :execute) (defun warm () 2))
+(defun helper () 1)
+(defun helper () 2)"
+   (lambda (system)
+     (unless (find-package "CLMCP-TEST-WARN-FIXTURE")
+       (make-package "CLMCP-TEST-WARN-FIXTURE" :use '(:cl)))
+     ;; A definition from elsewhere, so the compile-time one redefines it.
+     (setf (fdefinition (intern "WARM" "CLMCP-TEST-WARN-FIXTURE")) (lambda () 1))
+     (let ((reason (%first-failure-reason (run-tests system))))
+       ;; SBCL's own block, its lines starting "; ", may report it; the bare
+       ;; line the capture added may not.
+       (ok (null (search (format nil "~%redefining") reason)) reason)
+       (ok (eql 1 (loop for start = (search "Duplicate definition for HELPER" reason)
+                          then (search "Duplicate definition for HELPER" reason
+                                       :start2 (1+ start))
+                        while start count t))
+           "the warning once, in the compiler's own block")))))
+
+(deftest run-tests-names-the-file-that-met-an-unknown-suite
+  ;; FiveAM's "Unknown suite" names the suite, not the file whose def-suite
+  ;; :in loaded before it; with several test files each had to be opened.
+  (%call-with-fiveam-fixture
+   "fiveam-early-probe"
+   (list (cons "early.lisp" (%fiveam-fixture-file "fiveam-early-probe/early" "early-suite"
+                                                  '(("early-check" "(= 1 1)"))
+                                                  ":fiveam-early-probe"))
+         (cons "main.lisp" (%fiveam-fixture-file "fiveam-early-probe/main"
+                                                 ":fiveam-early-probe"
+                                                 '(("main-check" "(= 1 1)")))))
+   (lambda (dir)
+     (declare (ignore dir))
+     (let ((reason (%first-failure-reason (run-tests "fiveam-early-probe"))))
+       (ok (search "Unknown suite" reason))
+       (ok (search "early.lisp" reason) reason)))))
 
 (deftest load-failure-hint-for-package-variance-is-a-fresh-worker
   ;; The one warning a fresh worker cures: the file is as its author wants it,
