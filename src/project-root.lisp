@@ -123,10 +123,11 @@ via REGISTER-PROJECT-ROOT-SOURCE-REGISTRY. Tracked so a root change removes the
 old entry instead of leaving stale project roots in the search list (which would
 leak the previous project's systems into the new root).")
 
-(defvar *systems-left-by-root-change* (make-hash-table :test #'equal)
+(defvar *systems-left-by-root-change* (make-hash-table :test #'equal :synchronized t)
   "Maps the name of each system %CLEAR-SYSTEMS-UNDER unregistered to the system
 object it was.  Its packages, and the tests its files defined, outlive the
-registration.")
+registration.  Synchronized: a run-tests thread a deadline could not stop may
+still be reading it when a later root change writes.")
 
 (defun system-left-by-root-change (name)
   "Return the system named NAME as it was when a root change unregistered it, or
@@ -148,7 +149,10 @@ Each system unregistered is kept for SYSTEM-LEFT-BY-ROOT-CHANGE: what it
 loaded stays in the image."
   (let ((root (uiop:ensure-directory-pathname root)))
     (dolist (name (asdf:registered-systems))
-      (let* ((system (ignore-errors (asdf:find-system name nil)))
+      ;; REGISTERED-SYSTEM, not FIND-SYSTEM: the latter would load the .asd of
+      ;; a subsystem's primary already cleared in this loop, registering it
+      ;; again.
+      (let* ((system (ignore-errors (asdf:registered-system name)))
              (path (and system (ignore-errors (asdf:component-pathname system)))))
         (when (and path (uiop:subpathp path root))
           (setf (gethash name *systems-left-by-root-change*) system)

@@ -1609,8 +1609,8 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
 (defun %call-with-inferred-test-fixture (primary framework file-text thunk)
   "Write a package-inferred PRIMARY to a fresh directory on ASDF's central
 registry: it depends on FRAMEWORK and on the inferred PRIMARY/tests/a, whose
-file holds FILE-TEXT.  Call THUNK with the directory, then forget the systems,
-their packages and the directory."
+file holds FILE-TEXT.  Call THUNK with the directory, then forget the systems --
+in ASDF and as left by a root change --, their packages and the directory."
   (let ((dir (uiop:ensure-directory-pathname
               (uiop:merge-pathnames*
                (format nil "cl-mcp-~A-~A-~A/" primary (get-universal-time)
@@ -1638,7 +1638,8 @@ their packages and the directory."
                 (remove-if (lambda (suite) (search (string-upcase primary) (string suite)))
                            (symbol-value var)))))
       (dolist (name (list sub primary))
-        (ignore-errors (asdf:clear-system name)))
+        (ignore-errors (asdf:clear-system name))
+        (remhash name cl-mcp/src/project-root::*systems-left-by-root-change*))
       (let ((package (find-package (string-upcase sub)))
             (suites (uiop:find-symbol* '#:*package-suites* :rove/core/suite/package nil)))
         (when package
@@ -1652,8 +1653,9 @@ their packages and the directory."
   ;; packages and Rove suites stay.  The purge walked registered systems only,
   ;; so an inferred test file's suite was never cleared, and a test deleted
   ;; from that file ran again on the next run-tests, and was counted.  The
-  ;; purge itself is called here: run-tests on such a primary system takes
-  ;; Rove's zero-count fallback, which clears each sub-system's suite by name.
+  ;; purge itself is called here rather than run-tests: that would nest a
+  ;; rove:run inside the Rove run of this suite, which shares its state.  The
+  ;; FiveAM test below goes through run-tests end to end.
   (%call-with-inferred-test-fixture
    "rove-root-probe" "rove"
    "(defpackage #:rove-root-probe/tests/a (:use #:cl #:rove))
