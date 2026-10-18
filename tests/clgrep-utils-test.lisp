@@ -190,6 +190,82 @@ Final line
       (ok (ignored-p "**/*.log" "app.log"))
       (ok (ignored-p "**/*.log" "logs/app.log")))))
 
+(deftest glob-to-regex-reads-classes-escapes-and-a-lone-star-as-git-does
+  ;; Pathnames parsed natively: a namestring would read [ and * as wildcards.
+  (flet ((ignored-p (pattern path)
+           (path-ignored-p (uiop:parse-native-namestring
+                            (concatenate 'string "/project/" path))
+                           #P"/project/"
+                           (list (glob-to-regex pattern)))))
+    (testing "[...] is a character class"
+      (ok (ignored-p "[ab]x.lisp" "ax.lisp"))
+      (ok (ignored-p "[ab]x.lisp" "bx.lisp"))
+      (ok (not (ignored-p "[ab]x.lisp" "cx.lisp")))
+      (ok (ignored-p "[a-c]x.lisp" "cx.lisp"))
+      (ok (ignored-p "[!a]x.lisp" "bx.lisp"))
+      (ok (not (ignored-p "[!a]x.lisp" "ax.lisp"))))
+    (testing "a backslash makes the next character literal"
+      (ok (ignored-p "\\#hash.lisp" "#hash.lisp"))
+      (ok (ignored-p "\\*star.lisp" "*star.lisp"))
+      (ok (not (ignored-p "\\*star.lisp" "xstar.lisp"))))
+    (testing "an unclosed [ is literal"
+      (ok (ignored-p "odd[name.lisp" "odd[name.lisp")))
+    (testing "dir/* matches what is in the directory, not the directory itself"
+      ;; git never ignores gen/ for gen/*: a re-include under it stays reachable.
+      (ok (ignored-p "gen/*" "gen/x.lisp"))
+      (ok (not (ignored-p "gen/*" "gen/"))))))
+
+(defun %call-with-gitignore-tree (gitignore files thunk)
+  "Write GITIGNORE as the .gitignore of a fresh directory holding FILES (paths
+relative to it, each given a one-line Lisp body), call THUNK with the directory,
+and delete it."
+  (let ((root (uiop:ensure-directory-pathname
+               (uiop:merge-pathnames*
+                (format nil "cl-mcp-gitignore-~36R/" (random most-positive-fixnum
+                                                            (make-random-state t)))
+                (uiop:temporary-directory)))))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist root)
+           (with-open-file (out (merge-pathnames ".gitignore" root)
+                                :direction :output :if-exists :supersede)
+             (write-string gitignore out))
+           (dolist (file files)
+             (let ((path (merge-pathnames file root)))
+               (ensure-directories-exist path)
+               (with-open-file (out path :direction :output :if-exists :supersede)
+                 (format out "(defun probe () ~S)~%" file))))
+           (funcall thunk (truename root)))
+      (uiop:delete-directory-tree root :validate (lambda (path)
+                                                   (search "cl-mcp-gitignore-"
+                                                           (namestring path)))))))
+
+(deftest collect-target-files-honours-negation-as-git-does
+  ;; What git check-ignore said of the same tree (issue #244): a ! pattern
+  ;; re-includes, the last matching pattern decides, and a file under a
+  ;; directory left out stays out whatever comes after.
+  (%call-with-gitignore-tree
+   (format nil "*.tmp~%!keep.tmp~%*-tmp.lisp~%!keep-tmp.lisp~%gen/*~%!gen/keep.lisp~%~
+                scratch/~%!scratch/keep.lisp~%[ab]x.lisp~%\\#hash.lisp~%")
+   '("keep.tmp/b.lisp" "drop.tmp/c.lisp" "keep-tmp.lisp" "drop-tmp.lisp"
+     "gen/keep.lisp" "gen/drop.lisp" "scratch/keep.lisp" "ax.lisp" "cx.lisp"
+     "#hash.lisp" "src/main.lisp")
+   (lambda (root)
+     (let ((found (mapcar (lambda (path) (enough-namestring path root))
+                          (collect-target-files root)))
+           (project-p (cl-mcp/src/utils/project-files:project-file-predicate root)))
+       (dolist (kept '("keep.tmp/b.lisp" "keep-tmp.lisp" "gen/keep.lisp" "cx.lisp"
+                       "src/main.lisp"))
+         (ok (member kept found :test #'string=) (format nil "~A is searched" kept))
+         (ok (funcall project-p (merge-pathnames kept root))
+             (format nil "~A is the project's" kept)))
+       (dolist (left-out '("drop.tmp/c.lisp" "drop-tmp.lisp" "gen/drop.lisp"
+                           "scratch/keep.lisp" "ax.lisp" "#hash.lisp"))
+         (ok (not (member left-out found :test #'string=))
+             (format nil "~A is left out" left-out))
+         (ok (not (funcall project-p (merge-pathnames left-out root)))
+             (format nil "~A is not the project's" left-out)))))))
+
 (deftest test-collect-target-files
   (testing "should collect .lisp, .asd, and .ros files from project"
     (let ((files (collect-target-files

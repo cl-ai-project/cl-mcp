@@ -241,11 +241,14 @@ lines it swallowed still belong to a form."
 
 (defun glob-to-regex (pattern)
   "Convert a gitignore glob PATTERN to a regular expression string, matched with
-SCAN against a path relative to the root.  Handles *, ?, ** and basic glob syntax.
+SCAN against a path relative to the root.  Handles *, ?, **, [...] classes ([!...]
+and [^...] negated) and a backslash that makes the next character literal.
 As git does, the pattern matches whole path components: a slash at its start or
 in its middle anchors it to the root, otherwise it matches at any depth, and a
 trailing slash matches a directory and what is in it.  Matching the bare text
-anywhere would leave out src/catalog.lisp for the pattern log."
+anywhere would leave out src/catalog.lisp for the pattern log.  A component that
+is a lone * matches a non-empty one, as every component is: gen/* matches what is
+in gen/, not gen/ itself."
   (let* ((len (length pattern))
          (directory-p (and (> len 0) (char= (char pattern (1- len)) #\/)))
          (body (string-left-trim "/" (if directory-p (subseq pattern 0 (1- len)) pattern)))
@@ -254,8 +257,21 @@ anywhere would leave out src/catalog.lisp for the pattern log."
          (result (make-array 0 :element-type 'character :fill-pointer 0 :adjustable t))
          (i 0)
          (body-len (length body)))
-    (flet ((emit (string)
-             (loop for c across string do (vector-push-extend c result))))
+    (labels ((emit (string)
+               (loop for c across string do (vector-push-extend c result)))
+             (emit-literal (char)
+               (when (find char ".+*?^$(){}[]|\\")
+                 (vector-push-extend #\\ result))
+               (vector-push-extend char result))
+             (class-end (start)
+               ;; The index of the ] closing a class whose [ is at START, or NIL.
+               ;; A ] first in the class, after any !/^, is one of its members.
+               (let ((j (1+ start)))
+                 (when (and (< j body-len) (find (char body j) "!^"))
+                   (incf j))
+                 (when (and (< j body-len) (char= (char body j) #\]))
+                   (incf j))
+                 (position #\] body :start j))))
       (emit (if anchored-p "^" "(?:^|/)"))
       (loop while (< i body-len)
             do (let ((char (char body i)))
@@ -274,6 +290,12 @@ anywhere would leave out src/catalog.lisp for the pattern log."
                          (= (+ i 2) body-len))
                     (emit ".*")
                     (incf i 2))
+                   ;; A lone * as a whole component matches a non-empty one
+                   ((and (char= char #\*)
+                         (or (zerop i) (char= (char body (1- i)) #\/))
+                         (or (= (1+ i) body-len) (char= (char body (1+ i)) #\/)))
+                    (emit "[^/]+")
+                    (incf i))
                    ;; A single * matches anything except /
                    ((char= char #\*)
                     (emit "[^/]*")
@@ -282,21 +304,35 @@ anywhere would leave out src/catalog.lisp for the pattern log."
                    ((char= char #\?)
                     (emit "[^/]")
                     (incf i))
-                   ;; Regex special characters are escaped
-                   ((find char ".+^$(){}[]|\\")
-                    (vector-push-extend #\\ result)
-                    (vector-push-extend char result)
-                    (incf i))
+                   ;; \x is x, whatever x is
+                   ((and (char= char #\\) (< (1+ i) body-len))
+                    (emit-literal (char body (1+ i)))
+                    (incf i 2))
+                   ;; [...] is a class of characters, never including /
+                   ((and (char= char #\[) (class-end i))
+                    (let* ((end (class-end i))
+                           (start (1+ i))
+                           (negated (find (char body start) "!^")))
+                      (emit (if negated "[^/" "["))
+                      (loop for k from (if negated (1+ start) start) below end
+                            for member = (char body k)
+                            do (when (find member "\\[]^")
+                                 (vector-push-extend #\\ result))
+                               (vector-push-extend member result))
+                      (emit "]")
+                      (setf i (1+ end))))
                    (t
-                    (vector-push-extend char result)
+                    (emit-literal char)
                     (incf i)))))
       ;; The last component ends where the path or a component does.
       (emit (if directory-p "/" "(?:/|$)")))
     result))
 
 (defun parse-gitignore (gitignore-path)
-  "Parse a .gitignore file and return a list of regex pattern strings.
-   Returns NIL if the file doesn't exist."
+  "Parse a .gitignore file and return its patterns in file order, each a regex
+string (GLOB-TO-REGEX) that leaves a path out, or (:NEGATE . regex) for a line
+starting with !, which takes a path back in.  Returns NIL if the file doesn't
+exist."
   (when (probe-file gitignore-path)
     (with-open-file (stream gitignore-path :direction :input)
       (loop for line = (read-line stream nil nil)
@@ -304,27 +340,53 @@ anywhere would leave out src/catalog.lisp for the pattern log."
             for trimmed = (string-trim '(#\Space #\Tab #\Return) line)
             unless (or (zerop (length trimmed))           ; Empty line
                        (char= (char trimmed 0) #\#))      ; Comment
-            collect (glob-to-regex trimmed)))))
+              collect (if (char= (char trimmed 0) #\!)
+                          (cons :negate (glob-to-regex (subseq trimmed 1)))
+                          (glob-to-regex trimmed))))))
 
-(defun path-ignored-p (path root-dir ignore-patterns)
-  "Check if PATH matches any of the IGNORE-PATTERNS.
-   PATH is made relative to ROOT-DIR for matching."
-  (let* ((relative-path (enough-namestring path root-dir))
-         ;; Convert backslashes to forward slashes for consistency
-         (normalized-path (substitute #\/ #\\ relative-path)))
-    (dolist (pattern ignore-patterns)
-      (when (cl-ppcre:scan pattern normalized-path)
-        (return-from path-ignored-p t)))
-    nil))
+(defun %last-match-ignores-p (relative-path patterns)
+  "True when the last of PATTERNS that matches RELATIVE-PATH leaves it out: a
+pattern is a regex or scanner that does, or (:NEGATE . regex-or-scanner) that
+takes the path back in.  NIL when none matches."
+  (let ((ignored nil))
+    (dolist (pattern patterns ignored)
+      (let ((negated (and (consp pattern) (eq (car pattern) :negate))))
+        (when (cl-ppcre:scan (if negated (cdr pattern) pattern) relative-path)
+          (setf ignored (not negated)))))))
+
+(defun path-ignored-p (path root-dir ignore-patterns &key (parents t))
+  "True when PATH, made relative to ROOT-DIR, is left out by IGNORE-PATTERNS,
+patterns as PARSE-GITIGNORE returns them, as git decides: the last pattern that
+matches says, and a path under a directory left out stays out, as no pattern can
+take back what is inside an excluded directory.  PARENTS NIL skips that check of
+the directories above PATH, for a walk that has made it on the way down."
+  (let* ((path-string (uiop:native-namestring path))
+         (root-string (uiop:native-namestring (uiop:ensure-directory-pathname root-dir)))
+         ;; Native namestrings: ENOUGH-NAMESTRING escapes * [ and ? in a name.
+         (relative (substitute #\/ #\\
+                               (if (uiop:string-prefix-p root-string path-string)
+                                   (subseq path-string (length root-string))
+                                   path-string))))
+    (or (and parents
+             (loop for slash = (position #\/ relative)
+                     then (position #\/ relative :start (1+ slash))
+                   while (and slash (< (1+ slash) (length relative)))
+                   thereis (%last-match-ignores-p (subseq relative 0 (1+ slash))
+                                                  ignore-patterns)))
+        (%last-match-ignores-p relative ignore-patterns))))
 
 (defun root-ignore-patterns (root-dir)
   "Return the patterns that leave a path under ROOT-DIR out of the project: its
-.gitignore's, and .git/.  Matched with PATH-IGNORED-P.
+.gitignore's, in order, then .git/, last so no ! line takes it back in.  Matched
+with PATH-IGNORED-P.
 Compiled here, once: given as strings, CL-PPCRE:SCAN compiles each again for
 every entry of the walk, which took seconds over a large project's tree."
-  (mapcar #'create-scanner
-          (cons (glob-to-regex ".git/")
-                (parse-gitignore (merge-pathnames ".gitignore" root-dir)))))
+  (mapcar (lambda (pattern)
+            (if (consp pattern)
+                (cons (car pattern) (create-scanner (cdr pattern)))
+                (create-scanner pattern)))
+          (append (parse-gitignore (merge-pathnames ".gitignore" root-dir))
+                  (list (glob-to-regex ".git/")))))
 
 (defun target-file-p (pathname)
   "Check if PATHNAME has a target extension (.lisp, .asd, or .ros)."
@@ -336,7 +398,9 @@ every entry of the walk, which took seconds over a large project's tree."
   "Collect .lisp, .asd, and .ros files from ROOT-DIRECTORY.
    If ROOT-DIRECTORY is a single file, return it in a list (if it's a target file).
    If RECURSIVE is true (default), search subdirectories recursively.
-   Respects .gitignore patterns and excludes .git directories."
+   Respects .gitignore patterns and excludes .git directories.  A directory left
+   out is not entered, so each entry's own directories were checked on the way
+   down (PATH-IGNORED-P :PARENTS NIL)."
   (let ((root-path (truename root-directory)))
     ;; Handle single file case
     (when (uiop:file-pathname-p root-path)
@@ -348,23 +412,25 @@ every entry of the walk, which took seconds over a large project's tree."
     (let* ((root-dir (uiop:ensure-directory-pathname root-path))
            (all-patterns (root-ignore-patterns root-dir))
            (result nil))
-      (if recursive
-          (labels ((collect-from-dir (dir)
-                     "Recursively collect files from DIR."
-                     (dolist (entry (uiop:directory*
-                                     (merge-pathnames uiop:*wild-file* dir)))
-                       (unless (path-ignored-p entry root-dir all-patterns)
-                         (when (target-file-p entry)
-                           (push entry result))))
-                     (dolist (subdir (uiop:subdirectories dir))
-                       (unless (path-ignored-p subdir root-dir all-patterns)
-                         (collect-from-dir subdir)))))
-            (collect-from-dir root-dir))
-          (dolist (entry (uiop:directory*
-                          (merge-pathnames uiop:*wild-file* root-dir)))
-            (unless (path-ignored-p entry root-dir all-patterns)
-              (when (target-file-p entry)
-                (push entry result)))))
+      (flet ((ignored-p (entry)
+               (path-ignored-p entry root-dir all-patterns :parents nil)))
+        (if recursive
+            (labels ((collect-from-dir (dir)
+                       "Recursively collect files from DIR."
+                       (dolist (entry (uiop:directory*
+                                       (merge-pathnames uiop:*wild-file* dir)))
+                         (unless (ignored-p entry)
+                           (when (target-file-p entry)
+                             (push entry result))))
+                       (dolist (subdir (uiop:subdirectories dir))
+                         (unless (ignored-p subdir)
+                           (collect-from-dir subdir)))))
+              (collect-from-dir root-dir))
+            (dolist (entry (uiop:directory*
+                            (merge-pathnames uiop:*wild-file* root-dir)))
+              (unless (ignored-p entry)
+                (when (target-file-p entry)
+                  (push entry result))))))
       (nreverse result))))
 
 (defparameter *known-form-types*
