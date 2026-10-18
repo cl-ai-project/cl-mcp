@@ -1606,6 +1606,51 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
                    (gethash "unreached_tests" result)))
        (ok (equal "✓ PASS" (%headline result)) "a plain pass")))))
 
+(deftest run-tests-forgets-a-suite-it-called-outside-once-it-is-nested
+  ;; FiveAM never removes a name from *toplevel-suites*: a suite first defined
+  ;; without :in stayed listed there after the file nested it, and run-tests
+  ;; kept calling it outside the root suite, advice the file already followed.
+  (flet ((sub-file (parent)
+           (%fiveam-fixture-file "fiveam-nest-probe/sub" "sub-suite"
+                                 '(("sub-check" "(= 1 1)")) parent)))
+    (%call-with-fiveam-fixture
+     "fiveam-nest-probe"
+     (list (cons "main.lisp" (%fiveam-fixture-file "fiveam-nest-probe/main"
+                                                   ":fiveam-nest-probe"
+                                                   '(("main-check" "(= 1 1)"))))
+           (cons "sub.lisp" (sub-file nil)))
+     (lambda (dir)
+       (ok (gethash "suites_outside_root" (run-tests "fiveam-nest-probe"))
+           "a suite without :in is outside the root suite")
+       (%write-fixture-file dir "sub.lisp" (sub-file ":fiveam-nest-probe"))
+       (let ((result (run-tests "fiveam-nest-probe")))
+         (ok (null (gethash "suites_outside_root" result))
+             (format nil "nested now, it is not called outside: ~S"
+                     (gethash "suites_outside_root" result)))
+         (ok (equal "✓ PASS" (%headline result)) "a plain pass"))))))
+
+(deftest run-tests-forgets-a-fiveam-test-a-repl-eval-compile-left
+  ;; repl-eval compiles under a compilation unit whose source namestring is
+  ;; "repl-eval", so a test loaded that way names "repl-eval" as its file and
+  ;; the purge, which matches files, never forgot it once deleted.
+  (%call-with-fiveam-fixture
+   "fiveam-repl-probe"
+   (list (cons "main.lisp" (%fiveam-fixture-file "fiveam-repl-probe/main" ":fiveam-repl-probe"
+                                                 '(("kept" "(= 1 1)") ("deleted" "(= 2 2)")))))
+   (lambda (dir)
+     (let ((source (uiop:merge-pathnames* "main.lisp" dir)))
+       (with-compilation-unit (:override t :source-namestring "repl-eval")
+         (load (compile-file source :output-file (uiop:merge-pathnames* "repl.fasl" dir)
+                                    :verbose nil :print nil))))
+     (%write-fixture-file dir "main.lisp"
+                          (%fiveam-fixture-file "fiveam-repl-probe/main" ":fiveam-repl-probe"
+                                                '(("kept" "(= 1 1)"))))
+     (let ((result (run-tests "fiveam-repl-probe")))
+       (ok (= 1 (gethash "passed" result)) "the test still in the file runs")
+       (ok (null (gethash "unreached_tests" result))
+           (format nil "the deleted test is not reported (~S)"
+                   (gethash "unreached_tests" result)))))))
+
 (deftest run-tests-keeps-fiveam-tests-of-packages-it-does-not-reload
   ;; Only a package the reload defines again loses its tests first: a test of
   ;; any other package would not come back, and would vanish from the run.

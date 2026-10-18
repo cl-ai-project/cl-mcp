@@ -2076,6 +2076,21 @@ NAMED-LAMBDA as the file loads, and SBCL names a function compiled then
          (in (and (consp name) (member :in name))))
     (and in (stringp (second in)) (second in))))
 
+(defun %packages-defined-by (files)
+  "Return the packages the Lisp source files among FILES, namestrings, define with
+DEFPACKAGE or DEFINE-PACKAGE, as far as they exist in this image."
+  (let ((scan-package (make-package (gensym "CL-MCP-DEFPACKAGE-SCAN") :use '(:cl))))
+    (unwind-protect
+         (remove-duplicates
+          (loop for file in files
+                when (and (equalp "lisp" (pathname-type (uiop:parse-native-namestring file)))
+                          (probe-file file))
+                  append (loop for name in (%extract-defpackage-names-from-file
+                                            file scan-package)
+                               for package = (find-package name)
+                               when package collect package)))
+      (ignore-errors (delete-package scan-package)))))
+
 (defun %fiveam-purge-ghost-tests (system-names)
   "Remove from FiveAM the tests made by a file the reload of SYSTEM-NAMES loads
 again (%RELOADED-FILES, %FIVEAM-TEST-FILE), before that reload.  FiveAM keeps
@@ -2084,24 +2099,48 @@ this worker, reached by no suite and reported as never run; the reload makes the
 current ones again.  A test of any other file stays, whatever its package -- one
 a dependency defines, even in a package a reloaded file shares, would not come
 back -- and so does a test whose file cannot be told, and every suite: a
-def-suite replaces its suite when it runs again."
+def-suite replaces its suite when it runs again.
+
+A test whose file is no file -- compiled under repl-eval, whose compilation unit
+names its source \"repl-eval\" -- goes too when a reloaded file defines its
+package: that file is where it came from, and the reload makes again what it
+still holds."
   (let ((test-names (%fiveam-symbol "TEST-NAMES"))
         (rem-test (%fiveam-symbol "REM-TEST")))
     (when (and test-names rem-test (fboundp test-names) (fboundp rem-test))
       (let ((files (%reloaded-files system-names)))
         (when files
-          (dolist (name (remove-duplicates (funcall test-names)))
-            (let ((object (%fiveam-test-object name)))
-              (when (and object
-                         (not (%fiveam-suite-p object))
-                         (member (%fiveam-test-file object) files :test #'equal))
-                (funcall rem-test name)))))))))
+          (let ((packages (%packages-defined-by files)))
+            (dolist (name (remove-duplicates (funcall test-names)))
+              (let* ((object (%fiveam-test-object name))
+                     (file (and object (%fiveam-test-file object))))
+                (when (and object
+                           (not (%fiveam-suite-p object))
+                           (or (member file files :test #'equal)
+                               (and (stringp file)
+                                    (not (uiop:absolute-pathname-p
+                                          (uiop:parse-native-namestring file)))
+                                    (symbolp name)
+                                    (member (symbol-package name) packages))))
+                  (funcall rem-test name))))))))))
 
 (defun %qualified-test-name (symbol)
   "Return SYMBOL written PACKAGE::NAME, or :NAME for a keyword."
   (if (keywordp symbol)
       (format nil ":~A" (symbol-name symbol))
       (format nil "~A::~A" (package-name (symbol-package symbol)) (symbol-name symbol))))
+
+(defun %fiveam-suites-under (suite-name)
+  "Return an EQ table of the suite objects the suite SUITE-NAME holds, through its
+sub-suites, itself included: what running it runs."
+  (let ((seen (make-hash-table :test 'eq)))
+    (labels ((visit (suite)
+               (when (and (%fiveam-suite-p suite) (not (gethash suite seen)))
+                 (setf (gethash suite seen) t)
+                 (loop for (nil . child) in (%fiveam-suite-children suite)
+                       do (visit child)))))
+      (visit (%fiveam-test-object suite-name)))
+    seen))
 
 (defun %fiveam-reachability (system-name suite-symbols ran-names)
   "Return (values UNREACHED OUTSIDE) for a run of SYSTEM-NAME's SUITE-SYMBOLS that
@@ -2115,7 +2154,8 @@ worker that loaded both before, leaves its tests under the previous root suite
 object: the run then reports a pass without them.  So does a test only an OR's
 unneeded alternative depends on.
 OUTSIDE: run suites other than the root suite, the one named after the primary
-system.  run-tests runs them, but a test-op running the root suite -- the
+system, that the root's tree does not hold (%FIVEAM-SUITES-UNDER).  run-tests
+runs them, but a test-op running the root suite -- the
 scaffold's does -- never reaches them, so the two runs differ unseen.
 Both are lists of qualified names; OUTSIDE is NIL when no root suite is found."
   (let ((unreached (set-difference (%fiveam-system-test-names system-name)
@@ -2125,8 +2165,17 @@ Both are lists of qualified names; OUTSIDE is NIL when no root suite is found."
                     :key #'string :test #'string-equal)))
     (values (sort (mapcar #'%qualified-test-name unreached) #'string<)
             (and root
-                 (sort (mapcar #'%qualified-test-name (remove root suite-symbols))
-                       #'string<)))))
+                 (let ((under-root (%fiveam-suites-under root)))
+                   ;; FiveAM never drops a name from *TOPLEVEL-SUITES*: a suite
+                   ;; first defined without :in stays listed once its file nests
+                   ;; it.  The root's tree is what says where it hangs now.
+                   (sort (mapcar #'%qualified-test-name
+                                 (remove-if (lambda (suite)
+                                              (or (eq suite root)
+                                                  (gethash (%fiveam-test-object suite)
+                                                           under-root)))
+                                            suite-symbols))
+                         #'string<))))))
 
 (defun %with-fiveam-variables (fn)
   "Bind FiveAM special variables for output suppression and call FN.
