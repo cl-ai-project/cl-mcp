@@ -1160,6 +1160,46 @@ convention (names like *FOO*) for special variables")))))))
       (ok (search "2x" (subseq text (search "1 more kind" text)))
           "with its count"))))
 
+(deftest load-system-response-bounds-the-style-kinds-it-names
+  ;; A library that formats its own style warnings makes a kind per message:
+  ;; naming every kind past the limit would grow the text without bound.
+  (flet ((style (kind message line)
+           (%warning-record "severity" "style-warning"
+                            "class" "SB-INT:SIMPLE-STYLE-WARNING"
+                            "message" message "kind" kind
+                            "file" "src/a.lisp" "line" line
+                            "form" (format nil "(defun f~D)" line))))
+    (testing "as many kinds again are named, the rest counted"
+      (let ((text (let ((cl-mcp/src/tools/response-builders::*load-style-kinds-shown* 2))
+                    (%response-text
+                     "fake-system"
+                     (%loaded-with (loop for kind from 1 to 7
+                                         collect (style kind (format nil "kind ~D." kind)
+                                                        kind)))))))
+        (ok (search "5 more kinds" text))
+        (ok (search "kind 4." text) "the first kinds past the limit are named")
+        (ok (null (search "kind 5." text)) "the ones past those are not")
+        (ok (search "... and 3 more kinds" text) "but counted")))
+    (testing "a kind of identical warnings says whose place it gives"
+      (let ((text (let ((cl-mcp/src/tools/response-builders::*load-style-kinds-shown* 1))
+                    (%response-text
+                     "fake-system"
+                     (%loaded-with (list (style 1 "first kind." 1)
+                                         (style 2 "same text." 2)
+                                         (style 2 "same text." 3)))))))
+        (ok (search "2x same text., first at src/a.lisp:2 (defun f2)" text) text)))))
+
+(deftest headline-is-the-first-sentence-of-a-message
+  (let ((headline #'cl-mcp/src/tools/response-builders::%headline)
+        (long (make-string 250 :initial-element #\x)))
+    (ok (equal "The headline." (funcall headline (format nil "~%~%The headline.~%advice")))
+        "leading blank lines are skipped")
+    (ok (equal "The headline." (funcall headline (format nil "   ~%The headline.")))
+        "and so is a line of spaces")
+    (ok (equal long (funcall headline long))
+        "a long message of one line is kept whole")
+    (ok (equal "" (funcall headline "")) "an empty message has an empty headline")))
+
 (deftest load-system-response-lists-the-projects-style-warnings-first
   ;; A dependency under the project root loads first and its path can sort
   ;; first too: the project's own warning was the one cut behind "(+N more)".

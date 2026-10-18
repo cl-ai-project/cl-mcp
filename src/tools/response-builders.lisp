@@ -350,21 +350,27 @@ fails on, so none is summed up; *LOAD-FULL-WARNINGS-SHOWN* only bounds a flood."
   "Characters of a warning's headline (%HEADLINE) written into load-system's text.")
 
 (defun %headline (text)
-  "Return TEXT's first sentence or line: its first line, continued by the lines
-after it while what is taken so far ends in no . : ! or ?, joined by single
-spaces and cut at *HEADLINE-MAX-CHARS*.  SBCL breaks some messages at fixed
-places mid-sentence (\"... of the symbol (X), not the\" / \"dynamic binding ...\"),
-and puts advice or the offending form on the lines after a sentence that ends."
+  "Return TEXT's first sentence or line: its first non-blank line, continued by
+the lines after it while what is taken so far ends in no . : ! or ?, joined by
+single spaces.  What the joining adds is cut at *HEADLINE-MAX-CHARS*; a first
+line longer than that is kept whole, as it always was.  SBCL breaks some
+messages at fixed places mid-sentence (\"... of the symbol (X), not the\" /
+\"dynamic binding ...\"), and puts advice or the offending form on the lines after
+a sentence that ends."
   (let ((taken '()))
     (loop for line in (uiop:split-string text :separator '(#\Newline))
           for trimmed = (string-trim '(#\Space #\Tab) line)
           until (and taken (zerop (length trimmed)))
-          do (push trimmed taken)
-          until (and (plusp (length trimmed))
-                     (member (char trimmed (1- (length trimmed))) '(#\. #\: #\! #\?))))
-    (let ((headline (format nil "~{~A~^ ~}" (reverse taken))))
-      (if (> (length headline) *headline-max-chars*)
-          (concatenate 'string (subseq headline 0 *headline-max-chars*) "...")
+          do (unless (zerop (length trimmed))
+               (push trimmed taken))
+          until (and taken
+                     (member (char (first taken) (1- (length (first taken))))
+                             '(#\. #\: #\! #\?))))
+    (let* ((lines (reverse taken))
+           (headline (format nil "~{~A~^ ~}" lines))
+           (limit (max *headline-max-chars* (length (or (first lines) "")))))
+      (if (> (length headline) limit)
+          (concatenate 'string (subseq headline 0 limit) "...")
           headline))))
 
 (defun %in-project-p (record)
@@ -462,10 +468,11 @@ unused variable with one format control, whatever the variable -- so each
 listed warning gives its place and its own headline.
 
 Kinds holding a warning of the project's come first, each part in the order the
-kinds first appeared.  *LOAD-STYLE-KINDS-SHOWN* kinds are written so; each kind
-past them gets one line, its count and its first warning -- an undefined
-function is reported when the compilation unit ends, so its kind comes last,
-and it is often a typo.  Every record stays in warning_records."
+kinds first appeared.  *LOAD-STYLE-KINDS-SHOWN* kinds are written so; as many
+again past them get one line each, their count and first warning -- an
+undefined function is reported when the compilation unit ends, so its kind comes
+last, and it is often a typo -- and any further kinds are counted.  Every record
+stays in warning_records."
   (let ((kinds '()))
     (dolist (record records)
       (let ((entry (assoc (gethash "kind" record) kinds :test #'equal)))
@@ -510,17 +517,23 @@ and it is often a typo.  Every record stays in warning_records."
         (format stream "~%  ... and ~D more kind~:P (all are in warning_records):"
                 (length rest))
         (loop for (nil . members) in rest
+              for named from 1 to *load-style-kinds-shown*
               do (let* ((first (first (%project-first members)))
                         (headline (%record-headline first))
-                        (count (cond ((null (rest members)) "")
-                                     ((every (lambda (record)
-                                               (string= headline (%record-headline record)))
-                                             members)
-                                      (format nil "~Dx " (length members)))
-                                     (t (format nil "~Dx of one kind, such as "
-                                                (length members))))))
-                   (format stream "~%    ~A~A~@[ at ~A~]"
-                           count headline (%load-warning-place first))))))))
+                        (place (%load-warning-place first)))
+                   (cond ((null (rest members))
+                          (format stream "~%    ~A~@[ at ~A~]" headline place))
+                         ((every (lambda (record)
+                                   (string= headline (%record-headline record)))
+                                 members)
+                          (format stream "~%    ~Dx ~A~@[, first at ~A~]"
+                                  (length members) headline place))
+                         (t
+                          (format stream "~%    ~Dx of one kind, such as ~A~@[ at ~A~]"
+                                  (length members) headline place)))))
+        (let ((unnamed (- (length rest) *load-style-kinds-shown*)))
+          (when (plusp unnamed)
+            (format stream "~%    ... and ~D more kind~:P" unnamed)))))))
 
 (defun build-load-system-response (system ht)
   "Build the standard load-system response with summary text.
