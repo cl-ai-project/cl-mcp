@@ -25,6 +25,7 @@
   (:import-from #:cl-mcp/src/utils/compilation-unit
                 #:call-with-own-compilation-unit)
   (:import-from #:cl-mcp/src/warning-records
+                #:load-failure-kind
                 #:%redefinition-warning-p
                 #:%make-warning-record
                 #:%in-project-predicate
@@ -422,6 +423,13 @@ registering it."
              ;; the records, that warning is the thing to fix.
              (when (typep err 'uiop:compile-file-error)
                (setf (gethash "compile_failed" ht) t))
+             ;; A cause a fresh worker meets again, named so the hint can say
+             ;; what to fix rather than to replace the worker.
+             (multiple-value-bind (kind detail) (load-failure-kind err)
+               (when kind
+                 (setf (gethash "failure_kind" ht) (string-downcase kind))
+                 (when detail
+                   (setf (gethash "failure_detail" ht) detail))))
              ;; What had been recorded when the error struck: for a compile
              ;; that failed on a warning, the cause itself.
              (let ((records unwound-records))

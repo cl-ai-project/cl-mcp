@@ -1298,7 +1298,7 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
                    "fake-system"
                    (%failed-with (list (variance "fails_compile" t)) :compile-failed t))))
         (ok (search "FAKE also exports the following symbols" text))
-        (ok (search "the running image has stale exports" text))
+        (ok (search "the worker still holds a package" text))
         (ok (search "pool-kill-worker" text))))
     (testing "a package at variance met while an earlier file loaded is not the cause"
       (let ((text (%response-text
@@ -1306,7 +1306,7 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
                    (%failed-with (list (variance)) :compile-failed t))))
         (ok (search "Warnings before the error (1)" text))
         (ok (null (search "ASDF refuses" text)))
-        (ok (null (search "the running image has stale exports" text)))))
+        (ok (null (search "the worker still holds a package" text)))))
     (testing "another error: the warnings came before it and are not blamed for it"
       (let ((text (%response-text "fake-system"
                                   (%failed-with (list (earlier) (refusing))))))
@@ -1315,6 +1315,60 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
         (ok (search "a warning signalled while compiling" text))
         (ok (null (search "ASDF refuses" text)))
         (ok (search "pool-kill-worker" text))))))
+
+(deftest load-system-response-sends-to-a-fresh-worker-only-for-the-workers-state
+  ;; Every failure without a refusing warning got "the worker process may now
+  ;; have a broken package state. Use pool-kill-worker": a missing dependency,
+  ;; a compile error and a DEFCONSTANT given a list, none of which a fresh
+  ;; worker cures -- the last one loops.
+  (flet ((text (kind &key detail compile-failed)
+           (let ((ht (%failed-with '() :compile-failed compile-failed)))
+             (when kind (setf (gethash "failure_kind" ht) kind))
+             (when detail (setf (gethash "failure_detail" ht) detail))
+             (%response-text "fake-system" ht))))
+    (testing "a missing dependency"
+      (let ((text (text "missing-dependency" :detail "no-such-ledger-lib")))
+        (ok (search "no-such-ledger-lib" text))
+        (ok (search ":depends-on" text) text)
+        (ok (null (search "pool-kill-worker" text)))))
+    (testing "a compile error"
+      (let ((text (text nil :compile-failed t)))
+        (ok (search "did not compile" text) text)
+        (ok (null (search "pool-kill-worker" text)))))
+    (testing "a DEFCONSTANT whose value is not EQL"
+      (let ((text (text "defconstant")))
+        (ok (search "defparameter" text) text)
+        (ok (null (search "pool-kill-worker" text)))))
+    (testing "and the variance hint names no kind of variance in particular"
+      (let* ((record (%full-warning "APP also uses the following packages: (LIB)"))
+             (text (progn (setf (gethash "class" record) "SB-INT:PACKAGE-AT-VARIANCE"
+                                (gethash "fails_compile" record) t)
+                          (%response-text "fake-system"
+                                          (%failed-with (list record) :compile-failed t)))))
+        (ok (search "pool-kill-worker" text))
+        (ok (null (search "stale exports" text)) text)
+        (ok (search "two definitions of the package disagree" text)
+            "with the advice for when a fresh worker meets it again")))))
+
+(deftest load-system-names-a-missing-dependency
+  (let* ((name "clmcp-missing-dep-fixture")
+         (dir (uiop:ensure-directory-pathname
+               (merge-pathnames (format nil "~A/" name) (uiop:temporary-directory)))))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist dir)
+           (with-open-file (out (merge-pathnames (format nil "~A.asd" name) dir)
+                                :direction :output :if-exists :supersede)
+             (format out "(asdf:defsystem ~S :depends-on (\"clmcp-no-such-dependency\"))~%"
+                     name))
+           (asdf:load-asd (merge-pathnames (format nil "~A.asd" name) dir))
+           (let ((ht (load-system name)))
+             (ok (string= "error" (gethash "status" ht)))
+             (ok (equal "missing-dependency" (gethash "failure_kind" ht))
+                 (format nil "the failure is classified: ~S" (gethash "failure_kind" ht)))
+             (ok (equal "clmcp-no-such-dependency" (gethash "failure_detail" ht)))))
+      (ignore-errors (asdf:clear-system name))
+      (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))
 
 (deftest load-system-force-reload-reports-no-redefinitions
   (testing "force=true on an already-loaded system reports zero warnings
