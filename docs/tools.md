@@ -353,10 +353,11 @@ Output fields:
   of the project's tree deleted because their source was written in the same second as them —
   ASDF's one-second timestamps would have reused them, running the code from before the edit.
   A count of deletions, not of compilations: a file this load reaches is compiled from source,
-  one in a sibling subsystem it never reaches only when something loads it. The project's
-  tree leaves out what the root's `.gitignore` does, such as `.qlot/`, unless the system
-  itself is kept there. The text says `Deleted N FASLs whose source was written in the same
-  second`
+  one in a sibling subsystem it never reaches only when something loads it. A FASL whose
+  source is newer still is deleted too but not counted, since ASDF recompiles it anyway. The
+  project's tree leaves out what the root's `.gitignore` does, such as `.qlot/`, unless the
+  system itself is kept there. The text says `Deleted N FASLs whose source was written in the
+  same second`
 - `message` (string|null): error or timeout message
 
 Solves three problems with using `ql:quickload` via `repl-eval`:
