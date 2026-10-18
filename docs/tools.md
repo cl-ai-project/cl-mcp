@@ -382,8 +382,8 @@ Input:
 Both count characters, so a window advanced by the characters it returned picks up exactly
 where it stopped, in multibyte text too. A byte that is not valid UTF-8 before the window counts
 as one character. An offset at or past the end returns an empty result, and the content says
-so: `[Nothing read: offset N is at or past the end of the file (a B-byte file).]`, `[Nothing read: limit is
-0.]`, or `[The file is empty.]`.
+so: `[Nothing read: offset N is at or past the end of the file (a B-byte file).]`,
+`[Nothing read: limit is 0.]`, or `[The file is empty.]`.
 
 Output:
 - `content`: the text. Whenever text is left past a non-empty window — because `limit` stopped
