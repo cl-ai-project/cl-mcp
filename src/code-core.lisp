@@ -16,7 +16,6 @@
   (:import-from #:cl-mcp/src/code-refs-core
                 #:sequence->list
                 #:parse-symbol-text
-                #:find-package-named
                 #:resolve-target
                 #:qualified-symbol-name
                 #:symbol-kind
@@ -72,7 +71,8 @@ code-find and code-describe answer it as a tool error rather than a fault."))
 (defun %parse-symbol (symbol-name &key package)
   "Read SYMBOL-NAME as a symbol without permitting evaluation.
 PACKAGE is used only when SYMBOL-NAME is unqualified; when a package marker
-appears in SYMBOL-NAME (e.g., \"pkg:sym\"), PACKAGE is ignored."
+appears in SYMBOL-NAME (e.g., \"pkg:sym\"), PACKAGE is ignored.  A package
+part naming no package signals SYMBOL-PACKAGE-MISSING before anything is read."
   (unless (stringp symbol-name)
     (error "symbol must be a string"))
   ;; Looked up before reading: the reader's own package error says only that
@@ -80,7 +80,9 @@ appears in SYMBOL-NAME (e.g., \"pkg:sym\"), PACKAGE is ignored."
   ;; Text that is no symbol name is left to the reader's own refusal.
   (multiple-value-bind (name package-part) (parse-symbol-text symbol-name)
     (declare (ignore name))
-    (when (and package-part (null (find-package-named package-part)))
+    ;; FIND-PACKAGE as the reader will look it up: PACKAGE-PART is already
+    ;; written as the reader reads it, so no upcased retry.
+    (when (and package-part (null (find-package package-part)))
       (error 'symbol-package-missing :package-name package-part)))
   (let* ((qualified-p (position #\: symbol-name))
          (*package* (if qualified-p
