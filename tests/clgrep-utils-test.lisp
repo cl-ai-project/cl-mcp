@@ -20,7 +20,9 @@
                 #:toplevel-form-end-pos
                 #:toplevel-form-start-line
                 #:toplevel-form-end-line
-                #:toplevel-form-unterminated-p))
+                #:toplevel-form-unterminated-p)
+  (:import-from #:cl-mcp/src/utils/project-files
+                #:project-file-predicate))
 
 (in-package #:cl-mcp/tests/clgrep-utils-test)
 
@@ -213,7 +215,11 @@ Final line
     (testing "dir/* matches what is in the directory, not the directory itself"
       ;; git never ignores gen/ for gen/*: a re-include under it stays reachable.
       (ok (ignored-p "gen/*" "gen/x.lisp"))
-      (ok (not (ignored-p "gen/*" "gen/"))))))
+      (ok (not (ignored-p "gen/*" "gen/"))))
+    (testing "dir/** likewise: everything inside, not the directory"
+      (ok (ignored-p "gen/**" "gen/x.lisp"))
+      (ok (ignored-p "gen/**" "gen/sub/x.lisp"))
+      (ok (not (ignored-p "gen/**" "gen/"))))))
 
 (defun %call-with-gitignore-tree (gitignore files thunk)
   "Write GITIGNORE as the .gitignore of a fresh directory holding FILES (paths
@@ -253,7 +259,7 @@ and delete it."
    (lambda (root)
      (let ((found (mapcar (lambda (path) (enough-namestring path root))
                           (collect-target-files root)))
-           (project-p (cl-mcp/src/utils/project-files:project-file-predicate root)))
+           (project-p (project-file-predicate root)))
        (dolist (kept '("keep.tmp/b.lisp" "keep-tmp.lisp" "gen/keep.lisp" "cx.lisp"
                        "src/main.lisp"))
          (ok (member kept found :test #'string=) (format nil "~A is searched" kept))
@@ -265,6 +271,59 @@ and delete it."
              (format nil "~A is left out" left-out))
          (ok (not (funcall project-p (merge-pathnames left-out root)))
              (format nil "~A is not the project's" left-out)))))))
+
+(defun %check-against-git (gitignore kept left-out)
+  "Write a tree of KEPT and LEFT-OUT files under GITIGNORE and check that both
+the walk and the project-file predicate keep exactly KEPT, as git check-ignore
+said of the same tree."
+  (%call-with-gitignore-tree
+   gitignore (append kept left-out)
+   (lambda (root)
+     (let ((found (mapcar (lambda (path) (enough-namestring path root))
+                          (collect-target-files root)))
+           (project-p (project-file-predicate root)))
+       (dolist (file kept)
+         (ok (and (member file found :test #'string=)
+                  (funcall project-p (merge-pathnames file root)))
+             (format nil "~S keeps ~A" gitignore file)))
+       (dolist (file left-out)
+         (ok (not (or (member file found :test #'string=)
+                      (funcall project-p (merge-pathnames file root))))
+             (format nil "~S leaves out ~A" gitignore file)))))))
+
+(deftest a-re-included-directory-does-not-re-include-what-a-pattern-leaves-out
+  ;; A pattern matched its path's descendants too, harmless while every pattern
+  ;; excluded; once a later ! decides, !dir/ took back everything under dir,
+  ;; even files a pattern of their own left out.  git matches a pattern against
+  ;; the path itself and leaves containment to the directories above it.
+  (testing "the whitelist idiom"
+    (%check-against-git (format nil "*~%!*/~%!*.lisp~%")
+                        '("a.lisp" "src/b.lisp" "src/deep/c.lisp")
+                        '("src/foo.asd" "src/deep/x.ros")))
+  (testing "a directory re-included under a file pattern"
+    (%check-against-git (format nil "*.ros~%!scripts/~%")
+                        '("scripts/a.lisp")
+                        '("scripts/a.ros"))
+    (%check-against-git (format nil "*.lisp~%!src~%")
+                        '("src/main.asd")
+                        '("src/main.lisp")))
+  (testing "build/* then !build/"
+    (%check-against-git (format nil "build/*~%!build/~%")
+                        '("other/x.lisp")
+                        '("build/x.lisp" "build/sub/y.lisp")))
+  (testing "gen/** then !gen/keep.lisp"
+    (%check-against-git (format nil "gen/**~%!gen/keep.lisp~%")
+                        '("gen/keep.lisp")
+                        '("gen/drop.lisp")))
+  (testing "a line that is no regular expression costs only itself"
+    ;; [z-a] made CL-PPCRE signal, which dropped every pattern of the file.
+    (%check-against-git (format nil "[z-a]x.lisp~%*.tmp~%")
+                        '("ax.lisp")
+                        '("drop.tmp/a.lisp")))
+  (testing "a line that is only ! takes nothing back"
+    (%check-against-git (format nil "build/~%!~%")
+                        '("src/a.lisp")
+                        '("build/x.lisp"))))
 
 (deftest test-collect-target-files
   (testing "should collect .lisp, .asd, and .ros files from project"

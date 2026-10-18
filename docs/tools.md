@@ -957,10 +957,13 @@ Input:
   with `...` marking the gaps.
 
 Files searched: `.lisp`, `.asd` and `.ros`. The `.gitignore` of the search root (only that one)
-is honoured, with the common glob forms (`*`, `?`, `**`, a leading `/`) but not `!` negation.
-A pattern without a leading `/` matches anywhere in the path, as a substring, so it can exclude
-more than git would (`build` also skips `src/rebuild.lisp`). `.git/` is always skipped. Because only the root's own `.gitignore` applies, a directory that
-the project's `.gitignore` excludes is still searched when you pass it as `path`. A hit on a
+is honoured as git reads it: `*`, `?`, `**`, `[...]` and `[!...]` classes, `\` escapes, a
+leading or middle `/` anchoring to the root, a trailing `/` for directories only, and `!` lines
+taking a path back in, the last matching line deciding. A pattern matches whole path
+components (`build` does not skip `src/rebuild.lisp`), and a file under a directory left out
+stays out whatever follows, as in git. `.git/` is always skipped. Because only the root's own
+`.gitignore` applies, a directory that the project's `.gitignore` excludes is still searched
+when you pass it as `path`. A hit on a
 line outside every top-level form (a comment between forms) is dropped.
 
 Output:

@@ -243,12 +243,14 @@ lines it swallowed still belong to a form."
   "Convert a gitignore glob PATTERN to a regular expression string, matched with
 SCAN against a path relative to the root.  Handles *, ?, **, [...] classes ([!...]
 and [^...] negated) and a backslash that makes the next character literal.
-As git does, the pattern matches whole path components: a slash at its start or
-in its middle anchors it to the root, otherwise it matches at any depth, and a
-trailing slash matches a directory and what is in it.  Matching the bare text
-anywhere would leave out src/catalog.lisp for the pattern log.  A component that
-is a lone * matches a non-empty one, as every component is: gen/* matches what is
-in gen/, not gen/ itself."
+As git does, the pattern matches a path whole -- the path itself, a directory's
+ending in a slash, not what is under it (PATH-IGNORED-P judges that by its
+directories) -- with whole components: a slash at its start or in its middle
+anchors it to the root, otherwise it matches at any depth, and a trailing slash
+matches a directory only.  Matching the bare text anywhere would leave out
+src/catalog.lisp for the pattern log.  A component that is a lone * matches a
+non-empty one, as every component is, and a trailing /** at least one character:
+gen/* and gen/** match what is in gen/, not gen/ itself."
   (let* ((len (length pattern))
          (directory-p (and (> len 0) (char= (char pattern (1- len)) #\/)))
          (body (string-left-trim "/" (if directory-p (subseq pattern 0 (1- len)) pattern)))
@@ -283,12 +285,13 @@ in gen/, not gen/ itself."
                          (char= (char body (+ i 2)) #\/))
                     (emit "(?:.*/|)")
                     (incf i 3))
-                   ;; /** at the end matches everything under the directory
+                   ;; /** at the end matches everything under the directory,
+                   ;; not the directory itself
                    ((and (< (+ i 1) body-len)
                          (char= char #\*)
                          (char= (char body (+ i 1)) #\*)
                          (= (+ i 2) body-len))
-                    (emit ".*")
+                    (emit ".+")
                     (incf i 2))
                    ;; A lone * as a whole component matches a non-empty one
                    ((and (char= char #\*)
@@ -324,25 +327,31 @@ in gen/, not gen/ itself."
                    (t
                     (emit-literal char)
                     (incf i)))))
-      ;; The last component ends where the path or a component does.
-      (emit (if directory-p "/" "(?:/|$)")))
+      ;; The pattern matches the path itself -- a directory's path ends in
+      ;; a slash -- and never what is under it: as in git, that is left out
+      ;; because its directory is (PATH-IGNORED-P), so a later ! line that
+      ;; takes a directory back in takes nothing else with it.
+      (emit (if directory-p "/$" "/?$")))
     result))
 
 (defun parse-gitignore (gitignore-path)
   "Parse a .gitignore file and return its patterns in file order, each a regex
 string (GLOB-TO-REGEX) that leaves a path out, or (:NEGATE . regex) for a line
-starting with !, which takes a path back in.  Returns NIL if the file doesn't
-exist."
+starting with !, which takes a path back in.  A line that is only ! matches
+nothing, as in git, and is dropped.  Returns NIL if the file doesn't exist."
   (when (probe-file gitignore-path)
     (with-open-file (stream gitignore-path :direction :input)
       (loop for line = (read-line stream nil nil)
             while line
             for trimmed = (string-trim '(#\Space #\Tab #\Return) line)
-            unless (or (zerop (length trimmed))           ; Empty line
-                       (char= (char trimmed 0) #\#))      ; Comment
-              collect (if (char= (char trimmed 0) #\!)
-                          (cons :negate (glob-to-regex (subseq trimmed 1)))
-                          (glob-to-regex trimmed))))))
+            for negated = (and (plusp (length trimmed)) (char= (char trimmed 0) #\!))
+            for body = (if negated (subseq trimmed 1) trimmed)
+            unless (or (zerop (length body))                ; Empty line, or a bare !
+                       (and (not negated)
+                            (char= (char trimmed 0) #\#)))  ; Comment
+              collect (if negated
+                          (cons :negate (glob-to-regex body))
+                          (glob-to-regex body))))))
 
 (defun %last-match-ignores-p (relative-path patterns)
   "True when the last of PATTERNS that matches RELATIVE-PATH leaves it out: a
@@ -360,7 +369,9 @@ patterns as PARSE-GITIGNORE returns them, as git decides: the last pattern that
 matches says, and a path under a directory left out stays out, as no pattern can
 take back what is inside an excluded directory.  PARENTS NIL skips that check of
 the directories above PATH, for a walk that has made it on the way down."
-  (let* ((path-string (uiop:native-namestring path))
+  (let* ((path-string (or (ignore-errors (uiop:native-namestring path))
+                          ;; A wild pathname has no native namestring.
+                          (namestring path)))
          (root-string (uiop:native-namestring (uiop:ensure-directory-pathname root-dir)))
          ;; Native namestrings: ENOUGH-NAMESTRING escapes * [ and ? in a name.
          (relative (substitute #\/ #\\
@@ -378,15 +389,17 @@ the directories above PATH, for a walk that has made it on the way down."
 (defun root-ignore-patterns (root-dir)
   "Return the patterns that leave a path under ROOT-DIR out of the project: its
 .gitignore's, in order, then .git/, last so no ! line takes it back in.  Matched
-with PATH-IGNORED-P.
+with PATH-IGNORED-P.  A line whose pattern is no regular expression -- a reversed
+range such as [z-a] -- is dropped, alone, as git ignores a line it cannot use.
 Compiled here, once: given as strings, CL-PPCRE:SCAN compiles each again for
 every entry of the walk, which took seconds over a large project's tree."
-  (mapcar (lambda (pattern)
-            (if (consp pattern)
-                (cons (car pattern) (create-scanner (cdr pattern)))
-                (create-scanner pattern)))
-          (append (parse-gitignore (merge-pathnames ".gitignore" root-dir))
-                  (list (glob-to-regex ".git/")))))
+  (flet ((compiled (regex)
+           (ignore-errors (create-scanner regex))))
+    (loop for pattern in (append (parse-gitignore (merge-pathnames ".gitignore" root-dir))
+                                 (list (glob-to-regex ".git/")))
+          for scanner = (compiled (if (consp pattern) (cdr pattern) pattern))
+          when scanner
+            collect (if (consp pattern) (cons (car pattern) scanner) scanner))))
 
 (defun target-file-p (pathname)
   "Check if PATHNAME has a target extension (.lisp, .asd, or .ros)."
