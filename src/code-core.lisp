@@ -14,6 +14,7 @@
   (:import-from #:uiop
                 #:read-file-string #:ensure-pathname #:absolute-pathname-p)
   (:import-from #:cl-mcp/src/code-refs-core
+                #:%method-specializer-keys
                 #:sequence->list
                 #:parse-symbol-text
                 #:resolve-target
@@ -986,6 +987,10 @@ index of its top-level form in the file."
                                     :caller caller
                                     :caller-symbol (and caller-symbol
                                                         (qualified-symbol-name caller-symbol))
+                                    ;; A method's specializers as symbols, so
+                                    ;; a stale entry tells A:NODE from B:NODE.
+                                    :specializer-keys (ignore-errors
+                                                       (%method-specializer-keys caller-name))
                                     :truename (%truename-string pathname)
                                     :path path
                                     :line line
@@ -1054,6 +1059,21 @@ paths lie outside what the caller may read."
                 notes))
         (nreverse notes))))
 
+(defun %gone-notes (gone)
+  "Return the sentence naming GONE, xref entries of definitions no longer in their
+files (MERGE-REFERENCES' second value), as a list, or NIL when there are none."
+  (when gone
+    (list (format nil "~D reference~:P left out: ~{~A~^, ~} ~:[is~;are~] compiled in this ~
+                       worker but no longer in ~:[its file~;their files~]; a fresh worker ~
+                       drops ~:[it~;them~]"
+                  (length gone)
+                  (remove-duplicates (mapcar (lambda (entry)
+                                               (or (getf entry :caller-symbol)
+                                                   (getf entry :caller)))
+                                             gone)
+                                     :test #'equal :from-end t)
+                  (rest gone) (rest gone) (rest gone)))))
+
 (defun code-find-references-report (symbol-name &key package (project-only t) (limit 50)
                                                    scan)
   "Return the code-find-references payload for SYMBOL-NAME, without content text.
@@ -1086,17 +1106,18 @@ CL-MCP/SRC/CODE-REFS-CORE:BUILD-REFERENCES-REPORT."
                                   (%collect-xref-entries symbol :project-only project-only))))
             (multiple-value-bind (forms unresolved)
                 (resolve-scan-forms scan-forms symbol :macro-p (equal kind "macro"))
-              (apply #'build-references-report
-                     :status :found
-                     :resolved-symbol (qualified-symbol-name symbol)
-                     :kind kind
-                     :refs (merge-references entries forms)
-                     :unresolved unresolved
-                     :xref-count (length entries)
-                     :notes (%scan-notes scan)
-                     :via-macros (macros-expanding-to forms)
-                     :names-class (and (find-class symbol nil) t)
-                     common)))))))
+              (multiple-value-bind (refs gone) (merge-references entries forms)
+                (apply #'build-references-report
+                       :status :found
+                       :resolved-symbol (qualified-symbol-name symbol)
+                       :kind kind
+                       :refs refs
+                       :unresolved unresolved
+                       :xref-count (length entries)
+                       :notes (append (%scan-notes scan) (%gone-notes gone))
+                       :via-macros (macros-expanding-to forms)
+                       :names-class (and (find-class symbol nil) t)
+                       common))))))))
 
 (declaim (ftype (function (string &key (:package (or null package symbol string))
                                  (:project-only (member t nil)))

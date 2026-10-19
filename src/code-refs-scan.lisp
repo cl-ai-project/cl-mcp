@@ -518,6 +518,11 @@ later forms were not scanned"
                                      "test_name" test-name
                                      "test_framework" framework
                                      "in_package" in-package
+                                     "name_token" (ignore-errors
+                                                   (%definition-name-token node text))
+                                     "specializers" (ignore-errors
+                                                     (%defmethod-specializer-tokens
+                                                      node text in-package))
                                      "context" (%line-context text (cst-node-start node))
                                      "sites" (map 'vector
                                                   (lambda (site) (%site->ht site text))
@@ -795,6 +800,55 @@ list keyword (&OPTIONAL, &REST, ...), which ends the required parameters."
                   (member (symbol-name (cst-node-value param))
                           *method-lambda-list-keywords* :test #'string=))
         collect (%source-specializer param text in-package)))
+
+(defun %definition-name-token (node text)
+  "Return the name of NODE, a top-level definition (DEF... form), as written --
+its package prefix kept, which the form name drops -- when it is a symbol, or
+NIL: a (SETF name) or any other shape, or a form that defines nothing."
+  (let ((value (cst-node-value node)))
+    (when (and (consp value) (symbolp (first value))
+               (%definer-name-p (symbol-name (first value)))
+               (consp (rest value)) (symbolp (second value)))
+      (let ((name (%unwrap (second (%expr-children node)))))
+        (subseq text (cst-node-start name) (cst-node-end name))))))
+
+(defun %defmethod-specializer-tokens (node text in-package)
+  "Return the specializers of NODE, a top-level DEFMETHOD form, as the worker
+needs them to tell a class from its namesake: a vector of objects, one per
+required parameter, {kind \"class\", token, in_package} with the class name as
+written -- prefix and nickname kept, which the form name drops -- or
+{kind \"eql\", token, in_package} with the (EQL datum) text.  An unspecialized parameter is
+the class T of COMMON-LISP.  NIL for any other form, or a shape this does not
+describe."
+  (let ((value (cst-node-value node)))
+    (when (and (consp value) (symbolp (first value))
+               (string= "DEFMETHOD" (symbol-name (first value))))
+      (multiple-value-bind (qualifiers lambda-list)
+          (%split-qualifiers (cddr (%expr-children node)))
+        (declare (ignore qualifiers))
+        (when lambda-list
+          (let ((tokens
+                  (loop for param in (%expr-children lambda-list)
+                        for param-value = (cst-node-value (%unwrap param))
+                        until (and (symbolp param-value)
+                                   (member (symbol-name param-value)
+                                           *method-lambda-list-keywords* :test #'string=))
+                        collect
+                        (cond
+                          ((symbolp param-value)
+                           (make-ht "kind" "class" "token" "T" "in_package" "COMMON-LISP"))
+                          ((and (consp param-value) (consp (rest param-value)))
+                           (let* ((specializer (%unwrap (second (%expr-children
+                                                                 (%unwrap param)))))
+                                  (spec-text (subseq text (cst-node-start specializer)
+                                                     (cst-node-end specializer))))
+                             (if (symbolp (cst-node-value specializer))
+                                 (make-ht "kind" "class" "token" spec-text
+                                          "in_package" in-package)
+                                 (make-ht "kind" "eql" "token" spec-text
+                                          "in_package" in-package))))
+                          (t (return-from %defmethod-specializer-tokens nil))))))
+            (coerce tokens 'vector)))))))
 
 (defun %split-qualifiers (nodes)
   "Return (values QUALIFIER-NODES LAMBDA-LIST-NODE) splitting NODES, the

@@ -13,7 +13,8 @@
                 #:arg-validation-error
                 #:make-ht
                 #:json-bool)
-  (:export #:sequence->list
+  (:export #:%method-specializer-keys
+           #:sequence->list
            #:parse-symbol-text
            #:parse-target-designator
            #:find-package-named
@@ -219,6 +220,14 @@ interned."
 (defparameter *note-stale* "file changed since load; reload for accurate results"
   "Note for a reference whose file was written after its code was compiled.")
 
+(defparameter *note-stale-reference*
+  (concatenate 'string *note-stale*
+               " (a definition deleted from the file stays listed until a fresh worker)")
+  "Note for a reference in a file written after its code was compiled: its form
+is met by its caller's name (%STALE-ENTRY-FORM), or not at all, and a caller
+deleted from the file is still in this worker's image, so a reload cannot drop
+it.")
+
 (defparameter *note-macro-expansion*
   "call not visible in source (produced by a macro expansion)"
   "Note for an xref entry whose form in a scanned file holds no matching site.")
@@ -336,6 +345,8 @@ missing package, counting the sites that could not be judged."
                       :test-framework (gethash "test_framework" form)
                       :context (gethash "context" form)
                       :in-package (gethash "in_package" form)
+                      :name-token (gethash "name_token" form)
+                      :specializers (sequence->list (gethash "specializers" form))
                       :sites (nreverse kept))
                 resolved))))
     (values (nreverse resolved) (nreverse unresolved))))
@@ -408,7 +419,7 @@ to be missing from xref); and a form both found where some xref type has no
 compatible site (see *XREF-TYPE-SITE-KINDS*), so that no site listed is that
 call, set, ... itself."
   (cond
-    (stale *note-stale*)
+    (stale *note-stale-reference*)
     ((null form)
      (case (getf primary :scan-status)
        (:scanned *note-macro-expansion*)
@@ -429,18 +440,22 @@ call, set, ... itself."
         (remove-if (lambda (type) (%compatible-site-p type sites))
                    (%distinct (mapcar (lambda (entry) (getf entry :type)) xrefs))))))))
 
-(defun %reference (form xrefs)
+(defun %reference (form xrefs &optional stale-file)
   "Return the reference object for one top-level form.
 FORM is a resolved scan form or NIL; XREFS are the xref entries in that form,
 in finder order, possibly none.  A named caller is preferred over a lambda
-when several xref entries share the form."
+when several xref entries share the form.  STALE-FILE says FORM's file was
+written after its code was compiled: a form there that no xref entry met is
+stale too, rather than missing from xref -- its entry may be one that could
+not be met with it."
   (let* ((primary (or (find-if (lambda (entry) (getf entry :caller-symbol)) xrefs)
                       (first xrefs)))
          (sites (and form (getf form :sites)))
          (types (%distinct (if xrefs
                                (mapcar (lambda (entry) (getf entry :type)) xrefs)
                                (mapcar (lambda (site) (getf site :kind)) sites))))
-         (stale (some (lambda (entry) (getf entry :stale)) xrefs)))
+         (stale (or (some (lambda (entry) (getf entry :stale)) xrefs)
+                    (and (null xrefs) stale-file))))
     (make-ht "path" (if form (getf form :path) (getf primary :path))
              "abs_path" (if form (getf form :truename) (getf primary :truename))
              "line" (if form (getf form :start-line) (getf primary :line))
@@ -471,6 +486,258 @@ when several xref entries share the form."
     (and (integerp line) (integerp start) (integerp end)
          (<= start line end))))
 
+(defun %symbol-text-name (text)
+  "Return the name part of TEXT, a symbol written PKG::NAME, PKG:NAME or NAME,
+in lower case, or NIL for NIL."
+  (when text
+    (string-downcase (subseq text (let ((colon (position #\: text :from-end t)))
+                                    (if colon (1+ colon) 0))))))
+
+(defun %name-tokens (text)
+  "Return TEXT split at whitespace and parentheses into lower-case tokens, each
+without a package prefix, a leading colon, or a quote."
+  (loop for token in (uiop:split-string (string-downcase text)
+                                        :separator '(#\Space #\Tab #\Newline #\( #\)))
+        for name = (string-left-trim ":'" (or (%symbol-text-name token) ""))
+        when (plusp (length name))
+          collect name))
+
+(defun %list-elements (text start)
+  "Return the top-level elements of the list whose ( is at START in TEXT, each
+as its text, in order, or NIL when there is no ( at START or it is not closed."
+  (when (and (< start (length text)) (char= (char text start) #\())
+    (let ((elements '()) (depth 0) (element-start nil))
+      (loop for i from start below (length text)
+            for ch = (char text i)
+            do (cond ((char= ch #\()
+                      (when (and (= depth 1) (null element-start))
+                        (setf element-start i))
+                      (incf depth))
+                     ((char= ch #\))
+                      (decf depth)
+                      (cond ((zerop depth)
+                             (when element-start
+                               (push (subseq text element-start i) elements))
+                             (return-from %list-elements (nreverse elements)))
+                            ((and (= depth 1) element-start)
+                             (push (subseq text element-start (1+ i)) elements)
+                             (setf element-start nil))))
+                     ((member ch '(#\Space #\Tab #\Newline))
+                      (when (and (= depth 1) element-start)
+                        (push (subseq text element-start i) elements)
+                        (setf element-start nil)))
+                     ((and (= depth 1) (null element-start))
+                      (setf element-start i))))
+      nil)))
+
+(defun %method-caller-signature (caller)
+  "Return (values QUALIFIERS SPECIALIZERS) for CALLER, an xref caller written as
+(defmethod name before (class t)): its qualifier names as %NAME-TOKENS gives
+them, and its specializers in order, each as the token list of its text (T as
+(\"t\"), (eql :a) as (\"eql\" \"a\")).  Both NIL, with a third value NIL, for a
+caller that is no method."
+  (when (and (stringp caller)
+             (eql 0 (search "(defmethod " caller :test #'char-equal)))
+    (let ((inner (position #\( caller :start 1)))
+      (when inner
+        (values (rest (%name-tokens (subseq caller (length "(defmethod ") inner)))
+                (mapcar #'%name-tokens (%list-elements caller inner))
+                t)))))
+
+(defun %form-name-specializers (form-name)
+  "Return the specializers of FORM-NAME, a defmethod's form name such as
+\"name ((x class) y)\", in the shape %METHOD-CALLER-SIGNATURE gives them: one
+token list per required parameter, (\"t\") for one not specialized."
+  (let ((open (position #\( form-name)))
+    (when open
+      (loop for parameter in (%list-elements form-name open)
+            until (char= (char parameter 0) #\&)
+            collect (if (char= (char parameter 0) #\()
+                        (let ((parts (%list-elements parameter 0)))
+                          (if (second parts) (%name-tokens (second parts)) (list "t")))
+                        (list "t"))))))
+
+(defun %specializer-key (specializer)
+  "Return the key %STALE-ENTRY-FORM compares SPECIALIZER, a method specializer as
+SBCL names it -- a class name or (EQL datum) --, by: (:CLASS PACKAGE NAME) for a
+symbol, so a class is never taken for its namesake in another package;
+(:EQL-SYMBOL PACKAGE NAME) for an EQL datum that is a symbol, likewise;
+(:EQL-VALUE datum) for a character, number or string, compared by value; and a
+key no source datum has for any other."
+  (cond ((and (consp specializer) (symbolp (first specializer))
+              (string= (symbol-name (first specializer)) "EQL"))
+         (let ((datum (second specializer)))
+           (cond ((and (symbolp datum) (symbol-package datum))
+                  (list :eql-symbol (package-name (symbol-package datum)) (symbol-name datum)))
+                 ;; By value, as EQL compares it: #\A is not #\a, 1 not 1.0.
+                 ((or (characterp datum) (numberp datum) (stringp datum))
+                  (list :eql-value datum))
+                 (t (list :unknown (princ-to-string datum))))))
+        ((and (symbolp specializer) (symbol-package specializer))
+         (list :class (package-name (symbol-package specializer)) (symbol-name specializer)))
+        (t (list :unknown (princ-to-string specializer)))))
+
+(defun %method-specializer-keys (caller-name)
+  "Return the specializer keys (%SPECIALIZER-KEY) of CALLER-NAME, an xref caller
+as SBCL gives it -- (SB-PCL::FAST-METHOD NAME QUALIFIER... (SPECIALIZER...)) or
+(:METHOD ...) --, or NIL when it is no method."
+  (when (and (consp caller-name) (symbolp (first caller-name))
+             (member (symbol-name (first caller-name))
+                     '("FAST-METHOD" "SLOW-METHOD" "METHOD") :test #'string=))
+    (let ((specializers (first (last caller-name))))
+      (and (listp specializers) (mapcar #'%specializer-key specializers)))))
+
+(defun %token-symbol (token in-package)
+  "Return (values SYMBOL T) for the symbol TOKEN names, written where IN-PACKAGE
+was current -- a prefix read with that package's local nicknames --, or NIL when
+it names none in this image (the second value tells CL:NIL from none).  Nothing
+is interned."
+  (multiple-value-bind (name package-part problem) (parse-symbol-text token)
+    (unless problem
+      (let ((home (find-package-named (or in-package "COMMON-LISP-USER"))))
+        (when home
+          (let ((package (if package-part
+                             (let ((*package* home)) (find-package-named package-part))
+                             home)))
+            (when package
+              (multiple-value-bind (symbol status) (find-symbol name package)
+                (when status (values symbol t))))))))))
+
+(defun %quoted-symbol-text (datum)
+  "Return the symbol token DATUM, an EQL datum's source text, writes when it is a
+quoted symbol ('x or (quote x)), a keyword (:x) or an unquoted NIL or T, or NIL
+for any other datum."
+  (let ((text (string-trim '(#\Space #\Tab #\Newline) datum)))
+    (cond ((zerop (length text)) nil)
+          ((char= (char text 0) #\') (string-left-trim "' " (subseq text 1)))
+          ((char= (char text 0) #\:) text)
+          ;; NIL and T evaluate to themselves, unquoted as they are.
+          ((member text '("nil" "t") :test #'string-equal) (concatenate 'string "cl:" text))
+          ((char= (char text 0) #\()
+           (let ((parts (%list-elements text 0)))
+             (and (= 2 (length parts)) (string-equal (first parts) "quote") (second parts))))
+          (t nil))))
+
+(defun %literal-datum (text)
+  "Return (values VALUE T) when TEXT, an EQL datum's source text, is a character,
+number or string literal, read as the reader reads it -- case kept, 1 apart from
+1.0 --, or NIL for anything else.  Read with *READ-EVAL* off in a throwaway
+package, so nothing is interned anywhere that lasts."
+  (let ((text (string-trim '(#\Space #\Tab #\Newline) text)))
+    (when (and (plusp (length text))
+               (or (char= (char text 0) #\")
+                   (and (> (length text) 2) (string= "#\\" text :end2 2))
+                   ;; #x10, #b101, #o17, #c(1 2): numbers in another notation.
+                   (and (> (length text) 2) (char= (char text 0) #\#)
+                        (find (char text 1) "xXbBoOcC"))
+                   (digit-char-p (char text 0))
+                   (and (> (length text) 1)
+                        (find (char text 0) "+-.")
+                        (or (digit-char-p (char text 1)) (char= (char text 1) #\.)))))
+      (let ((scratch (make-package (gensym "CL-MCP-EQL-DATUM") :use '())))
+        (unwind-protect
+             (let ((value (ignore-errors
+                           (let ((*read-eval* nil)
+                                 (*package* scratch)
+                                 (*readtable* (copy-readtable nil)))
+                             (multiple-value-bind (value end) (read-from-string text)
+                               (and (= end (length text)) value))))))
+               (when (or (characterp value) (numberp value) (stringp value))
+                 (values value t)))
+          (delete-package scratch))))))
+
+(defun %form-specializer-keys (specializers)
+  "Return the specializer keys (%SPECIALIZER-KEY) of SPECIALIZERS, a defmethod
+form's specializer objects as the scan writes them (each with kind, token and,
+for a class, in_package): a class name is looked up as written -- its prefix
+read with the package-local nicknames of the package it was written in, as
+RESOLVE-SITE-TOKEN reads a site --, with FIND-SYMBOL, nothing interned.  A name
+that is not found gets a key no specializer has."
+  (mapcar (lambda (specializer)
+            (let ((token (gethash "token" specializer)))
+              (if (equal (gethash "kind" specializer) "eql")
+                  (let* ((inner (%list-elements token 0))
+                         (datum (or (second inner) ""))
+                         (symbol-text (%quoted-symbol-text datum)))
+                    (if symbol-text
+                        ;; 'a:node or :k: the symbol it names, as a class is.
+                        (multiple-value-bind (symbol found)
+                            (%token-symbol symbol-text (gethash "in_package" specializer))
+                          (if found
+                              (list :eql-symbol (package-name (symbol-package symbol))
+                                    (symbol-name symbol))
+                              (list :unresolved datum)))
+                        (multiple-value-bind (value literal-p) (%literal-datum datum)
+                          (if literal-p
+                              (list :eql-value value)
+                              (list :unresolved datum)))))
+                  (multiple-value-bind (symbol found)
+                      (%token-symbol token (gethash "in_package" specializer))
+                    (if found
+                        (%specializer-key symbol)
+                        (list :unresolved token))))))
+          specializers))
+
+(defparameter *non-function-definers*
+  '("defclass" "defstruct" "define-condition" "deftype" "defvar" "defparameter"
+    "defconstant" "defpackage" "in-package")
+  "Form types that define no function, so no xref caller is one of them.")
+
+(defun %stale-entry-form (entry forms)
+  "Return the one form among FORMS, those of ENTRY's file, that ENTRY's caller
+is, or NIL when none or several are.  A method is met only with a defmethod of
+its name whose qualifiers and specializers, in order, are its own; any other
+caller with a form of its name that defines a function.
+An entry of a file written after its code was compiled cannot be met by index or
+line, which name a different form once forms were inserted above or removed."
+  (let ((name (%symbol-text-name (getf entry :caller-symbol))))
+    (when name
+      (multiple-value-bind (qualifiers specializers method-p)
+          (%method-caller-signature (getf entry :caller))
+        (let ((named
+                (remove-if-not
+                 (lambda (form)
+                   (let* ((form-name (getf form :form-name))
+                          (tokens (and (stringp form-name) (%name-tokens form-name)))
+                          (form-type (string-downcase (or (getf form :form-type) ""))))
+                     (and (equal name (first tokens))
+                          ;; The name as a symbol where the form says how it was
+                          ;; written: A:CALLER is not B:CALLER.
+                          (or (not (and (getf form :name-token) (getf form :in-package)))
+                              (multiple-value-bind (symbol found)
+                                  (%token-symbol (getf form :name-token)
+                                                 (getf form :in-package))
+                                (and found
+                                     (equal (qualified-symbol-name symbol)
+                                            (getf entry :caller-symbol)))))
+                          (if method-p
+                              (and (equal form-type "defmethod")
+                                   ;; The qualifiers sit between the name and
+                                   ;; the lambda list.
+                                   (equal qualifiers
+                                          (%name-tokens
+                                           (subseq form-name
+                                                   (or (position #\Space form-name)
+                                                       (length form-name))
+                                                   (or (position #\( form-name)
+                                                       (length form-name)))))
+                                   ;; In order, parameter by parameter: (A B)
+                                   ;; is not (B A), and a parameter named like
+                                   ;; a class is no specializer.
+                                   ;; By symbol where both sides can say it:
+                                   ;; A:NODE is not B:NODE.
+                                   (if (and (getf entry :specializer-keys)
+                                            (getf form :specializers))
+                                       (equal (getf entry :specializer-keys)
+                                              (%form-specializer-keys
+                                               (getf form :specializers)))
+                                       (equal specializers
+                                              (%form-name-specializers form-name))))
+                              (not (member form-type *non-function-definers*
+                                           :test #'string=))))))
+                 forms)))
+          (and named (null (rest named)) (first named)))))))
+
 (defun merge-references (xref-entries forms)
   "Merge XREF-ENTRIES with resolved scan FORMS into reference objects.
 
@@ -495,6 +762,15 @@ fails, the entry meets the form of the same truename whose span holds its
 line; when no form does, it is unmatched.  An unmatched entry, like one without
 a form path, groups on its line, keyed (:LINE truename line).
 
+None of that holds for a :STALE entry, one of a file written after its code was
+compiled: forms inserted above it or removed move both its index and its line
+onto a neighbour.  It meets the form named after its caller instead
+(%STALE-ENTRY-FORM), or none, and, when every entry of the file is stale -- an
+edit not reloaded -- every other form of that file is stale too.  A stale entry
+of a file that also has fresh ones is a definition the last reload did not
+compile again, one no longer in the file: it is no reference, and is returned as
+the second value, for the report to mention.
+
 An entry meets its form whatever sites the form holds.  When none of them shows
 the entry's type -- a call made by a macro expansion or through a function
 passed by name beside a quoted name, say -- the reference says so in its note
@@ -507,6 +783,9 @@ Returns JSON-ready hash-tables, one per top-level form, in first-seen order."
         (form-by-key (make-hash-table :test #'equal))
         (forms-by-truename (make-hash-table :test #'equal))
         (xrefs-by-key (make-hash-table :test #'equal))
+        (stale-files (make-hash-table :test #'equal))
+        (fresh-files (make-hash-table :test #'equal))
+        (gone-entries '())
         (order '()))
     (flet ((remember (key)
              (unless (gethash key seen)
@@ -517,25 +796,50 @@ Returns JSON-ready hash-tables, one per top-level form, in first-seen order."
           (remember key)
           (setf (gethash key form-by-key) form)
           (push form (gethash (getf form :truename) forms-by-truename))))
+      ;; Staleness is per definition: a file reloaded since an edit has fresh
+      ;; entries, and a stale one there is a definition the reload did not
+      ;; compile again -- one no longer in the file.
+      (dolist (entry xref-entries)
+        (unless (getf entry :stale)
+          (setf (gethash (getf entry :truename) fresh-files) t)))
       (dolist (entry xref-entries)
         (let* ((truename (getf entry :truename))
                (line (getf entry :line))
                (index (getf entry :form-index))
                (indexed (and index (gethash (list :form truename index) form-by-key)))
-               (form (and index
-                          (if (and indexed (%span-contains-p indexed line))
-                              indexed
-                              (find-if (lambda (form) (%span-contains-p form line))
-                                       (gethash truename forms-by-truename)))))
+               (stale (getf entry :stale))
+               (gone (and stale (gethash truename fresh-files)))
+               (form (cond
+                       (gone nil)
+                       ;; A caller with a name is met by it; a lambda, a (setf f)
+                       ;; or a macro function has none, and is met by index and
+                       ;; span as before, which an edit above it can mislead.
+                       ((and stale (getf entry :caller-symbol))
+                        (setf (gethash truename stale-files) t)
+                        (%stale-entry-form entry (gethash truename forms-by-truename)))
+                       (index
+                        (when stale
+                          (setf (gethash truename stale-files) t))
+                        (if (and indexed (%span-contains-p indexed line))
+                            indexed
+                            (find-if (lambda (form) (%span-contains-p form line))
+                                     (gethash truename forms-by-truename))))))
                (key (if form
                         (list :form truename (getf form :index))
                         (list :line truename line))))
-          (remember key)
-          (push entry (gethash key xrefs-by-key)))))
-    (mapcar (lambda (key)
-              (%reference (gethash key form-by-key)
-                          (reverse (gethash key xrefs-by-key))))
-            (reverse order))))
+          (if gone
+              (push entry gone-entries)
+              (progn
+                (remember key)
+                (push entry (gethash key xrefs-by-key)))))))
+    (values
+     (mapcar (lambda (key)
+               (let ((form (gethash key form-by-key)))
+                 (%reference form
+                             (reverse (gethash key xrefs-by-key))
+                             (and form (gethash (getf form :truename) stale-files)))))
+             (reverse order))
+     (nreverse gone-entries))))
 
 (defun %reference< (a b)
   "Order references by path, then by line."
@@ -593,6 +897,15 @@ docs/tools.md describes every field."
   (let* ((sorted (sort (copy-list refs) #'%reference<))
          (count (length sorted))
          (limit (or limit count)))
+    ;; A call no site shows names the macros that may have made it: the project
+    ;; macros whose expansion writes the symbol.
+    (when via-macros
+      (dolist (ref sorted)
+        (when (equal *note-macro-expansion* (gethash "note" ref))
+          (setf (gethash "note" ref)
+                (format nil "call not visible in source (produced by a macro expansion, ~
+                             possibly of ~{~A~^ or ~}, whose expansion names it)"
+                        via-macros)))))
     (make-ht "symbol" symbol
              "resolved_symbol" resolved-symbol
              "symbol_status" (%status-string status)

@@ -293,10 +293,15 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
 (deftest merge-references-groups-types-and-prefers-named-callers
   (testing "one form, two xref kinds, a lambda and a named caller"
     (let* ((refs (merge-references
-                  (list (%xref "/abs/a.lisp" 1 :type "call" :caller "(lambda)")
+                  ;; Both stale, as an edit not yet reloaded leaves a file's
+                  ;; entries: a stale entry beside a fresh one is a definition
+                  ;; gone from the file.
+                  (list (%xref "/abs/a.lisp" 1 :type "call" :caller "(lambda)" :stale t)
                         (%xref "/abs/a.lisp" 1 :type "reference" :caller "named"
                                                :caller-symbol "P::NAMED" :stale t))
-                  (list (%resolved "/abs/a.lisp" 1 :test-name "a-test"))))
+                  ;; Named after the stale entry's caller: a stale entry meets
+                  ;; its form by name.
+                  (list (%resolved "/abs/a.lisp" 1 :test-name "a-test" :form-name "named"))))
            (ref (first refs)))
       (ok (= 1 (length refs)))
       (ok (equal '("call" "reference") (coerce (gethash "types" ref) 'list)))
@@ -353,6 +358,277 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
           "a form in another file never holds the line")
       (ok (and source-only (equal "b" (gethash "form_name" source-only)))
           "the form the index named is left to the source scan"))))
+
+(deftest merge-references-meets-a-stale-entry-by-its-callers-name
+  ;; After forms are inserted above a caller and the file is not reloaded, the
+  ;; entry's index and line both land in a shifted neighbour: by index and span
+  ;; the merge listed non-callers as callers and the real callers as "not in
+  ;; xref".
+  (testing "a defun meets the form of its name, wherever it moved"
+    (let* ((refs (merge-references
+                  (list (%xref "/abs/a.lisp" 5 :caller "b" :caller-symbol "P::B"
+                                               :line 50 :stale t))
+                  (list (%resolved "/abs/a.lisp" 5 :start-line 50 :form-name "inserted")
+                        (%resolved "/abs/a.lisp" 7 :start-line 70 :form-name "b"))))
+           (b (find "b" refs :key (lambda (ref) (gethash "form_name" ref)) :test #'equal))
+           (inserted (find "inserted" refs :key (lambda (ref) (gethash "form_name" ref))
+                           :test #'equal)))
+      (ok (and b (equal "xref+source" (gethash "origin" b)) (= 70 (gethash "line" b)))
+          "the caller is met with its own form")
+      (ok (and inserted (equal "source" (gethash "origin" inserted)))
+          "the form now at its old place is not taken for it")
+      (ok (and inserted (search "reload" (gethash "note" inserted))
+               (not (search "not in xref" (gethash "note" inserted))))
+          "and a form of a stale file is not said to be missing from xref")))
+  (testing "a method meets the form of its specializers"
+    (let* ((refs (merge-references
+                  ;; Written as %FORMAT-XREF-CALLER writes a method's name.
+                  (list (%xref "/abs/a.lisp" 5 :caller "(defmethod eval-node (binop-node t))"
+                                               :caller-symbol "P::EVAL-NODE" :line 50 :stale t))
+                  (list (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
+                                           "eval-node ((node num-node) env)"
+                                           :start-line 50)
+                        (%resolved-of-type "/abs/a.lisp" 6 "defmethod"
+                                           "eval-node ((node binop-node) env)"
+                                           :start-line 60))))
+           (met (first (%with-origin refs "xref+source"))))
+      (ok (and met (equal "eval-node ((node binop-node) env)" (gethash "form_name" met)))
+          (format nil "met with the binop-node method: ~S"
+                  (and met (gethash "form_name" met))))))
+  (testing "an entry no form of its name holds is left unplaced, not given a neighbour"
+    ;; A deftest deleted from its file: its line now lies in the next test.
+    (let* ((refs (merge-references
+                  (list (%xref "/abs/a.lisp" 3 :caller "temp-ref" :caller-symbol "P::TEMP-REF"
+                                               :line 32 :stale t))
+                  (list (%resolved "/abs/a.lisp" 3 :start-line 30 :form-name "kept-test"
+                                                   :test-name "kept-test"))))
+           (temp (find "P::TEMP-REF" refs :key (lambda (ref) (gethash "caller_symbol" ref))
+                                          :test #'equal)))
+      (ok (and temp (null (gethash "form_name" temp)))
+          "it is not met with the test now at its line")
+      (ok (and temp (search "fresh worker" (gethash "note" temp)))
+          "and its note says a deleted definition stays until a fresh worker"))))
+
+(defun %resolved-of-type (truename index form-type form-name &key (start-line (* 10 index)))
+  "Return a resolved form plist like %RESOLVED's, of FORM-TYPE."
+  (let ((form (%resolved truename index :start-line start-line :form-name form-name)))
+    (setf (getf form :form-type) form-type)
+    form))
+
+(deftest merge-references-meets-a-stale-method-only-with-its-own-specializers
+  ;; With one method of the name left, the entry of a deleted method was met
+  ;; with it, specializers unchecked: a method that does not call the symbol
+  ;; was listed as its caller.
+  (let* ((refs (merge-references
+                (list (%xref "/abs/a.lisp" 5 :caller "(defmethod eval-node (binop-node t))"
+                                             :caller-symbol "P::EVAL-NODE" :line 50 :stale t))
+                (list (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
+                                         "eval-node ((node num-node) env)" :start-line 50))))
+         (num (find "eval-node ((node num-node) env)" refs
+                    :key (lambda (ref) (gethash "form_name" ref)) :test #'equal)))
+    (ok (and num (equal "source" (gethash "origin" num)))
+        "the num-node method is not taken for the binop-node one"))
+  (testing "a qualifier tells two methods of one specializer apart"
+    (let* ((refs (merge-references
+                  (list (%xref "/abs/a.lisp" 5 :caller "(defmethod gf before (node t))"
+                                               :caller-symbol "P::GF" :line 50 :stale t))
+                  (list (%resolved-of-type "/abs/a.lisp" 5 "defmethod" "gf ((x node) y)"
+                                           :start-line 50)
+                        (%resolved-of-type "/abs/a.lisp" 6 "defmethod" "gf :before ((x node) y)"
+                                           :start-line 60))))
+           (met (first (%with-origin refs "xref+source"))))
+      (ok (and met (equal "gf :before ((x node) y)" (gethash "form_name" met)))
+          (format nil "met with the :before method: ~S" (and met (gethash "form_name" met))))))
+  (testing "a function's entry is not met with a class of its name"
+    (let ((refs (merge-references
+                 (list (%xref "/abs/a.lisp" 5 :caller "foo" :caller-symbol "P::FOO"
+                                              :line 50 :stale t))
+                 (list (%resolved-of-type "/abs/a.lisp" 5 "defclass" "foo" :start-line 50)))))
+      (ok (null (%with-origin refs "xref+source")) "the defclass is not its caller"))))
+
+(deftest merge-references-compares-a-stale-methods-specializers-in-order
+  ;; The specializers were compared as sets, so the entry of a deleted (A B)
+  ;; method was met with the (B A) method still in the file -- and a
+  ;; parameter named like a class matched the class.
+  (flet ((met-form (caller forms)
+           (let ((met (first (%with-origin
+                              (merge-references
+                               (list (%xref "/abs/a.lisp" 5 :caller caller
+                                                            :caller-symbol "P::COMBINE"
+                                                            :line 50 :stale t))
+                               forms)
+                              "xref+source"))))
+             (and met (gethash "form_name" met)))))
+    (ok (null (met-form "(defmethod combine (a-node b-node))"
+                        (list (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
+                                                 "combine ((x b-node) (y a-node))"
+                                                 :start-line 50))))
+        "(A B) is not (B A)")
+    (ok (equal "combine ((x a-node) (y b-node))"
+               (met-form "(defmethod combine (a-node b-node))"
+                         (list (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
+                                                  "combine ((x b-node) (y a-node))"
+                                                  :start-line 50)
+                               (%resolved-of-type "/abs/a.lisp" 6 "defmethod"
+                                                  "combine ((x a-node) (y b-node))"
+                                                  :start-line 60))))
+        "and is met with its own")
+    (ok (null (met-form "(defmethod combine (node t))"
+                        (list (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
+                                                 "combine ((node num-node) env)"
+                                                 :start-line 50))))
+        "a parameter named NODE is no NODE specializer")
+    (ok (equal "combine ((x (eql :a)) y)"
+               (met-form "(defmethod combine ((eql :a) t))"
+                         (list (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
+                                                  "combine ((x (eql :a)) y)"
+                                                  :start-line 50))))
+        "an EQL specializer and an unspecialized parameter")))
+
+(deftest merge-references-tells-a-class-from-its-namesake-in-another-package
+  ;; The specializers were compared by name alone, so the entry of a deleted
+  ;; method on A:NODE was met with the method on B:NODE still in the file --
+  ;; which the scan writes "combine ((n node))" too, its prefix dropped: only
+  ;; the specializer tokens as written tell them apart.
+  (let ((a (or (find-package "CLMCP-SPEC-PROBE-A") (make-package "CLMCP-SPEC-PROBE-A" :use '())))
+        (b (or (find-package "CLMCP-SPEC-PROBE-B") (make-package "CLMCP-SPEC-PROBE-B" :use '()))))
+    (unwind-protect
+         (let* ((a-node (intern "NODE" a))
+                (entry (append (%xref "/abs/a.lisp" 5
+                                      :caller "(defmethod combine (node))"
+                                      :caller-symbol "P::COMBINE" :line 50 :stale t)
+                               (list :specializer-keys
+                                     (cl-mcp/src/code-refs-core::%method-specializer-keys
+                                      `(sb-pcl::fast-method combine (,a-node))))))
+                (specializer (lambda (token)
+                               (cl-mcp/src/tools/helpers:make-ht
+                                "kind" "class" "token" token
+                                "in_package" "CLMCP-SPEC-PROBE-A")))
+                (b-node-form (append (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
+                                                        "combine ((n node))" :start-line 50)
+                                     (list :specializers
+                                           (list (funcall specializer
+                                                          "clmcp-spec-probe-b:node")))))
+                (a-node-form (append (%resolved-of-type "/abs/a.lisp" 6 "defmethod"
+                                                        "combine ((n node))" :start-line 60)
+                                     (list :specializers (list (funcall specializer "node"))))))
+           (export (intern "NODE" b) b)
+           (flet ((met (forms)
+                    (let ((ref (first (%with-origin (merge-references (list entry) forms)
+                                                    "xref+source"))))
+                      (and ref (gethash "line" ref)))))
+             (ok (null (met (list b-node-form)))
+                 "A:NODE's method is not met with B:NODE's, written with its prefix")
+             (ok (eql 60 (met (list b-node-form a-node-form)))
+                 "and is met with its own")))
+      (delete-package a)
+      (delete-package b))))
+
+(deftest merge-references-tells-a-caller-and-an-eql-datum-from-their-namesakes
+  ;; The caller was matched by its bare name, so A:CALLER's stale entry was met
+  ;; with B:CALLER's definition; and (eql 'a:node) keyed as (eql 'b:node).
+  (let ((a (or (find-package "CLMCP-NAME-PROBE-A") (make-package "CLMCP-NAME-PROBE-A" :use '())))
+        (b (or (find-package "CLMCP-NAME-PROBE-B") (make-package "CLMCP-NAME-PROBE-B" :use '()))))
+    (unwind-protect
+         (let ((a-caller (intern "CALLER" a))
+               (a-node (intern "NODE" a)))
+           (intern "CALLER" b)
+           (export (intern "NODE" b) b)
+           (flet ((met (entry forms)
+                    (let ((ref (first (%with-origin (merge-references (list entry) forms)
+                                                    "xref+source"))))
+                      (and ref (gethash "line" ref))))
+                  (defun-form (index line package)
+                    (append (%resolved "/abs/a.lisp" index :start-line line :form-name "caller")
+                            (list :name-token "caller" :in-package package)))
+                  (eql-form (index line token)
+                    (append (%resolved-of-type "/abs/a.lisp" index "defmethod"
+                                               "combine ((n (eql 'node)))" :start-line line)
+                            (list :name-token "combine" :in-package "CLMCP-NAME-PROBE-A"
+                                  :specializers
+                                  (list (cl-mcp/src/tools/helpers:make-ht
+                                         "kind" "eql" "token" token
+                                         "in_package" "CLMCP-NAME-PROBE-A"))))))
+             (let ((entry (%xref "/abs/a.lisp" 5 :caller "caller"
+                                 :caller-symbol (cl-mcp/src/code-refs-core:qualified-symbol-name
+                                                 a-caller)
+                                 :line 50 :stale t)))
+               (ok (null (met entry (list (defun-form 5 50 "CLMCP-NAME-PROBE-B"))))
+                   "A:CALLER's entry is not met with B:CALLER's definition")
+               (ok (eql 60 (met entry (list (defun-form 5 50 "CLMCP-NAME-PROBE-B")
+                                            (defun-form 6 60 "CLMCP-NAME-PROBE-A"))))
+                   "and is met with its own"))
+             (let ((entry (append (%xref "/abs/a.lisp" 5
+                                         :caller "(defmethod combine ((eql node)))"
+                                         :caller-symbol
+                                         (cl-mcp/src/code-refs-core:qualified-symbol-name
+                                          (intern "COMBINE" a))
+                                         :line 50 :stale t)
+                                  (list :specializer-keys
+                                        (cl-mcp/src/code-refs-core::%method-specializer-keys
+                                         `(sb-pcl::fast-method combine ((eql ,a-node))))))))
+               (ok (null (met entry (list (eql-form 5 50 "(eql 'clmcp-name-probe-b:node)"))))
+                   "(eql 'a:node) is not (eql 'b:node)")
+               (ok (eql 60 (met entry (list (eql-form 5 50 "(eql 'clmcp-name-probe-b:node)")
+                                            (eql-form 6 60 "(eql 'node)"))))
+                   "and is met with its own"))
+             (ok (equal (cl-mcp/src/code-refs-core::%method-specializer-keys
+                         '(sb-pcl::fast-method combine ((eql nil))))
+                        (cl-mcp/src/code-refs-core::%form-specializer-keys
+                         (list (cl-mcp/src/tools/helpers:make-ht
+                                "kind" "eql" "token" "(eql nil)"
+                                "in_package" "CLMCP-NAME-PROBE-A"))))
+                 "an unquoted (eql nil) keys as SBCL's (eql nil) does")
+             ;; A datum that is no symbol keys by its value, as EQL compares:
+             ;; #\A is not #\a, 1 is not 1.0.
+             (flet ((same-p (datum text)
+                      (equal (cl-mcp/src/code-refs-core::%method-specializer-keys
+                              `(sb-pcl::fast-method combine ((eql ,datum))))
+                             (cl-mcp/src/code-refs-core::%form-specializer-keys
+                              (list (cl-mcp/src/tools/helpers:make-ht
+                                     "kind" "eql" "token" (format nil "(eql ~A)" text)
+                                     "in_package" "CLMCP-NAME-PROBE-A"))))))
+               (ok (same-p #\A "#\\A"))
+               (ok (not (same-p #\A "#\\a")) "#\\A is not #\\a")
+               (ok (same-p 5 "5"))
+               (ok (not (same-p 1 "1.0")) "1 is not 1.0")
+               (ok (same-p 16 "#x10") "a number in another notation")
+               (ok (not (same-p 5 "five")) "a datum the source does not spell as a literal"))))
+      (delete-package a)
+      (delete-package b))))
+
+(deftest merge-references-leaves-out-a-definition-gone-from-a-reloaded-file
+  ;; Staleness is per definition: after a reload, a definition deleted from the
+  ;; file keeps its old date, and that one entry made every form of the file
+  ;; stale, for as long as the worker lived.
+  (multiple-value-bind (refs gone)
+      (merge-references
+       (list (%xref "/abs/a.lisp" 1 :caller "kept" :caller-symbol "P::KEPT" :line 12)
+             (%xref "/abs/a.lisp" 2 :caller "deleted" :caller-symbol "P::DELETED"
+                                    :line 22 :stale t))
+       (list (%resolved "/abs/a.lisp" 1 :form-name "kept")
+             (%resolved "/abs/a.lisp" 3 :start-line 30 :form-name "*top*")))
+    (ok (notany (lambda (ref) (eq t (gethash "stale" ref))) refs)
+        "no form of the reloaded file is stale")
+    (ok (null (find "P::DELETED" refs :key (lambda (ref) (gethash "caller_symbol" ref))
+                                       :test #'equal))
+        "the deleted definition is not listed")
+    (ok (equal '("P::DELETED") (mapcar (lambda (entry) (getf entry :caller-symbol)) gone))
+        "but returned, for the report to mention")))
+
+(deftest build-references-report-names-the-macros-a-hidden-call-may-come-from
+  ;; A call xref recorded but no site shows was said to be "produced by a macro
+  ;; expansion" without naming any macro, while the same report's via_macros
+  ;; named the project macro whose expansion writes the symbol.
+  (let* ((refs (merge-references
+                (list (%xref "/abs/m.lisp" 1 :caller "run-line" :caller-symbol "P::RUN-LINE"
+                                             :line 12))
+                '()))
+         (report (build-references-report :symbol "p::evaluate" :refs refs
+                                          :via-macros (list "P::CALC")))
+         (ref (aref (gethash "refs" report) 0)))
+    (ok (search "P::CALC" (gethash "note" ref))
+        (format nil "the note names the macro: ~S" (gethash "note" ref)))))
 
 (deftest merge-references-flags-xref-types-no-site-shows
   (flet ((site (kind &optional (line 11))
