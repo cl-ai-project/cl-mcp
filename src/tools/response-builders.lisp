@@ -45,43 +45,51 @@ and :frames as returned by repl-eval.
 Internal/infrastructure frames (CL-MCP, SBCL internals, ASDF, etc.) are
 filtered out so that the user-visible backtrace focuses on application code.
 If filtering would remove ALL frames, the filter is skipped to preserve
-useful debug information."
+useful debug information.  frames_truncated is present, true, when the capture
+stopped before a frame of the user's (:FRAMES-TRUNCATED)."
   (let* ((all-frames (getf error-context :frames))
          (user-frames
            (remove-if (lambda (f)
                         (%internal-frame-p (or (getf f :function) "")))
                       all-frames))
          ;; Fall back to all frames when filtering removes everything
-         (display-frames (if user-frames user-frames all-frames)))
-    (make-ht
-     "condition_type" (sanitize-for-json (getf error-context :condition-type))
-     "message" (sanitize-for-json (getf error-context :message))
-     "restarts"
-     (mapcar (lambda (r)
-               (make-ht "name" (sanitize-for-json (getf r :name))
-                        "description" (sanitize-for-json (getf r :description))))
-             (getf error-context :restarts))
-     "frames"
-     (coerce
-      (mapcar (lambda (f)
-                (make-ht
-                 "index" (getf f :index)
-                 "function" (sanitize-for-json (getf f :function))
-                 "source_file" (getf f :source-file)
-                 "source_line" (getf f :source-line)
-                 "locals"
-                 (mapcar (lambda (l)
-                           (let ((lht (make-ht
-                                       "name" (sanitize-for-json (getf l :name))
-                                       "value" (sanitize-for-json (getf l :value)))))
-                             (when (getf l :object-id)
-                               (setf (gethash "object_id" lht) (getf l :object-id)))
-                             (when (getf l :preview)
-                               (setf (gethash "preview" lht) (getf l :preview)))
-                             lht))
-                         (getf f :locals))))
-              display-frames)
-      'vector))))
+         (display-frames (if user-frames user-frames all-frames))
+         (ht (make-ht
+              "condition_type" (sanitize-for-json (getf error-context :condition-type))
+              "message" (sanitize-for-json (getf error-context :message))
+              "restarts"
+              (mapcar (lambda (r)
+                        (make-ht "name" (sanitize-for-json (getf r :name))
+                                 "description" (sanitize-for-json (getf r :description))))
+                      (getf error-context :restarts))
+              "frames"
+              (coerce
+               (mapcar (lambda (f)
+                         (make-ht
+                          "index" (getf f :index)
+                          "function" (sanitize-for-json (getf f :function))
+                          "source_file" (getf f :source-file)
+                          "source_line" (getf f :source-line)
+                          "locals"
+                          (mapcar (lambda (l)
+                                    (let ((lht (make-ht
+                                                "name" (sanitize-for-json (getf l :name))
+                                                "value" (sanitize-for-json (getf l :value)))))
+                                      (when (getf l :object-id)
+                                        (setf (gethash "object_id" lht) (getf l :object-id)))
+                                      (when (getf l :preview)
+                                        (setf (gethash "preview" lht) (getf l :preview)))
+                                      lht))
+                                  (getf f :locals))))
+                       display-frames)
+               'vector))))
+    (when (getf error-context :frames-truncated)
+      (setf (gethash "frames_truncated" ht) t))
+    ht))
+
+(defparameter *backtrace-frames-shown* 5
+  "User frames listed in repl-eval's backtrace text: the first ones less one, and
+the outermost; those between are counted, and all are in error_context.frames.")
 
 (defparameter *locals-shown-per-frame* 10
   "Locals listed per backtrace frame in repl-eval's content text; the rest are
@@ -253,22 +261,43 @@ execution_status is \"execution-unknown\"."
                                       for fn = (or (getf frame :function) "")
                                       unless (%internal-frame-p fn)
                                         collect frame)))
+                         (limit (max 1 *backtrace-frames-shown*))
                          (display-frames (or user-frames
                                              (and frames (subseq frames 0
-                                                          (min 5 (length frames)))))))
+                                                          (min limit (length frames)))))))
                     (when display-frames
                       (format s "~&Backtrace:")
-                      (loop for frame in display-frames
-                            for shown from 1
-                            do (format s "~&  ~A: ~A~@[ (~A~@[:~A~])~]"
-                                       (or (getf frame :index) "?")
-                                       (sanitize-for-json
-                                        (or (getf frame :function) ""))
-                                       (sanitize-for-json
-                                        (getf frame :source-file))
-                                       (getf frame :source-line))
-                               (%write-frame-locals s frame 5)
-                            until (>= shown 5)))))))))
+                      ;; Past the limit the outermost frame is kept: a recursive
+                      ;; LABELS fills the first frames, and the function the
+                      ;; user called is the last of theirs -- or of those the
+                      ;; capture reached, when its cap cut the walk short.
+                      (let* ((count (length display-frames))
+                             (shown (if (> count limit)
+                                        (append (subseq display-frames 0 (1- limit))
+                                                (last display-frames))
+                                        display-frames))
+                             (left-out (- count (length shown)))
+                             (truncated (getf error-context :frames-truncated)))
+                        (loop for frame in shown
+                              for position from 1
+                              do (when (and (plusp left-out) (= position limit))
+                                   ;; error_context.frames holds the user frames
+                                   ;; (%BUILD-ERROR-CONTEXT-HT), so they are what
+                                   ;; is counted.
+                                   (format s "~&  ... ~D more of your frames left out ~
+                                              here; error_context.frames has ~
+                                              ~:[all ~D of them~;the ~D captured -- the ~
+                                              stack went deeper, so the next frame is the ~
+                                              outermost captured~]"
+                                           left-out truncated count))
+                                 (format s "~&  ~A: ~A~@[ (~A~@[:~A~])~]"
+                                         (or (getf frame :index) "?")
+                                         (sanitize-for-json
+                                          (or (getf frame :function) ""))
+                                         (sanitize-for-json
+                                          (getf frame :source-file))
+                                         (getf frame :source-line))
+                                 (%write-frame-locals s frame 5))))))))))
       (setf (gethash "content" ht)
             (text-content
              (if (> (length enriched) effective-limit)
