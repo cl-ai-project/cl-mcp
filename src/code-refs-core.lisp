@@ -499,19 +499,60 @@ without a package prefix, a leading colon, or a quote."
         when (plusp (length name))
           collect name))
 
+(defun %list-elements (text start)
+  "Return the top-level elements of the list whose ( is at START in TEXT, each
+as its text, in order, or NIL when there is no ( at START or it is not closed."
+  (when (and (< start (length text)) (char= (char text start) #\())
+    (let ((elements '()) (depth 0) (element-start nil))
+      (loop for i from start below (length text)
+            for ch = (char text i)
+            do (cond ((char= ch #\()
+                      (when (and (= depth 1) (null element-start))
+                        (setf element-start i))
+                      (incf depth))
+                     ((char= ch #\))
+                      (decf depth)
+                      (cond ((zerop depth)
+                             (when element-start
+                               (push (subseq text element-start i) elements))
+                             (return-from %list-elements (nreverse elements)))
+                            ((and (= depth 1) element-start)
+                             (push (subseq text element-start (1+ i)) elements)
+                             (setf element-start nil))))
+                     ((member ch '(#\Space #\Tab #\Newline))
+                      (when (and (= depth 1) element-start)
+                        (push (subseq text element-start i) elements)
+                        (setf element-start nil)))
+                     ((and (= depth 1) (null element-start))
+                      (setf element-start i))))
+      nil)))
+
 (defun %method-caller-signature (caller)
   "Return (values QUALIFIERS SPECIALIZERS) for CALLER, an xref caller written as
-(defmethod name before (class t)): its qualifier and specializer names as
-%NAME-TOKENS gives them, T left out of the second.  Both NIL, with a third value
-NIL, for a caller that is no method."
+(defmethod name before (class t)): its qualifier names as %NAME-TOKENS gives
+them, and its specializers in order, each as the token list of its text (T as
+(\"t\"), (eql :a) as (\"eql\" \"a\")).  Both NIL, with a third value NIL, for a
+caller that is no method."
   (when (and (stringp caller)
              (eql 0 (search "(defmethod " caller :test #'char-equal)))
-    (let* ((inner (position #\( caller :start 1))
-           (close (and inner (position #\) caller :start inner))))
-      (when close
+    (let ((inner (position #\( caller :start 1)))
+      (when inner
         (values (rest (%name-tokens (subseq caller (length "(defmethod ") inner)))
-                (remove "t" (%name-tokens (subseq caller inner close)) :test #'string=)
+                (mapcar #'%name-tokens (%list-elements caller inner))
                 t)))))
+
+(defun %form-name-specializers (form-name)
+  "Return the specializers of FORM-NAME, a defmethod's form name such as
+\"name ((x class) y)\", in the shape %METHOD-CALLER-SIGNATURE gives them: one
+token list per required parameter, (\"t\") for one not specialized."
+  (let ((open (position #\( form-name)))
+    (when open
+      (loop for parameter in (%list-elements form-name open)
+            until (char= (char parameter 0) #\&)
+            collect (if (char= (char parameter 0) #\()
+                        (let ((parts (%list-elements parameter 0)))
+                          (if (second parts) (%name-tokens (second parts)) (list "t")))
+                        (list "t"))))))
 
 (defparameter *non-function-definers*
   '("defclass" "defstruct" "define-condition" "deftype" "defvar" "defparameter"
@@ -521,8 +562,8 @@ NIL, for a caller that is no method."
 (defun %stale-entry-form (entry forms)
   "Return the one form among FORMS, those of ENTRY's file, that ENTRY's caller
 is, or NIL when none or several are.  A method is met only with a defmethod of
-its name whose qualifiers are its own and whose name holds every one of its
-specializers; any other caller with a form of its name that defines a function.
+its name whose qualifiers and specializers, in order, are its own; any other
+caller with a form of its name that defines a function.
 An entry of a file written after its code was compiled cannot be met by index or
 line, which name a different form once forms were inserted above or removed."
   (let ((name (%symbol-text-name (getf entry :caller-symbol))))
@@ -547,7 +588,11 @@ line, which name a different form once forms were inserted above or removed."
                                                        (length form-name))
                                                    (or (position #\( form-name)
                                                        (length form-name)))))
-                                   (subsetp specializers (rest tokens) :test #'string=))
+                                   ;; In order, parameter by parameter: (A B)
+                                   ;; is not (B A), and a parameter named like
+                                   ;; a class is no specializer.
+                                   (equal specializers
+                                          (%form-name-specializers form-name)))
                               (not (member form-type *non-function-definers*
                                            :test #'string=))))))
                  forms)))

@@ -446,6 +446,45 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
                  (list (%resolved-of-type "/abs/a.lisp" 5 "defclass" "foo" :start-line 50)))))
       (ok (null (%with-origin refs "xref+source")) "the defclass is not its caller"))))
 
+(deftest merge-references-compares-a-stale-methods-specializers-in-order
+  ;; The specializers were compared as sets, so the entry of a deleted (A B)
+  ;; method was met with the (B A) method still in the file -- and a
+  ;; parameter named like a class matched the class.
+  (flet ((met-form (caller forms)
+           (let ((met (first (%with-origin
+                              (merge-references
+                               (list (%xref "/abs/a.lisp" 5 :caller caller
+                                                            :caller-symbol "P::COMBINE"
+                                                            :line 50 :stale t))
+                               forms)
+                              "xref+source"))))
+             (and met (gethash "form_name" met)))))
+    (ok (null (met-form "(defmethod combine (a-node b-node))"
+                        (list (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
+                                                 "combine ((x b-node) (y a-node))"
+                                                 :start-line 50))))
+        "(A B) is not (B A)")
+    (ok (equal "combine ((x a-node) (y b-node))"
+               (met-form "(defmethod combine (a-node b-node))"
+                         (list (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
+                                                  "combine ((x b-node) (y a-node))"
+                                                  :start-line 50)
+                               (%resolved-of-type "/abs/a.lisp" 6 "defmethod"
+                                                  "combine ((x a-node) (y b-node))"
+                                                  :start-line 60))))
+        "and is met with its own")
+    (ok (null (met-form "(defmethod combine (node t))"
+                        (list (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
+                                                 "combine ((node num-node) env)"
+                                                 :start-line 50))))
+        "a parameter named NODE is no NODE specializer")
+    (ok (equal "combine ((x (eql :a)) y)"
+               (met-form "(defmethod combine ((eql :a) t))"
+                         (list (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
+                                                  "combine ((x (eql :a)) y)"
+                                                  :start-line 50))))
+        "an EQL specializer and an unspecialized parameter")))
+
 (deftest merge-references-leaves-out-a-definition-gone-from-a-reloaded-file
   ;; Staleness is per definition: after a reload, a definition deleted from the
   ;; file keeps its old date, and that one entry made every form of the file
