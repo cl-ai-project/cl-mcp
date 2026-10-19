@@ -497,7 +497,8 @@ every call, up to ~D" *max-sub-form-matches*))
   (code :type :string :description
    "Source text of a form to expand; alternative to path")
   (package :type :string :description
-   "Package to read the form in; defaults to the in-package in effect at the form, else CL-USER")
+   "Package to read and expand the form in -- the expander runs with *package* bound to it, as
+compile-file runs it; defaults to the in-package in effect at the form, else CL-USER")
   (level :type :string :enum ("once" "full" "all") :description
    "Expansion depth: once (default), full, or all")
   (readtable :type :string :description

@@ -387,10 +387,21 @@ sanitization so the limit applies to the characters actually emitted."
 (defun %expand-one-entry (source package readtable level
                           print-level print-length max-output-length)
   "Expand SOURCE in the already-resolved PACKAGE.
-Returns the tail of the result plist (everything except :LABEL)."
+Returns the tail of the result plist (everything except :LABEL).
+
+The expander runs with *PACKAGE* bound to PACKAGE and *READTABLE* to READTABLE
+(when one is given), as COMPILE-FILE runs it after the file's IN-PACKAGE and
+IN-READTABLE.  A macro that interns at expansion time -- INTERN, a
+SYMBOLICATE, FORMAT-SYMBOL with *PACKAGE* -- therefore makes the symbols the
+compiler makes.  Before issue #238 only reading and printing were bound, so the
+expander ran in the worker's CL-USER: the result showed
+common-lisp-user::*foo-flag* under a header naming the target package, and
+left that symbol behind in CL-USER."
   (let ((form (%read-source source package readtable)))
     (multiple-value-bind (expansion steps capped-p)
-        (%expand form level)
+        (let ((*package* package)
+              (*readtable* (or readtable *readtable*)))
+          (%expand form level))
       (multiple-value-bind (printed truncated-p)
           (%truncate (%print-expansion expansion package print-level print-length)
                      max-output-length)

@@ -1089,10 +1089,14 @@ Other inputs:
 - `level` (`once` | `full` | `all`, default `once`): one `macroexpand-1` step; repeat until the
   head is not a macro (at most 100 steps); or walk the whole form with `macroexpand-all`,
   expanding nested macros too (at most 1000 expansions; `defun` itself stays in place).
-- `package` (string): the package to read the form in. In file mode it defaults to the last
-  `in-package` before the form, else the file's first, else `CL-USER`; in code mode to
-  `CL-USER`.
-- `readtable` (string): named-readtable designator; the worker needs `named-readtables`.
+- `package` (string): the package to read the form in and to expand it in. In file mode it
+  defaults to the last `in-package` before the form, else the file's first, else `CL-USER`;
+  in code mode to `CL-USER`. The expander runs with `*package*` bound to it, as
+  `compile-file` runs it after the file's `in-package`, so a macro that interns at
+  expansion time (`intern`, a `symbolicate`, `format-symbol` with `*package*`) makes the
+  symbols the compiler makes.
+- `readtable` (string): named-readtable designator; the worker needs `named-readtables`. The
+  expander runs with `*readtable*` bound to it as well.
 - `print_level` (integer, default `50`), `print_length` (integer, default `1000`): printing
   bounds; a value below 1 is treated as 1.
 - `max_output_length` (integer, default `50000`): characters per expansion; longer output ends
