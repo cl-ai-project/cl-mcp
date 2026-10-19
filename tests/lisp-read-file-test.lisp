@@ -503,7 +503,7 @@ tests/tmp/NAME.lisp."
                           "(define-condition unexpected-contact (error) ())"
                           "(deftype contact-type () '(member :a :b))"
                           "(deftest require-access-token (ok (let ((x 1)) x)))"
-                          "(define-repository-function create-total-topup-limit ((money money)) money)"
+                          "(define-repository-function create-total-topup-limit ((m money)) m)"
                           "(define-controller (show :require-token t) (render))"
                           "(defsystem \"sig-named-system\" :depends-on (\"a\"))"
                           "(progn (setup))")))))
@@ -565,7 +565,8 @@ tests/tmp/NAME.lisp."
   ;; A newline inside a name used to reach the collapsed line, which then
   ;; spilled onto a second, unnumbered line.
   (let ((lines (%collapsed-lines "tests/tmp/sig-newline-name.lisp"
-                                 (format nil "(defsystem \"line1~%line2\" :depends-on ())~%~%(defun after () 1)~%"))))
+                                 (format nil "(defsystem \"line1~%line2\" :depends-on ())~%~%~
+                                              (defun after () 1)~%"))))
     (ok (= 2 (length lines)) (format nil "two forms, two lines: ~S" lines))
     (ok (search "(defsystem \"line1 line2\" ...)" (first lines))
         "the newline is shown as a space")))
@@ -590,7 +591,8 @@ tests/tmp/NAME.lisp."
   ;; (SECOND FORM) signalled on (deftest . foo), and on (defun . foo) in
   ;; %COLLAPSE-DEF-FORM, and took the whole view down.
   (let ((lines (%collapsed-lines "tests/tmp/sig-dotted.lisp"
-                                 (format nil "(deftest . foo)~%~%(defun . foo)~%~%(defun after () 1)~%"))))
+                                 (format nil "(deftest . foo)~%~%(defun . foo)~%~%~
+                                              (defun after () 1)~%"))))
     (ok (= 3 (length lines)) (format nil "every form is listed: ~S" lines))
     (ok (search "(defun after ()" (third lines)) "and the one after them is named")))
 
@@ -610,7 +612,8 @@ tests/tmp/NAME.lisp."
 (deftest lisp-read-file-collapsed-view-keeps-a-symbol-name-on-one-line
   ;; A symbol's name was shown raw, so one with a newline split the entry.
   (let ((lines (%collapsed-lines "tests/tmp/sig-newline-symbol.lisp"
-                                 (format nil "(define-thing |sym~%with newline| 1)~%~%(defun after () 1)~%"))))
+                                 (format nil "(define-thing |sym~%with newline| 1)~%~%~
+                                              (defun after () 1)~%"))))
     (ok (= 2 (length lines)) (format nil "two forms, two lines: ~S" lines))
     (ok (search "(define-thing sym with newline ...)" (first lines))
         "the newline is shown as a space")))

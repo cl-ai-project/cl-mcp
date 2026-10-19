@@ -560,13 +560,14 @@ Inputs:
   lambda list (or value, superclasses, first slot); every other form whose head starts
   with `def` or `define-` -- `deftest`, `define-condition`, `deftype`, `defpackage`,
   `defsystem`, a project's own `define-*` -- shows its name alone, `(deftest my-test ...)`,
-  in exactly the text `name_pattern` matches: lower-cased, on one line -- a symbol without
-  its package or `#:` (`(defpackage my-app ...)`), a string with its quotes
-  (`(defsystem "mylib" ...)` for `"MyLib"`), and a list such as
-  `(define-controller (show :require-token t) ...)`. A name over 80 characters is cut at the
-  last space before the limit, or at 80 when it has none. A top-level call whose head merely starts with `def` (`(default-handler x)`)
-  is shown the same way. Any other form shows its head, `(progn ...)`. A definition's docstring follows as `;; first line`, taken from where its
-  definer puts one: after a variable's value, a `defstruct`'s name, or a function's
+  in exactly the text `name_pattern` matches: lower-cased, on one line, each whitespace run
+  made one space -- a symbol without its package or `#:` (`(defpackage my-app ...)`), a
+  string with its quotes (`(defsystem "mylib" ...)` for `"MyLib"`), and a list such as
+  `(define-controller (show :require-token t) ...)`. A name over 80 characters is cut at
+  the last space before the limit, or at 80 when it has none. A top-level call whose head
+  merely starts with `def` (`(default-handler x)`) is shown the same way. Any other form
+  shows its head, `(progn ...)`. A definition's docstring follows as `;; first line`, taken
+  from where its definer puts one: after a variable's value, a `defstruct`'s name, or a function's
   lambda list (never a function's only form, which is its value), so a variable whose
   value is a string does not show that value as its documentation. A variable's value is cut
   at 80 characters. A definition behind `#+`/`#-` shows its feature expressions in front of

@@ -988,7 +988,8 @@ or relative to project root")
          (name_pattern :type :string
                        :description "Regex to match definition names to expand (CL-PPCRE syntax),
 matched against the lower-cased name; a string name keeps its double quotes, so (define-tool \"x\"
-...) is matched by ^\"x\"$. Ignored when collapsed=false")
+...) is matched by ^\"x\"$, and a list name is matched as the collapsed line shows it, so
+(defun (setf foo) ...) is matched by ^\\(setf foo\\)$. Ignored when collapsed=false")
          (content_pattern :type :string
                           :description "Regex to match form bodies or text lines to expand. Ignored
 when collapsed=false")

@@ -780,10 +780,15 @@ said of the same tree."
     ;; TESTING block came back whole as its "signature".
     (ok (string= "find-total-topup-limit"
                  (extract-form-signature
-                  (format nil "(deftest find-total-topup-limit~%  (let* ((money (make-money))~%         (limit (make-limit money)))~%    (ok (eq limit (find-limit money)))))"))))
+                  (format nil "(deftest find-total-topup-limit~%  ~
+                               (let* ((money (make-money))~%         ~
+                               (limit (make-limit money)))~%    ~
+                               (ok (eq limit (find-limit money)))))"))))
     (ok (string= "create-limit"
                  (extract-form-signature
-                  (format nil "(deftest create-limit~%  (testing \"entire period\"~%    (ok t))~%  (testing \"range\"~%    (ok t)))"))))
+                  (format nil "(deftest create-limit~%  ~
+                               (testing \"entire period\"~%    (ok t))~%  ~
+                               (testing \"range\"~%    (ok t)))"))))
     ;; An edge case rather than the regression: with nothing after the name
     ;; the old scan fell back to the name too.
     (ok (string= "empty-test" (extract-form-signature "(deftest empty-test)"))
