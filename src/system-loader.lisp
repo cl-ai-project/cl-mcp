@@ -2,7 +2,7 @@
 ;;;;
 ;;;; MCP tool for loading ASDF systems with structured output.
 ;;;; Solves three problems with raw (asdf:load-system) via repl-eval:
-;;;; 1. Staleness: force=true (default) clears loaded state before reloading
+;;;; 1. Staleness: force=true (default) reloads the named system and its .asd
 ;;;; 2. Output noise: suppresses verbose compilation/load output
 ;;;; 3. Timeout: dedicated timeout with worker-thread pattern
 
@@ -28,7 +28,8 @@
   "Load an ASDF system with structured output and reload support.
 
 Solves three problems with using (asdf:load-system) via repl-eval:
-1. Staleness: force=true (default) clears loaded state before reloading
+1. Staleness: force=true (default) reloads the named system; package-inferred
+   code only where it is stale
 2. Output noise: suppresses verbose compilation/load output
 3. Timeout: dedicated timeout prevents hanging on large systems
 
@@ -41,8 +42,16 @@ force=true clears ASDF's loaded state, but ASDF still recompiles only the files
 it judges stale by their timestamps (one-second resolution).  A file of the
 project's tree written in the same second as its FASL would look current, so
 that FASL is deleted first, and the file is recompiled when this load reaches
-it (same_second_fasls_deleted counts the deletions).  clear_fasls=true is the
-guaranteed rebuild, of every file.
+it (same_second_fasls_deleted counts them).  clear_fasls=true is the
+guaranteed rebuild, of every file.  force=true clears the named system and
+re-reads its .asd, so every system defined there that this load reaches (the
+named one and its dependencies) is loaded again: a stale file is recompiled, a
+current FASL loaded as it is, and either replaces a definition made in
+repl-eval.  In a package-inferred system the code lives in per-file
+subsystems that are neither cleared nor re-read, so a file of one is loaded
+again only when it is stale, and a definition made in repl-eval stays until it
+is: load-system on that file's own system (my-app/src/states), clear_fasls=true
+or a fresh worker (pool-kill-worker) drops it.
 
 Warning handling: a file that compiles with a full WARNING (a duplicate
 definition, a type conflict, package variance, a wrong argument count to a
@@ -68,7 +77,8 @@ file; a call to one defun'd earlier in the same file is checked against the
 file's.  A load that succeeds is no proof that every call has the right number
 of arguments.
 
-SBCL 'redefining X in DEFUN' notifications are dropped, on a first load and a
+SBCL's 'redefining X in DEFUN' notifications (DEFMACRO, DEFGENERIC, DEFMETHOD
+and the rest alike) are dropped, on a first load and a
 reload alike: redefining is ordinary Common Lisp development, and a reload
 exists to do it.  That includes one file replacing another file's definition
 (a name taken in with :import-from and then defined again, say): plain

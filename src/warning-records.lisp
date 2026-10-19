@@ -21,12 +21,78 @@
                 #:registered-fasl-sources)
   (:import-from #:cl-mcp/src/utils/project-files
                 #:project-file-predicate)
-  (:export #:%redefinition-warning-p
+  (:export #:load-failure-kind
+           #:load-failure-hint
+           #:%redefinition-warning-p
            #:%make-warning-record
            #:%in-project-predicate
            #:%warning-record-tables))
 
 (in-package #:cl-mcp/src/warning-records)
+
+(defun load-failure-kind (condition)
+  "Return (values KIND DETAIL) for CONDITION, the error that stopped a load, when
+it is one a fresh worker would meet again and that has a cause of its own to
+name: :MISSING-DEPENDENCY, a system some :depends-on names that ASDF cannot find,
+:MISSING-SYSTEM, the named system itself (each with that system's name as
+DETAIL), or :DEFCONSTANT, a constant given a value not EQL to the one it has.
+NIL for any other error, a dependency found in the wrong version included."
+  (flet ((requires ()
+           (ignore-errors
+            (princ-to-string (asdf/find-component:missing-requires condition)))))
+    (cond
+      ((typep condition 'asdf/find-component:missing-component-of-version) nil)
+      ((typep condition 'asdf/find-component:missing-dependency)
+       (values :missing-dependency (requires)))
+      ((typep condition 'asdf/find-component:missing-component)
+       (values :missing-system (requires)))
+      ((typep condition 'sb-ext:defconstant-uneql)
+       (values :defconstant nil)))))
+
+(defun load-failure-hint (kind tool &optional detail)
+  "Return the hint load-system's and run-tests' failures end with, for KIND:
+:VARIANCE (a package at variance with its DEFPACKAGE), :MISSING-DEPENDENCY or
+:MISSING-SYSTEM (DETAIL the system's name), :DEFCONSTANT, :DID-NOT-COMPILE, or
+NIL for an error
+none of these explains.  TOOL is the tool to retry.  Only the first and the last
+send the caller to a fresh worker, and the last only for what the worker holds:
+a fresh worker meets every other cause again."
+  (ecase kind
+    (:variance
+     (format nil "Hint: the worker still holds a package as an earlier definition ~
+                  declared it -- exports, uses or shadows the file no longer declares. ~
+                  Use pool-kill-worker to get a fresh worker, then retry ~A. If it comes ~
+                  back on a fresh worker, two definitions of the package disagree: make ~
+                  them agree."
+             tool))
+    (:missing-dependency
+     (format nil "Hint: ASDF cannot find ~:[a system~;~:*the system ~A~] this one ~
+                  depends on. Check the name in :depends-on, then register its .asd ~
+                  (load-system, asdf:load-asd) or install it (ql:quickload) and retry ~A; ~
+                  a fresh worker would not find it either."
+             detail tool))
+    (:missing-system
+     (format nil "Hint: ASDF knows no system ~A, and no ~A.asd was found under the ~
+                  project root. Check the name, or register its .asd with load-system ~
+                  or asdf:load-asd, then retry ~A."
+             detail (and detail (asdf:primary-system-name detail)) tool))
+    (:defconstant
+     (format nil "Hint: a DEFCONSTANT was given a value not EQL to the one it already ~
+                  has. A list, string or other compound value is a new object each time ~
+                  the file is compiled or loaded, so it never is: use defparameter, or ~
+                  alexandria:define-constant with :test #'equal, then retry ~A. A fresh ~
+                  worker meets it again whenever the file is recompiled."
+             tool))
+    (:did-not-compile
+     (format nil "Hint: the file did not compile; the compiler output above shows why. ~
+                  Fix the file and retry ~A."
+             tool))
+    ((nil)
+     (format nil "Hint: if the error is about something this worker holds -- a ~
+                  package, a structure's layout -- a fresh worker clears it: ~
+                  pool-kill-worker, then retry ~A. Otherwise its cause is in the code ~
+                  being loaded."
+             tool))))
 
 (defun %redefinition-warning-p (warning)
   "Return T when WARNING is an SBCL \"redefining X in DEFUN/DEFMACRO/...\"
@@ -135,7 +201,14 @@ ends, after every COMPILE-FILE has returned, with the place of the reference."
         (ignore-errors (%compiler-place))
       (list :severity (%warning-severity warning)
             :class class
-            :message (or (ignore-errors (princ-to-string warning)) class)
+            ;; Printed at a wide margin: SBCL formats many compiler messages
+            ;; in a logical block, which the default margin breaks mid-sentence.
+            ;; A finite one: with none the pretty printer never flushes a line
+            ;; and rescans what it has queued, quadratic in a large constant.
+            :message (or (ignore-errors
+                          (let ((*print-right-margin* 1000))
+                            (princ-to-string warning)))
+                         class)
             :kind-key (ignore-errors (%warning-kind-key warning))
             :compiling (and *compile-file-truename* t)
             :file (and (typep file '(or pathname string)) file)

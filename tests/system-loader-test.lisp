@@ -1030,7 +1030,7 @@ property list of its JSON keys and values."
                             "file" "src/a.lisp"
                             "line" line
                             "form" (format nil "(defun f~D)" line))))
-    (testing "kinds past the limit are counted, not listed"
+    (testing "kinds past the limit are counted, and named only by their first warning"
       (let ((text (let ((cl-mcp/src/tools/response-builders::*load-style-kinds-shown* 3))
                     (%response-text
                      "fake-system"
@@ -1039,8 +1039,10 @@ property list of its JSON keys and values."
                             collect (style kind (format nil "style kind ~D" kind))))))))
         (ok (search "(5 style warnings)" text))
         (ok (search "style kind 3" text))
-        (ok (null (search "style kind 4" text)))
-        (ok (search "2 more kinds" text))))
+        (ok (search "2 more kinds" text))
+        (ok (< (search "2 more kinds" text) (search "style kind 4" text)))
+        (ok (search "style kind 4 at src/a.lisp:4 (defun f4)" text)
+            "on one line with its place")))
     (testing "places past the limit are counted, not listed"
       (let ((text (let ((cl-mcp/src/tools/response-builders::*load-warning-places-shown* 2))
                     (%response-text
@@ -1051,13 +1053,22 @@ property list of its JSON keys and values."
         (ok (search "src/a.lisp:12 (defun f12)" text))
         (ok (null (search "src/a.lisp:13" text)))
         (ok (search "2 more" text))))
-    (testing "a style warning is shown by its first line"
+    (testing "a style warning is shown by its first sentence"
       (let ((text (%response-text
                    "fake-system"
                    (%loaded-with
-                    (list (style 1 (format nil "the headline~%a paragraph of advice")))))))
-        (ok (search "the headline" text))
-        (ok (null (search "a paragraph of advice" text)))))))
+                    (list (style 1 (format nil "The headline.~%See also: some advice")))))))
+        (ok (search "The headline." text))
+        (ok (null (search "some advice" text)))))
+    (testing "a sentence SBCL broke over lines is shown whole, on one line"
+      (let ((text (%response-text
+                   "fake-system"
+                   (%loaded-with
+                    (list (style 1 (format nil "using the lexical binding of the symbol ~
+(*X*), not the~%dynamic binding, even though the name follows~%the usual naming ~
+convention (names like *FOO*) for special variables")))))))
+        (ok (search "not the dynamic binding, even though the name follows the usual" text)
+            text)))))
 
 (deftest load-system-response-names-each-style-warning-by-its-own-message
   (flet ((style (message line &key (kind 1) (file "src/a.lisp"))
@@ -1124,6 +1135,123 @@ property list of its JSON keys and values."
                                    "src/b.lisp:3 (defun f3)")))
         (ok (search "3x the same kind" text))
         (ok (search expected text))))))
+
+(deftest load-system-response-names-the-style-kinds-it-leaves-out
+  ;; SBCL reports undefined functions when the compilation unit ends, so their
+  ;; kind came last and was the one left out past the limit -- counted as
+  ;; "1 more kind", never named, though a typo is what it usually is.
+  (flet ((style (kind message line)
+           (%warning-record "severity" "style-warning"
+                            "class" "SB-INT:SIMPLE-STYLE-WARNING"
+                            "message" message "kind" kind
+                            "file" "src/a.lisp" "line" line
+                            "form" (format nil "(defun f~D)" line))))
+    (let ((text (let ((cl-mcp/src/tools/response-builders::*load-style-kinds-shown* 1))
+                  (%response-text
+                   "fake-system"
+                   (%loaded-with
+                    (list (style 1 "The variable X is defined but never used." 1)
+                          (style 2 "undefined function: APP::FROBNICATE" 2)
+                          (style 2 "undefined function: APP::RECONCILE" 3)))))))
+      (ok (search "The variable X" text) "the first kind is listed")
+      (ok (search "1 more kind" text) "the rest is counted")
+      (ok (search "undefined function: APP::FROBNICATE" text)
+          (format nil "and named, by its first warning: ~A" text))
+      (ok (search "2x" (subseq text (search "1 more kind" text)))
+          "with its count"))))
+
+(deftest load-system-response-bounds-the-style-kinds-it-names
+  ;; A library that formats its own style warnings makes a kind per message:
+  ;; naming every kind past the limit would grow the text without bound.
+  (flet ((style (kind message line)
+           (%warning-record "severity" "style-warning"
+                            "class" "SB-INT:SIMPLE-STYLE-WARNING"
+                            "message" message "kind" kind
+                            "file" "src/a.lisp" "line" line
+                            "form" (format nil "(defun f~D)" line))))
+    (testing "as many kinds again are named, the rest counted"
+      (let ((text (let ((cl-mcp/src/tools/response-builders::*load-style-kinds-shown* 2))
+                    (%response-text
+                     "fake-system"
+                     (%loaded-with (loop for kind from 1 to 7
+                                         collect (style kind (format nil "kind ~D." kind)
+                                                        kind)))))))
+        (ok (search "5 more kinds" text))
+        (ok (search "kind 4." text) "the first kinds past the limit are named")
+        (ok (null (search "kind 5." text)) "the ones past those are not")
+        (ok (search "... and 3 more kinds, not named" text) "but counted")))
+    (testing "a kind of identical warnings says whose place it gives"
+      (let ((text (let ((cl-mcp/src/tools/response-builders::*load-style-kinds-shown* 1))
+                    (%response-text
+                     "fake-system"
+                     (%loaded-with (list (style 1 "first kind." 1)
+                                         (style 2 "same text." 2)
+                                         (style 2 "same text." 3)))))))
+        (ok (search "2x same text., first at src/a.lisp:2 (defun f2)" text) text)))))
+
+(deftest headline-is-the-first-sentence-of-a-message
+  (let ((headline #'cl-mcp/src/tools/response-builders::%headline)
+        (long (make-string 250 :initial-element #\x)))
+    (ok (equal "The headline." (funcall headline (format nil "~%~%The headline.~%advice")))
+        "leading blank lines are skipped")
+    (ok (equal "The headline." (funcall headline (format nil "   ~%The headline.")))
+        "and so is a line of spaces")
+    (ok (equal long (funcall headline long))
+        "a long message of one line is kept whole")
+    (ok (equal "" (funcall headline "")) "an empty message has an empty headline")))
+
+(deftest load-system-response-lists-the-projects-style-warnings-first
+  ;; A dependency under the project root loads first and its path can sort
+  ;; first too: the project's own warning was the one cut behind "(+N more)".
+  (flet ((style (kind message file line in-project)
+           (%warning-record "severity" "style-warning"
+                            "class" "SB-INT:SIMPLE-STYLE-WARNING"
+                            "message" message "kind" kind
+                            "file" file "line" line
+                            "form" (format nil "(defun f~D)" line)
+                            "in_project" (if in-project t yason:false))))
+    (testing "within a kind"
+      (let ((text (let ((cl-mcp/src/tools/response-builders::*load-warning-places-shown* 2))
+                    (%response-text
+                     "fake-system"
+                     (%loaded-with
+                      (list (style 1 "The variable A is defined but never used."
+                                   ".qlot/dep/a.lisp" 1 nil)
+                            (style 1 "The variable B is defined but never used."
+                                   ".qlot/dep/a.lisp" 2 nil)
+                            (style 1 "The variable C is defined but never used."
+                                   ".qlot/dep/a.lisp" 3 nil)
+                            (style 1 "The variable OWN is defined but never used."
+                                   "src/route.lisp" 69 t)))))))
+        (ok (search "src/route.lisp:69 (defun f69): The variable OWN" text)
+            (format nil "the project's warning is listed: ~A" text))
+        (ok (< (search "The variable OWN" text) (search "The variable A " text))
+            "before the dependency's")))
+    (testing "among kinds"
+      (let ((text (let ((cl-mcp/src/tools/response-builders::*load-style-kinds-shown* 1))
+                    (%response-text
+                     "fake-system"
+                     (%loaded-with
+                      (list (style 1 "outside kind" ".qlot/dep/a.lisp" 1 nil)
+                            (style 2 "own kind" "src/app.lisp" 5 t)))))))
+        (ok (< (search "own kind" text) (search "outside kind" text))
+            (format nil "a kind holding the project's warning comes first: ~A" text))))))
+
+(deftest load-system-response-lists-style-warnings-before-a-failure
+  ;; One of them can be the cause: a macro used before its DEFMACRO fails the
+  ;; compile with "illegal function call", and only a style warning says why.
+  (let ((text (%response-text
+               "fake-system"
+               (%failed-with
+                (list (%warning-record "severity" "style-warning"
+                                       "class" "SB-INT:SIMPLE-STYLE-WARNING"
+                                       "message" "undefined function: APP::LATE-MACRO"
+                                       "kind" 1 "file" "src/a.lisp" "line" 3
+                                       "form" "(defun uses-it)"))
+                :compile-failed t))))
+    (ok (search "undefined function: APP::LATE-MACRO" text)
+        (format nil "the style warning is shown: ~A" text))
+    (ok (search "src/a.lisp:3" text) "with its place")))
 
 (defun %full-warning (message &key (kind 1) (in-project t in-project-p) file line)
   "Return a full warning record with MESSAGE.  IN-PROJECT, when given, is stored
@@ -1269,7 +1397,7 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
                    (%failed-with (list (refusing) (style)) :compile-failed t))))
         (ok (search "ASDF refuses a file that compiles with a WARNING" text))
         (ok (search "a warning signalled while compiling" text))
-        (ok (search "1 style warning" text))
+        (ok (search "Style warnings before the error (1)" text))
         (ok (search "fix the warning ASDF refused the file for" text))))
     (testing "a warning from before the refused compile is listed apart from the cause"
       (let* ((text (%response-text
@@ -1298,7 +1426,7 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
                    "fake-system"
                    (%failed-with (list (variance "fails_compile" t)) :compile-failed t))))
         (ok (search "FAKE also exports the following symbols" text))
-        (ok (search "the running image has stale exports" text))
+        (ok (search "the worker still holds a package" text))
         (ok (search "pool-kill-worker" text))))
     (testing "a package at variance met while an earlier file loaded is not the cause"
       (let ((text (%response-text
@@ -1306,7 +1434,7 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
                    (%failed-with (list (variance)) :compile-failed t))))
         (ok (search "Warnings before the error (1)" text))
         (ok (null (search "ASDF refuses" text)))
-        (ok (null (search "the running image has stale exports" text)))))
+        (ok (null (search "the worker still holds a package" text)))))
     (testing "another error: the warnings came before it and are not blamed for it"
       (let ((text (%response-text "fake-system"
                                   (%failed-with (list (earlier) (refusing))))))
@@ -1315,6 +1443,72 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
         (ok (search "a warning signalled while compiling" text))
         (ok (null (search "ASDF refuses" text)))
         (ok (search "pool-kill-worker" text))))))
+
+(deftest load-system-response-sends-to-a-fresh-worker-only-for-the-workers-state
+  ;; Every failure without a refusing warning got "the worker process may now
+  ;; have a broken package state. Use pool-kill-worker": a missing dependency,
+  ;; a compile error and a DEFCONSTANT given a list, none of which a fresh
+  ;; worker cures -- the last one loops.
+  (flet ((text (kind &key detail compile-failed)
+           (let ((ht (%failed-with '() :compile-failed compile-failed)))
+             (when kind (setf (gethash "failure_kind" ht) kind))
+             (when detail (setf (gethash "failure_detail" ht) detail))
+             (%response-text "fake-system" ht))))
+    (testing "a missing dependency"
+      (let ((text (text "missing-dependency" :detail "no-such-ledger-lib")))
+        (ok (search "no-such-ledger-lib" text))
+        (ok (search ":depends-on" text) text)
+        (ok (null (search "pool-kill-worker" text)))))
+    (testing "a compile error"
+      (let ((text (text nil :compile-failed t)))
+        (ok (search "did not compile" text) text)
+        (ok (null (search "pool-kill-worker" text)))))
+    (testing "a DEFCONSTANT whose value is not EQL"
+      (let ((text (text "defconstant")))
+        (ok (search "defparameter" text) text)
+        (ok (null (search "pool-kill-worker" text)))))
+    (testing "and the variance hint names no kind of variance in particular"
+      (let* ((record (%full-warning "APP also uses the following packages: (LIB)"))
+             (text (progn (setf (gethash "class" record) "SB-INT:PACKAGE-AT-VARIANCE"
+                                (gethash "fails_compile" record) t)
+                          (%response-text "fake-system"
+                                          (%failed-with (list record) :compile-failed t)))))
+        (ok (search "pool-kill-worker" text))
+        (ok (null (search "stale exports" text)) text)
+        (ok (search "two definitions of the package disagree" text)
+            "with the advice for when a fresh worker meets it again")))))
+
+(deftest load-system-names-a-missing-dependency
+  (let* ((name "clmcp-missing-dep-fixture")
+         (dir (uiop:ensure-directory-pathname
+               (merge-pathnames (format nil "~A/" name) (uiop:temporary-directory)))))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist dir)
+           (with-open-file (out (merge-pathnames (format nil "~A.asd" name) dir)
+                                :direction :output :if-exists :supersede)
+             (format out "(asdf:defsystem ~S :depends-on (\"clmcp-no-such-dependency\"))~%"
+                     name))
+           (asdf:load-asd (merge-pathnames (format nil "~A.asd" name) dir))
+           (let ((ht (load-system name)))
+             (ok (string= "error" (gethash "status" ht)))
+             (ok (equal "missing-dependency" (gethash "failure_kind" ht))
+                 (format nil "the failure is classified: ~S" (gethash "failure_kind" ht)))
+             (ok (equal "clmcp-no-such-dependency" (gethash "failure_detail" ht)))))
+      (ignore-errors (asdf:clear-system name))
+      (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))
+
+(deftest load-system-tells-a-missing-system-from-a-missing-dependency
+  ;; A name ASDF knows nowhere, with no .asd under the project root, is a
+  ;; typo in the request, not a :depends-on entry.
+  (let* ((ht (load-system "clmcp-no-such-system-at-all"))
+         (text (progn (cl-mcp/src/tools/response-builders:build-load-system-response
+                       "clmcp-no-such-system-at-all" ht)
+                      (gethash "text" (aref (gethash "content" ht) 0)))))
+    (ok (string= "error" (gethash "status" ht)))
+    (ok (search "ASDF knows no system clmcp-no-such-system-at-all" text) text)
+    (ok (null (search ":depends-on" text)))
+    (ok (null (gethash "failure_kind" ht)) "the classification stays internal")))
 
 (deftest load-system-force-reload-reports-no-redefinitions
   (testing "force=true on an already-loaded system reports zero warnings
@@ -1427,6 +1621,63 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
         (ignore-errors (asdf:clear-system name))
         (ignore-errors (asdf:clear-system (format nil "~A/src/main" name)))
         (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
+
+(deftest load-system-does-not-count-a-newer-source-as-same-second
+  ;; A source newer than its fasl is ASDF's to recompile; counting it said
+  ;; "written in the same second" after every ordinary edit.
+  (require :sb-posix)
+  (let* ((name "clmcp-newer-source-fixture")
+         (dir (merge-pathnames (format nil "~A/" name) (uiop:temporary-directory)))
+         (main (merge-pathnames "src/main.lisp" dir))
+         (package (format nil "~:@(~A~)/SRC/MAIN" name)))
+    (unwind-protect
+        (flet ((write-main (value)
+                 (with-open-file (out main :direction :output :if-exists :supersede)
+                   (format out "(defpackage #:~A/src/main (:use #:cl) (:export #:answer))~%~
+                                (in-package #:~A/src/main)~%~
+                                (defun answer () ~A)~%"
+                           name name value))))
+          (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)
+          (ensure-directories-exist main)
+          (with-open-file (out (merge-pathnames (format nil "~A.asd" name) dir)
+                               :direction :output :if-exists :supersede)
+            (format out "(asdf:defsystem ~S :class :package-inferred-system ~
+                           :depends-on (~S))~%"
+                    name (format nil "~A/src/main" name)))
+          (write-main 1)
+          (asdf:load-asd (merge-pathnames (format nil "~A.asd" name) dir))
+          (ok (string= "loaded" (gethash "status" (load-system name))))
+          (write-main 2)
+          (let* ((fasl (asdf:apply-output-translations (compile-file-pathname main)))
+                 (unix (+ 30 (- (file-write-date fasl)
+                                (encode-universal-time 0 0 0 1 1 1970 0)))))
+            (uiop:symbol-call :sb-posix :utimes (namestring main) unix unix))
+          (let ((ht (load-system name)))
+            (ok (= 2 (funcall (find-symbol "ANSWER" package))) "the edit is what runs")
+            (ok (member (gethash "same_second_fasls_deleted" ht) '(nil 0))
+                (format nil "no fasl is counted as same-second (~S)"
+                        (gethash "same_second_fasls_deleted" ht)))
+            (ok (null (search "same second"
+                              (let ((content (gethash "content"
+                                                      (build-load-system-response name ht))))
+                                (gethash "text" (aref content 0)))))
+                "and the text does not say so")))
+      (ignore-errors (asdf:clear-system name))
+      (ignore-errors (asdf:clear-system (format nil "~A/src/main" name)))
+      (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))
+
+(deftest warning-record-message-is-not-cut-at-the-printer-margin
+  ;; SBCL formats many compiler messages in a logical block, so printed at the
+  ;; default margin they wrap mid-sentence -- and a style warning is shown by
+  ;; its first line.
+  (let* ((words (format nil "~{~A~^ ~}" (loop repeat 30 collect "word")))
+         (warning (make-condition 'sb-int:simple-style-warning
+                                  :format-control "~@<~A ~A~:@>"
+                                  :format-arguments (list words words)))
+         (message (getf (cl-mcp/src/warning-records:%make-warning-record warning)
+                        :message)))
+    (ok (null (position #\Newline message))
+        (format nil "one line: ~S" message))))
 
 (deftest load-system-clear-fasls-on-a-subsystem-clears-its-primary
   (testing "clear_fasls given a package-inferred subsystem recompiles its dependencies (#167)"

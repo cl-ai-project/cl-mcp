@@ -580,8 +580,26 @@ summary text and the result hash."
       (fs-write-file "tests/tmp/limit-marker.txt" (format nil "abc"))
       (multiple-value-bind (text payload)
           (%call-fs-read "tests/tmp/limit-marker.txt" :limit 0)
-        (ok (equal "" text))
+        (ok (equal "" (gethash "text" payload)))
+        (ok (search "Nothing read: limit is 0" text)
+            (format nil "an empty answer says why: ~S" text))
         (ok (null (gethash "next_offset" payload))))))
+  (testing "an offset at or past the end says so"
+    ;; An empty text with no word read like an empty file; lisp-read-file's raw
+    ;; mode already says "past end of file" for the same mistake.
+    (with-scratch-file ("tests/tmp/limit-marker.txt")
+      (fs-write-file "tests/tmp/limit-marker.txt" (format nil "ééabc"))
+      (dolist (offset '(5 500))
+        (multiple-value-bind (text payload)
+            (%call-fs-read "tests/tmp/limit-marker.txt" :offset offset)
+          (ok (equal "" (gethash "text" payload)))
+          (ok (search (format nil "offset ~D is at or past the end of the file" offset) text)
+              (format nil "offset ~D: ~S" offset text))))))
+  (testing "one character is one character"
+    (with-scratch-file ("tests/tmp/limit-marker.txt")
+      (fs-write-file "tests/tmp/limit-marker.txt" (format nil "abc"))
+      (let ((text (%call-fs-read "tests/tmp/limit-marker.txt" :limit 1)))
+        (ok (search "showing 1 character from" text) text))))
   (testing "a read that reaches the end carries no marker"
     (with-scratch-file ("tests/tmp/limit-marker.txt")
       (fs-write-file "tests/tmp/limit-marker.txt" (format nil "ééabcdef"))
@@ -653,6 +671,38 @@ summary text and the result hash."
         (ok (null err))
         (ng (search "WARNING" text))
         (ok (null (gethash "unparseable" payload)))))))
+
+(deftest fs-write-file-warns-of-an-object-printed-unreadably-and-lets-it-be-repaired
+  ;; An expected value pasted from printed output, #<HASH-TABLE ...>, no
+  ;; readtable reads: the standard makes #< signal an error.  It was written
+  ;; without a word, and then no tool could change the file -- not even
+  ;; fs-write-file with allow_unparseable_overwrite.
+  (let ((broken (format nil "(defun a () 1)~%~%(test empty~%  (is (eq nil #<ledger>)))~%"))
+        (fixed (format nil "(defun a () 1)~%~%(test empty~%  (is (eq nil (ledger))))~%")))
+    (with-scratch-file ("tests/tmp/write-unreadable.lisp")
+      (multiple-value-bind (text payload err)
+          (%call-fs-write "tests/tmp/write-unreadable.lisp" broken)
+        (ok (null err))
+        (ok (search "WARNING: the file was written but does not parse." text) text)
+        (ok (search "#<" text) "the warning names what the reader rejects")
+        (ok (search "line 4, column 15" text) "and where")
+        (ok (eq t (gethash "unparseable" payload))))
+      (multiple-value-bind (text payload err)
+          (%call-fs-write "tests/tmp/write-unreadable.lisp" fixed :allow t)
+        (declare (ignore payload))
+        (ok (null err) (format nil "the repair is let through: ~S" err))
+        (ng (search "WARNING" text))))
+    (testing "a file that declares a readtable keeps its guard"
+      (with-scratch-file ("tests/tmp/write-unreadable-rt.lisp")
+        (%call-fs-write "tests/tmp/write-unreadable-rt.lisp"
+                        (concatenate 'string "(named-readtables:in-readtable :standard)"
+                                     (string #\Newline) broken))
+        (multiple-value-bind (text payload err)
+            (%call-fs-write "tests/tmp/write-unreadable-rt.lisp" fixed :allow t)
+          (declare (ignore text payload))
+          ;; Any in-readtable keeps it: whether that readtable defines #< is
+          ;; not judged.
+          (ok err "a readtable of its own may define #<"))))))
 
 (deftest fs-write-file-does-not-warn-for-parseable-or-non-lisp-content
   (testing "a balanced .lisp gets the plain summary"

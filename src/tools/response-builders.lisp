@@ -23,6 +23,8 @@
                 #:*shadowed-binding-marker*)
   (:import-from #:cl-mcp/src/repl-core
                 #:*default-max-output-length*)
+  (:import-from #:cl-mcp/src/warning-records
+                #:load-failure-hint)
   (:import-from #:cl-mcp/src/frame-inspector
                 #:%internal-frame-p)
   (:export #:build-eval-response
@@ -45,43 +47,51 @@ and :frames as returned by repl-eval.
 Internal/infrastructure frames (CL-MCP, SBCL internals, ASDF, etc.) are
 filtered out so that the user-visible backtrace focuses on application code.
 If filtering would remove ALL frames, the filter is skipped to preserve
-useful debug information."
+useful debug information.  frames_truncated is present, true, when the capture
+stopped before a frame of the user's (:FRAMES-TRUNCATED)."
   (let* ((all-frames (getf error-context :frames))
          (user-frames
            (remove-if (lambda (f)
                         (%internal-frame-p (or (getf f :function) "")))
                       all-frames))
          ;; Fall back to all frames when filtering removes everything
-         (display-frames (if user-frames user-frames all-frames)))
-    (make-ht
-     "condition_type" (sanitize-for-json (getf error-context :condition-type))
-     "message" (sanitize-for-json (getf error-context :message))
-     "restarts"
-     (mapcar (lambda (r)
-               (make-ht "name" (sanitize-for-json (getf r :name))
-                        "description" (sanitize-for-json (getf r :description))))
-             (getf error-context :restarts))
-     "frames"
-     (coerce
-      (mapcar (lambda (f)
-                (make-ht
-                 "index" (getf f :index)
-                 "function" (sanitize-for-json (getf f :function))
-                 "source_file" (getf f :source-file)
-                 "source_line" (getf f :source-line)
-                 "locals"
-                 (mapcar (lambda (l)
-                           (let ((lht (make-ht
-                                       "name" (sanitize-for-json (getf l :name))
-                                       "value" (sanitize-for-json (getf l :value)))))
-                             (when (getf l :object-id)
-                               (setf (gethash "object_id" lht) (getf l :object-id)))
-                             (when (getf l :preview)
-                               (setf (gethash "preview" lht) (getf l :preview)))
-                             lht))
-                         (getf f :locals))))
-              display-frames)
-      'vector))))
+         (display-frames (if user-frames user-frames all-frames))
+         (ht (make-ht
+              "condition_type" (sanitize-for-json (getf error-context :condition-type))
+              "message" (sanitize-for-json (getf error-context :message))
+              "restarts"
+              (mapcar (lambda (r)
+                        (make-ht "name" (sanitize-for-json (getf r :name))
+                                 "description" (sanitize-for-json (getf r :description))))
+                      (getf error-context :restarts))
+              "frames"
+              (coerce
+               (mapcar (lambda (f)
+                         (make-ht
+                          "index" (getf f :index)
+                          "function" (sanitize-for-json (getf f :function))
+                          "source_file" (getf f :source-file)
+                          "source_line" (getf f :source-line)
+                          "locals"
+                          (mapcar (lambda (l)
+                                    (let ((lht (make-ht
+                                                "name" (sanitize-for-json (getf l :name))
+                                                "value" (sanitize-for-json (getf l :value)))))
+                                      (when (getf l :object-id)
+                                        (setf (gethash "object_id" lht) (getf l :object-id)))
+                                      (when (getf l :preview)
+                                        (setf (gethash "preview" lht) (getf l :preview)))
+                                      lht))
+                                  (getf f :locals))))
+                       display-frames)
+               'vector))))
+    (when (getf error-context :frames-truncated)
+      (setf (gethash "frames_truncated" ht) t))
+    ht))
+
+(defparameter *backtrace-frames-shown* 5
+  "User frames listed in repl-eval's backtrace text: the first ones less one, and
+the outermost; those between are counted, and all are in error_context.frames.")
 
 (defparameter *locals-shown-per-frame* 10
   "Locals listed per backtrace frame in repl-eval's content text; the rest are
@@ -253,22 +263,43 @@ execution_status is \"execution-unknown\"."
                                       for fn = (or (getf frame :function) "")
                                       unless (%internal-frame-p fn)
                                         collect frame)))
+                         (limit (max 1 *backtrace-frames-shown*))
                          (display-frames (or user-frames
                                              (and frames (subseq frames 0
-                                                          (min 5 (length frames)))))))
+                                                          (min limit (length frames)))))))
                     (when display-frames
                       (format s "~&Backtrace:")
-                      (loop for frame in display-frames
-                            for shown from 1
-                            do (format s "~&  ~A: ~A~@[ (~A~@[:~A~])~]"
-                                       (or (getf frame :index) "?")
-                                       (sanitize-for-json
-                                        (or (getf frame :function) ""))
-                                       (sanitize-for-json
-                                        (getf frame :source-file))
-                                       (getf frame :source-line))
-                               (%write-frame-locals s frame 5)
-                            until (>= shown 5)))))))))
+                      ;; Past the limit the outermost frame is kept: a recursive
+                      ;; LABELS fills the first frames, and the function the
+                      ;; user called is the last of theirs -- or of those the
+                      ;; capture reached, when its cap cut the walk short.
+                      (let* ((count (length display-frames))
+                             (shown (if (> count limit)
+                                        (append (subseq display-frames 0 (1- limit))
+                                                (last display-frames))
+                                        display-frames))
+                             (left-out (- count (length shown)))
+                             (truncated (getf error-context :frames-truncated)))
+                        (loop for frame in shown
+                              for position from 1
+                              do (when (and (plusp left-out) (= position limit))
+                                   ;; error_context.frames holds the user frames
+                                   ;; (%BUILD-ERROR-CONTEXT-HT), so they are what
+                                   ;; is counted.
+                                   (format s "~&  ... ~D more of your frames left out ~
+                                              here; error_context.frames has ~
+                                              ~:[all ~D of them~;the ~D captured -- the ~
+                                              stack went deeper, so the next frame is the ~
+                                              outermost captured~]"
+                                           left-out truncated count))
+                                 (format s "~&  ~A: ~A~@[ (~A~@[:~A~])~]"
+                                         (or (getf frame :index) "?")
+                                         (sanitize-for-json
+                                          (or (getf frame :function) ""))
+                                         (sanitize-for-json
+                                          (getf frame :source-file))
+                                         (getf frame :source-line))
+                                 (%write-frame-locals s frame 5))))))))))
       (setf (gethash "content" ht)
             (text-content
              (if (> (length enriched) effective-limit)
@@ -277,12 +308,6 @@ execution_status is \"execution-unknown\"."
                               "...(truncated)")
                  enriched))))
     ht))
-
-(defparameter *package-variance-hint*
-  (format nil "Hint: package-variance warnings mean the running image has stale exports. ~
-Use pool-kill-worker to get a fresh worker, then re-run load-system.")
-  "What load-system says when a package is at variance with its DEFPACKAGE: the
-file is as its author wants it, and the worker is what is out of date.")
 
 (defparameter *load-full-warnings-shown* 20
   "Full warnings listed one by one in load-system's text; the rest are counted.")
@@ -346,9 +371,32 @@ fails on, so none is summed up; *LOAD-FULL-WARNINGS-SHOWN* only bounds a flood."
       (format stream "~%  ... and ~D more warning~:P (all are in warning_records)"
               hidden))))
 
-(defun %first-line (text)
-  "Return TEXT up to its first newline."
-  (subseq text 0 (or (position #\Newline text) (length text))))
+(defparameter *headline-max-chars* 200
+  "Characters of a warning's headline (%HEADLINE) written into load-system's text.")
+
+(defun %headline (text)
+  "Return TEXT's first sentence or line: its first non-blank line, continued by
+the lines after it while what is taken so far ends in no . : ! or ?, joined by
+single spaces.  What the joining adds is cut at *HEADLINE-MAX-CHARS*; a first
+line longer than that is kept whole, as it always was.  SBCL breaks some
+messages at fixed places mid-sentence (\"... of the symbol (X), not the\" /
+\"dynamic binding ...\"), and puts advice or the offending form on the lines after
+a sentence that ends."
+  (let ((taken '()))
+    (loop for line in (uiop:split-string text :separator '(#\Newline))
+          for trimmed = (string-trim '(#\Space #\Tab) line)
+          until (and taken (zerop (length trimmed)))
+          do (unless (zerop (length trimmed))
+               (push trimmed taken))
+          until (and taken
+                     (member (char (first taken) (1- (length (first taken))))
+                             '(#\. #\: #\! #\?))))
+    (let* ((lines (reverse taken))
+           (headline (format nil "~{~A~^ ~}" lines))
+           (limit (max *headline-max-chars* (length (or (first lines) "")))))
+      (if (> (length headline) limit)
+          (concatenate 'string (string-right-trim " " (subseq headline 0 limit)) "...")
+          headline))))
 
 (defun %in-project-p (record)
   "True unless RECORD, a load-system warning record, says it came from outside the
@@ -361,7 +409,7 @@ warning was before, rather than hidden in the summary."
 (defun %write-outside-warnings (stream records)
   "Write RECORDS, full warnings from outside the project, to STREAM summed up by
 kind: how many there are of the kind, when more than one, and the first one's
-first line, marked as an example when the others read differently.  Nothing in
+headline (%HEADLINE), marked as an example when the others read differently.  Nothing in
 them is the project's to fix, so none is listed whole; *LOAD-OUTSIDE-KINDS-SHOWN*
 kinds are written, the rest counted, and every record stays in warning_records."
   (let ((kinds '()))
@@ -375,9 +423,7 @@ warning_records):"
             (length records))
     (loop for (nil . members) in kinds
           for shown from 1 to *load-outside-kinds-shown*
-          do (let ((headlines (mapcar (lambda (record)
-                                        (%first-line (or (gethash "message" record) "")))
-                                      members)))
+          do (let ((headlines (mapcar #'%record-headline members)))
                (format stream "~%    ~@[~Dx ~]~:[e.g. ~;~]~A"
                        (and (rest members) (length members))
                        (every (lambda (headline) (string= headline (first headlines)))
@@ -411,9 +457,14 @@ cases apart, and the hint is still given when a compile is refused for it."
   (if full
       (some (lambda (record)
               (and (%in-project-p record)
-                   (search "also exports" (or (gethash "message" record) ""))))
+                   ;; By its class: an "also uses" or "also shadows" variance
+                   ;; is one as much as "also exports".
+                   (equal "SB-INT:PACKAGE-AT-VARIANCE" (gethash "class" record))))
             full)
-      (and (stringp details) (search "also exports" details) t)))
+      (and (stringp details)
+           (some (lambda (phrase) (search phrase details))
+                 '("also exports" "also uses" "also shadows"))
+           t)))
 
 (defun %place-precedes-p (a b)
   "True when load-system warning record A is listed before B: by file, then by
@@ -426,27 +477,46 @@ line, and a record with a place before one without."
           ((string< file-b file-a) nil)
           (t (< (or (gethash "line" a) 0) (or (gethash "line" b) 0))))))
 
+(defun %project-first (records)
+  "Return RECORDS, load-system warning records, the project's (%IN-PROJECT-P)
+before the rest, each part in file and line order (%PLACE-PRECEDES-P)."
+  (stable-sort (stable-sort (copy-list records) #'%place-precedes-p)
+               (lambda (a b) (and (%in-project-p a) (not (%in-project-p b))))))
+
+(defun %record-headline (record)
+  "Return the headline (%HEADLINE) of RECORD's message, a load-system warning
+record's."
+  (%headline (or (gethash "message" record) "")))
+
 (defun %write-style-warnings (stream records)
   "Write RECORDS, style warnings, to STREAM summed up by kind: how many there are
-of the kind and the first *LOAD-WARNING-PLACES-SHOWN* of them in file and line
-order.  A kind whose warnings all read the same is headed by that first line and
-lists their places; otherwise no one message stands for the kind -- SBCL signals
-every unused variable with one format control, whatever the variable -- so each
-listed warning gives its place and its own first line.  *LOAD-STYLE-KINDS-SHOWN*
-kinds are written; the rest are counted.  Every record stays in
-warning_records."
+of the kind and the first *LOAD-WARNING-PLACES-SHOWN* of them, the project's
+before a dependency's, each in file and line order (%PROJECT-FIRST).  A kind
+whose warnings all read the same is headed by that headline (%HEADLINE) and lists
+their places; otherwise no one message stands for the kind -- SBCL signals every
+unused variable with one format control, whatever the variable -- so each
+listed warning gives its place and its own headline.
+
+Kinds holding a warning of the project's come first, each part in the order the
+kinds first appeared.  *LOAD-STYLE-KINDS-SHOWN* kinds are written so; as many
+again past them get one line each, their count and first warning -- an
+undefined function is reported when the compilation unit ends, so its kind comes
+last, and it is often a typo -- and any further kinds are counted.  Every record
+stays in warning_records."
   (let ((kinds '()))
     (dolist (record records)
       (let ((entry (assoc (gethash "kind" record) kinds :test #'equal)))
         (if entry
             (setf (cdr entry) (append (cdr entry) (list record)))
             (setf kinds (append kinds (list (list (gethash "kind" record) record)))))))
+    (setf kinds (stable-sort kinds
+                             (lambda (a b)
+                               (and (some #'%in-project-p (cdr a))
+                                    (notany #'%in-project-p (cdr b))))))
     (loop for (nil . members) in kinds
           for shown from 1 to *load-style-kinds-shown*
-          do (let* ((ordered (stable-sort (copy-list members) #'%place-precedes-p))
-                    (headlines (mapcar (lambda (record)
-                                         (%first-line (or (gethash "message" record) "")))
-                                       ordered))
+          do (let* ((ordered (%project-first members))
+                    (headlines (mapcar #'%record-headline ordered))
                     (listed (min *load-warning-places-shown* (length ordered)))
                     (hidden (- (length ordered) listed)))
                ;; "2x", not the multiplication sign: that is the mark a test
@@ -472,10 +542,35 @@ warning_records."
                                       (%load-warning-place record) headline))
                      (when (plusp hidden)
                        (format stream "~%    (+~D more)" hidden))))))
-    (let ((hidden (- (length kinds) *load-style-kinds-shown*)))
-      (when (plusp hidden)
-        (format stream "~%  ... and ~D more kind~:P (all are in warning_records)"
-                hidden)))))
+    (let ((rest (nthcdr *load-style-kinds-shown* kinds)))
+      (when rest
+        (format stream "~%  ... and ~D more kind~:P (all are in warning_records):"
+                (length rest))
+        (loop for (nil . members) in rest
+              for named from 1 to *load-style-kinds-shown*
+              do (let* ((first (first (%project-first members)))
+                        (headline (%record-headline first))
+                        (place (%load-warning-place first)))
+                   (cond ((null (rest members))
+                          (format stream "~%    ~A~@[ at ~A~]" headline place))
+                         ((every (lambda (record)
+                                   (string= headline (%record-headline record)))
+                                 members)
+                          (format stream "~%    ~Dx ~A~@[, first at ~A~]"
+                                  (length members) headline place))
+                         (t
+                          (format stream "~%    ~Dx of one kind, such as ~A~@[ at ~A~]"
+                                  (length members) headline place)))))
+        (let ((unnamed (- (length rest) *load-style-kinds-shown*)))
+          (when (plusp unnamed)
+            (format stream "~%    ... and ~D more kind~:P, not named" unnamed)))))))
+
+(defun %failure-kind-keyword (text)
+  "Return the LOAD-FAILURE-HINT kind TEXT, a load-system failure_kind, names, or
+NIL when it names none."
+  (cond ((equal text "missing-dependency") :missing-dependency)
+        ((equal text "missing-system") :missing-system)
+        ((equal text "defconstant") :defconstant)))
 
 (defun build-load-system-response (system ht)
   "Build the standard load-system response with summary text.
@@ -555,7 +650,7 @@ or its primary system" system)))))))
                                       wd)))
                        (format s "~%⚠ ~A" (string-right-trim '(#\Newline) body)))))
                   (when (%project-variance-p full wd)
-                    (format s "~%~%~A" *package-variance-hint*)))
+                    (format s "~%~%~A" (load-failure-hint :variance "load-system"))))
                 (let ((same-second (gethash "same_second_fasls_deleted" ht)))
                   (when same-second
                     ;; Deleted, not recompiled: the project's tree is checked
@@ -589,9 +684,13 @@ with a WARNING:"
                     (format s "~%~%~:[Warnings~;Other warnings~] before the error (~D):"
                             refusing (length others))
                     (%write-load-warnings s others))
-                  (when (and full style)
-                    (format s "~%(and ~D style warning~:P, in warning_records)"
-                            (length style)))
+                  ;; Summed up as on success: one can be the cause -- a macro
+                  ;; used before its DEFMACRO is an undefined function, then
+                  ;; an illegal function call.
+                  (when style
+                    (format s "~%~%Style warnings before the error (~D)~:[~;, by kind~]:"
+                            (length style) (rest style))
+                    (%write-style-warnings s style))
                   (let ((co (gethash "compiler_output" ht)))
                     (when (and (stringp co) (plusp (length co)))
                       (let* ((limit 2048)
@@ -618,7 +717,7 @@ with a WARNING:"
                                      (equal "SB-INT:PACKAGE-AT-VARIANCE"
                                             (gethash "class" record)))
                                    refusing))
-                       (format s "~%~%~A" *package-variance-hint*))
+                       (format s "~%~%~A" (load-failure-hint :variance "load-system")))
                       ;; The warning is the cause, and a fresh worker would
                       ;; meet it again -- unless it is about what this
                       ;; worker holds, which only a fresh worker cures.
@@ -631,12 +730,21 @@ and load again. A warning about a definition this worker already holds -- a ~
 structure's layout, say -- needs a fresh worker instead: pool-kill-worker, then ~
 load-system."
                                (length refusing)))
+                      ;; Causes a fresh worker meets again: name what to fix.
+                      ((%failure-kind-keyword (gethash "failure_kind" ht))
+                       (format s "~%~%~A"
+                               (load-failure-hint
+                                (%failure-kind-keyword (gethash "failure_kind" ht))
+                                "load-system" (gethash "failure_detail" ht))))
+                      (compile-failed
+                       (format s "~%~%~A" (load-failure-hint :did-not-compile "load-system")))
                       (t
-                       (format s "~%~%Hint: the worker process may now have a broken ~
-package state. Use pool-kill-worker to get a fresh worker, then retry load-system."))))))))))
+                       (format s "~%~%~A" (load-failure-hint nil "load-system")))))))))))
     ;; Internal classifications for the hints above, not fields.
     (remhash "load_not_started" ht)
     (remhash "compile_failed" ht)
+    (remhash "failure_kind" ht)
+    (remhash "failure_detail" ht)
     (setf (gethash "content" ht) (text-content summary))
     ht))
 

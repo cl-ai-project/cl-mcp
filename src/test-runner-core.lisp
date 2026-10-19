@@ -13,6 +13,8 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:discover-asd-in-project
                 #:normalize-path-for-display)
+  (:import-from #:cl-mcp/src/project-root
+                #:system-left-by-root-change)
   (:import-from #:cl-mcp/src/utils/fasls
                 #:delete-same-second-fasls
                 #:registered-fasl-sources)
@@ -21,6 +23,8 @@
   ;; The warning records load-system reports, so a load refused for a
   ;; warning names it and its place the same way here.
   (:import-from #:cl-mcp/src/warning-records
+                #:load-failure-kind
+                #:load-failure-hint
                 #:%make-warning-record
                 #:%warning-record-tables
                 #:%in-project-predicate
@@ -639,6 +643,15 @@ named by the source it was compiled from, when a registered system has it."
         (format nil "while ~A ~A" verb (or (normalize-path-for-display source)
                                            (namestring source)))))))
 
+(define-condition test-system-load-failed (simple-error)
+  ((kind :initarg :kind :initform nil :reader test-system-load-failed-kind)
+   (detail :initarg :detail :initform nil :reader test-system-load-failed-detail))
+  (:documentation "Loading the test system stopped on an error a fresh worker
+would meet again, with a cause of its own (LOAD-FAILURE-KIND): KIND is
+:MISSING-DEPENDENCY, DETAIL then the system's name, or :DEFCONSTANT.  Its own
+type, so the load failure names that cause rather than sending the caller to
+replace a worker that is fine."))
+
 (defun %format-load-error (system-name condition stderr &optional where)
   "Format a test-system load-failure message.
 WHERE, when given, says which file was compiling or loading when CONDITION
@@ -695,11 +708,8 @@ them."
                   ((typep condition 'transient-error) text)
                   ;; Nothing is wrong with the worker: the name is unknown.
                   ((typep condition 'test-system-not-found)
-                   (format nil "~A~%~%Hint: ASDF knows no system ~A, and no ~A.asd was ~
-                                found under the project root. Check the name, or ~
-                                register its .asd with load-system or asdf:load-asd, ~
-                                then retry run-tests."
-                           text system-name (asdf:primary-system-name system-name)))
+                   (format nil "~A~%~%~A" text
+                           (load-failure-hint :missing-system "run-tests" system-name)))
                   ;; Nothing in the file is wrong: the worker still exports what
                   ;; the file no longer declares, and only a fresh worker cures
                   ;; that.
@@ -708,12 +718,14 @@ them."
                                  (equal "SB-INT:PACKAGE-AT-VARIANCE"
                                         (gethash "class" record)))
                                records))
-                   (format nil "~A~%~%Hint: package-variance warnings mean the running ~
-                                image has stale exports. Use pool-kill-worker to get a ~
-                                fresh worker, then retry run-tests. If they come back ~
-                                on a fresh worker, two definitions of the package ~
-                                disagree: make them agree."
-                           text))
+                   (format nil "~A~%~%~A" text (load-failure-hint :variance "run-tests")))
+                  ;; A cause a fresh worker meets again: a dependency ASDF cannot
+                  ;; find, a constant given a value not EQL to its own.
+                  ((typep condition 'test-system-load-failed)
+                   (format nil "~A~%~%~A" text
+                           (load-failure-hint (test-system-load-failed-kind condition)
+                                              "run-tests"
+                                              (test-system-load-failed-detail condition))))
                   ;; The warning is the cause, and a fresh worker would meet it
                   ;; again -- unless it is about what this worker holds.
                   (records
@@ -742,10 +754,7 @@ them."
                                 earlier in it. Fix the file and run the tests again."
                            text))
                   (t
-                   (format nil "~A~%~%Hint: the worker process may have a broken ~
-                                package state. Use pool-kill-worker to get a fresh ~
-                                worker, then retry run-tests."
-                           text)))))))))
+                   (format nil "~A~%~%~A" text (load-failure-hint nil "run-tests"))))))))))
     (when records
       (setf (gethash "warning_records" result) (coerce records 'vector)))
     result))
@@ -951,6 +960,14 @@ names returned are strings and stay valid after the package is deleted."
       (when own-package
         (ignore-errors (delete-package own-package))))))
 
+(defun %loaded-system-by-name (name)
+  "Return the system named NAME that this image may have loaded: the registered
+one, or else the one a root change unregistered (SYSTEM-LEFT-BY-ROOT-CHANGE),
+whose files' packages and tests are still here.  NIL when neither exists.
+Never FIND-SYSTEM; see %TRANSITIVE-DEPENDENCY-NAMES."
+  (or (ignore-errors (asdf:registered-system name))
+      (system-left-by-root-change name)))
+
 (defun %rove-purge-ghost-suites (system-name)
   "Remove Rove suite entries for every test package associated with
 SYSTEM-NAME. This prevents `ghost deftests' — tests that were deleted
@@ -985,8 +1002,9 @@ session every call re-runs the source-registry search, measured at 114 ms,
 and a large package-inferred project reaches 905 systems -- 103 seconds of
 purging before a single test runs.  REGISTERED-SYSTEM makes the same
 traversal cost 0.3 seconds and loses nothing, because a system that is not
-registered has never been loaded: its packages do not exist, so Rove holds
-no suite for them and there is no ghost to purge.
+registered has never been loaded -- its packages do not exist, so Rove holds
+no suite for them and there is no ghost to purge -- unless a root change
+unregistered it, and that system is still known (%LOADED-SYSTEM-BY-NAME).
 
 Nothing is walked when Rove's registry is empty, and the source scan
 interns into one throwaway package, deleted afterwards, rather than into
@@ -1027,7 +1045,7 @@ CL-USER."
                                   (not (gethash name visited-systems)))
                          (setf (gethash name visited-systems) t)
                          (clear-pkg name)
-                         (let ((sys (ignore-errors (asdf:registered-system name))))
+                         (let ((sys (%loaded-system-by-name name)))
                            (when sys
                              (walk-components sys)
                              (dolist (dep (ignore-errors
@@ -1201,9 +1219,17 @@ COMPILE-FILE-ERROR."
                                    (reverse refusing)
                                    :in-project (%in-project-predicate system-name)))))
             (t
-             (error "~A"
-                    (%format-load-error system-name c combined
-                                        (%erring-file-text erring-file))))))))))
+             (multiple-value-bind (kind detail) (load-failure-kind c)
+               (if kind
+                   (error 'test-system-load-failed
+                          :kind kind :detail detail
+                          :format-control "~A"
+                          :format-arguments
+                          (list (%format-load-error system-name c combined
+                                                    (%erring-file-text erring-file))))
+                   (error "~A"
+                          (%format-load-error system-name c combined
+                                              (%erring-file-text erring-file))))))))))))
 
 (defun %rove-result-symbol (name)
   "Return Rove's ROVE/CORE/RESULT symbol NAME, resolved at run time since Rove
@@ -2205,7 +2231,7 @@ dependency is not followed -- a system not cleared is not reloaded."
                      ((typep component 'asdf:parent-component)
                       (mapc #'walk (asdf:component-children component))))))
       (dolist (name system-names)
-        (let ((system (ignore-errors (asdf:registered-system name))))
+        (let ((system (%loaded-system-by-name name)))
           (when system (walk system)))))
     files))
 

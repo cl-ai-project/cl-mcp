@@ -153,19 +153,26 @@ Output fields:
   partway, or could not be stopped at all, so whether it did what it was asked, and what it
   changed, is unknown. An expression that merely returns `:timeout` is not an error.
 
-- `error_context` (object|null): when `repl-eval` returns a structured in-process error
-  result, contains `condition_type`, `message`, `restarts`, and `frames` with local
-  variable inspection. The content text carries the same thing: each displayed frame is followed by its locals as
-  `NAME = VALUE`, with `[object-id: ID]` on a non-primitive one, capped at 10 per frame.
-  Two variables of one name in a frame -- an inner binding shadowing an argument, or a
-  `labels` helper's variables merged into its caller -- are named as SBCL's debugger names
-  them, `PATTERN` and `PATTERN#1`, here and in the JSON `name`.
-  `locals_preview_frames` expands the entries, elements or slots of a non-primitive local in
-  the top N frames underneath it, nested as deep as `locals_preview_max_depth` reached. A
-  value over 200 characters is cut with its full length noted, and a preview over 20 lines
-  likewise: `print_level`/`print_length` bound a structure's depth and width but not a
-  string, so one large local would otherwise spend the whole `max_output_length` budget and
-  drop the frames below it
+- `error_context` (object|null): when `repl-eval` returns a structured in-process error result,
+  contains `condition_type`, `message`, `restarts`, and `frames` with local variable inspection
+  (your frames only, or every frame when none is yours). The content text carries the same thing
+  for up to five of your frames: the first four and the outermost (a recursive `labels` helper
+  would otherwise fill the list and hide the function you called), with a line counting those
+  left out between them. At most 20 frames are captured, the capture's own five among them; when
+  a frame of yours lay deeper the line says so, and the frame after it is the outermost
+  captured, not the function you called. The text is cut at `max_output_length` from its end, so
+  with a small budget that line and the outermost frame go first. Each displayed frame is
+  followed by its locals as `NAME = VALUE`, with `[object-id: ID]` on a non-primitive one,
+  capped at 10 per frame. Two variables of one name in a frame -- an inner binding shadowing an
+  argument, or a `labels` helper's variables merged into its caller -- are named as SBCL's
+  debugger names them, `PATTERN` and `PATTERN#1`, here and in the JSON `name`; a variable the
+  compiler introduced or renamed, such as the key `case` binds, is written with its package,
+  `SB-C::X`, and a macro's gensym (`dolist`'s list) as `#:LIST0`. `locals_preview_frames`
+  expands the entries, elements or slots of a non-primitive local in the top N frames underneath
+  it, nested as deep as `locals_preview_max_depth` reached. A value over 200 characters is cut
+  with its full length noted, and a preview over 20 lines likewise: `print_level`/`print_length`
+  bound a structure's depth and width but not a string, so one large local would otherwise spend
+  the whole `max_output_length` budget and drop the frames below it
 
 When this request-level debugger boundary is used, condition type/message,
 frames, locals when available, and restarts are captured before unwind.
@@ -259,21 +266,33 @@ Output fields:
 - `content`: summary text. Every full warning from the project's own files (`in_project`) is
   written whole, with its place (`file:line (defun name)`). Those from outside them -- a
   dependency's, which come first since dependencies load first -- follow, summed up by kind as
-  `Nx <first line>`, or `Nx e.g. <first line>` when the kind's messages differ (a kind of one
-  warning is written without `1x`); at most eight kinds are listed. Style warnings are summed
-  up by kind: how many there are and up to three of them, in file and line order. A kind
-  whose warnings all read the same is headed by that first line and lists their places; one
-  whose messages differ -- SBCL signals every unused variable and every undefined function as
-  one kind -- is headed `Nx of one kind:` and
-  gives each listed warning its place and its own first line. At most eight kinds are listed
-  and the rest counted. A load that failed on a compile ASDF refused gives as its cause the full warnings
-  signalled while a file compiled (`fails_compile`) and says to fix them. A full warning
-  signalled earlier, while another file loaded, is listed apart as `Other warnings before the
-  error`; when the refused compile had no warning of its own (it failed on an error, which the
-  compiler output shows) no warning is blamed for it; a warning a compile was refused for is
-  written whole wherever it comes from. A package at variance ("also exports") that refused
-  the compile, or one of the project's at variance on a load that went on, or any other
-  error, adds a hint to get a fresh worker with `pool-kill-worker`
+  `Nx <headline>`, or `Nx e.g. <headline>` when the kind's messages differ (a kind of one
+  warning is written without `1x`); at most eight kinds are listed. A headline is a message's
+  first sentence: its first line, joined with the lines after it, up to a blank line, while the
+  text does not yet end in `.`, `:`, `!` or `?` (SBCL breaks some messages mid-sentence). What
+  the joining adds is cut at 200 characters; a longer first line is kept whole. Style warnings
+  are summed up by kind: how many there are and up to three of them, the project's before a
+  dependency's, each in file and line order. A kind whose warnings all read the same is headed
+  by that headline and lists their places; one whose messages differ -- SBCL signals every
+  unused variable and every undefined function as one kind -- is headed `Nx of one kind:` and
+  gives each listed warning its place and its own headline. Kinds holding a warning of the
+  project's come first; eight kinds are written so, as many again past them get one line each
+  (count, first warning, its place) -- an undefined function, reported when the compilation unit
+  ends, is often in that last group -- and any further kinds are counted. A failed load sums its
+  style warnings up the same way, under `Style warnings before the error`. A load that failed on
+  a compile ASDF refused gives as its cause the full warnings signalled while a file compiled
+  (`fails_compile`) and says to fix them. A full warning signalled earlier, while another file
+  loaded, is listed apart as `Other warnings before the error`; when the refused compile had no
+  warning of its own (it failed on an error, which the compiler output shows) no warning is
+  blamed for it; a warning a compile was refused for is written whole wherever it comes from.
+  The text ends with a hint by cause, the same one `run-tests` gives: a package at variance (an
+  export, use or shadow the file no longer declares) that refused the compile, or one of the
+  project's on a load that went on, gets a fresh worker with `pool-kill-worker`, which only that
+  cures; a dependency ASDF cannot find is named, with where to register it; a system named that
+  ASDF knows nowhere, the name to check; a `DEFCONSTANT` given a value not `EQL` to its own (a
+  list or string is a new object on each compile), `defparameter` or
+  `alexandria:define-constant`; a compile that failed on an error, the file to fix; any other
+  error, a fresh worker only if the error is about what this worker holds
 - `system` (string): echoed system name
 - `status` (string): `"loaded"`, `"timeout"`, or `"error"`. A full `WARNING` signalled while
   a file compiles (a duplicate definition, a type conflict, package variance, a wrong argument
@@ -353,14 +372,22 @@ Output fields:
   of the project's tree deleted because their source was written in the same second as them —
   ASDF's one-second timestamps would have reused them, running the code from before the edit.
   A count of deletions, not of compilations: a file this load reaches is compiled from source,
-  one in a sibling subsystem it never reaches only when something loads it. The project's
-  tree leaves out what the root's `.gitignore` does, such as `.qlot/`, unless the system
-  itself is kept there. The text says `Deleted N FASLs whose source was written in the same
-  second`
+  one in a sibling subsystem it never reaches only when something loads it. A FASL whose
+  source is newer still is deleted too but not counted, since ASDF recompiles it anyway. The
+  project's tree leaves out what the root's `.gitignore` does, such as `.qlot/`, unless the
+  system itself is kept there. The text says `Deleted N FASLs whose source was written in the
+  same second`
 - `message` (string|null): error or timeout message
 
 Solves three problems with using `ql:quickload` via `repl-eval`:
-1. **Staleness**: `force=true` (default) clears loaded state before reloading
+1. **Staleness**: `force=true` (default) clears the named system and re-reads its `.asd`, so
+   every system defined there that this load reaches (the named one and its dependencies) is
+   loaded again: a stale file is recompiled, a current FASL is loaded as it is, and either
+   replaces a definition made in `repl-eval`. In a package-inferred system the code lives in
+   per-file subsystems that are neither cleared nor re-read, so a file of one is loaded again
+   only when it is stale, and a definition made in `repl-eval` stays until it is: `load-system`
+   on that file's own system (`my-app/src/states`), `clear_fasls=true` or `pool-kill-worker`
+   drops it
 2. **Output noise**: suppresses verbose compilation/load output
 3. **Timeout**: dedicated timeout prevents hanging on large systems
 
@@ -381,7 +408,9 @@ Input:
 
 Both count characters, so a window advanced by the characters it returned picks up exactly
 where it stopped, in multibyte text too. A byte that is not valid UTF-8 before the window counts
-as one character. An offset at or past the end returns an empty result.
+as one character. An offset at or past the end returns an empty result, and the content says
+so: `[Nothing read: offset N is at or past the end of the file (a B-byte file).]`,
+`[Nothing read: limit is 0.]`, or `[The file is empty.]`.
 
 Output:
 - `content`: the text. Whenever text is left past a non-empty window — because `limit` stopped
@@ -409,24 +438,27 @@ After a `.lisp`/`.asd` file is written its content is parsed: the write still su
 when the file does not parse the response adds `unparseable: true`, a `WARNING` with the
 diagnosis, and a reminder that the next write to it needs `allow_unparseable_overwrite`.
 
-Policy: writes outside the project root are rejected. An existing `.lisp`/`.asd`
-file is never overwritten by default (`existing_lisp_overwrite_forbidden`; use
-`lisp-edit-form`). With `allow_unparseable_overwrite: true` the file is parsed
-first, and the write is allowed in two cases: the parse fails on a delimiter (a
-missing or stray `)`, or an unterminated string or `#|` comment) that no
-readtable could fix, **or** the parser reached a top-level `(in-readtable ...)`
-naming a readtable this server process does not have — nothing can parse past
-that point here and the `readtable` argument resolves in this same process, so
-refusing would leave the file with no write path while pointing at
-`lisp-edit-form`, which points back. The evidence is the parser's, not a scan of
-the text, so a mention in a comment, a string or a quoted list does not open the
-guard, and neither does a declaration past the point the reader reached. A file
-that parses, one that fails at reader level while the readtable it needs *is*
-available here, a truncated read, or an unreadable file is still refused. The intended recovery loop is `lisp-check-parens` →
-`fs-read-file` → `fs-write-file` with the flag; `path` must be relative to the
-project root, and the guidance the tools print gives it in that form. The
-plain refusal (no flag) carries `allow_unparseable_overwrite_available: true`
-in its error data so a client can discover the opt-in.
+Policy: writes outside the project root are rejected. An existing `.lisp`/`.asd` file is never
+overwritten by default (`existing_lisp_overwrite_forbidden`; use `lisp-edit-form`). With
+`allow_unparseable_overwrite: true` the file is parsed first, and the write is allowed in three
+cases: the parse fails on a delimiter (a missing or stray `)`, or an unterminated string or `#|`
+comment) that no readtable could fix; the file declares no readtable (no `in-readtable` anywhere
+in it), uses no `#` dispatch the standard readtable lacks (such as `#?`), and holds a `#<`, `#)`
+or `#` followed by whitespace, which the standard makes every standard readtable reject -- an
+object printed unreadably, such as `#<HASH-TABLE ...>`, pasted as source (the warning after the
+first write, lisp-check-parens and the edit tools' error name its line and column); **or** the
+parser reached a top-level `(in-readtable ...)` naming a readtable this server process does not
+have — nothing can parse past that point here and the `readtable` argument resolves in this same
+process, so refusing would leave the file with no write path while pointing at `lisp-edit-form`,
+which points back. The evidence is the parser's, not a scan of the text, so a mention in a
+comment, a string or a quoted list does not open the guard, and neither does a declaration past
+the point the reader reached. A file that parses, one that fails at reader level while the
+readtable it needs *is* available here, a truncated read, or an unreadable file is still
+refused. The intended recovery loop is `lisp-check-parens` → `fs-read-file` → `fs-write-file`
+with the flag; `path` must be relative to the project root, and the guidance the tools print
+gives it in that form. The plain refusal (no flag) carries
+`allow_unparseable_overwrite_available: true` in its error data so a client can discover the
+opt-in.
 
 Concurrent cl-mcp calls: like `lisp-edit-form` and `lisp-patch-form`, a write holds one
 per-file lock for its whole decide-then-write span, so a concurrent `lisp-edit-form` or
@@ -510,7 +542,14 @@ Inputs:
   shown. A definition's docstring follows as `;; first line`, taken from where its
   definer puts one: after a variable's value, a `defstruct`'s name, or a function's
   lambda list (never a function's only form, which is its value), so a variable whose
-  value is a string does not show that value as its documentation.
+  value is a string does not show that value as its documentation. A variable's value is cut
+  at 80 characters. A definition behind `#+`/`#-` shows its feature expressions in front of
+  its signature (`49: #+sbcl (defun float-epsilon () ...)`), and one the reader skipped
+  because its expression is false in the server -- the other implementation's twin -- is
+  listed by the start of its text and `[not read: its feature expression is false in this
+  server]` (never expanded; read it with `collapsed=false`). A file read by the CL reader --
+  with `readtable`, or after an `in-readtable` -- lists no such twin, since that reader
+  returns nothing for it.
 - `name_pattern` (string, optional): CL-PPCRE regex; matching definition names are
   expanded even in collapsed mode.
 - `content_pattern` (string, optional): CL-PPCRE regex applied to form bodies; if
@@ -681,8 +720,10 @@ Input:
   expressions (`#+sbcl (defun ...)`, `#+sbcl #+x86-64 ...`) keeps them, with any comment
   between them and the form, in front of the new form when `content` does not start with
   feature expressions of its own; the summary then says `Kept #+sbcl in front of the form`
-  and the result carries `kept_feature_expression`. Start `content` with the expression it
-  should have to change or drop the condition; the form after it is validated (and repaired)
+  and the result carries `kept_feature_expression`, the expressions alone. Start `content`
+  with the expression it should have to change the condition; to drop it, `delete` the form
+  and insert the bare definition with `insert_before`/`insert_after` on a neighbouring form.
+  The form after a content's own expression is validated (and repaired)
   whether or not that condition holds in the server, so `#-sbcl (defun ...)` on SBCL is
   accepted, while an expression with no form after it, or one that breaks the feature
   expression grammar (`#+(not a b)`, `#+(bogus a)`), is refused and nothing is written.
@@ -690,10 +731,16 @@ Input:
   the file. `delete` removes the expressions with the form
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
 - `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms.
-  A `replace` whose content is the form already there changes nothing, spacing included
-  (`No change …`). When a real `replace` also moves the blank lines around the form -- forms
-  written with no blank line between them are set apart -- the summary says so and the
-  result carries `blank_lines_normalized: true`; pass `false` to leave them as they were
+  A `replace` whose content is the form already there changes nothing, spacing included (`No
+  change …`). When a real `replace` also moves the blank lines around the form -- forms written
+  with no blank line between them are set apart -- the summary says so and the result carries
+  `blank_lines_normalized: true`; pass `false` to leave them as they were. A comment written
+  directly above the form (`;` lines with no blank line between them and the form, a `;;;`
+  header among them) is the form's in either mode: `replace` keeps it attached, and
+  `insert_before` puts the new form above it; `delete` leaves it. A comment in the content of a
+  `replace` is put after the file's, which stays. Every summary names the line the matched form
+  starts on, its `#+` line when it has one (`Applied replace to defun beta (line 4) in …`, also
+  the result's `line`), and a "Multiple matches" error lists each candidate with its line
 - `readtable` (string, optional): named-readtable designator for files using custom reader
   macros. **The readtable must be registered in the cl-mcp server process**, which is where
   files are parsed. `load-system` and `repl-eval` load into the session's *worker*, so
@@ -1328,7 +1375,7 @@ Notes:
 Run tests for a system and return structured results with pass/fail counts and failure details.
 
 Input:
-- `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`). A system ASDF does not know yet is looked for under the project root, as `load-system` does; a name found nowhere is reported as such, not as a broken worker. The system is force-reloaded, and a file of its tree written in the same second as its fasl has the fasl deleted first, so an edit made right after a compile is what runs (ASDF's timestamps have one-second resolution)
+- `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`). A system ASDF does not know yet is looked for under the project root, as `load-system` does; a name found nowhere is reported as such, not as a broken worker. The system and its direct `<system>/...` dependencies are cleared and their `.asd` read again, so every system defined there that the test system reaches is loaded again; any other file of a package-inferred system, or of a system defined in another `.asd`, is loaded again only when its FASL is stale, so a definition made in `repl-eval` there stays for the run. A file of its tree written in the same second as its fasl has the fasl deleted first, so an edit made right after a compile is what runs (ASDF's timestamps have one-second resolution)
 - `framework` (string, optional): Force a specific framework (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, or `"auto"` for auto-detect). Auto-detection reads the test system's own `:depends-on`: a framework the system declares directly wins, then one reached transitively, and only for a system ASDF has not registered does it fall back to guessing from the loaded packages. Detection never loads anything.
 - `test` (string, optional): Run only a specific test by fully qualified name (e.g., `"my-package::my-test-name"`)
 - `tests` (array of strings, optional): Run only the listed fully qualified tests
@@ -1428,7 +1475,7 @@ Example requests:
 ```
 
 Notes:
-- **Auto-reloads the test system** before execution (clears ASDF's loaded state and reloads from source). Files edited via `lisp-edit-form` are automatically picked up — no need to call `load-system` first.
+- **Auto-reloads the test system** before execution (see `system` above for what is loaded again). Files edited via `lisp-edit-form` are automatically picked up — no need to call `load-system` first.
 - Auto-detects Rove, FiveAM or prove; anything else falls back to ASDF `test-system` for text capture
 - A `test`/`tests` name is resolved after that reload, so its package needs no separate
   loading as long as `system` loads it; a name that still does not resolve is reported as

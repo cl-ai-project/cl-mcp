@@ -130,8 +130,9 @@ this does nothing."
 (defun delete-same-second-fasls (system-name)
   "Delete the fasl of each source file of SYSTEM-NAME's project (%SOURCE-FASL-PAIRS)
 whose source was written in the same second as the fasl, or later.  Return the
-number deleted.  Call it before clearing the project's systems from ASDF: the
-registered components are half of what it reads.
+number deleted of the first kind, written in the same second.  Call it before
+clearing the project's systems from ASDF: the registered components are half of
+what it reads.
 
 ASDF judges a fasl current when its FILE-WRITE-DATE is not older than its
 source's, and those dates are whole seconds: an edit landing in the second the
@@ -139,7 +140,10 @@ fasl was written leaves the two equal, so ASDF keeps the fasl and loads the code
 from before the edit.  Such a fasl cannot be told from a current one, so it is
 deleted and ASDF compiles the file again; one written a second or more after
 its source is kept, so a run recompiles only what may be stale, unlike
-clear_fasls, which drops them all."
+clear_fasls, which drops them all.  A source written later than its fasl is
+one ASDF recompiles by itself -- unless an ASDF session in progress still has
+the source's older date -- so its fasl goes too, but is not counted: the count
+is of the fasls ASDF would have kept."
   (let ((deleted 0))
     (loop for (source . fasl) in (%source-fasl-pairs system-name)
           for fasl-date = (ignore-errors (file-write-date fasl))
@@ -147,5 +151,6 @@ clear_fasls, which drops them all."
           when (and fasl-date source-date (>= source-date fasl-date)
                     (ignore-errors (delete-file fasl) t))
             do (%forget-file-stamp fasl)
-               (incf deleted))
+               (when (= source-date fasl-date)
+                 (incf deleted)))
     deleted))

@@ -16,16 +16,20 @@
                 #:scan-to-strings)
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms
+                #:cst-node-start-line
                 #:stray-right-parenthesis
                 #:readtable-unavailable
                 #:readtable-unavailable-designator
+                #:%skip-whitespace-and-comments
                 #:*standard-readtable*)
   (:import-from #:cl-mcp/src/package-context
                 #:extract-in-package-name-from-text)
   (:import-from #:cl-mcp/src/paren-diagnostics
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis
-                #:format-overwrite-recovery)
+                #:format-overwrite-recovery
+                #:unreadable-dispatch-position
+                #:format-unreadable-dispatch)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/utils/paths
@@ -47,7 +51,9 @@
                 #:enough-pathname
                 #:native-namestring
                 #:subpathp)
-  (:export #:%normalize-string
+  (:export #:%skip-blank-and-comments
+           #:%feature-prefix-end
+           #:%normalize-string
            #:%defmethod-candidates
            #:%definition-candidates
            #:%normalize-paths
@@ -221,6 +227,47 @@ than a symbol, a string, a method signature or a DEFSTRUCT's (NAME OPTIONS...)."
 
 (defun %whitespace-char-p (ch)
   (member ch '(#\Space #\Tab #\Newline #\Return)))
+
+(defun %skip-blank-and-comments (text start)
+  "Return the index of the first character at or after START in TEXT that is
+neither whitespace nor inside a comment, reading the standard syntax; START when
+a block comment there is never closed."
+  (with-input-from-string (in text :start start)
+    (if (%skip-whitespace-and-comments in *standard-readtable*)
+        start
+        ;; A string input stream counts its position from START.
+        (+ start (file-position in)))))
+
+(defun %feature-prefix-end (text start)
+  "Return the index in TEXT where the form at START begins once the #+ and #-
+feature expressions in front of it are passed, with the whitespace and comments
+after each; START when there are none.  The second value lists each expression's
+span, (START . END) from its # to the end of its feature expression, in order.
+The expressions are read with *READ-SUPPRESS* on, which interns nothing, and
+under the standard syntax, as feature expressions are read whatever the file's
+readtable.  Shared by lisp-edit-form, which keeps a replaced form's prefix, and
+lisp-read-file, which shows it in the collapsed view."
+  (let ((pos start)
+        (spans '())
+        (length (length text)))
+    (loop while (and (< (1+ pos) length)
+                     (char= (char text pos) #\#)
+                     (member (char text (1+ pos)) '(#\+ #\-)))
+          do (let ((after (handler-case
+                              (let ((*read-suppress* t)
+                                    ;; #. is not evaluated while suppressing;
+                                    ;; this says so and keeps it that way.
+                                    (*read-eval* nil)
+                                    (*readtable* *standard-readtable*))
+                                (nth-value 1 (read-from-string text t nil
+                                                               :start (+ pos 2)
+                                                               :preserve-whitespace t)))
+                            (error () nil))))
+               (unless after
+                 (return-from %feature-prefix-end (values start '())))
+               (push (cons pos after) spans)
+               (setf pos (%skip-blank-and-comments text after))))
+    (values pos (nreverse spans))))
 
 (defun %normalize-paths (file-path)
   "Return two values: absolute path (pathname) and relative namestring for FS tools.
@@ -575,8 +622,11 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
                              collect (let ((candidates (%definition-candidates form form-type)))
                                        ;; The index is relative to this form_name,
                                        ;; so the whole string to pass is spelled out.
-                                       (format nil "[~D] ~A  (form_name ~S)" i
+                                       ;; Its line too: two forms of one name
+                                       ;; are told apart only by where they are.
+                                       (format nil "[~D] ~A, line ~D  (form_name ~S)" i
                                                (or (car (last candidates)) (first candidates))
+                                               (cst-node-start-line node)
                                                (format nil "~A[~D]" listed-name i))))))
                  (values nil (format nil "Multiple matches for ~A ~A. Specify an index:~%~{  ~A~%~}"
                                      form-type form-name descriptions))))))))))
@@ -876,6 +926,16 @@ because %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P opens it for exactly that case."
                     in this same process, and no tool registers one here, so no ~
                     structural edit of this file is possible. ~A"
                head (%rewrite-whole-file-instruction path)))
+      ((file-unparseable-unreadable-dispatch condition)
+       ;; No readtable reads it, so the readtable parameter is no way round
+       ;; it, and %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P opens the overwrite path.
+       ;; Not HEAD: the reader's message ends by recommending the readtable
+       ;; parameter, which cannot help here.
+       (format nil "Cannot parse ~A: ~A No structural edit of this file is possible. ~A"
+               path
+               (apply #'format-unreadable-dispatch
+                      (file-unparseable-unreadable-dispatch condition))
+               (%rewrite-whole-file-instruction path)))
       (t
        ;; The reader stopped on something other than a delimiter. When the
        ;; scan also found a delimiter problem, both are shown: the reader's
@@ -910,7 +970,13 @@ because %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P opens it for exactly that case."
                           :documentation
                           "The readtable the file's own (in-readtable ...) names, when this
 process cannot resolve it; NIL otherwise. Set by
-MAKE-FILE-UNPARSEABLE-CONDITION from the file's text."))
+MAKE-FILE-UNPARSEABLE-CONDITION from the file's text.")
+   (unreadable-dispatch :initarg :unreadable-dispatch :initform nil
+                        :reader file-unparseable-unreadable-dispatch
+                        :documentation
+                        "(LINE COLUMN SUB-CHAR) of a # no standard readtable reads
+(UNREADABLE-DISPATCH-POSITION), when the reader failed on something other than
+a delimiter and no readtable was supplied; NIL otherwise."))
   (:report (lambda (c s) (write-string (file-unparseable-message c) s)))
   (:documentation "Signaled when the target file cannot be parsed into top-level forms.
 RECOVERABLE is T when the failure is a delimiter problem (missing or stray
@@ -958,6 +1024,13 @@ the forms it could still show."
                   :unavailable-readtable
                   (and (typep cause 'readtable-unavailable)
                        (readtable-unavailable-designator cause))
+                  :unreadable-dispatch
+                  (and (null readtable)
+                       (not (%delimiter-failure-p cause))
+                       (not (typep cause 'readtable-unavailable))
+                       (multiple-value-bind (line column sub-char)
+                           (unreadable-dispatch-position text)
+                         (and line (list line column sub-char))))
                   :cause (sanitize-condition-text cause)))
 
 (defun signal-file-unparseable (abs text cause &key readtable editable-prefix)
@@ -1450,8 +1523,10 @@ Returns eight values:
                 (signal-file-unparseable abs original swallowed
                                         :readtable readtable
                                         :editable-prefix (and nodes t)))
-              (error "Form ~A ~A not found in ~A~%~A" form-type form-name
-                     (native-path-namestring abs)
+              ;; Named as the summaries of these tools name a file: relative to
+              ;; the project root when it lies under it.
+              (error "Form ~A ~A not found in ~A.~%~A" form-type form-name
+                     (or (%project-relative-path abs) (native-path-namestring abs))
                      (%forms-listing nodes form-type-str)))
             (when guard
               (multiple-value-bind (ok-p conflict)
@@ -1486,7 +1561,11 @@ The second value says why: :DELIMITER (the primary value is T), :PARSED (the
 file parses cleanly, so a scan verdict against it is a false positive),
 :READER-LEVEL (it fails, but not on a delimiter, and a readtable this process
 has could still make it editable), :READTABLE-UNAVAILABLE (the primary value
-is T; see above), or :TRUNCATED. The third
+is T; see above), :UNREADABLE-DISPATCH (the primary value is T: the file
+declares no readtable and holds a #<, #) or # and whitespace, which the standard
+makes the reader reject, per UNREADABLE-DISPATCH-POSITION -- an object printed
+unreadably and pasted as source, which no readtable parameter can fix either),
+or :TRUNCATED. The third
 value is T when the failing parse still returned forms (the lenient
 CL-reader pass after an IN-READTABLE switch keeps the forms before the
 breakage), so those forms remain editable with lisp-edit-form and the
@@ -1511,15 +1590,18 @@ by lisp-check-parens so its next-step hint rests on the same verdict."
                      (values t :delimiter (and nodes t)))
                     ((typep swallowed 'readtable-unavailable)
                      (values t :readtable-unavailable (and nodes t)))
+                    ((unreadable-dispatch-position source)
+                     (values t :unreadable-dispatch (and nodes t)))
                     (t (values nil :reader-level (and nodes t)))))
           (readtable-unavailable ()
             ;; Reached only with a caller-supplied readtable, which this
             ;; hook never passes; kept so the classification is total.
             (values t :readtable-unavailable nil))
           (error (e)
-            (if (%delimiter-failure-p e)
-                (values t :delimiter nil)
-                (values nil :reader-level nil)))))))
+            (cond ((%delimiter-failure-p e) (values t :delimiter nil))
+                  ((unreadable-dispatch-position source)
+                   (values t :unreadable-dispatch nil))
+                  (t (values nil :reader-level nil))))))))
 
 ;; Register at load time so fs-write-file's overwrite guard agrees with the
 ;; edit tools about which files are unparseable.
