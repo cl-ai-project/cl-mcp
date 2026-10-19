@@ -917,7 +917,9 @@ result instead of a timeout."
 
 (defun %extract-defpackage-names-from-file (pathname &optional scan-package)
   "Return a list of package names mentioned in `(defpackage ...)' forms
-of the Lisp source file at PATHNAME. Silently returns NIL on any error.
+of the Lisp source file at PATHNAME, top level or inside an EVAL-WHEN, PROGN or
+LOCALLY; one a macro the file defines writes is not seen. Silently returns NIL
+on any error.
 
 READ interns every unqualified symbol it reads into *PACKAGE*, so the scan
 must not run in CL-USER: one %ROVE-PURGE-GHOST-SUITES traversal of a large
@@ -939,22 +941,30 @@ names returned are strings and stay valid after the package is deleted."
               (let ((*read-eval* nil)
                     (*package* (or scan-package own-package))
                     (names nil))
-                (loop
-                 (let ((form (handler-case (read stream nil :eof)
-                               (error () :eof))))
-                   (when (eq form :eof) (return))
-                   (when (and (consp form)
-                              (symbolp (car form))
-                              (or (string= (symbol-name (car form)) "DEFPACKAGE")
-                                  (string= (symbol-name (car form)) "DEFINE-PACKAGE"))
-                              (consp (cdr form)))
-                     (let ((name-form (second form)))
-                       (push
-                        (cond
-                          ((stringp name-form) name-form)
-                          ((symbolp name-form) (symbol-name name-form))
-                          (t nil))
-                        names)))))
+                (labels ((note (form)
+                           (when (and (consp form) (symbolp (car form)))
+                             (let ((head (symbol-name (car form))))
+                               (cond
+                                 ((and (member head '("DEFPACKAGE" "DEFINE-PACKAGE")
+                                               :test #'string=)
+                                       (consp (cdr form)))
+                                  (let ((name-form (second form)))
+                                    (push (cond ((stringp name-form) name-form)
+                                                ((symbolp name-form) (symbol-name name-form))
+                                                (t nil))
+                                          names)))
+                                 ;; Still top level: a DEFPACKAGE inside one is
+                                 ;; the file's as much as a bare one.
+                                 ((and (string= head "EVAL-WHEN") (listp (cdr form)))
+                                  (mapc #'note (cddr form)))
+                                 ((member head '("PROGN" "LOCALLY") :test #'string=)
+                                  (mapc #'note (cdr form))))))))
+                  (loop
+                   (let ((form (handler-case (read stream nil :eof)
+                                 (error () :eof))))
+                     (when (eq form :eof) (return))
+                     ;; A malformed form -- (progn . x) -- skips itself only.
+                     (ignore-errors (note form)))))
                 (remove-if-not #'stringp (nreverse names))))
           (error () nil))
       (when own-package
@@ -2246,6 +2256,59 @@ NAMED-LAMBDA as the file loads, and SBCL names a function compiled then
          (in (and (consp name) (member :in name))))
     (and in (stringp (second in)) (second in))))
 
+(defun %packages-defined-by (files)
+  "Return the packages the Lisp source files among FILES, namestrings, define with
+DEFPACKAGE or DEFINE-PACKAGE, as far as they exist in this image."
+  (let ((scan-package (make-package (gensym "CL-MCP-DEFPACKAGE-SCAN") :use '(:cl))))
+    (unwind-protect
+         (remove-duplicates
+          (loop for file in files
+                when (and (member (pathname-type (uiop:parse-native-namestring file))
+                                  '("lisp" "cl" "lsp") :test #'equalp)
+                          (probe-file file))
+                  append (loop for name in (%extract-defpackage-names-from-file
+                                            file scan-package)
+                               for package = (find-package name)
+                               when package collect package)))
+      (ignore-errors (delete-package scan-package)))))
+
+(defun %packages-also-defined-outside (system-names files packages)
+  "Return those of PACKAGES that a source file of a dependency of SYSTEM-NAMES
+also defines, a file not among FILES (%RELOADED-FILES): a dependency the reload
+does not load again.  Only a file whose text names the package is read."
+  (let ((outside '())
+        (names (mapcar #'package-name packages)))
+    (dolist (dependency (remove-duplicates
+                         (loop for name in system-names
+                               append (ignore-errors (%transitive-dependency-names name)))
+                         :test #'string=))
+      (let ((system (and (not (member dependency system-names :test #'string=))
+                         (%loaded-system-by-name dependency))))
+        (when system
+          (dolist (file (%source-files-of system))
+            (let ((namestring (namestring file)))
+              (unless (member namestring files :test #'string=)
+                (let ((text (ignore-errors (uiop:read-file-string file))))
+                  (when (and text
+                             (some (lambda (name) (search name text :test #'char-equal))
+                                   names))
+                    (dolist (package (%packages-defined-by (list namestring)))
+                      (when (member package packages)
+                        (pushnew package outside)))))))))))
+    outside))
+
+(defun %source-files-of (system)
+  "Return the pathnames of SYSTEM's Lisp source file components."
+  (let ((files '()))
+    (labels ((walk (component)
+               (cond ((typep component 'asdf:cl-source-file)
+                      (let ((path (ignore-errors (asdf:component-pathname component))))
+                        (when path (push path files))))
+                     ((typep component 'asdf:parent-component)
+                      (mapc #'walk (asdf:component-children component))))))
+      (walk system))
+    files))
+
 (defun %fiveam-purge-ghost-tests (system-names)
   "Remove from FiveAM the tests made by a file the reload of SYSTEM-NAMES loads
 again (%RELOADED-FILES, %FIVEAM-TEST-FILE), before that reload.  FiveAM keeps
@@ -2254,24 +2317,87 @@ this worker, reached by no suite and reported as never run; the reload makes the
 current ones again.  A test of any other file stays, whatever its package -- one
 a dependency defines, even in a package a reloaded file shares, would not come
 back -- and so does a test whose file cannot be told, and every suite: a
-def-suite replaces its suite when it runs again."
+def-suite replaces its suite when it runs again.
+
+A test whose file is no file -- compiled under repl-eval, whose compilation unit
+names its source \"repl-eval\" -- goes too when a reloaded file defines its
+package: that file is where it came from, and the reload makes again what it
+still holds -- unless a dependency the reload leaves as it is defines the
+package too (%PACKAGES-ALSO-DEFINED-OUTSIDE).  Then the test may be that
+dependency's, and it stays rather than a dependency's test be lost.  A test
+deleted from a reloaded file there then stays too: reported as not run when the
+reload makes its suite again, and still run when that suite is the dependency's
+(FiveAM runs a suite's tests by name); a fresh worker drops it."
   (let ((test-names (%fiveam-symbol "TEST-NAMES"))
         (rem-test (%fiveam-symbol "REM-TEST")))
     (when (and test-names rem-test (fboundp test-names) (fboundp rem-test))
       (let ((files (%reloaded-files system-names)))
         (when files
-          (dolist (name (remove-duplicates (funcall test-names)))
-            (let ((object (%fiveam-test-object name)))
-              (when (and object
-                         (not (%fiveam-suite-p object))
-                         (member (%fiveam-test-file object) files :test #'equal))
-                (funcall rem-test name)))))))))
+          (let ((packages (%packages-defined-by files))
+                (by-package '()))
+            (dolist (name (remove-duplicates (funcall test-names)))
+              (let* ((object (%fiveam-test-object name))
+                     (file (and object (%fiveam-test-file object))))
+                (when (and object (not (%fiveam-suite-p object)))
+                  (cond ((member file files :test #'equal)
+                         (funcall rem-test name))
+                        ;; repl-eval's own marker only: any other relative
+                        ;; name is a file loaded apart from the system, whose
+                        ;; test the reload would not make again.
+                        ((and (equal file "repl-eval")
+                              (symbolp name)
+                              (member (symbol-package name) packages))
+                         (push name by-package))))))
+            ;; A test that names no file goes by its package only where no
+            ;; dependency left as it is defines that package too: such a test
+            ;; may be that dependency's, which the reload would not make again.
+            (when by-package
+              (let ((shared (%packages-also-defined-outside
+                             system-names files
+                             (remove-duplicates (mapcar #'symbol-package by-package)))))
+                (dolist (name by-package)
+                  (unless (member (symbol-package name) shared)
+                    (funcall rem-test name)))))))))))
 
 (defun %qualified-test-name (symbol)
   "Return SYMBOL written PACKAGE::NAME, or :NAME for a keyword."
   (if (keywordp symbol)
       (format nil ":~A" (symbol-name symbol))
       (format nil "~A::~A" (package-name (symbol-package symbol)) (symbol-name symbol))))
+
+(defun %fiveam-suites-under (suite-name)
+  "Return an EQ table of the suite objects the suite SUITE-NAME holds, through its
+sub-suites, itself included: what running it runs."
+  (let ((seen (make-hash-table :test 'eq)))
+    (labels ((visit (suite)
+               (when (and (%fiveam-suite-p suite) (not (gethash suite seen)))
+                 (setf (gethash suite seen) t)
+                 (loop for (nil . child) in (%fiveam-suite-children suite)
+                       do (visit child)))))
+      (visit (%fiveam-test-object suite-name)))
+    seen))
+
+(defun %fiveam-root-suite (system-name suite-symbols)
+  "Return the root suite among SUITE-SYMBOLS: the one named after SYSTEM-NAME's
+primary system, or NIL."
+  (find (asdf:primary-system-name system-name) suite-symbols
+        :key #'string :test #'string-equal))
+
+(defun %fiveam-specs-to-run (system-name suite-symbols)
+  "Return SUITE-SYMBOLS without the suites the root suite's tree already holds,
+the root itself kept: running both would run those suites twice.  SUITE-SYMBOLS
+unchanged when there is no root suite, or when FiveAM's internals are not what
+%FIVEAM-SUITES-UNDER expects."
+  (let ((root (%fiveam-root-suite system-name suite-symbols)))
+    (if (null root)
+        suite-symbols
+        (handler-case
+            (let ((under-root (%fiveam-suites-under root)))
+              (remove-if (lambda (suite)
+                           (and (not (eq suite root))
+                                (gethash (%fiveam-test-object suite) under-root)))
+                         suite-symbols))
+          (error () suite-symbols)))))
 
 (defun %fiveam-reachability (system-name suite-symbols ran-names)
   "Return (values UNREACHED OUTSIDE) for a run of SYSTEM-NAME's SUITE-SYMBOLS that
@@ -2285,18 +2411,27 @@ worker that loaded both before, leaves its tests under the previous root suite
 object: the run then reports a pass without them.  So does a test only an OR's
 unneeded alternative depends on.
 OUTSIDE: run suites other than the root suite, the one named after the primary
-system.  run-tests runs them, but a test-op running the root suite -- the
+system, that the root's tree does not hold (%FIVEAM-SUITES-UNDER).  run-tests
+runs them, but a test-op running the root suite -- the
 scaffold's does -- never reaches them, so the two runs differ unseen.
 Both are lists of qualified names; OUTSIDE is NIL when no root suite is found."
   (let ((unreached (set-difference (%fiveam-system-test-names system-name)
                                    (union (%fiveam-suite-test-names suite-symbols)
                                           ran-names)))
-        (root (find (asdf:primary-system-name system-name) suite-symbols
-                    :key #'string :test #'string-equal)))
+        (root (%fiveam-root-suite system-name suite-symbols)))
     (values (sort (mapcar #'%qualified-test-name unreached) #'string<)
             (and root
-                 (sort (mapcar #'%qualified-test-name (remove root suite-symbols))
-                       #'string<)))))
+                 (let ((under-root (%fiveam-suites-under root)))
+                   ;; FiveAM never drops a name from *TOPLEVEL-SUITES*: a suite
+                   ;; first defined without :in stays listed once its file nests
+                   ;; it.  The root's tree is what says where it hangs now.
+                   (sort (mapcar #'%qualified-test-name
+                                 (remove-if (lambda (suite)
+                                              (or (eq suite root)
+                                                  (gethash (%fiveam-test-object suite)
+                                                           under-root)))
+                                            suite-symbols))
+                         #'string<))))))
 
 (defun %with-fiveam-variables (fn)
   "Bind FiveAM special variables for output suppression and call FN.
@@ -2424,6 +2559,10 @@ ways a FiveAM run and the system's test-op silently part (%FIVEAM-REACHABILITY).
                       ASDF system, so cl-mcp will not run every suite in the ~
                       image." system-name)
              :hint "Name a suite or its package after the system, or pass TEST/TESTS instead."))
+    ;; FiveAM never drops a name from *TOPLEVEL-SUITES*, so a suite nested
+    ;; since it was first defined is listed there too.  fiveam:run of it and of
+    ;; the root suite would run it twice; the root's run covers it.
+    (setf suite-symbols (%fiveam-specs-to-run system-name suite-symbols))
     (multiple-value-bind (result ran-names finished)
         (%fiveam-run-and-collect suite-symbols (list system-name))
       (multiple-value-bind (unreached outside)
