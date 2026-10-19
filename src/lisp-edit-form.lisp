@@ -49,6 +49,8 @@
   (:import-from #:cl-mcp/src/package-context
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:%skip-blank-and-comments
+                #:%feature-prefix-end
                 #:%resolve-named-readtable
                 #:%nonstandard-readtable-p
                 #:%parse-readtable-designator
@@ -596,42 +598,6 @@ error are never taken on their own."
                                 (reparented-forms content repaired))
                            (length repaired-spans)
                            repaired-spans)))))))))))
-
-(defun %skip-blank-and-comments (text start)
-  "Return the index of the first character at or after START in TEXT that is
-neither whitespace nor inside a comment, reading the standard syntax; START when
-a block comment there is never closed."
-  (with-input-from-string (in text :start start)
-    (if (%skip-whitespace-and-comments in *standard-readtable*)
-        start
-        ;; A string input stream counts its position from START.
-        (+ start (file-position in)))))
-
-(defun %feature-prefix-end (text start)
-  "Return the index in TEXT where the form at START begins once the #+ and #-
-feature expressions in front of it are passed, with the whitespace and comments
-after each; START when there are none.  The expressions are read with
-*READ-SUPPRESS* on, which interns nothing, and under the standard syntax, as
-feature expressions are read whatever the file's readtable."
-  (let ((pos start)
-        (length (length text)))
-    (loop while (and (< (1+ pos) length)
-                     (char= (char text pos) #\#)
-                     (member (char text (1+ pos)) '(#\+ #\-)))
-          do (let ((after (handler-case
-                              (let ((*read-suppress* t)
-                                    ;; #. is not evaluated while suppressing;
-                                    ;; this says so and keeps it that way.
-                                    (*read-eval* nil)
-                                    (*readtable* *standard-readtable*))
-                                (nth-value 1 (read-from-string text t nil
-                                                               :start (+ pos 2)
-                                                               :preserve-whitespace t)))
-                            (error () nil))))
-               (unless after
-                 (return-from %feature-prefix-end start))
-               (setf pos (%skip-blank-and-comments text after))))
-    pos))
 
 (defun %target-feature-prefix (text node)
   "Return the #+/#- feature expressions written in front of NODE's form in TEXT,

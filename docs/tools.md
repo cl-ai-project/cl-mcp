@@ -389,7 +389,9 @@ Input:
 
 Both count characters, so a window advanced by the characters it returned picks up exactly
 where it stopped, in multibyte text too. A byte that is not valid UTF-8 before the window counts
-as one character. An offset at or past the end returns an empty result.
+as one character. An offset at or past the end returns an empty result, and the content says
+so: `[Nothing read: offset N is at or past the end of the file (a B-byte file).]`,
+`[Nothing read: limit is 0.]`, or `[The file is empty.]`.
 
 Output:
 - `content`: the text. Whenever text is left past a non-empty window — because `limit` stopped
@@ -518,7 +520,14 @@ Inputs:
   shown. A definition's docstring follows as `;; first line`, taken from where its
   definer puts one: after a variable's value, a `defstruct`'s name, or a function's
   lambda list (never a function's only form, which is its value), so a variable whose
-  value is a string does not show that value as its documentation.
+  value is a string does not show that value as its documentation. A variable's value is cut
+  at 80 characters. A definition behind `#+`/`#-` shows its feature expressions in front of
+  its signature (`49: #+sbcl (defun float-epsilon () ...)`), and one the reader skipped
+  because its expression is false in the server -- the other implementation's twin -- is
+  listed by the start of its text and `[not read: its feature expression is false in this
+  server]` (never expanded; read it with `collapsed=false`). A file read by the CL reader --
+  with `readtable`, or after an `in-readtable` -- lists no such twin, since that reader
+  returns nothing for it.
 - `name_pattern` (string, optional): CL-PPCRE regex; matching definition names are
   expanded even in collapsed mode.
 - `content_pattern` (string, optional): CL-PPCRE regex applied to form bodies; if
