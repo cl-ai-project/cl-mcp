@@ -210,6 +210,16 @@ Final line
       (ok (ignored-p "\\#hash.lisp" "#hash.lisp"))
       (ok (ignored-p "\\*star.lisp" "*star.lisp"))
       (ok (not (ignored-p "\\*star.lisp" "xstar.lisp"))))
+    (testing "a backslash inside a class escapes the member after it, as git reads it"
+      ;; Checked with git check-ignore: [a\-c] is a, - or c, not the range \..c.
+      (ok (ignored-p "[a\\-c].lisp" "-.lisp"))
+      (ok (ignored-p "[a\\-c].lisp" "c.lisp"))
+      (ok (not (ignored-p "[a\\-c].lisp" "b.lisp")))
+      (ok (not (ignored-p "[a\\-c].lisp" "\\.lisp")))
+      ;; [\]q] holds ] and q; the escaped ] does not close it.
+      (ok (ignored-p "[\\]q]x.lisp" "]x.lisp"))
+      (ok (ignored-p "[\\]q]x.lisp" "qx.lisp"))
+      (ok (not (ignored-p "[\\]q]x.lisp" "\\x.lisp"))))
     (testing "an unclosed [ is literal"
       (ok (ignored-p "odd[name.lisp" "odd[name.lisp")))
     (testing "dir/* matches what is in the directory, not the directory itself"
