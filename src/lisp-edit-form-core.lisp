@@ -16,6 +16,7 @@
                 #:scan-to-strings)
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms
+                #:cst-node-start-line
                 #:stray-right-parenthesis
                 #:readtable-unavailable
                 #:readtable-unavailable-designator
@@ -619,8 +620,11 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
                              collect (let ((candidates (%definition-candidates form form-type)))
                                        ;; The index is relative to this form_name,
                                        ;; so the whole string to pass is spelled out.
-                                       (format nil "[~D] ~A  (form_name ~S)" i
+                                       ;; Its line too: two forms of one name
+                                       ;; are told apart only by where they are.
+                                       (format nil "[~D] ~A, line ~D  (form_name ~S)" i
                                                (or (car (last candidates)) (first candidates))
+                                               (cst-node-start-line node)
                                                (format nil "~A[~D]" listed-name i))))))
                  (values nil (format nil "Multiple matches for ~A ~A. Specify an index:~%~{  ~A~%~}"
                                      form-type form-name descriptions))))))))))
@@ -1494,8 +1498,10 @@ Returns eight values:
                 (signal-file-unparseable abs original swallowed
                                         :readtable readtable
                                         :editable-prefix (and nodes t)))
-              (error "Form ~A ~A not found in ~A~%~A" form-type form-name
-                     (native-path-namestring abs)
+              ;; Named as the summaries of these tools name a file: relative to
+              ;; the project root when it lies under it.
+              (error "Form ~A ~A not found in ~A.~%~A" form-type form-name
+                     (or (%project-relative-path abs) (native-path-namestring abs))
                      (%forms-listing nodes form-type-str)))
             (when guard
               (multiple-value-bind (ok-p conflict)

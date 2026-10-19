@@ -705,8 +705,10 @@ Input:
   expressions (`#+sbcl (defun ...)`, `#+sbcl #+x86-64 ...`) keeps them, with any comment
   between them and the form, in front of the new form when `content` does not start with
   feature expressions of its own; the summary then says `Kept #+sbcl in front of the form`
-  and the result carries `kept_feature_expression`. Start `content` with the expression it
-  should have to change or drop the condition; the form after it is validated (and repaired)
+  and the result carries `kept_feature_expression`, the expressions alone. Start `content`
+  with the expression it should have to change the condition; to drop it, `delete` the form
+  and insert the bare definition with `insert_before`/`insert_after` on a neighbouring form.
+  The form after a content's own expression is validated (and repaired)
   whether or not that condition holds in the server, so `#-sbcl (defun ...)` on SBCL is
   accepted, while an expression with no form after it, or one that breaks the feature
   expression grammar (`#+(not a b)`, `#+(bogus a)`), is refused and nothing is written.
@@ -714,10 +716,16 @@ Input:
   the file. `delete` removes the expressions with the form
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
 - `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms.
-  A `replace` whose content is the form already there changes nothing, spacing included
-  (`No change …`). When a real `replace` also moves the blank lines around the form -- forms
-  written with no blank line between them are set apart -- the summary says so and the
-  result carries `blank_lines_normalized: true`; pass `false` to leave them as they were
+  A `replace` whose content is the form already there changes nothing, spacing included (`No
+  change …`). When a real `replace` also moves the blank lines around the form -- forms written
+  with no blank line between them are set apart -- the summary says so and the result carries
+  `blank_lines_normalized: true`; pass `false` to leave them as they were. A comment written
+  directly above the form (`;` lines with no blank line between them and the form, a `;;;`
+  header among them) is the form's in either mode: `replace` keeps it attached, and
+  `insert_before` puts the new form above it; `delete` leaves it. A comment in the content of a
+  `replace` is put after the file's, which stays. Every summary names the line the matched form
+  starts on, its `#+` line when it has one (`Applied replace to defun beta (line 4) in …`, also
+  the result's `line`), and a "Multiple matches" error lists each candidate with its line
 - `readtable` (string, optional): named-readtable designator for files using custom reader
   macros. **The readtable must be registered in the cl-mcp server process**, which is where
   files are parsed. `load-system` and `repl-eval` load into the session's *worker*, so
