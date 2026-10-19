@@ -587,11 +587,33 @@ tests/tmp/NAME.lisp."
         (format nil "the name is cut where it has a space: ~S" shown))))
 
 (deftest lisp-read-file-collapsed-view-survives-a-dotted-definition
-  ;; (SECOND FORM) signalled on (deftest . foo) and took the whole view down.
+  ;; (SECOND FORM) signalled on (deftest . foo), and on (defun . foo) in
+  ;; %COLLAPSE-DEF-FORM, and took the whole view down.
   (let ((lines (%collapsed-lines "tests/tmp/sig-dotted.lisp"
-                                 (format nil "(deftest . foo)~%~%(defun after () 1)~%"))))
-    (ok (= 2 (length lines)) (format nil "both forms are listed: ~S" lines))
-    (ok (search "(defun after ()" (second lines)) "and the one after it is named")))
+                                 (format nil "(deftest . foo)~%~%(defun . foo)~%~%(defun after () 1)~%"))))
+    (ok (= 3 (length lines)) (format nil "every form is listed: ~S" lines))
+    (ok (search "(defun after ()" (third lines)) "and the one after them is named")))
+
+(deftest lisp-read-file-name-pattern-ignores-the-case-of-a-name
+  ;; name_pattern is matched against the lower-cased name, a string name's
+  ;; contents included, and the collapsed view shows that same text.
+  (with-temp-lisp-file "tests/tmp/sig-name-case.lisp"
+      (format nil "(defsystem \"MyLib\" :depends-on ())~%~%(defsystem \"Other\" :depends-on ())~%")
+    (lambda (path)
+      (ok (search "(defsystem \"mylib\" ...)" (gethash "content" (lisp-read-file path)))
+          "the name is shown lower-cased")
+      (let ((content (gethash "content" (lisp-read-file path :name-pattern "^\"mylib\"$"))))
+        (ok (search "(defsystem \"MyLib\" :depends-on ())" content)
+            "and matched as shown")
+        (ok (search "(defsystem \"other\" ...)" content) "the other stays collapsed")))))
+
+(deftest lisp-read-file-collapsed-view-keeps-a-symbol-name-on-one-line
+  ;; A symbol's name was shown raw, so one with a newline split the entry.
+  (let ((lines (%collapsed-lines "tests/tmp/sig-newline-symbol.lisp"
+                                 (format nil "(define-thing |sym~%with newline| 1)~%~%(defun after () 1)~%"))))
+    (ok (= 2 (length lines)) (format nil "two forms, two lines: ~S" lines))
+    (ok (search "(define-thing sym with newline ...)" (first lines))
+        "the newline is shown as a space")))
 
 (defun %try-load (system)
   "Attempt to load SYSTEM via Quicklisp or ASDF. Returns T on success, NIL on failure."

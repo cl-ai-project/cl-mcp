@@ -327,22 +327,26 @@ PATTERN is a non-empty string that is not valid regex syntax."
 
 (defun %definition-name-text (name)
   "Return NAME, a definition's name, as the text name_pattern matches and the
-collapsed view shows.  A symbol gives its name lower-cased, without a package
-or #:, as the nine definers have always shown it.  Anything else -- a string, a
-list such as (setf foo) or (show :require-token t) -- is printed as a signature
-is: by *SIGNATURE-PPRINT-DISPATCH*, so a symbol left homeless by the reader's
-temporary package prints without #:, on one line, with every whitespace run
-made one space.  PRIN1-TO-STRING printed both differently, so a list name
-shown as (show ...) had to be matched as (#:show ...)."
-  (if (symbolp name)
-      (string-downcase (symbol-name name))
-      (%collapse-whitespace-runs
-       (let ((*print-case* :downcase)
-             (*print-circle* nil)
-             (*print-pprint-dispatch* *signature-pprint-dispatch*)
-             (*print-right-margin* most-positive-fixnum))
-         (with-output-to-string (out)
-           (write name :stream out :pretty t :escape t :case :downcase))))))
+collapsed view shows: lower-cased, on one line, every whitespace run made one
+space.  A symbol gives its name without a package or #:, as the nine definers
+have always shown it.  Anything else -- a string, a list such as (setf foo) or
+(show :require-token t) -- is printed as a signature is, by
+*SIGNATURE-PPRINT-DISPATCH*, so a symbol left homeless by the reader's
+temporary package prints without #:.  name_pattern used to match
+PRIN1-TO-STRING, which kept the #: and could wrap a long name over lines, so a
+list name shown as (show ...) had to be matched as (#:show ...).  The whole
+text is lower-cased, a string's contents included, as name_pattern has always
+matched it and as the nine definers show their names."
+  (string-downcase
+   (%collapse-whitespace-runs
+    (if (symbolp name)
+        (symbol-name name)
+        (let ((*print-case* :downcase)
+              (*print-circle* nil)
+              (*print-pprint-dispatch* *signature-pprint-dispatch*)
+              (*print-right-margin* most-positive-fixnum))
+          (with-output-to-string (out)
+            (write name :stream out :pretty t :escape t :case :downcase)))))))
 
 (defun %definition-names (form)
   "Return a list of stringified definition names for FORM, when applicable:
@@ -632,14 +636,17 @@ whitespace."
                     (expand?
                      (%add-line-numbers (%node-source-text node source-text)
                                         start-line line-width))
-                    ((member head '(defun defmacro defvar defparameter defconstant defclass
-                                     defstruct defgeneric defmethod))
+                    ;; A dotted (defun . foo) has no second element to show, and
+                    ;; %COLLAPSE-DEF-FORM's SECOND would signal on it.
+                    ((and (member head '(defun defmacro defvar defparameter defconstant
+                                          defclass defstruct defgeneric defmethod))
+                          (consp (cdr form)))
                      (format nil "~VD: ~@[~A ~]~A" line-width start-line prefix
                              (%collapse-def-form form)))
                     ((eq head 'in-package)
                      (%form->string form))
                     ;; Any other definition is named, as name_pattern sees it.
-                    ((and names (consp (cdr form)))
+                    (names
                      (format nil "~VD: ~@[~A ~]~A" line-width start-line prefix
                              (%collapse-named-form form)))
                     (t (format nil "~VD: ~@[~A ~]~A" line-width start-line prefix
