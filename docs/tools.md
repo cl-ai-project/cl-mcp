@@ -1125,7 +1125,10 @@ The text ends with a pointer to `clos-describe` for a generic function (with its
 A symbol bound as none of these — a restart's name, or a name whose system is not loaded yet —
 is answered as not found, the way `code-find` answers one: a result with `isError` and a
 `content` text naming the symbol qualified (`Nothing to describe for PKG::NAME: …`), not a
-JSON-RPC error.
+JSON-RPC error. A qualified name whose package does not exist -- most often because its system
+is not loaded yet -- is answered the same way by both tools, as `code-find-references` answers
+it: `Package "PKG" not found (nothing was interned). Load the system that defines it with
+load-system.`
 
 ## `code-find-references`
 Find who calls or references a symbol — its callers, the exact call sites inside

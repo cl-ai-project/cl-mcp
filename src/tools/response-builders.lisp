@@ -33,6 +33,7 @@
            #:build-code-find-response
            #:build-code-describe-response
            #:build-code-describe-not-found-response
+           #:build-tool-refusal-response
            #:build-code-find-references-response
            #:build-inspect-response
            #:build-macroexpand-response
@@ -1024,6 +1025,14 @@ as an internal fault."
 variable, class, condition or structure type. If the system defining it is not loaded yet, ~
 run load-system first; a name such as a restart's has no definition to describe."
                     name))))
+
+(defun build-tool-refusal-response (condition)
+  "Build an isError result whose text is CONDITION's report: what code-find and
+code-describe answer for a name they cannot look up (a package that does not
+exist, say), rather than an error signalled through to the transport, which a
+client reads as an internal fault."
+  (make-ht "isError" t
+           "content" (text-content (princ-to-string condition))))
 
 (defparameter *references-sites-shown* 5
   "Call sites listed per form in code-find-references' text; the rest are counted.")
