@@ -139,6 +139,32 @@
         (ok (and text (search "load-system" text))
             "and the step to take when its system is not loaded yet")))))
 
+(deftest code-find-and-describe-answer-a-package-that-does-not-exist
+  ;; The reader's package error escaped as "JSON-RPC error -32603: Internal
+  ;; error: Package ... does not exist" -- most often the package's system is
+  ;; simply not loaded yet, which code-find-references already says.
+  (dolist (tool (list (cons "code-find"
+                            (lambda (params)
+                              (cl-mcp/src/worker/handlers::%handle-code-find params)))
+                      (cons "code-describe"
+                            (lambda (params)
+                              (cl-mcp/src/worker/handlers::%handle-code-describe params)))))
+    (dolist (pooled '(nil t))
+      (testing (format nil "~A ~:[inline~;through a worker~]" (car tool) pooled)
+        (let* ((response (%call-code-tool (car tool) (cdr tool)
+                                          "clmcp-no-such-package-xyz/src/x:foo"
+                                          :pooled pooled))
+               (result (gethash "result" response))
+               (text (and result (gethash "text" (aref (gethash "content" result) 0)))))
+          (ok (null (gethash "error" response)) "no JSON-RPC error")
+          (ok (and result (eq t (gethash "isError" result))) "an isError result")
+          (ok (and text (search "CLMCP-NO-SUCH-PACKAGE-XYZ/SRC/X" text)
+                   (search "not found (nothing was interned)" text)
+                   (search "load-system" text))
+              text)
+          (ok (null (find-package "CLMCP-NO-SUCH-PACKAGE-XYZ/SRC/X"))
+              "and nothing was created"))))))
+
 (deftest code-find-definition-logical-pathname
   (testing "code-find-definition handles CL standard symbols with logical pathnames"
     ;; CL standard symbols like CL:CAR have source locations with logical pathnames

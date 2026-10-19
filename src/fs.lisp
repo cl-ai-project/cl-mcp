@@ -45,7 +45,9 @@
   ;; No cycle: paren-diagnostics depends on parinfer and uiop only.
   (:import-from #:cl-mcp/src/paren-diagnostics
                 #:diagnose-delimiters
-                #:format-delimiter-diagnosis)
+                #:format-delimiter-diagnosis
+                #:unreadable-dispatch-position
+                #:format-unreadable-dispatch)
   (:export #:*lisp-file-unparseable-hook*
            #:*fs-read-max-bytes*
            #:with-file-lock
@@ -590,8 +592,14 @@ back to the plain sentence."
              (ignore-errors (funcall *lisp-file-unparseable-hook* pn content)))
     (format nil "WARNING: the file was written but does not parse.~%~A~%~A"
             (or (handler-case
-                    (format-delimiter-diagnosis (diagnose-delimiters content)
-                                                :target path)
+                    (let ((diagnosis (diagnose-delimiters content)))
+                      (multiple-value-bind (line column sub-char)
+                          (and (getf diagnosis :ok) (unreadable-dispatch-position content))
+                        ;; Balanced, so the reader stopped on a # it rejects in
+                        ;; every standard readtable: say which and where.
+                        (if line
+                            (format-unreadable-dispatch line column sub-char)
+                            (format-delimiter-diagnosis diagnosis :target path))))
                   (error () nil))
                 (concatenate 'string
                              "The editing tools' reader cannot parse the file as "
@@ -822,7 +830,9 @@ to preserve structure and comments. The one exception: when an existing .lisp
 file no longer parses (a missing or stray parenthesis), lisp-edit-form cannot
 locate any form in it, so overwriting it here is the repair path -- but only
 with allow_unparseable_overwrite=true, because a file that only looks broken
-to the default reader may be valid under a custom readtable.
+to the default reader may be valid under a custom readtable.  So is a file that
+declares no readtable and holds a #< (an object printed unreadably, such as
+#<HASH-TABLE ...>, pasted as source), which no standard readtable reads.
 After writing a .lisp/.asd file its content is checked with the parser the
 overwrite guard uses: the write still succeeds, but if the file does not parse
 the response says so, shows the diagnosis, and reminds you that the next write

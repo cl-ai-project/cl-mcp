@@ -11,16 +11,20 @@
                 #:json-bool
                 #:transient-error)
   (:import-from #:cl-mcp/src/utils/paths
-                #:discover-asd-in-project)
+                #:discover-asd-in-project
+                #:normalize-path-for-display)
   (:import-from #:cl-mcp/src/project-root
                 #:system-left-by-root-change)
   (:import-from #:cl-mcp/src/utils/fasls
-                #:delete-same-second-fasls)
+                #:delete-same-second-fasls
+                #:registered-fasl-sources)
   (:import-from #:cl-mcp/src/utils/compilation-unit
                 #:call-with-own-compilation-unit)
   ;; The warning records load-system reports, so a load refused for a
   ;; warning names it and its place the same way here.
   (:import-from #:cl-mcp/src/warning-records
+                #:load-failure-kind
+                #:load-failure-hint
                 #:%make-warning-record
                 #:%warning-record-tables
                 #:%in-project-predicate
@@ -311,9 +315,18 @@ comparison is exactly where it matters."
             (coerce (mapcar #'%source-text values) 'vector)))
     (when reason
       (setf (gethash "reason" ht)
-            (if (stringp reason)
-                reason
-                (princ-to-string reason))))
+            (typecase reason
+              (string reason)
+              ;; A condition's report alone hides what was signalled -- unless
+              ;; it names the class itself, as SBCL's arithmetic errors do.
+              (condition
+               ;; On one line: SBCL's pretty-printed reports otherwise break
+               ;; flush left under the "Error: " they follow.
+               (let ((report (let ((*print-pretty* nil)) (princ-to-string reason))))
+                 (if (search (symbol-name (type-of reason)) report :test #'char-equal)
+                     report
+                     (format nil "~S: ~A" (type-of reason) report))))
+              (t (princ-to-string reason)))))
     (when source
       (setf (gethash "source" ht)
             (if (listp source)
@@ -345,27 +358,126 @@ errors are NOT signaled this way; they propagate so real failures stay visible."
 ;;; Rove Backend
 ;;; ---------------------------------------------------------------------------
 
+(defun %dissect-function (package name)
+  "Return dissect's function NAME in PACKAGE, or NIL when PACKAGE is NIL or has
+no such function: dissect comes with Rove and is resolved at run time."
+  (let ((symbol (and package (find-symbol name package))))
+    (and symbol (fboundp symbol) (fdefinition symbol))))
+
+(defun %frame-owner-package (call)
+  "Return the package of the name a backtrace frame's CALL runs, or NIL when it
+names none: a symbol's own; for (:METHOD NAME ...), (FLET NAME :IN OUTER) and
+the like, NAME's, or OUTER's when NAME is no symbol; for (LAMBDA ... :IN
+OUTER), OUTER's when it is a symbol.  (SETF NAME) counts as NAME."
+  (labels ((owner (designator)
+             (typecase designator
+               (null nil)
+               (symbol (symbol-package designator))
+               (cons (if (and (eq (first designator) 'setf) (symbolp (second designator)))
+                         (symbol-package (second designator))
+                         (owner-of-call designator)))
+               (t nil)))
+           (owner-of-call (form)
+             (let ((in (member :in form)))
+               (case (first form)
+                 ((lambda) (and in (symbolp (second in)) (owner (second in))))
+                 ((flet labels) (or (owner (second form)) (and in (owner (second in)))))
+                 (t (owner (second form)))))))
+    (typecase call
+      (symbol (symbol-package call))
+      (cons (owner-of-call call))
+      (t nil))))
+
+(defun %package-named-p (package names)
+  "True when PACKAGE's name is one of NAMES, an entry ending in / or - being a
+prefix (\"SB-\", \"ROVE/\") and any other a whole name (\"ROVE\"), so ROVER-APP
+is not Rove's."
+  (and package
+       (let ((name (package-name package)))
+         (some (lambda (entry)
+                 (if (find (char entry (1- (length entry))) "/-")
+                     (uiop:string-prefix-p entry name)
+                     (string= entry name)))
+               names))))
+
+(defun %rove-first-user-frame (stacks package)
+  "Return where the error in STACKS, a Rove assertion's dissect frames, was
+signalled: the first frame of the test's own code, as \"NAME\", \"NAME (file)\"
+or \"NAME (file:line)\", printed as PACKAGE reads it.  Frames are told apart by
+the package of the name they run (%FRAME-OWNER-PACKAGE), not by how it prints:
+CL's, SBCL's, dissect's and cl-mcp's are passed over, and the first of Rove's
+ends the walk, since below it is the runner, whose frames say nothing about the
+test.  NIL when no frame of the test's code is above it, or dissect is absent."
+  (let* ((dissect (find-package :dissect))
+         (call-fn (%dissect-function dissect "CALL"))
+         (file-fn (%dissect-function dissect "FILE"))
+         (line-fn (%dissect-function dissect "LINE"))
+         (*package* (if (packagep package) package *package*)))
+    (when call-fn
+      (dolist (frame stacks)
+        (let* ((call (ignore-errors (funcall call-fn frame)))
+               (owner (%frame-owner-package call)))
+          (cond ((%package-named-p owner '("ROVE" "ROVE/")) (return nil))
+                ((or (null call)
+                     (stringp call)
+                     (%package-named-p owner '("COMMON-LISP" "SB-" "DISSECT" "CL-MCP"
+                                               "CL-MCP/SRC/" "UIOP" "UIOP/" "ASDF"
+                                               "ASDF/"))))
+                (t
+                 (let ((text (ignore-errors (let ((*print-pretty* nil))
+                                              (prin1-to-string call))))
+                       (file (and file-fn (ignore-errors (funcall file-fn frame))))
+                       (line (and line-fn (ignore-errors (funcall line-fn frame)))))
+                   (when text
+                     (return (format nil "~A~@[ (~A~@[:~D~])~]"
+                                     text
+                                     (and file (or (ignore-errors
+                                                    (normalize-path-for-display file))
+                                                   (ignore-errors (namestring file))))
+                                     line)))))))))))
+
+(defun %rove-failure-detail (assertion package)
+  "Return the failure detail for ASSERTION, a Rove FAILED-ASSERTION of a test
+written in PACKAGE (MAKE-FAILURE-DETAIL).  An error escaping the test body is
+recorded by Rove with the placeholder form T and the condition as its reason:
+it gets no form, \"signalled\" true and \"error_frame\", where it was signalled.
+A form that is NIL is shown as NIL, not left out as if unknown."
+  (let* ((pkg (find-package :rove/core/result))
+         (form (funcall (fdefinition (find-symbol "ASSERTION-FORM" pkg)) assertion))
+         (reason (funcall (fdefinition (find-symbol "ASSERTION-REASON" pkg)) assertion))
+         (signalled (and (typep reason 'condition) (eq form t)))
+         (detail (make-failure-detail
+                  :form (and (not signalled) form)
+                  :description (funcall (fdefinition (find-symbol "ASSERTION-DESCRIPTION" pkg))
+                                        assertion)
+                  :reason reason
+                  :values (funcall (fdefinition (find-symbol "ASSERTION-VALUES" pkg)) assertion)
+                  :source (funcall (fdefinition (find-symbol "ASSERTION-SOURCE-LOCATION" pkg))
+                                   assertion)
+                  :package package)))
+    (cond (signalled
+           (setf (gethash "signalled" detail) t)
+           (let* ((stacks-sym (find-symbol "ASSERTION-STACKS" pkg))
+                  (frame (and stacks-sym
+                              (%rove-first-user-frame
+                               (ignore-errors (funcall (fdefinition stacks-sym) assertion))
+                               package))))
+             (when frame
+               (setf (gethash "error_frame" detail) frame))))
+          ((null form)
+           (setf (gethash "form" detail) "NIL")))
+    detail))
+
 (defun %rove-extract-assertions (test-node &optional package)
   "Recursively extract failed assertions from a Rove test node.
 PACKAGE is the package the test was written in; see MAKE-FAILURE-DETAIL."
   (let* ((pkg (find-package :rove/core/result))
          (test-failed-fn (fdefinition (find-symbol "TEST-FAILED-TESTS" pkg)))
-         (assertion-form-fn (fdefinition (find-symbol "ASSERTION-FORM" pkg)))
-         (assertion-desc-fn (fdefinition (find-symbol "ASSERTION-DESCRIPTION" pkg)))
-         (assertion-reason-fn (fdefinition (find-symbol "ASSERTION-REASON" pkg)))
-         (assertion-values-fn (fdefinition (find-symbol "ASSERTION-VALUES" pkg)))
-         (assertion-source-fn (fdefinition (find-symbol "ASSERTION-SOURCE-LOCATION" pkg)))
          (failed-assertion-class (find-symbol "FAILED-ASSERTION" pkg))
          (children (funcall test-failed-fn test-node)))
     (loop for child in children
           if (typep child failed-assertion-class)
-            collect (make-failure-detail
-                     :form (funcall assertion-form-fn child)
-                     :description (funcall assertion-desc-fn child)
-                     :reason (funcall assertion-reason-fn child)
-                     :values (funcall assertion-values-fn child)
-                     :source (funcall assertion-source-fn child)
-                     :package package)
+            collect (%rove-failure-detail child package)
           else
             append (%rove-extract-assertions child package))))
 
@@ -517,8 +629,33 @@ load-system's warning records (%WARNING-RECORD-TABLES), each with its place,
 and empty when only an error failed it.  Its own type, so the load failure sends
 the caller to the file rather than to a fresh worker."))
 
-(defun %format-load-error (system-name condition stderr)
+(defun %erring-file-text (erring-file)
+  "Return \"while compiling FILE\" or \"while loading FILE\" for ERRING-FILE, a
+(VERB PATHNAME) %ENSURE-SYSTEM-LOADED recorded, or NIL.  A FASL being loaded is
+named by the source it was compiled from, when a registered system has it."
+  (when erring-file
+    (destructuring-bind (verb pathname) erring-file
+      (let ((source (or (and (equal verb "loading")
+                             ;; Never over the load's own error.
+                             (ignore-errors
+                              (gethash (namestring pathname) (registered-fasl-sources))))
+                        pathname)))
+        (format nil "while ~A ~A" verb (or (normalize-path-for-display source)
+                                           (namestring source)))))))
+
+(define-condition test-system-load-failed (simple-error)
+  ((kind :initarg :kind :initform nil :reader test-system-load-failed-kind)
+   (detail :initarg :detail :initform nil :reader test-system-load-failed-detail))
+  (:documentation "Loading the test system stopped on an error a fresh worker
+would meet again, with a cause of its own (LOAD-FAILURE-KIND): KIND is
+:MISSING-DEPENDENCY, DETAIL then the system's name, or :DEFCONSTANT.  Its own
+type, so the load failure names that cause rather than sending the caller to
+replace a worker that is fine."))
+
+(defun %format-load-error (system-name condition stderr &optional where)
   "Format a test-system load-failure message.
+WHERE, when given, says which file was compiling or loading when CONDITION
+was signalled (\"while compiling tests/item-test.lisp\").
 When STDERR contains captured compiler output, the tail of it is
 appended under a 'Compiler output (most recent):' header so the user
 can see the underlying reason (e.g., SBCL package-variance warnings)
@@ -531,10 +668,11 @@ Shows the condition type explicitly to aid root-cause diagnosis."
                   "unprintable condition")))
     (if tail
         (format nil
-                "Failed to load test system ~A:~%  [~A] ~A~%~%Compiler output (most recent):~%~A"
-                system-name ctype cmsg tail)
-        (format nil "Failed to load test system ~A:~%  [~A] ~A"
-                system-name ctype cmsg))))
+                "Failed to load test system ~A:~%  [~A] ~A~@[~%  ~A~]~%~%Compiler output ~
+                 (most recent):~%~A"
+                system-name ctype cmsg where tail)
+        (format nil "Failed to load test system ~A:~%  [~A] ~A~@[~%  ~A~]"
+                system-name ctype cmsg where))))
 
 (defun make-load-failure-result (system-name condition)
   "Convert a test-system load failure into a structured test-result so
@@ -570,11 +708,8 @@ them."
                   ((typep condition 'transient-error) text)
                   ;; Nothing is wrong with the worker: the name is unknown.
                   ((typep condition 'test-system-not-found)
-                   (format nil "~A~%~%Hint: ASDF knows no system ~A, and no ~A.asd was ~
-                                found under the project root. Check the name, or ~
-                                register its .asd with load-system or asdf:load-asd, ~
-                                then retry run-tests."
-                           text system-name (asdf:primary-system-name system-name)))
+                   (format nil "~A~%~%~A" text
+                           (load-failure-hint :missing-system "run-tests" system-name)))
                   ;; Nothing in the file is wrong: the worker still exports what
                   ;; the file no longer declares, and only a fresh worker cures
                   ;; that.
@@ -583,12 +718,14 @@ them."
                                  (equal "SB-INT:PACKAGE-AT-VARIANCE"
                                         (gethash "class" record)))
                                records))
-                   (format nil "~A~%~%Hint: package-variance warnings mean the running ~
-                                image has stale exports. Use pool-kill-worker to get a ~
-                                fresh worker, then retry run-tests. If they come back ~
-                                on a fresh worker, two definitions of the package ~
-                                disagree: make them agree."
-                           text))
+                   (format nil "~A~%~%~A" text (load-failure-hint :variance "run-tests")))
+                  ;; A cause a fresh worker meets again: a dependency ASDF cannot
+                  ;; find, a constant given a value not EQL to its own.
+                  ((typep condition 'test-system-load-failed)
+                   (format nil "~A~%~%~A" text
+                           (load-failure-hint (test-system-load-failed-kind condition)
+                                              "run-tests"
+                                              (test-system-load-failed-detail condition))))
                   ;; The warning is the cause, and a fresh worker would meet it
                   ;; again -- unless it is about what this worker holds.
                   (records
@@ -617,10 +754,7 @@ them."
                                 earlier in it. Fix the file and run the tests again."
                            text))
                   (t
-                   (format nil "~A~%~%Hint: the worker process may have a broken ~
-                                package state. Use pool-kill-worker to get a fresh ~
-                                worker, then retry run-tests."
-                           text)))))))))
+                   (format nil "~A~%~%~A" text (load-failure-hint nil "run-tests"))))))))))
     (when records
       (setf (gethash "warning_records" result) (coerce records 'vector)))
     result))
@@ -980,16 +1114,38 @@ COMPILE-FILE-ERROR."
         ;; Full warnings signalled while a file compiled: what ASDF refuses a
         ;; file for.  Recorded in the handler, where the compiler's place for
         ;; them can still be read.
-        (refusing '()))
+        (refusing '())
+        ;; The file being compiled or loaded when the last error was
+        ;; signalled, as (VERB PATHNAME): an error FiveAM signals there, such
+        ;; as "Unknown suite", names no file of its own.
+        (erring-file nil)
+        ;; True while ASDF:LOAD-SYSTEM runs with *ERROR-OUTPUT* captured.
+        (loading nil))
     (handler-case
         (handler-bind
-            ((warning
+            ((error
               (lambda (c)
-                (format captured-warnings "~A~%" c)
+                (declare (ignore c))
+                (let ((file (or (and *compile-file-truename*
+                                     (list "compiling" *compile-file-truename*))
+                                (and *load-truename* (list "loading" *load-truename*)))))
+                  (when file (setf erring-file file)))))
+             (warning
+              (lambda (c)
+                ;; A bare copy only where nothing else writes the warning: the
+                ;; compiler writes one signalled while a file compiles, with
+                ;; its place, and WARN one signalled during the load into
+                ;; CAPTURED-STDERR.  A redefinition notice is muffled below.
+                (unless (or *compile-file-truename* loading (%redefinition-warning-p c))
+                  (format captured-warnings "~A~%" c))
                 (when (and *compile-file-truename*
                            (not (typep c 'style-warning))
                            (not (%redefinition-warning-p c)))
-                  (push (%make-warning-record c) refusing)))))
+                  (push (%make-warning-record c) refusing))
+                ;; Dropped as load-system drops it: redefining is what a reload
+                ;; does.  A style warning, so no compile's failure-p changes.
+                (when (and (%redefinition-warning-p c) (find-restart 'muffle-warning c))
+                  (invoke-restart 'muffle-warning)))))
           (progn
             ;; As load-system does: a system nobody has registered yet --
             ;; its .asd freshly written under the project root -- is found
@@ -1034,6 +1190,7 @@ COMPILE-FILE-ERROR."
                 ;; and other system metadata are picked up.
                 (when asd-src
                   (ignore-errors (asdf:load-asd asd-src)))))
+            (setf loading t)
             (let ((*error-output* captured-stderr))
               (call-with-own-compilation-unit
                (lambda () (asdf:load-system system-name))))))
@@ -1062,8 +1219,17 @@ COMPILE-FILE-ERROR."
                                    (reverse refusing)
                                    :in-project (%in-project-predicate system-name)))))
             (t
-             (error "~A"
-                    (%format-load-error system-name c combined)))))))))
+             (multiple-value-bind (kind detail) (load-failure-kind c)
+               (if kind
+                   (error 'test-system-load-failed
+                          :kind kind :detail detail
+                          :format-control "~A"
+                          :format-arguments
+                          (list (%format-load-error system-name c combined
+                                                    (%erring-file-text erring-file))))
+                   (error "~A"
+                          (%format-load-error system-name c combined
+                                              (%erring-file-text erring-file))))))))))))
 
 (defun %rove-result-symbol (name)
   "Return Rove's ROVE/CORE/RESULT symbol NAME, resolved at run time since Rove
@@ -1115,8 +1281,9 @@ A test fails when it or anything nested in it failed.  A test whose only
 results are skips, however deep in TESTING blocks, is PENDING: it checked
 nothing, and a pass would say it had.  Every other test passed.  SKIPPED holds
 one entry per test that skipped anything -- those counted as pending, and
-those that passed but left part unchecked -- as a hash-table with test_name
-and reasons, so a skip is never lost inside a pass.  An entry that is not a
+those that passed or failed but left part unchecked -- as a hash-table with
+test_name, status (\"pending\", \"passed\" or \"failed\", as counted) and reasons,
+so a skip is never lost inside a pass.  An entry that is not a
 test result (an assertion Rove left at the top) counts by its own class."
   (let ((test-class (%rove-result-symbol "TEST"))
         (failed-class (%rove-result-symbol "FAILED"))
@@ -1126,13 +1293,15 @@ test result (an assertion Rove left at the top) counts by its own class."
     (dolist (entry entries)
       (if (typep entry test-class)
           (multiple-value-bind (checks reasons failures) (%rove-tally entry)
-            (cond ((or (typep entry failed-class) (plusp failures)) (incf failed))
-                  ((and reasons (zerop checks)) (incf pending))
-                  (t (incf passed)))
-            (when reasons
-              (push (make-ht "test_name" (princ-to-string (%safe-test-name test-name entry))
-                             "reasons" (coerce reasons 'vector))
-                    skipped)))
+            (let ((status (cond ((or (typep entry failed-class) (plusp failures))
+                                 (incf failed) "failed")
+                                ((and reasons (zerop checks)) (incf pending) "pending")
+                                (t (incf passed) "passed"))))
+              (when reasons
+                (push (make-ht "test_name" (princ-to-string (%safe-test-name test-name entry))
+                               "status" status
+                               "reasons" (coerce reasons 'vector))
+                      skipped))))
           (cond ((typep entry failed-class) (incf failed))
                 ((typep entry pending-class) (incf pending))
                 (t (incf passed)))))
@@ -1146,25 +1315,15 @@ a future Rove version returns them directly instead of crashing."
   (let* ((pkg (find-package :rove/core/result))
          (test-name-fn (fdefinition (find-symbol "TEST-NAME" pkg)))
          (failed-assertion-class (find-symbol "FAILED-ASSERTION" pkg))
-         (assertion-form-fn (fdefinition (find-symbol "ASSERTION-FORM" pkg)))
-         (assertion-desc-fn (fdefinition (find-symbol "ASSERTION-DESCRIPTION" pkg)))
-         (assertion-reason-fn (fdefinition (find-symbol "ASSERTION-REASON" pkg)))
-         (assertion-values-fn (fdefinition (find-symbol "ASSERTION-VALUES" pkg)))
-         (assertion-source-fn (fdefinition (find-symbol "ASSERTION-SOURCE-LOCATION" pkg)))
          (failure-details nil))
     (dolist (test-result results)
       (if (typep test-result failed-assertion-class)
           ;; Direct assertion in deftest body (no testing wrapper).  It
           ;; carries no test name, so there is no package to print its form
           ;; relative to; it prints from the runner's, as before.
-          (push (make-failure-detail
-                 :test-name (princ-to-string test-result)
-                 :form (funcall assertion-form-fn test-result)
-                 :description (funcall assertion-desc-fn test-result)
-                 :reason (funcall assertion-reason-fn test-result)
-                 :values (funcall assertion-values-fn test-result)
-                 :source (funcall assertion-source-fn test-result))
-                failure-details)
+          (let ((detail (%rove-failure-detail test-result nil)))
+            (setf (gethash "test_name" detail) (princ-to-string test-result))
+            (push detail failure-details))
           ;; Test node — recurse via %rove-extract-assertions
           (let* ((name (funcall test-name-fn test-result))
                  (test-name (princ-to-string name))

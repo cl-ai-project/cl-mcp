@@ -23,6 +23,8 @@
                 #:*shadowed-binding-marker*)
   (:import-from #:cl-mcp/src/repl-core
                 #:*default-max-output-length*)
+  (:import-from #:cl-mcp/src/warning-records
+                #:load-failure-hint)
   (:import-from #:cl-mcp/src/frame-inspector
                 #:%internal-frame-p)
   (:export #:build-eval-response
@@ -31,6 +33,7 @@
            #:build-code-find-response
            #:build-code-describe-response
            #:build-code-describe-not-found-response
+           #:build-tool-refusal-response
            #:build-code-find-references-response
            #:build-inspect-response
            #:build-macroexpand-response
@@ -307,12 +310,6 @@ execution_status is \"execution-unknown\"."
                  enriched))))
     ht))
 
-(defparameter *package-variance-hint*
-  (format nil "Hint: package-variance warnings mean the running image has stale exports. ~
-Use pool-kill-worker to get a fresh worker, then re-run load-system.")
-  "What load-system says when a package is at variance with its DEFPACKAGE: the
-file is as its author wants it, and the worker is what is out of date.")
-
 (defparameter *load-full-warnings-shown* 20
   "Full warnings listed one by one in load-system's text; the rest are counted.")
 
@@ -461,9 +458,14 @@ cases apart, and the hint is still given when a compile is refused for it."
   (if full
       (some (lambda (record)
               (and (%in-project-p record)
-                   (search "also exports" (or (gethash "message" record) ""))))
+                   ;; By its class: an "also uses" or "also shadows" variance
+                   ;; is one as much as "also exports".
+                   (equal "SB-INT:PACKAGE-AT-VARIANCE" (gethash "class" record))))
             full)
-      (and (stringp details) (search "also exports" details) t)))
+      (and (stringp details)
+           (some (lambda (phrase) (search phrase details))
+                 '("also exports" "also uses" "also shadows"))
+           t)))
 
 (defun %place-precedes-p (a b)
   "True when load-system warning record A is listed before B: by file, then by
@@ -564,6 +566,13 @@ stays in warning_records."
           (when (plusp unnamed)
             (format stream "~%    ... and ~D more kind~:P, not named" unnamed)))))))
 
+(defun %failure-kind-keyword (text)
+  "Return the LOAD-FAILURE-HINT kind TEXT, a load-system failure_kind, names, or
+NIL when it names none."
+  (cond ((equal text "missing-dependency") :missing-dependency)
+        ((equal text "missing-system") :missing-system)
+        ((equal text "defconstant") :defconstant)))
+
 (defun build-load-system-response (system ht)
   "Build the standard load-system response with summary text.
 HT is the hash-table returned by load-system core.  Adds a content
@@ -642,7 +651,7 @@ or its primary system" system)))))))
                                       wd)))
                        (format s "~%⚠ ~A" (string-right-trim '(#\Newline) body)))))
                   (when (%project-variance-p full wd)
-                    (format s "~%~%~A" *package-variance-hint*)))
+                    (format s "~%~%~A" (load-failure-hint :variance "load-system"))))
                 (let ((same-second (gethash "same_second_fasls_deleted" ht)))
                   (when same-second
                     ;; Deleted, not recompiled: the project's tree is checked
@@ -709,7 +718,7 @@ with a WARNING:"
                                      (equal "SB-INT:PACKAGE-AT-VARIANCE"
                                             (gethash "class" record)))
                                    refusing))
-                       (format s "~%~%~A" *package-variance-hint*))
+                       (format s "~%~%~A" (load-failure-hint :variance "load-system")))
                       ;; The warning is the cause, and a fresh worker would
                       ;; meet it again -- unless it is about what this
                       ;; worker holds, which only a fresh worker cures.
@@ -722,12 +731,21 @@ and load again. A warning about a definition this worker already holds -- a ~
 structure's layout, say -- needs a fresh worker instead: pool-kill-worker, then ~
 load-system."
                                (length refusing)))
+                      ;; Causes a fresh worker meets again: name what to fix.
+                      ((%failure-kind-keyword (gethash "failure_kind" ht))
+                       (format s "~%~%~A"
+                               (load-failure-hint
+                                (%failure-kind-keyword (gethash "failure_kind" ht))
+                                "load-system" (gethash "failure_detail" ht))))
+                      (compile-failed
+                       (format s "~%~%~A" (load-failure-hint :did-not-compile "load-system")))
                       (t
-                       (format s "~%~%Hint: the worker process may now have a broken ~
-package state. Use pool-kill-worker to get a fresh worker, then retry load-system."))))))))))
+                       (format s "~%~%~A" (load-failure-hint nil "load-system")))))))))))
     ;; Internal classifications for the hints above, not fields.
     (remhash "load_not_started" ht)
     (remhash "compile_failed" ht)
+    (remhash "failure_kind" ht)
+    (remhash "failure_detail" ht)
     (setf (gethash "content" ht) (text-content summary))
     ht))
 
@@ -819,8 +837,10 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
             (when (plusp (length skipped-tests))
               (format s "~%Skipped (~D test~:P):~%" (length skipped-tests))
               (loop for entry across skipped-tests
-                    do (format s "  ~A — ~{~A~^; ~}~%"
+                    do (format s "  ~A~@[ (~A)~] — ~{~A~^; ~}~%"
                                (gethash "test_name" entry)
+                               (let ((status (gethash "status" entry)))
+                                 (if (equal status "passed") "passed the rest" status))
                                (coerce (gethash "reasons" entry) 'list))))
             (when unreached
               (format s "~%Did not run (~D): ~{~A~^, ~}~%  Defined in this system's ~
@@ -857,8 +877,10 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                              (format s "     Got: ~{~A~^, ~}~%"
                                      (coerce vals 'list)))))
                        (when (gethash "reason" fail)
-                         (format s "     Reason: ~A~%"
-                                 (gethash "reason" fail)))))
+                         (format s "     ~:[Reason~;Error~]: ~A~%"
+                                 (gethash "signalled" fail) (gethash "reason" fail)))
+                       (when (gethash "error_frame" fail)
+                         (format s "     In: ~A~%" (gethash "error_frame" fail)))))
             ;; A test system refused for a warning: the warning with its
             ;; place, written as load-system writes it.
             (let ((refusing (remove-if-not
@@ -1003,6 +1025,14 @@ as an internal fault."
 variable, class, condition or structure type. If the system defining it is not loaded yet, ~
 run load-system first; a name such as a restart's has no definition to describe."
                     name))))
+
+(defun build-tool-refusal-response (condition)
+  "Build an isError result whose text is CONDITION's report: what code-find and
+code-describe answer for a name they cannot look up (a package that does not
+exist, say), rather than an error signalled through to the transport, which a
+client reads as an internal fault."
+  (make-ht "isError" t
+           "content" (text-content (princ-to-string condition))))
 
 (defparameter *references-sites-shown* 5
   "Call sites listed per form in code-find-references' text; the rest are counted.")

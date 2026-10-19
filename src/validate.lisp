@@ -18,7 +18,9 @@
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis
                 #:format-overwrite-recovery
-                #:next-top-level-hint-line)
+                #:next-top-level-hint-line
+                #:unreadable-dispatch-position
+                #:format-unreadable-dispatch)
   (:import-from #:cl-mcp/src/cst
                 #:text-reached-in-readtable)
   (:import-from #:cl-mcp/src/tools/helpers
@@ -522,7 +524,37 @@ it is flagged in \"diagnosis_text\" as a likely artifact of the window."
                                   an artifact of where the window starts (inside a ~
                                   string or a comment, say), so treat it as a hint ~
                                   only; check the whole file before acting on it."
-                             path base-off (length text)))))
+                             path base-off (length text))))
+             ;; A # no standard readtable reads, in a file that declares no
+             ;; readtable: the overwrite path is open for it, and the only one.
+             (when (and path (not partial) (%under-project-root-p path)
+                        (eq :unreadable-dispatch
+                            (nth-value 1 (ignore-errors
+                                          (%file-unparseable-by-edit-tools-p
+                                           (fs-resolve-read-path path) text)))))
+               (multiple-value-bind (u-line u-column) (unreadable-dispatch-position text)
+                 ;; The headline names the # too, not the character after it
+                 ;; where the reader stopped.
+                 (when u-line
+                   (let ((pos (gethash "position" h)))
+                     (setf (gethash "line" pos) u-line
+                           (gethash "column" pos) u-column
+                           (gethash "offset" pos)
+                           (+ (loop with start = 0
+                                    repeat (1- u-line)
+                                    do (setf start (1+ (position #\Newline text :start start)))
+                                    finally (return start))
+                              (1- u-column))))))
+               (setf (gethash "diagnosis_text" h)
+                     (format nil "~A No structural edit of this file is possible: ~
+                                  rewrite it whole with fs-write-file (path=~S, ~
+                                  allow_unparseable_overwrite=true), reading the exact ~
+                                  bytes with fs-read-file first."
+                             (multiple-value-call #'format-unreadable-dispatch
+                               (unreadable-dispatch-position text))
+                             (native-path-namestring
+                              (uiop:enough-pathname (fs-resolve-read-path path)
+                                                    (%project-root-truename)))))))
             (t
              ;; Both checks passed
              (setf (gethash "ok" h) t)))

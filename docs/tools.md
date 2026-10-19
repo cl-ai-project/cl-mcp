@@ -136,15 +136,23 @@ Input schema (JSON):
 Output fields:
 - `content`: last value as text
 - `stdout`: concatenated standard output from evaluation
-- `stderr`: concatenated standard error from evaluation. A warning is written here
-  as `Warning: ...` and evaluation goes on, except a full `WARNING` signalled while a
-  file compiles: that one is left to the compiler, which reports it here with its
-  place and counts it, so `(asdf:load-system ...)` fails with `COMPILE-FILE-ERROR`,
-  as it does outside `repl-eval`. An undefined variable is the exception: it is
-  reported at the end of `repl-eval`'s compilation unit, after `compile-file` has
-  returned, so it is written as `Warning: ...` and a `compile-file` called
-  directly returns a false failure-p for it (`asdf:load-system` loads such a file
-  everywhere)
+- `stderr`: concatenated standard error from evaluation. Warnings are reported here as they are
+  outside `repl-eval`. One signalled while the compiler runs (`compile-file`, `compile`, or the
+  compile behind an evaluated `defun`) is the compiler's: it is written with its place and
+  counted, so `(asdf:load-system ...)` fails with `COMPILE-FILE-ERROR` on a full `WARNING`, and
+  `compile` returns its warnings-p and failure-p. An error that unwinds through nested
+  compilation units (a refused compile, say) is counted once for each here (`caught 1 fatal
+  ERROR condition` for one), even when the code handled the error itself. Any other warning is
+  written by `warn` to `*error-output*` (`WARNING: ...`, a style warning too), which is this
+  stream unless the evaluated code rebinds it, and evaluation goes on. A `WARNING: redefining
+  ...` notice is shown when the earlier definition came from a file, as `load-system` loads it;
+  everything `repl-eval` compiles, or loads from source, is recorded as coming from the source
+  `repl-eval` (#249), and SBCL keeps quiet about a redefinition from the same source, so
+  redefining it there again is quiet. A FASL compiled elsewhere keeps the file it was compiled
+  from, so loading it through `repl-eval` shows the notice again. An undefined variable is
+  reported at the end of `repl-eval`'s compilation unit, after a `compile-file` it called has
+  returned, so that `compile-file`'s failure-p does not count it (`asdf:load-system` loads such
+  a file everywhere)
 - `result_object_id` (string|null): an opaque id, such as `"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-17"`; when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
 - `result_preview` (object, with `result_object_id`): a lightweight structural preview of the
   result — its kind, type and first elements or slots — shaped like `inspect-object`'s output
@@ -268,14 +276,14 @@ Output fields:
   dependency's, which come first since dependencies load first -- follow, summed up by kind as
   `Nx <headline>`, or `Nx e.g. <headline>` when the kind's messages differ (a kind of one
   warning is written without `1x`); at most eight kinds are listed. A headline is a message's
-  first sentence: its first line, joined with the lines after it, up to a blank line, while
-  the text does not yet end in `.`, `:`, `!` or `?` (SBCL breaks some messages mid-sentence).
-  What the joining adds is cut at 200 characters; a longer first line is kept whole. Style
-  warnings are summed up by kind: how many there are and up to three of them, the project's
-  before a dependency's, each in file and line order. A kind whose warnings all read the same is
-  headed by that headline and lists their places; one whose messages differ -- SBCL signals
-  every unused variable and every undefined function as one kind -- is headed `Nx of one kind:`
-  and gives each listed warning its place and its own headline. Kinds holding a warning of the
+  first sentence: its first line, joined with the lines after it, up to a blank line, while the
+  text does not yet end in `.`, `:`, `!` or `?` (SBCL breaks some messages mid-sentence). What
+  the joining adds is cut at 200 characters; a longer first line is kept whole. Style warnings
+  are summed up by kind: how many there are and up to three of them, the project's before a
+  dependency's, each in file and line order. A kind whose warnings all read the same is headed
+  by that headline and lists their places; one whose messages differ -- SBCL signals every
+  unused variable and every undefined function as one kind -- is headed `Nx of one kind:` and
+  gives each listed warning its place and its own headline. Kinds holding a warning of the
   project's come first; eight kinds are written so, as many again past them get one line each
   (count, first warning, its place) -- an undefined function, reported when the compilation unit
   ends, is often in that last group -- and any further kinds are counted. A failed load sums its
@@ -284,10 +292,15 @@ Output fields:
   (`fails_compile`) and says to fix them. A full warning signalled earlier, while another file
   loaded, is listed apart as `Other warnings before the error`; when the refused compile had no
   warning of its own (it failed on an error, which the compiler output shows) no warning is
-  blamed for it; a warning a compile was refused for is written whole wherever it comes from. A
-  package at variance ("also exports") that refused the compile, or one of the project's at
-  variance on a load that went on, or any other error, adds a hint to get a fresh worker with
-  `pool-kill-worker`
+  blamed for it; a warning a compile was refused for is written whole wherever it comes from.
+  The text ends with a hint by cause, the same one `run-tests` gives: a package at variance (an
+  export, use or shadow the file no longer declares) that refused the compile, or one of the
+  project's on a load that went on, gets a fresh worker with `pool-kill-worker`, which only that
+  cures; a dependency ASDF cannot find is named, with where to register it; a system named that
+  ASDF knows nowhere, the name to check; a `DEFCONSTANT` given a value not `EQL` to its own (a
+  list or string is a new object on each compile), `defparameter` or
+  `alexandria:define-constant`; a compile that failed on an error, the file to fix; any other
+  error, a fresh worker only if the error is about what this worker holds
 - `system` (string): echoed system name
 - `status` (string): `"loaded"`, `"timeout"`, or `"error"`. A full `WARNING` signalled while
   a file compiles (a duplicate definition, a type conflict, package variance, a wrong argument
@@ -375,7 +388,14 @@ Output fields:
 - `message` (string|null): error or timeout message
 
 Solves three problems with using `ql:quickload` via `repl-eval`:
-1. **Staleness**: `force=true` (default) clears loaded state before reloading
+1. **Staleness**: `force=true` (default) clears the named system and re-reads its `.asd`, so
+   every system defined there that this load reaches (the named one and its dependencies) is
+   loaded again: a stale file is recompiled, a current FASL is loaded as it is, and either
+   replaces a definition made in `repl-eval`. In a package-inferred system the code lives in
+   per-file subsystems that are neither cleared nor re-read, so a file of one is loaded again
+   only when it is stale, and a definition made in `repl-eval` stays until it is: `load-system`
+   on that file's own system (`my-app/src/states`), `clear_fasls=true` or `pool-kill-worker`
+   drops it
 2. **Output noise**: suppresses verbose compilation/load output
 3. **Timeout**: dedicated timeout prevents hanging on large systems
 
@@ -426,24 +446,27 @@ After a `.lisp`/`.asd` file is written its content is parsed: the write still su
 when the file does not parse the response adds `unparseable: true`, a `WARNING` with the
 diagnosis, and a reminder that the next write to it needs `allow_unparseable_overwrite`.
 
-Policy: writes outside the project root are rejected. An existing `.lisp`/`.asd`
-file is never overwritten by default (`existing_lisp_overwrite_forbidden`; use
-`lisp-edit-form`). With `allow_unparseable_overwrite: true` the file is parsed
-first, and the write is allowed in two cases: the parse fails on a delimiter (a
-missing or stray `)`, or an unterminated string or `#|` comment) that no
-readtable could fix, **or** the parser reached a top-level `(in-readtable ...)`
-naming a readtable this server process does not have — nothing can parse past
-that point here and the `readtable` argument resolves in this same process, so
-refusing would leave the file with no write path while pointing at
-`lisp-edit-form`, which points back. The evidence is the parser's, not a scan of
-the text, so a mention in a comment, a string or a quoted list does not open the
-guard, and neither does a declaration past the point the reader reached. A file
-that parses, one that fails at reader level while the readtable it needs *is*
-available here, a truncated read, or an unreadable file is still refused. The intended recovery loop is `lisp-check-parens` →
-`fs-read-file` → `fs-write-file` with the flag; `path` must be relative to the
-project root, and the guidance the tools print gives it in that form. The
-plain refusal (no flag) carries `allow_unparseable_overwrite_available: true`
-in its error data so a client can discover the opt-in.
+Policy: writes outside the project root are rejected. An existing `.lisp`/`.asd` file is never
+overwritten by default (`existing_lisp_overwrite_forbidden`; use `lisp-edit-form`). With
+`allow_unparseable_overwrite: true` the file is parsed first, and the write is allowed in three
+cases: the parse fails on a delimiter (a missing or stray `)`, or an unterminated string or `#|`
+comment) that no readtable could fix; the file declares no readtable (no `in-readtable` anywhere
+in it), uses no `#` dispatch the standard readtable lacks (such as `#?`), and holds a `#<`, `#)`
+or `#` followed by whitespace, which the standard makes every standard readtable reject -- an
+object printed unreadably, such as `#<HASH-TABLE ...>`, pasted as source (the warning after the
+first write, lisp-check-parens and the edit tools' error name its line and column); **or** the
+parser reached a top-level `(in-readtable ...)` naming a readtable this server process does not
+have — nothing can parse past that point here and the `readtable` argument resolves in this same
+process, so refusing would leave the file with no write path while pointing at `lisp-edit-form`,
+which points back. The evidence is the parser's, not a scan of the text, so a mention in a
+comment, a string or a quoted list does not open the guard, and neither does a declaration past
+the point the reader reached. A file that parses, one that fails at reader level while the
+readtable it needs *is* available here, a truncated read, or an unreadable file is still
+refused. The intended recovery loop is `lisp-check-parens` → `fs-read-file` → `fs-write-file`
+with the flag; `path` must be relative to the project root, and the guidance the tools print
+gives it in that form. The plain refusal (no flag) carries
+`allow_unparseable_overwrite_available: true` in its error data so a client can discover the
+opt-in.
 
 Concurrent cl-mcp calls: like `lisp-edit-form` and `lisp-patch-form`, a write holds one
 per-file lock for its whole decide-then-write span, so a concurrent `lisp-edit-form` or
@@ -1110,7 +1133,10 @@ The text ends with a pointer to `clos-describe` for a generic function (with its
 A symbol bound as none of these — a restart's name, or a name whose system is not loaded yet —
 is answered as not found, the way `code-find` answers one: a result with `isError` and a
 `content` text naming the symbol qualified (`Nothing to describe for PKG::NAME: …`), not a
-JSON-RPC error.
+JSON-RPC error. A qualified name whose package does not exist -- most often because its system
+is not loaded yet -- is answered the same way by both tools, as `code-find-references` answers
+it: `Package "PKG" not found (nothing was interned). Load the system that defines it with
+load-system.`
 
 ## `code-find-references`
 Find who calls or references a symbol — its callers, the exact call sites inside
@@ -1367,7 +1393,7 @@ Notes:
 Run tests for a system and return structured results with pass/fail counts and failure details.
 
 Input:
-- `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`). A system ASDF does not know yet is looked for under the project root, as `load-system` does; a name found nowhere is reported as such, not as a broken worker. The system is force-reloaded, and a file of its tree written in the same second as its fasl has the fasl deleted first, so an edit made right after a compile is what runs (ASDF's timestamps have one-second resolution)
+- `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`). A system ASDF does not know yet is looked for under the project root, as `load-system` does; a name found nowhere is reported as such, not as a broken worker. The system and its direct `<system>/...` dependencies are cleared and their `.asd` read again, so every system defined there that the test system reaches is loaded again; any other file of a package-inferred system, or of a system defined in another `.asd`, is loaded again only when its FASL is stale, so a definition made in `repl-eval` there stays for the run. A file of its tree written in the same second as its fasl has the fasl deleted first, so an edit made right after a compile is what runs (ASDF's timestamps have one-second resolution)
 - `framework` (string, optional): Force a specific framework (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, or `"auto"` for auto-detect). Auto-detection reads the test system's own `:depends-on`: a framework the system declares directly wins, then one reached transitively, and only for a system ASDF has not registered does it fall back to guessing from the loaded packages. Detection never loads anything.
 - `test` (string, optional): Run only a specific test by fully qualified name (e.g., `"my-package::my-test-name"`)
 - `tests` (array of strings, optional): Run only the listed fully qualified tests
@@ -1384,9 +1410,11 @@ Output:
 - `pending` (integer): Number of tests that only skipped and so checked nothing (when reported by the framework).
   With Rove, a test whose only results are `(skip ...)`, however deep inside `testing` blocks, is pending,
   not passed, although Rove's own result object calls it passed
-- `skipped_tests` (array, Rove, present when any test skipped): `test_name` and `reasons` of every test that
-  skipped anything, including one that passed on what it did check, so a skip is never hidden inside a
-  pass; the summary text lists them under `Skipped`
+- `skipped_tests` (array, Rove, present when any test skipped): `test_name`, `status` and
+  `reasons` of every test that skipped anything, including one that passed on what it did check,
+  so a skip is never hidden inside a pass. `status` is how the test was counted: `"pending"` (it
+  checked nothing), `"passed"` or `"failed"`; the summary text lists them under `Skipped` as
+  `NAME (pending)`, `NAME (passed the rest)` or `NAME (failed)`
 - `unreached_tests` (array, FiveAM whole-system run, present when any): tests defined in the
   system's packages that the run did not reach: held by no suite that ran, and neither
   started nor skipped by FiveAM during the run, a run nested in a test included (a test run
@@ -1410,7 +1438,11 @@ Output:
   `Warnings (N) -- ASDF refuses a file that compiles with a WARNING:`, and its hint says to
   fix the file and run again, as it does for a file that did not compile for an error alone;
   only when every one of them is package variance does it send you to `pool-kill-worker`,
-  since then the file is right and the worker's image is stale
+  since then the file is right and the worker's image is stale. A load failure's reason
+  names the file that was compiling or loading when the error was signalled (`while
+  compiling tests/item-test.lisp`), for an error such as FiveAM's `Unknown suite` that names
+  none itself, and its compiler output holds neither redefinition notices nor a bare copy of
+  a warning the compiler's own block already writes
 - `framework` (string): Framework or outcome category used (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, `"load-error"`, `"unresolved"`, or `"timeout"`)
 - `counts_available` (boolean, ASDF fallback only): `false` — `asdf:test-system` reports no counts
 - `success` (boolean|null, ASDF fallback only): `false` when `asdf:test-system` signalled; `null` when it
@@ -1430,10 +1462,20 @@ Prove is supported for prove-asdf test systems (`:defsystem-depends-on ("prove-a
   - `description`: Rove — the assertion's description; FiveAM — the test's docstring
   - `form`: The failing assertion form. Rove and FiveAM print it as the test's own
     package reads it (a test's local is `H`, not `MY-APP/TESTS/FOO::H`); prove prints
-    it from the runner's package
+    it from the runner's package. A Rove form that is `NIL` is `"NIL"`; an error that
+    escaped a Rove test body has none (Rove records the placeholder `T` for it)
   - `values`: Evaluated values (Rove and prove), printed the same way as `form`
-  - `reason`: Error message (string). For FiveAM this is the framework's own
-    message with its blank lines removed, so one mismatch stays one short block
+  - `reason`: Error message (string); for a condition, `CLASS: message`. For FiveAM this
+    is the framework's own message with its blank lines removed, so one mismatch stays
+    one short block
+  - `signalled` (Rove, present when true): the failure is an error that escaped the test
+    body; the summary prints its reason as `Error:`
+  - `error_frame` (Rove, with `signalled`, when found): where it was signalled, the first
+    frame that is neither the runner's nor the implementation's -- frames are judged by the
+    package of the name they run, CL's, SBCL's, ASDF's and cl-mcp's passed over, and Rove's
+    first one ends the search -- as
+    `NAME`, `NAME (file)` or `NAME (file:line)`, the file relative to the project root;
+    the summary prints it as `In:`
   - `source`: Source location, file and line (**Rove only** — FiveAM records no
     source location for a test, so locate a FiveAM failure by `test_name` and
     `description`)
@@ -1451,7 +1493,7 @@ Example requests:
 ```
 
 Notes:
-- **Auto-reloads the test system** before execution (clears ASDF's loaded state and reloads from source). Files edited via `lisp-edit-form` are automatically picked up — no need to call `load-system` first.
+- **Auto-reloads the test system** before execution (see `system` above for what is loaded again). Files edited via `lisp-edit-form` are automatically picked up — no need to call `load-system` first.
 - Auto-detects Rove, FiveAM or prove; anything else falls back to ASDF `test-system` for text capture
 - A `test`/`tests` name is resolved after that reload, so its package needs no separate
   loading as long as `system` loads it; a name that still does not resolve is reported as
