@@ -294,6 +294,26 @@
                  (ok (string= (gethash "next_tool" res) "fs-write-file")))))
         (ignore-errors (delete-file abs))))))
 
+(deftest lisp-check-parens-names-the-way-out-of-a-hash-no-readtable-reads
+  ;; A #< no readtable reads, in a file that declares none: the overwrite path
+  ;; is the only one, and the reader error alone did not say so.
+  (let* ((root (asdf:system-source-directory :cl-mcp))
+         (abs (merge-pathnames "tests/tmp/check-parens-hash-angle.lisp" root))
+         (cl-mcp/src/project-root:*project-root* root))
+    (ensure-directories-exist abs)
+    (with-open-file (out abs :direction :output :if-exists :supersede)
+      (format out "(defun a () 1)~%(defun b ()~%  (eq nil #<ledger>))~%"))
+    (unwind-protect
+         (let* ((res (lisp-check-parens :path (namestring abs)))
+                (text (gethash "diagnosis_text" res)))
+           (ok (search "#< at line 3, column 11" text) text)
+           (ok (search "allow_unparseable_overwrite=true" text))
+           (ok (eql 11 (gethash "column" (gethash "position" res)))
+               "the position names the # as the sentence does")
+           (ok (eql 37 (gethash "offset" (gethash "position" res)))
+               (format nil "offset ~S" (gethash "offset" (gethash "position" res)))))
+      (ignore-errors (delete-file abs)))))
+
 (deftest lisp-check-parens-guidance-names-a-relative-path-and-the-editable-prefix
   (let* ((root (asdf:system-source-directory :cl-mcp))
          (abs (merge-pathnames "tests/tmp/check-parens-guidance-path.lisp" root))

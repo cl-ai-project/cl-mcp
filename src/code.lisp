@@ -7,6 +7,7 @@
                 #:code-describe-symbol
                 #:symbol-not-describable
                 #:symbol-not-describable-name
+                #:symbol-package-missing
                 #:code-find-references
                 #:code-find-references-report
                 #:generic-function-method-count)
@@ -25,6 +26,7 @@
                 #:build-code-find-response
                 #:build-code-describe-response
                 #:build-code-describe-not-found-response
+                #:build-tool-refusal-response
                 #:build-code-find-references-response)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*
@@ -43,7 +45,9 @@
 PREREQUISITE: The defining system MUST be loaded first (load-system tool).
 Prefer package-qualified symbols or supply the package argument.
 
-NOTE: If the symbol is not found, the system might not be loaded yet.
+NOTE: If the symbol is not found, the system might not be loaded yet.  A
+qualified name whose package does not exist is answered as an error result that
+says so (nothing is interned).
 For code exploration WITHOUT loading systems, use 'clgrep-search' instead.
 Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
   :args ((symbol :type :string :required t
@@ -58,9 +62,13 @@ or not be found"))
   :body
   (with-proxy-dispatch (id "worker/code-find"
                           (make-ht "symbol" symbol "package" package))
-    (multiple-value-bind (path line on-disk stale)
-        (code-find-definition symbol :package package)
-      (result id (build-code-find-response symbol path line on-disk stale)))))
+    (result id
+            (handler-case
+                (multiple-value-bind (path line on-disk stale)
+                    (code-find-definition symbol :package package)
+                  (build-code-find-response symbol path line on-disk stale))
+              (symbol-package-missing (condition)
+                (build-tool-refusal-response condition))))))
 
 (define-tool "code-describe"
   :description "Describe a symbol: type, arglist, and documentation.
@@ -68,7 +76,9 @@ or not be found"))
 PREREQUISITE: The defining system MUST be loaded first (load-system tool).
 Pass a package or a package-qualified symbol to avoid resolution errors.
 
-NOTE: If the symbol is not found, the system might not be loaded yet.
+NOTE: If the symbol is not found, the system might not be loaded yet.  A
+qualified name whose package does not exist is answered as an error result that
+says so (nothing is interned).
 For code exploration WITHOUT loading systems, use 'clgrep-search' instead.
 Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
   :args ((symbol :type :string :required t
@@ -93,7 +103,9 @@ or not be found"))
                    :stale stale))
               (symbol-not-describable (condition)
                 (build-code-describe-not-found-response
-                 (symbol-not-describable-name condition)))))))
+                 (symbol-not-describable-name condition)))
+              (symbol-package-missing (condition)
+                (build-tool-refusal-response condition))))))
 
 (defun %json-nulls->nil (value)
   "Return VALUE, a worker's answer parsed with its JSON types kept, with every

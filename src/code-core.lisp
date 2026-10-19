@@ -15,6 +15,7 @@
                 #:read-file-string #:ensure-pathname #:absolute-pathname-p)
   (:import-from #:cl-mcp/src/code-refs-core
                 #:sequence->list
+                #:parse-symbol-text
                 #:resolve-target
                 #:qualified-symbol-name
                 #:symbol-kind
@@ -27,6 +28,7 @@
            #:symbol-not-describable
            #:symbol-not-describable-symbol
            #:symbol-not-describable-name
+           #:symbol-package-missing
            #:code-find-references
            #:code-find-references-report
            #:%offset->line
@@ -56,12 +58,32 @@ Signals an error when the package does not exist."
          (error "Package ~A does not exist" package)))
     (t (error "Invalid package designator ~S" package))))
 
+(define-condition symbol-package-missing (error)
+  ((package-name :initarg :package-name :reader symbol-package-missing-name))
+  (:report (lambda (condition stream)
+             (format stream "Package ~S not found (nothing was interned). Load the system ~
+                             that defines it with load-system."
+                     (symbol-package-missing-name condition))))
+  (:documentation "A qualified symbol name names a package that does not exist,
+most often because the system defining it is not loaded yet.  Its own type, so
+code-find and code-describe answer it as a tool error rather than a fault."))
+
 (defun %parse-symbol (symbol-name &key package)
   "Read SYMBOL-NAME as a symbol without permitting evaluation.
 PACKAGE is used only when SYMBOL-NAME is unqualified; when a package marker
-appears in SYMBOL-NAME (e.g., \"pkg:sym\"), PACKAGE is ignored."
+appears in SYMBOL-NAME (e.g., \"pkg:sym\"), PACKAGE is ignored.  A package
+part naming no package signals SYMBOL-PACKAGE-MISSING before anything is read."
   (unless (stringp symbol-name)
     (error "symbol must be a string"))
+  ;; Looked up before reading: the reader's own package error says only that
+  ;; the package does not exist, and reaches the client as an internal fault.
+  ;; Text that is no symbol name is left to the reader's own refusal.
+  (multiple-value-bind (name package-part) (parse-symbol-text symbol-name)
+    (declare (ignore name))
+    ;; FIND-PACKAGE as the reader will look it up: PACKAGE-PART is already
+    ;; written as the reader reads it, so no upcased retry.
+    (when (and package-part (null (find-package package-part)))
+      (error 'symbol-package-missing :package-name package-part)))
   (let* ((qualified-p (position #\: symbol-name))
          (*package* (if qualified-p
                         *package*
