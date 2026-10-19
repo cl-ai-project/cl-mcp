@@ -1421,7 +1421,8 @@ Output:
   file stays, even in a package a reloaded file shares: a dependency's would not come back (the
   tests of a test file since deleted are not counted either). A test defined or compiled
   through `repl-eval`, which names no file, goes when a reloaded file defines its package, also
-  when `test`/`tests` names it: put it in its file first. It stays when a dependency the run
+  when `test`/`tests` names it (a file you `load` from `repl-eval` counts as `repl-eval`'s):
+  put it in its file first. It stays when a dependency the run
   does not reload defines that package too, since it may be that dependency's; a test deleted
   from a reloaded file there then stays as well -- not run, or, when its suite is the
   dependency's, still run -- until a fresh worker (`pool-kill-worker`)
