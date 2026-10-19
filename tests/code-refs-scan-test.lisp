@@ -56,6 +56,24 @@
     (ok (equal '("call") (%kinds "(defun a () (funcall #'(lambda (x) (foo x)) 1))" "FOO")))
     (ok (equal '("reference") (%kinds "(defclass a (foo) ())" "FOO")))))
 
+(deftest scan-text-keeps-a-methods-specializers-as-written
+  ;; The form name drops package prefixes; the specializers are what lets the
+  ;; worker tell B:NODE from the file's own NODE.
+  (let* ((form (first (scan-text (format nil "(in-package :a)~%(defmethod combine ~
+                                              ((n b:node) (k (eql :x)) env) (combine n))")
+                                 "COMBINE")))
+         (specializers (coerce (gethash "specializers" form) 'list)))
+    (ok (equal '("class" "eql" "class") (mapcar (lambda (s) (gethash "kind" s)) specializers)))
+    (ok (equal '("b:node" "(eql :x)" "T") (mapcar (lambda (s) (gethash "token" s)) specializers)))
+    (ok (equal '("A" nil "COMMON-LISP")
+               (mapcar (lambda (s) (and (string= (gethash "kind" s) "class")
+                                        (string-upcase (gethash "in_package" s))))
+                       specializers))
+        "an unspecialized parameter is CL's T")
+    (ok (null (gethash "specializers"
+                       (first (scan-text "(defun d () (combine 1))" "COMBINE"))))
+        "no specializers for a form that is no method")))
+
 (deftest scan-text-classifies-quoted-function-designators
   (testing "a quoted name as FUNCALL's, APPLY's or MULTIPLE-VALUE-CALL's function is a function"
     (ok (equal '("function") (%kinds "(defun a () (funcall 'foo 1))" "FOO")))

@@ -487,7 +487,9 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
 
 (deftest merge-references-tells-a-class-from-its-namesake-in-another-package
   ;; The specializers were compared by name alone, so the entry of a deleted
-  ;; method on A:NODE was met with the method on B:NODE still in the file.
+  ;; method on A:NODE was met with the method on B:NODE still in the file --
+  ;; which the scan writes "combine ((n node))" too, its prefix dropped: only
+  ;; the specializer tokens as written tell them apart.
   (let ((a (or (find-package "CLMCP-SPEC-PROBE-A") (make-package "CLMCP-SPEC-PROBE-A" :use '())))
         (b (or (find-package "CLMCP-SPEC-PROBE-B") (make-package "CLMCP-SPEC-PROBE-B" :use '()))))
     (unwind-protect
@@ -498,19 +500,25 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
                                (list :specializer-keys
                                      (cl-mcp/src/code-refs-core::%method-specializer-keys
                                       `(sb-pcl::fast-method combine (,a-node))))))
+                (specializer (lambda (token)
+                               (cl-mcp/src/tools/helpers:make-ht
+                                "kind" "class" "token" token
+                                "in_package" "CLMCP-SPEC-PROBE-A")))
                 (b-node-form (append (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
                                                         "combine ((n node))" :start-line 50)
-                                     (list :in-package "CLMCP-SPEC-PROBE-B")))
+                                     (list :specializers
+                                           (list (funcall specializer
+                                                          "clmcp-spec-probe-b:node")))))
                 (a-node-form (append (%resolved-of-type "/abs/a.lisp" 6 "defmethod"
                                                         "combine ((n node))" :start-line 60)
-                                     (list :in-package "CLMCP-SPEC-PROBE-A"))))
-           (intern "NODE" b)
+                                     (list :specializers (list (funcall specializer "node"))))))
+           (export (intern "NODE" b) b)
            (flet ((met (forms)
                     (let ((ref (first (%with-origin (merge-references (list entry) forms)
                                                     "xref+source"))))
                       (and ref (gethash "line" ref)))))
              (ok (null (met (list b-node-form)))
-                 "A:NODE's method is not met with B:NODE's")
+                 "A:NODE's method is not met with B:NODE's, written with its prefix")
              (ok (eql 60 (met (list b-node-form a-node-form)))
                  "and is met with its own")))
       (delete-package a)

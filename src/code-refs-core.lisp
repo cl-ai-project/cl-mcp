@@ -345,6 +345,7 @@ missing package, counting the sites that could not be judged."
                       :test-framework (gethash "test_framework" form)
                       :context (gethash "context" form)
                       :in-package (gethash "in_package" form)
+                      :specializers (sequence->list (gethash "specializers" form))
                       :sites (nreverse kept))
                 resolved))))
     (values (nreverse resolved) (nreverse unresolved))))
@@ -578,31 +579,38 @@ as SBCL gives it -- (SB-PCL::FAST-METHOD NAME QUALIFIER... (SPECIALIZER...)) or
     (let ((specializers (first (last caller-name))))
       (and (listp specializers) (mapcar #'%specializer-key specializers)))))
 
-(defun %form-name-specializer-keys (form-name in-package)
-  "Return the specializer keys of FORM-NAME, a defmethod's form name, its class
-names looked up in IN-PACKAGE, the package the form is read in -- with
-FIND-SYMBOL, nothing interned.  A name that is not found gets a key no
-specializer has.  NIL when FORM-NAME has no lambda list."
-  (let ((open (position #\( form-name)))
-    (when open
-      (loop for parameter in (%list-elements form-name open)
-            until (char= (char parameter 0) #\&)
-            collect (let* ((parts (and (char= (char parameter 0) #\()
-                                       (%list-elements parameter 0)))
-                           (text (if parts (second parts) "t")))
-                      (cond ((null text) (list :class "COMMON-LISP" "T"))
-                            ((char= (char text 0) #\()
-                             (let ((inner (%list-elements text 0)))
-                               (if (equalp (first inner) "eql")
-                                   (cons :eql (%name-tokens (or (second inner) "")))
-                                   (list :unknown text))))
-                            (t
-                             (multiple-value-bind (symbol status)
-                                 (ignore-errors
-                                  (resolve-target text :package (or in-package "CL-USER")))
-                               (if (eq status :found)
-                                   (%specializer-key symbol)
-                                   (list :unresolved text))))))))))
+(defun %token-symbol (token in-package)
+  "Return the symbol TOKEN names, written where IN-PACKAGE was current -- a
+prefix read with that package's local nicknames --, or NIL when it names none
+in this image.  Nothing is interned."
+  (multiple-value-bind (name package-part problem) (parse-symbol-text token)
+    (unless problem
+      (let ((home (find-package-named (or in-package "COMMON-LISP-USER"))))
+        (when home
+          (let ((package (if package-part
+                             (let ((*package* home)) (find-package-named package-part))
+                             home)))
+            (when package
+              (multiple-value-bind (symbol status) (find-symbol name package)
+                (and status symbol)))))))))
+
+(defun %form-specializer-keys (specializers)
+  "Return the specializer keys (%SPECIALIZER-KEY) of SPECIALIZERS, a defmethod
+form's specializer objects as the scan writes them (each with kind, token and,
+for a class, in_package): a class name is looked up as written -- its prefix
+read with the package-local nicknames of the package it was written in, as
+RESOLVE-SITE-TOKEN reads a site --, with FIND-SYMBOL, nothing interned.  A name
+that is not found gets a key no specializer has."
+  (mapcar (lambda (specializer)
+            (let ((token (gethash "token" specializer)))
+              (if (equal (gethash "kind" specializer) "eql")
+                  (let ((inner (%list-elements token 0)))
+                    (cons :eql (%name-tokens (or (second inner) ""))))
+                  (let ((symbol (%token-symbol token (gethash "in_package" specializer))))
+                    (if symbol
+                        (%specializer-key symbol)
+                        (list :unresolved token))))))
+          specializers))
 
 (defparameter *non-function-definers*
   '("defclass" "defstruct" "define-condition" "deftype" "defvar" "defparameter"
@@ -644,10 +652,10 @@ line, which name a different form once forms were inserted above or removed."
                                    ;; By symbol where both sides can say it:
                                    ;; A:NODE is not B:NODE.
                                    (if (and (getf entry :specializer-keys)
-                                            (getf form :in-package))
+                                            (getf form :specializers))
                                        (equal (getf entry :specializer-keys)
-                                              (%form-name-specializer-keys
-                                               form-name (getf form :in-package)))
+                                              (%form-specializer-keys
+                                               (getf form :specializers)))
                                        (equal specializers
                                               (%form-name-specializers form-name))))
                               (not (member form-type *non-function-definers*
