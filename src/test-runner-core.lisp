@@ -2155,8 +2155,10 @@ names its source \"repl-eval\" -- goes too when a reloaded file defines its
 package: that file is where it came from, and the reload makes again what it
 still holds -- unless a dependency the reload leaves as it is defines the
 package too (%PACKAGES-ALSO-DEFINED-OUTSIDE).  Then the test may be that
-dependency's, and it stays: a test deleted from a reloaded file there is
-reported as not run rather than a dependency's test lost."
+dependency's, and it stays rather than a dependency's test be lost.  A test
+deleted from a reloaded file there then stays too: reported as not run when the
+reload makes its suite again, and still run when that suite is the dependency's
+(FiveAM runs a suite's tests by name); a fresh worker drops it."
   (let ((test-names (%fiveam-symbol "TEST-NAMES"))
         (rem-test (%fiveam-symbol "REM-TEST")))
     (when (and test-names rem-test (fboundp test-names) (fboundp rem-test))

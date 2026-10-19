@@ -1394,7 +1394,9 @@ Output:
   tests of a test file since deleted are not counted either). A test defined or compiled
   through `repl-eval`, which names no file, goes when a reloaded file defines its package, also
   when `test`/`tests` names it: put it in its file first. It stays when a dependency the run
-  does not reload defines that package too, since it may be that dependency's
+  does not reload defines that package too, since it may be that dependency's; a test deleted
+  from a reloaded file there then stays as well -- not run, or, when its suite is the
+  dependency's, still run -- until a fresh worker (`pool-kill-worker`)
 - `suites_outside_root` (array, FiveAM, present when any): suites of the run other than the root
   suite, the one named after the primary system, that the root suite's tree does not hold (a
   suite nested with `:in` since an earlier load is not one). run-tests runs them, but a test-op
