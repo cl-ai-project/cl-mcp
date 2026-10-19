@@ -375,7 +375,14 @@ Output fields:
 - `message` (string|null): error or timeout message
 
 Solves three problems with using `ql:quickload` via `repl-eval`:
-1. **Staleness**: `force=true` (default) clears loaded state before reloading
+1. **Staleness**: `force=true` (default) clears the named system and re-reads its `.asd`, so
+   every system defined there that this load reaches (the named one and its dependencies) is
+   loaded again: a stale file is recompiled, a current FASL is loaded as it is, and either
+   replaces a definition made in `repl-eval`. In a package-inferred system the code lives in
+   per-file subsystems that are neither cleared nor re-read, so a file of one is loaded again
+   only when it is stale, and a definition made in `repl-eval` stays until it is: `load-system`
+   on that file's own system (`my-app/src/states`), `clear_fasls=true` or `pool-kill-worker`
+   drops it
 2. **Output noise**: suppresses verbose compilation/load output
 3. **Timeout**: dedicated timeout prevents hanging on large systems
 
@@ -1360,7 +1367,7 @@ Notes:
 Run tests for a system and return structured results with pass/fail counts and failure details.
 
 Input:
-- `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`). A system ASDF does not know yet is looked for under the project root, as `load-system` does; a name found nowhere is reported as such, not as a broken worker. The system is force-reloaded, and a file of its tree written in the same second as its fasl has the fasl deleted first, so an edit made right after a compile is what runs (ASDF's timestamps have one-second resolution)
+- `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`). A system ASDF does not know yet is looked for under the project root, as `load-system` does; a name found nowhere is reported as such, not as a broken worker. The system and its direct `<system>/...` dependencies are cleared and their `.asd` read again, so every system defined there that the test system reaches is loaded again; any other file of a package-inferred system, or of a system defined in another `.asd`, is loaded again only when its FASL is stale, so a definition made in `repl-eval` there stays for the run. A file of its tree written in the same second as its fasl has the fasl deleted first, so an edit made right after a compile is what runs (ASDF's timestamps have one-second resolution)
 - `framework` (string, optional): Force a specific framework (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, or `"auto"` for auto-detect). Auto-detection reads the test system's own `:depends-on`: a framework the system declares directly wins, then one reached transitively, and only for a system ASDF has not registered does it fall back to guessing from the loaded packages. Detection never loads anything.
 - `test` (string, optional): Run only a specific test by fully qualified name (e.g., `"my-package::my-test-name"`)
 - `tests` (array of strings, optional): Run only the listed fully qualified tests
@@ -1444,7 +1451,7 @@ Example requests:
 ```
 
 Notes:
-- **Auto-reloads the test system** before execution (clears ASDF's loaded state and reloads from source). Files edited via `lisp-edit-form` are automatically picked up — no need to call `load-system` first.
+- **Auto-reloads the test system** before execution (see `system` above for what is loaded again). Files edited via `lisp-edit-form` are automatically picked up — no need to call `load-system` first.
 - Auto-detects Rove, FiveAM or prove; anything else falls back to ASDF `test-system` for text capture
 - A `test`/`tests` name is resolved after that reload, so its package needs no separate
   loading as long as `system` loads it; a name that still does not resolve is reported as
