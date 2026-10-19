@@ -585,9 +585,10 @@ as SBCL gives it -- (SB-PCL::FAST-METHOD NAME QUALIFIER... (SPECIALIZER...)) or
       (and (listp specializers) (mapcar #'%specializer-key specializers)))))
 
 (defun %token-symbol (token in-package)
-  "Return the symbol TOKEN names, written where IN-PACKAGE was current -- a
-prefix read with that package's local nicknames --, or NIL when it names none
-in this image.  Nothing is interned."
+  "Return (values SYMBOL T) for the symbol TOKEN names, written where IN-PACKAGE
+was current -- a prefix read with that package's local nicknames --, or NIL when
+it names none in this image (the second value tells CL:NIL from none).  Nothing
+is interned."
   (multiple-value-bind (name package-part problem) (parse-symbol-text token)
     (unless problem
       (let ((home (find-package-named (or in-package "COMMON-LISP-USER"))))
@@ -597,15 +598,18 @@ in this image.  Nothing is interned."
                              home)))
             (when package
               (multiple-value-bind (symbol status) (find-symbol name package)
-                (and status symbol)))))))))
+                (when status (values symbol t))))))))))
 
 (defun %quoted-symbol-text (datum)
   "Return the symbol token DATUM, an EQL datum's source text, writes when it is a
-quoted symbol ('x or (quote x)) or a keyword (:x), or NIL for any other datum."
+quoted symbol ('x or (quote x)), a keyword (:x) or an unquoted NIL or T, or NIL
+for any other datum."
   (let ((text (string-trim '(#\Space #\Tab #\Newline) datum)))
     (cond ((zerop (length text)) nil)
           ((char= (char text 0) #\') (string-left-trim "' " (subseq text 1)))
           ((char= (char text 0) #\:) text)
+          ;; NIL and T evaluate to themselves, unquoted as they are.
+          ((member text '("nil" "t") :test #'string-equal) (concatenate 'string "cl:" text))
           ((char= (char text 0) #\()
            (let ((parts (%list-elements text 0)))
              (and (= 2 (length parts)) (string-equal (first parts) "quote") (second parts))))
@@ -626,15 +630,16 @@ that is not found gets a key no specializer has."
                          (symbol-text (%quoted-symbol-text datum)))
                     (if symbol-text
                         ;; 'a:node or :k: the symbol it names, as a class is.
-                        (let ((symbol (%token-symbol symbol-text
-                                                     (gethash "in_package" specializer))))
-                          (if symbol
+                        (multiple-value-bind (symbol found)
+                            (%token-symbol symbol-text (gethash "in_package" specializer))
+                          (if found
                               (list :eql-symbol (package-name (symbol-package symbol))
                                     (symbol-name symbol))
                               (list :unresolved datum)))
                         (cons :eql (%name-tokens datum))))
-                  (let ((symbol (%token-symbol token (gethash "in_package" specializer))))
-                    (if symbol
+                  (multiple-value-bind (symbol found)
+                      (%token-symbol token (gethash "in_package" specializer))
+                    (if found
                         (%specializer-key symbol)
                         (list :unresolved token))))))
           specializers))
@@ -665,9 +670,10 @@ line, which name a different form once forms were inserted above or removed."
                           ;; The name as a symbol where the form says how it was
                           ;; written: A:CALLER is not B:CALLER.
                           (or (not (and (getf form :name-token) (getf form :in-package)))
-                              (let ((symbol (%token-symbol (getf form :name-token)
-                                                           (getf form :in-package))))
-                                (and symbol
+                              (multiple-value-bind (symbol found)
+                                  (%token-symbol (getf form :name-token)
+                                                 (getf form :in-package))
+                                (and found
                                      (equal (qualified-symbol-name symbol)
                                             (getf entry :caller-symbol)))))
                           (if method-p

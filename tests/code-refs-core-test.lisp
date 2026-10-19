@@ -571,7 +571,14 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
                    "(eql 'a:node) is not (eql 'b:node)")
                (ok (eql 60 (met entry (list (eql-form 5 50 "(eql 'clmcp-name-probe-b:node)")
                                             (eql-form 6 60 "(eql 'node)"))))
-                   "and is met with its own"))))
+                   "and is met with its own"))
+             (ok (equal (cl-mcp/src/code-refs-core::%method-specializer-keys
+                         '(sb-pcl::fast-method combine ((eql nil))))
+                        (cl-mcp/src/code-refs-core::%form-specializer-keys
+                         (list (cl-mcp/src/tools/helpers:make-ht
+                                "kind" "eql" "token" "(eql nil)"
+                                "in_package" "CLMCP-NAME-PROBE-A"))))
+                 "an unquoted (eql nil) keys as SBCL's (eql nil) does")))
       (delete-package a)
       (delete-package b))))
 
