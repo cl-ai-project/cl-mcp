@@ -561,15 +561,18 @@ token list per required parameter, (\"t\") for one not specialized."
   "Return the key %STALE-ENTRY-FORM compares SPECIALIZER, a method specializer as
 SBCL names it -- a class name or (EQL datum) --, by: (:CLASS PACKAGE NAME) for a
 symbol, so a class is never taken for its namesake in another package;
-(:EQL-SYMBOL PACKAGE NAME) for an EQL datum that is a symbol, likewise; and
-(:EQL . tokens) for any other datum, its printed text as %NAME-TOKENS splits it."
+(:EQL-SYMBOL PACKAGE NAME) for an EQL datum that is a symbol, likewise;
+(:EQL-VALUE datum) for a character, number or string, compared by value; and a
+key no source datum has for any other."
   (cond ((and (consp specializer) (symbolp (first specializer))
               (string= (symbol-name (first specializer)) "EQL"))
          (let ((datum (second specializer)))
-           (if (and (symbolp datum) (symbol-package datum))
-               (list :eql-symbol (package-name (symbol-package datum)) (symbol-name datum))
-               (cons :eql (%name-tokens (let ((*package* (find-package "KEYWORD")))
-                                          (prin1-to-string datum)))))))
+           (cond ((and (symbolp datum) (symbol-package datum))
+                  (list :eql-symbol (package-name (symbol-package datum)) (symbol-name datum)))
+                 ;; By value, as EQL compares it: #\A is not #\a, 1 not 1.0.
+                 ((or (characterp datum) (numberp datum) (stringp datum))
+                  (list :eql-value datum))
+                 (t (list :unknown (princ-to-string datum))))))
         ((and (symbolp specializer) (symbol-package specializer))
          (list :class (package-name (symbol-package specializer)) (symbol-name specializer)))
         (t (list :unknown (princ-to-string specializer)))))
@@ -615,6 +618,31 @@ for any other datum."
              (and (= 2 (length parts)) (string-equal (first parts) "quote") (second parts))))
           (t nil))))
 
+(defun %literal-datum (text)
+  "Return (values VALUE T) when TEXT, an EQL datum's source text, is a character,
+number or string literal, read as the reader reads it -- case kept, 1 apart from
+1.0 --, or NIL for anything else.  Read with *READ-EVAL* off in a throwaway
+package, so nothing is interned anywhere that lasts."
+  (let ((text (string-trim '(#\Space #\Tab #\Newline) text)))
+    (when (and (plusp (length text))
+               (or (char= (char text 0) #\")
+                   (and (> (length text) 2) (string= "#\\" text :end2 2))
+                   (digit-char-p (char text 0))
+                   (and (> (length text) 1)
+                        (find (char text 0) "+-.")
+                        (or (digit-char-p (char text 1)) (char= (char text 1) #\.)))))
+      (let ((scratch (make-package (gensym "CL-MCP-EQL-DATUM") :use '())))
+        (unwind-protect
+             (let ((value (ignore-errors
+                           (let ((*read-eval* nil)
+                                 (*package* scratch)
+                                 (*readtable* (copy-readtable nil)))
+                             (multiple-value-bind (value end) (read-from-string text)
+                               (and (= end (length text)) value))))))
+               (when (or (characterp value) (numberp value) (stringp value))
+                 (values value t)))
+          (delete-package scratch))))))
+
 (defun %form-specializer-keys (specializers)
   "Return the specializer keys (%SPECIALIZER-KEY) of SPECIALIZERS, a defmethod
 form's specializer objects as the scan writes them (each with kind, token and,
@@ -636,7 +664,10 @@ that is not found gets a key no specializer has."
                               (list :eql-symbol (package-name (symbol-package symbol))
                                     (symbol-name symbol))
                               (list :unresolved datum)))
-                        (cons :eql (%name-tokens datum))))
+                        (multiple-value-bind (value literal-p) (%literal-datum datum)
+                          (if literal-p
+                              (list :eql-value value)
+                              (list :unresolved datum)))))
                   (multiple-value-bind (symbol found)
                       (%token-symbol token (gethash "in_package" specializer))
                     (if found

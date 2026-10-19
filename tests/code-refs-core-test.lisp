@@ -578,7 +578,21 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
                          (list (cl-mcp/src/tools/helpers:make-ht
                                 "kind" "eql" "token" "(eql nil)"
                                 "in_package" "CLMCP-NAME-PROBE-A"))))
-                 "an unquoted (eql nil) keys as SBCL's (eql nil) does")))
+                 "an unquoted (eql nil) keys as SBCL's (eql nil) does")
+             ;; A datum that is no symbol keys by its value, as EQL compares:
+             ;; #\A is not #\a, 1 is not 1.0.
+             (flet ((same-p (datum text)
+                      (equal (cl-mcp/src/code-refs-core::%method-specializer-keys
+                              `(sb-pcl::fast-method combine ((eql ,datum))))
+                             (cl-mcp/src/code-refs-core::%form-specializer-keys
+                              (list (cl-mcp/src/tools/helpers:make-ht
+                                     "kind" "eql" "token" (format nil "(eql ~A)" text)
+                                     "in_package" "CLMCP-NAME-PROBE-A"))))))
+               (ok (same-p #\A "#\\A"))
+               (ok (not (same-p #\A "#\\a")) "#\\A is not #\\a")
+               (ok (same-p 5 "5"))
+               (ok (not (same-p 1 "1.0")) "1 is not 1.0")
+               (ok (not (same-p 5 "five")) "a datum the source does not spell as a literal"))))
       (delete-package a)
       (delete-package b))))
 
