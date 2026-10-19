@@ -346,9 +346,32 @@ fails on, so none is summed up; *LOAD-FULL-WARNINGS-SHOWN* only bounds a flood."
       (format stream "~%  ... and ~D more warning~:P (all are in warning_records)"
               hidden))))
 
-(defun %first-line (text)
-  "Return TEXT up to its first newline."
-  (subseq text 0 (or (position #\Newline text) (length text))))
+(defparameter *headline-max-chars* 200
+  "Characters of a warning's headline (%HEADLINE) written into load-system's text.")
+
+(defun %headline (text)
+  "Return TEXT's first sentence or line: its first non-blank line, continued by
+the lines after it while what is taken so far ends in no . : ! or ?, joined by
+single spaces.  What the joining adds is cut at *HEADLINE-MAX-CHARS*; a first
+line longer than that is kept whole, as it always was.  SBCL breaks some
+messages at fixed places mid-sentence (\"... of the symbol (X), not the\" /
+\"dynamic binding ...\"), and puts advice or the offending form on the lines after
+a sentence that ends."
+  (let ((taken '()))
+    (loop for line in (uiop:split-string text :separator '(#\Newline))
+          for trimmed = (string-trim '(#\Space #\Tab) line)
+          until (and taken (zerop (length trimmed)))
+          do (unless (zerop (length trimmed))
+               (push trimmed taken))
+          until (and taken
+                     (member (char (first taken) (1- (length (first taken))))
+                             '(#\. #\: #\! #\?))))
+    (let* ((lines (reverse taken))
+           (headline (format nil "~{~A~^ ~}" lines))
+           (limit (max *headline-max-chars* (length (or (first lines) "")))))
+      (if (> (length headline) limit)
+          (concatenate 'string (string-right-trim " " (subseq headline 0 limit)) "...")
+          headline))))
 
 (defun %in-project-p (record)
   "True unless RECORD, a load-system warning record, says it came from outside the
@@ -361,7 +384,7 @@ warning was before, rather than hidden in the summary."
 (defun %write-outside-warnings (stream records)
   "Write RECORDS, full warnings from outside the project, to STREAM summed up by
 kind: how many there are of the kind, when more than one, and the first one's
-first line, marked as an example when the others read differently.  Nothing in
+headline (%HEADLINE), marked as an example when the others read differently.  Nothing in
 them is the project's to fix, so none is listed whole; *LOAD-OUTSIDE-KINDS-SHOWN*
 kinds are written, the rest counted, and every record stays in warning_records."
   (let ((kinds '()))
@@ -375,9 +398,7 @@ warning_records):"
             (length records))
     (loop for (nil . members) in kinds
           for shown from 1 to *load-outside-kinds-shown*
-          do (let ((headlines (mapcar (lambda (record)
-                                        (%first-line (or (gethash "message" record) "")))
-                                      members)))
+          do (let ((headlines (mapcar #'%record-headline members)))
                (format stream "~%    ~@[~Dx ~]~:[e.g. ~;~]~A"
                        (and (rest members) (length members))
                        (every (lambda (headline) (string= headline (first headlines)))
@@ -426,27 +447,46 @@ line, and a record with a place before one without."
           ((string< file-b file-a) nil)
           (t (< (or (gethash "line" a) 0) (or (gethash "line" b) 0))))))
 
+(defun %project-first (records)
+  "Return RECORDS, load-system warning records, the project's (%IN-PROJECT-P)
+before the rest, each part in file and line order (%PLACE-PRECEDES-P)."
+  (stable-sort (stable-sort (copy-list records) #'%place-precedes-p)
+               (lambda (a b) (and (%in-project-p a) (not (%in-project-p b))))))
+
+(defun %record-headline (record)
+  "Return the headline (%HEADLINE) of RECORD's message, a load-system warning
+record's."
+  (%headline (or (gethash "message" record) "")))
+
 (defun %write-style-warnings (stream records)
   "Write RECORDS, style warnings, to STREAM summed up by kind: how many there are
-of the kind and the first *LOAD-WARNING-PLACES-SHOWN* of them in file and line
-order.  A kind whose warnings all read the same is headed by that first line and
-lists their places; otherwise no one message stands for the kind -- SBCL signals
-every unused variable with one format control, whatever the variable -- so each
-listed warning gives its place and its own first line.  *LOAD-STYLE-KINDS-SHOWN*
-kinds are written; the rest are counted.  Every record stays in
-warning_records."
+of the kind and the first *LOAD-WARNING-PLACES-SHOWN* of them, the project's
+before a dependency's, each in file and line order (%PROJECT-FIRST).  A kind
+whose warnings all read the same is headed by that headline (%HEADLINE) and lists
+their places; otherwise no one message stands for the kind -- SBCL signals every
+unused variable with one format control, whatever the variable -- so each
+listed warning gives its place and its own headline.
+
+Kinds holding a warning of the project's come first, each part in the order the
+kinds first appeared.  *LOAD-STYLE-KINDS-SHOWN* kinds are written so; as many
+again past them get one line each, their count and first warning -- an
+undefined function is reported when the compilation unit ends, so its kind comes
+last, and it is often a typo -- and any further kinds are counted.  Every record
+stays in warning_records."
   (let ((kinds '()))
     (dolist (record records)
       (let ((entry (assoc (gethash "kind" record) kinds :test #'equal)))
         (if entry
             (setf (cdr entry) (append (cdr entry) (list record)))
             (setf kinds (append kinds (list (list (gethash "kind" record) record)))))))
+    (setf kinds (stable-sort kinds
+                             (lambda (a b)
+                               (and (some #'%in-project-p (cdr a))
+                                    (notany #'%in-project-p (cdr b))))))
     (loop for (nil . members) in kinds
           for shown from 1 to *load-style-kinds-shown*
-          do (let* ((ordered (stable-sort (copy-list members) #'%place-precedes-p))
-                    (headlines (mapcar (lambda (record)
-                                         (%first-line (or (gethash "message" record) "")))
-                                       ordered))
+          do (let* ((ordered (%project-first members))
+                    (headlines (mapcar #'%record-headline ordered))
                     (listed (min *load-warning-places-shown* (length ordered)))
                     (hidden (- (length ordered) listed)))
                ;; "2x", not the multiplication sign: that is the mark a test
@@ -472,10 +512,28 @@ warning_records."
                                       (%load-warning-place record) headline))
                      (when (plusp hidden)
                        (format stream "~%    (+~D more)" hidden))))))
-    (let ((hidden (- (length kinds) *load-style-kinds-shown*)))
-      (when (plusp hidden)
-        (format stream "~%  ... and ~D more kind~:P (all are in warning_records)"
-                hidden)))))
+    (let ((rest (nthcdr *load-style-kinds-shown* kinds)))
+      (when rest
+        (format stream "~%  ... and ~D more kind~:P (all are in warning_records):"
+                (length rest))
+        (loop for (nil . members) in rest
+              for named from 1 to *load-style-kinds-shown*
+              do (let* ((first (first (%project-first members)))
+                        (headline (%record-headline first))
+                        (place (%load-warning-place first)))
+                   (cond ((null (rest members))
+                          (format stream "~%    ~A~@[ at ~A~]" headline place))
+                         ((every (lambda (record)
+                                   (string= headline (%record-headline record)))
+                                 members)
+                          (format stream "~%    ~Dx ~A~@[, first at ~A~]"
+                                  (length members) headline place))
+                         (t
+                          (format stream "~%    ~Dx of one kind, such as ~A~@[ at ~A~]"
+                                  (length members) headline place)))))
+        (let ((unnamed (- (length rest) *load-style-kinds-shown*)))
+          (when (plusp unnamed)
+            (format stream "~%    ... and ~D more kind~:P, not named" unnamed)))))))
 
 (defun build-load-system-response (system ht)
   "Build the standard load-system response with summary text.
@@ -589,9 +647,13 @@ with a WARNING:"
                     (format s "~%~%~:[Warnings~;Other warnings~] before the error (~D):"
                             refusing (length others))
                     (%write-load-warnings s others))
-                  (when (and full style)
-                    (format s "~%(and ~D style warning~:P, in warning_records)"
-                            (length style)))
+                  ;; Summed up as on success: one can be the cause -- a macro
+                  ;; used before its DEFMACRO is an undefined function, then
+                  ;; an illegal function call.
+                  (when style
+                    (format s "~%~%Style warnings before the error (~D)~:[~;, by kind~]:"
+                            (length style) (rest style))
+                    (%write-style-warnings s style))
                   (let ((co (gethash "compiler_output" ht)))
                     (when (and (stringp co) (plusp (length co)))
                       (let* ((limit 2048)
