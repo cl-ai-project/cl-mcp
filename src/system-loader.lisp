@@ -41,7 +41,7 @@ force=true clears ASDF's loaded state, but ASDF still recompiles only the files
 it judges stale by their timestamps (one-second resolution).  A file of the
 project's tree written in the same second as its FASL would look current, so
 that FASL is deleted first, and the file is recompiled when this load reaches
-it (same_second_fasls_deleted counts the deletions).  clear_fasls=true is the
+it (same_second_fasls_deleted counts them).  clear_fasls=true is the
 guaranteed rebuild, of every file.
 
 Warning handling: a file that compiles with a full WARNING (a duplicate
