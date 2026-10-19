@@ -171,6 +171,16 @@ While the root is switched, every path argument (`lisp-edit-form file_path`,
 (`fs-set-project-root` asks for the directory you are working in; for the
 length of this step that is the experiment, so the call is in scope.)
 
+**Reload after switching back.** Switching the root unregisters the systems
+loaded from the previous root. On cl-mcp 3.1.0 and earlier (before PR #256, the
+fix for #241), the next `run-tests` then runs (Rove) or reports as not run
+(FiveAM) a test you deleted from its file before the switch: run-tests forgets a
+deleted test only for test systems that are still registered. Run
+`load-system system=<name>/tests` -- the test system, not `<name>`, which
+registers `src/` but not the test files' subsystems -- right after switching back, before
+`run-tests`, and do not read a `run-tests` that follows a bare switch as
+evidence about deleted tests.
+
 ### 6. Triage each candidate, then record
 
 Friction you notice is a **candidate**, not a feedback item. It becomes a
@@ -201,8 +211,24 @@ entirely. This is a shell command by definition — it is how this step is
 performed, and it is allowed here:
 
 ```bash
-ros run --non-interactive --eval '(progn <the smallest form that shows it>)'
+ros run --eval '(progn <the smallest form that shows it>)' --eval '(uiop:quit)' < /dev/null
 ```
+
+Either `(uiop:quit)` or `< /dev/null` ends it; with neither, `ros run` drops
+into its REPL and waits on standard input. A form that signals lands in the
+debugger, which reads EOF from `/dev/null` and exits with status 0, so judge a
+control by its output, not its exit status.
+
+A control run that loads the project from a copy must make ASDF find the copy.
+Roswell auto-registers every `.asd` under `~/.roswell/local-projects/**`, which
+holds the cl-mcp checkout and so `experiments/` when the checkout lives there, as
+step 2 assumes: a copy loaded with
+`asdf:load-asd` under the same name is replaced at the next `find-system` by the
+live definition, which compiles the live tree and writes its FASLs into the
+cache the worker shares. Put the copy first instead:
+`(push #p"<copy>/" asdf:*central-registry*)` before `asdf:load-system` (the
+central registry is searched before Roswell's local projects). Failing that,
+rename the copy's `.asd` and its system and package names.
 
 | Control run result | Layer | Promote? |
 |---|---|---|
@@ -273,7 +299,8 @@ These are documented pitfalls that have tripped previous dogfooding runs. If you
 | FiveAM project: `run-tests` is green with the full count, but `asdf:test-system` runs only the scaffold smoke test | A suite was declared without `:in :<name>`. The generated `test-op` runs the root suite alone, so it never reaches that suite — while `run-tests` still finds it, because its matcher also matches on *package* name and `<NAME>/TESTS/<FILE>-TEST` nests below the system name. `run-tests` now heads such a run `⚠ PASS, BUT N SUITES ARE OUTSIDE THE ROOT SUITE` and lists them in `suites_outside_root` (when the root suite is named after the system) | Nest every suite: `(def-suite <file>-suite :in :<name>)`. Verify with the tests-not-checks count under "Working in a FiveAM project" — it must match `run-tests`' `passed + failed + pending` |
 | FiveAM project: the test count drops (e.g. 6 → 1) between two `run-tests` calls; the run now heads `⚠ PASS, BUT N TESTS DID NOT RUN` and names them in `unreached_tests` | A sub-test file does not depend on the root-suite file, so its load order comes from the `.asd` `:depends-on` list. Wrong order on a *cold* worker is a loud `Unknown suite <NAME>` (whose hint names the `:import-from` fix); on a *warm* one the sub-suite attaches to the previous run's root-suite object, is orphaned when the new root replaces it, and its tests are reached from no suite | Give every sub-test `defpackage` an `(:import-from #:<name>/tests/main-test)` clause. That makes ASDF order the files regardless of the `:depends-on` order — verified by leaving the list deliberately reversed |
 | `run-tests` aggregate reports a suspiciously high count, per-package `run-tests` on your brand-new sub-packages fails with `MISSING-COMPONENT`, and `find-package` on the new test package returns `NIL` | ASDF resolved the system name to a stale `.asd` elsewhere on the Roswell source registry (previous dogfood residue) | `repl-eval (asdf:system-source-file (asdf:find-system "<name>"))` — if the path does not match your scaffold's `absolute_path`, rename and re-scaffold. Follow the pre-scaffold `asdf:find-system ... nil` check in step 2 to avoid this entirely |
-| `clgrep-search` or `code-find-references` finds nothing in your throwaway project, although the symbol is right there | Both honour the `.gitignore` of their scan root, and cl-mcp's lists `experiments/` | `clgrep-search path=experiments/<project>`; for references, switch the project root to the experiment for step 5 and back afterwards. Expected behaviour - do not record it as a tool bug |
+| `clgrep-search` or `code-find-references` finds nothing in your throwaway project, although the symbol is right there | Both honour the `.gitignore` of their scan root, and cl-mcp's lists `experiments/` | `clgrep-search path=experiments/<project>`; for references, switch the project root to the experiment for step 5 and back afterwards, then `load-system system=<name>/tests` (see step 5). Expected behaviour - do not record it as a tool bug |
+| After a root switch, `run-tests` runs (Rove) or reports `DID NOT RUN` (FiveAM) for a test you deleted from its file | #241: the switch unregisters the experiment's systems, and run-tests forgets deleted tests only for registered test systems (cl-mcp 3.1.0 and earlier; the fix is in PR #256) | `load-system system=<name>/tests` after switching back; known, cite #241 instead of re-filing |
 | A plain CL form looks broken in the worker: `define-condition` with a bare slot name, `handler-case` with a `(type (var) ...)` clause | Almost always the form as written, not the worker. Both of those were run in the worker and in plain SBCL on 2026-09-20 and behaved identically | Control-run it before recording. `(:format-control ...)` as a `define-condition` option and `make-instance` on a `defstruct` are *supposed* to fail - neither is in the standard |
 | `(format t ...)` inside a test prints nothing in `run-tests`' summary | Deliberate: raw stdout is kept in a structured-only field and the summary renders `debug_output` alone, so an MCP client shows neither | Write to `cl-mcp/src/test-runner-core:*test-debug-output*` instead — that stream reaches both the field and the summary text. Surfacing a `stdout` preview is already an open feedback item; do not re-file it |
 
