@@ -2103,6 +2103,43 @@ DEFPACKAGE or DEFINE-PACKAGE, as far as they exist in this image."
                                when package collect package)))
       (ignore-errors (delete-package scan-package)))))
 
+(defun %packages-also-defined-outside (system-names files packages)
+  "Return those of PACKAGES that a source file of a dependency of SYSTEM-NAMES
+also defines, a file not among FILES (%RELOADED-FILES): a dependency the reload
+does not load again.  Only a file whose text names the package is read."
+  (let ((outside '())
+        (names (mapcar #'package-name packages)))
+    (dolist (dependency (remove-duplicates
+                         (loop for name in system-names
+                               append (ignore-errors (%transitive-dependency-names name)))
+                         :test #'string=))
+      (let ((system (and (not (member dependency system-names :test #'string=))
+                         (%loaded-system-by-name dependency))))
+        (when system
+          (dolist (file (%source-files-of system))
+            (let ((namestring (namestring file)))
+              (unless (member namestring files :test #'string=)
+                (let ((text (ignore-errors (uiop:read-file-string file))))
+                  (when (and text
+                             (some (lambda (name) (search name text :test #'char-equal))
+                                   names))
+                    (dolist (package (%packages-defined-by (list namestring)))
+                      (when (member package packages)
+                        (pushnew package outside)))))))))))
+    outside))
+
+(defun %source-files-of (system)
+  "Return the pathnames of SYSTEM's Lisp source file components."
+  (let ((files '()))
+    (labels ((walk (component)
+               (cond ((typep component 'asdf:cl-source-file)
+                      (let ((path (ignore-errors (asdf:component-pathname component))))
+                        (when path (push path files))))
+                     ((typep component 'asdf:parent-component)
+                      (mapc #'walk (asdf:component-children component))))))
+      (walk system))
+    files))
+
 (defun %fiveam-purge-ghost-tests (system-names)
   "Remove from FiveAM the tests made by a file the reload of SYSTEM-NAMES loads
 again (%RELOADED-FILES, %FIVEAM-TEST-FILE), before that reload.  FiveAM keeps
@@ -2116,25 +2153,39 @@ def-suite replaces its suite when it runs again.
 A test whose file is no file -- compiled under repl-eval, whose compilation unit
 names its source \"repl-eval\" -- goes too when a reloaded file defines its
 package: that file is where it came from, and the reload makes again what it
-still holds."
+still holds -- unless a dependency the reload leaves as it is defines the
+package too (%PACKAGES-ALSO-DEFINED-OUTSIDE).  Then the test may be that
+dependency's, and it stays: a test deleted from a reloaded file there is
+reported as not run rather than a dependency's test lost."
   (let ((test-names (%fiveam-symbol "TEST-NAMES"))
         (rem-test (%fiveam-symbol "REM-TEST")))
     (when (and test-names rem-test (fboundp test-names) (fboundp rem-test))
       (let ((files (%reloaded-files system-names)))
         (when files
-          (let ((packages (%packages-defined-by files)))
+          (let ((packages (%packages-defined-by files))
+                (by-package '()))
             (dolist (name (remove-duplicates (funcall test-names)))
               (let* ((object (%fiveam-test-object name))
                      (file (and object (%fiveam-test-file object))))
-                (when (and object
-                           (not (%fiveam-suite-p object))
-                           (or (member file files :test #'equal)
-                               (and (stringp file)
-                                    (not (uiop:absolute-pathname-p
-                                          (uiop:parse-native-namestring file)))
-                                    (symbolp name)
-                                    (member (symbol-package name) packages))))
-                  (funcall rem-test name))))))))))
+                (when (and object (not (%fiveam-suite-p object)))
+                  (cond ((member file files :test #'equal)
+                         (funcall rem-test name))
+                        ((and (stringp file)
+                              (not (uiop:absolute-pathname-p
+                                    (uiop:parse-native-namestring file)))
+                              (symbolp name)
+                              (member (symbol-package name) packages))
+                         (push name by-package))))))
+            ;; A test that names no file goes by its package only where no
+            ;; dependency left as it is defines that package too: such a test
+            ;; may be that dependency's, which the reload would not make again.
+            (when by-package
+              (let ((shared (%packages-also-defined-outside
+                             system-names files
+                             (remove-duplicates (mapcar #'symbol-package by-package)))))
+                (dolist (name by-package)
+                  (unless (member (symbol-package name) shared)
+                    (funcall rem-test name)))))))))))
 
 (defun %qualified-test-name (symbol)
   "Return SYMBOL written PACKAGE::NAME, or :NAME for a keyword."
