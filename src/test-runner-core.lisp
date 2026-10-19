@@ -12,6 +12,8 @@
                 #:transient-error)
   (:import-from #:cl-mcp/src/utils/paths
                 #:discover-asd-in-project)
+  (:import-from #:cl-mcp/src/project-root
+                #:system-left-by-root-change)
   (:import-from #:cl-mcp/src/utils/fasls
                 #:delete-same-second-fasls)
   (:import-from #:cl-mcp/src/utils/compilation-unit
@@ -831,6 +833,14 @@ names returned are strings and stay valid after the package is deleted."
       (when own-package
         (ignore-errors (delete-package own-package))))))
 
+(defun %loaded-system-by-name (name)
+  "Return the system named NAME that this image may have loaded: the registered
+one, or else the one a root change unregistered (SYSTEM-LEFT-BY-ROOT-CHANGE),
+whose files' packages and tests are still here.  NIL when neither exists.
+Never FIND-SYSTEM; see %TRANSITIVE-DEPENDENCY-NAMES."
+  (or (ignore-errors (asdf:registered-system name))
+      (system-left-by-root-change name)))
+
 (defun %rove-purge-ghost-suites (system-name)
   "Remove Rove suite entries for every test package associated with
 SYSTEM-NAME. This prevents `ghost deftests' — tests that were deleted
@@ -865,8 +875,9 @@ session every call re-runs the source-registry search, measured at 114 ms,
 and a large package-inferred project reaches 905 systems -- 103 seconds of
 purging before a single test runs.  REGISTERED-SYSTEM makes the same
 traversal cost 0.3 seconds and loses nothing, because a system that is not
-registered has never been loaded: its packages do not exist, so Rove holds
-no suite for them and there is no ghost to purge.
+registered has never been loaded -- its packages do not exist, so Rove holds
+no suite for them and there is no ghost to purge -- unless a root change
+unregistered it, and that system is still known (%LOADED-SYSTEM-BY-NAME).
 
 Nothing is walked when Rove's registry is empty, and the source scan
 interns into one throwaway package, deleted afterwards, rather than into
@@ -907,7 +918,7 @@ CL-USER."
                                   (not (gethash name visited-systems)))
                          (setf (gethash name visited-systems) t)
                          (clear-pkg name)
-                         (let ((sys (ignore-errors (asdf:registered-system name))))
+                         (let ((sys (%loaded-system-by-name name)))
                            (when sys
                              (walk-components sys)
                              (dolist (dep (ignore-errors
@@ -2075,7 +2086,7 @@ dependency is not followed -- a system not cleared is not reloaded."
                      ((typep component 'asdf:parent-component)
                       (mapc #'walk (asdf:component-children component))))))
       (dolist (name system-names)
-        (let ((system (ignore-errors (asdf:registered-system name))))
+        (let ((system (%loaded-system-by-name name)))
           (when system (walk system)))))
     files))
 

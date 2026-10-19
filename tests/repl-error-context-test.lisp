@@ -217,6 +217,76 @@
      (ok (search "SB-KERNEL::ERROR" text)
          "fallback includes the first would-be-filtered frame"))))
 
+(deftest backtrace-text-says-what-it-leaves-out-and-keeps-the-outermost-frame
+  ;; Five user frames were listed and the text ended there, with no word of
+  ;; the rest.  A recursive LABELS fills all five, so the function the user
+  ;; called -- the outermost user frame -- never appeared.
+  (flet ((context (truncated)
+           (list :error t :condition-type "SIMPLE-ERROR" :message "bottom"
+                 :restarts nil :frames-truncated truncated
+                 :frames (append
+                          (loop for index from 1 to 9
+                                collect (list :index index
+                                              :function "(LABELS APP::DOWN :IN APP::OUTER)"
+                                              :locals nil))
+                          (list (list :index 10 :function "APP::OUTER" :locals nil)
+                                (list :index 11 :function "SB-INT:SIMPLE-EVAL-IN-LEXENV"
+                                      :locals nil))))))
+    (let ((text (cl-mcp/tests/repl-error-context-test::%response-text (context nil))))
+      (ok (search "10: APP::OUTER" text)
+          (format nil "the outermost user frame is shown: ~A" text))
+      (ok (search "5 more of your frames left out here" text)
+          "the ones left out are counted")
+      (ok (search "error_context.frames has all 10 of them" text)
+          "with where to find them, counted as that field holds them: the user's")
+      (ok (null (search "  5: " text)) "the middle of the run is what is left out"))
+    (let ((text (cl-mcp/tests/repl-error-context-test::%response-text (context t))))
+      (ok (null (search "has all" text))
+          "a capture its cap cut short does not claim to hold them all")
+      (ok (search "outermost captured" text)
+          (format nil "and says the last frame shown is the outermost captured: ~A" text)))))
+
+(deftest backtrace-text-falls-back-to-the-same-limit-without-your-frames
+  ;; With no user frame the first frames are shown, as many as the limit, and
+  ;; a count of the rest does not call them yours.
+  (let* ((frames (loop for index from 0 below 8
+                       collect (list :index index :function (format nil "SB-INT::F~D" index)
+                                     :locals nil)))
+         (text (let ((cl-mcp/src/tools/response-builders::*backtrace-frames-shown* 3))
+                 (cl-mcp/tests/repl-error-context-test::%response-text
+                  (list :error t :condition-type "SIMPLE-ERROR" :message "x"
+                        :restarts nil :frames frames)))))
+    (ok (search "SB-INT::F2" text) "the first frames are shown")
+    (ok (null (search "SB-INT::F3" text)) "up to the limit")
+    (ok (null (search "of your frames" text)) "and none is called yours")))
+
+(deftest backtrace-text-counts-a-real-recursion-truthfully
+  ;; Through repl-eval's own path: every stack ends in the thread's frames, so
+  ;; a flag set by any frame past the cap said every error's walk was cut short.
+  (cl-mcp/src/repl:repl-eval
+   "(defun rec-probe-outer (n)
+      (declare (optimize (debug 3)))
+      (labels ((rec-probe-down (k)
+                 (if (zerop k) (error \"bottom\") (1+ (rec-probe-down (1- k))))))
+        (rec-probe-down n)))")
+  (flet ((text-for (n)
+           ;; With a deadline, as the tool calls it: the evaluation then runs on
+           ;; a thread of its own, so this test's frames are not on its stack.
+           (multiple-value-bind (printed value stdout stderr context)
+               (cl-mcp/src/repl:repl-eval (format nil "(rec-probe-outer ~D)" n)
+                                          :timeout-seconds 60)
+             (gethash "text"
+                      (aref (gethash "content"
+                                     (cl-mcp/src/tools/response-builders:build-eval-response
+                                      printed value stdout stderr context))
+                            0)))))
+    (let ((text (text-for 8)))
+      (ok (search "has all" text) (format nil "a walk that reached the user's outermost: ~A" text))
+      (ok (search "REC-PROBE-OUTER (repl-eval)" text) "which is shown"))
+    (let ((text (text-for 40)))
+      (ok (search "outermost captured" text)
+          (format nil "a walk the cap cut short says so: ~A" text)))))
+
 (defun %response-text (error-context &key max-output-length)
   "Return the content text BUILD-EVAL-RESPONSE renders for ERROR-CONTEXT.
 MAX-OUTPUT-LENGTH is passed through, so a test can put the text under the same

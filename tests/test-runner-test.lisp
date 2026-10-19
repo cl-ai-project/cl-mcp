@@ -1627,6 +1627,104 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
                    (gethash "unreached_tests" result)))
        (ok (equal "✓ PASS" (%headline result)) "a plain pass")))))
 
+(defun %call-with-inferred-test-fixture (primary framework file-text thunk)
+  "Write a package-inferred PRIMARY to a fresh directory on ASDF's central
+registry: it depends on FRAMEWORK and on the inferred PRIMARY/tests/a, whose
+file holds FILE-TEXT.  Call THUNK with the directory, then forget the systems --
+in ASDF and as left by a root change --, their packages and the directory."
+  (let ((dir (uiop:ensure-directory-pathname
+              (uiop:merge-pathnames*
+               (format nil "cl-mcp-~A-~A-~A/" primary (get-universal-time)
+                       (random 100000))
+               (uiop:temporary-directory))))
+        (sub (format nil "~A/tests/a" primary)))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (uiop:merge-pathnames* "tests/" dir))
+           ;; One system per .asd, named after it: inside an ASDF session --
+           ;; rove cl-mcp.asd's test-op -- a second system of the file is not
+           ;; defined again after run-tests clears it.
+           (%write-fixture-file
+            dir (format nil "~A.asd" primary)
+            (format nil "(asdf:defsystem ~S :class :package-inferred-system~%  ~
+                         :depends-on (~S ~S))~%"
+                    primary framework sub))
+           (%write-fixture-file dir "tests/a.lisp" file-text)
+           (let ((asdf:*central-registry* (cons dir asdf:*central-registry*)))
+             (asdf:load-asd (uiop:merge-pathnames* (format nil "~A.asd" primary) dir))
+             (funcall thunk dir)))
+      (let ((var (uiop:find-symbol* '#:*toplevel-suites* :fiveam nil)))
+        (when (and var (boundp var))
+          (setf (symbol-value var)
+                (remove-if (lambda (suite) (search (string-upcase primary) (string suite)))
+                           (symbol-value var)))))
+      (dolist (name (list sub primary))
+        (ignore-errors (asdf:clear-system name))
+        (remhash name cl-mcp/src/project-root::*systems-left-by-root-change*))
+      (let ((package (find-package (string-upcase sub)))
+            (suites (uiop:find-symbol* '#:*package-suites* :rove/core/suite/package nil)))
+        (when package
+          (when (and suites (boundp suites))
+            (remhash package (symbol-value suites)))
+          (ignore-errors (delete-package package))))
+      (ignore-errors (uiop:delete-directory-tree dir :validate t)))))
+
+(deftest rove-purge-ghost-suites-reaches-systems-a-root-change-unregistered
+  ;; A root change unregisters the systems under the old root while their
+  ;; packages and Rove suites stay.  The purge walked registered systems only,
+  ;; so an inferred test file's suite was never cleared, and a test deleted
+  ;; from that file ran again on the next run-tests, and was counted.  The
+  ;; purge itself is called here rather than run-tests: that would nest a
+  ;; rove:run inside the Rove run of this suite, which shares its state.  The
+  ;; FiveAM test below goes through run-tests end to end.
+  (%call-with-inferred-test-fixture
+   "rove-root-probe" "rove"
+   "(defpackage #:rove-root-probe/tests/a (:use #:cl #:rove))
+(in-package #:rove-root-probe/tests/a)
+(deftest kept (ok t))
+"
+   (lambda (dir)
+     (asdf:load-system "rove-root-probe")
+     (let ((suites (symbol-value (find-symbol "*PACKAGE-SUITES*" :rove/core/suite/package)))
+           (package (find-package "ROVE-ROOT-PROBE/TESTS/A")))
+       (ok (gethash package suites) "Rove holds the test file's suite")
+       (cl-mcp/src/project-root::%clear-systems-under (truename dir))
+       (ok (null (asdf:registered-system "rove-root-probe/tests/a"))
+           "the root change unregistered the test file's system")
+       (cl-mcp/src/test-runner-core::%rove-purge-ghost-suites "rove-root-probe")
+       (ok (null (gethash package suites))
+           "the purge clears the suite of a system the root change unregistered")))))
+
+(deftest run-tests-forgets-a-fiveam-test-deleted-before-a-root-change
+  ;; The FiveAM side of the same root change: the purge could not tell which
+  ;; files the reload loads, so the deleted test stayed and was named under
+  ;; "Did not run", with load-order advice that did not apply.
+  (if (null (asdf:find-system "fiveam" nil))
+      (rove:skip "FiveAM is not installed; the FiveAM backend cannot run here")
+      (progn
+        (asdf:load-system "fiveam")
+        (%call-with-inferred-test-fixture
+         "fiveam-root-probe" "fiveam"
+         (%fiveam-fixture-file "fiveam-root-probe/tests/a" ":fiveam-root-probe"
+                               '(("kept" "(= 1 1)") ("deleted" "(= 2 2)")))
+         (lambda (dir)
+           (let ((first (run-tests "fiveam-root-probe")))
+             (ok (= 2 (gethash "passed" first))
+                 (format nil "both tests run first (~A)"
+                         (and (plusp (length (gethash "failed_tests" first)))
+                              (%first-failure-reason first)))))
+           (%write-fixture-file dir "tests/a.lisp"
+                                (%fiveam-fixture-file "fiveam-root-probe/tests/a"
+                                                      ":fiveam-root-probe"
+                                                      '(("kept" "(= 1 1)"))))
+           (cl-mcp/src/project-root::%clear-systems-under (truename dir))
+           (let ((result (run-tests "fiveam-root-probe")))
+             (ok (= 1 (gethash "passed" result)) "the test still in the file runs")
+             (ok (null (gethash "unreached_tests" result))
+                 (format nil "the deleted test is not reported (~S)"
+                         (gethash "unreached_tests" result)))
+             (ok (equal "✓ PASS" (%headline result)) "a plain pass")))))))
+
 (deftest run-tests-keeps-fiveam-tests-of-packages-it-does-not-reload
   ;; Only a package the reload defines again loses its tests first: a test of
   ;; any other package would not come back, and would vanish from the run.
