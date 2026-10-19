@@ -326,10 +326,13 @@ gen/* and gen/** match what is in gen/, not gen/ itself."
                     (incf i 3))
                    ;; /** at the end matches everything under the directory,
                    ;; not the directory itself
+                   ;; Only a whole last component: file.lisp** is two plain
+                   ;; stars, which match nothing too.
                    ((and (< (+ i 1) body-len)
                          (char= char #\*)
                          (char= (char body (+ i 1)) #\*)
-                         (= (+ i 2) body-len))
+                         (= (+ i 2) body-len)
+                         (or (zerop i) (char= (char body (1- i)) #\/)))
                     (emit ".+")
                     (incf i 2))
                    ;; A lone * as a whole component matches a non-empty one
@@ -355,7 +358,9 @@ gen/* and gen/** match what is in gen/, not gen/ itself."
                     (let* ((end (class-end i))
                            (start (1+ i))
                            (negated (find (char body start) "!^")))
-                      (emit (if negated "[^/" "["))
+                      ;; Never the slash, whatever the class holds -- / itself,
+                      ;; [:punct:], a range across it --, as in git.
+                      (emit (if negated "[^/" "(?!/)["))
                       (loop with k = (if negated (1+ start) start)
                             while (< k end)
                             do (if (posix-class-end k)

@@ -245,6 +245,17 @@ Final line
       ;; git never ignores gen/ for gen/*: a re-include under it stays reachable.
       (ok (ignored-p "gen/*" "gen/x.lisp"))
       (ok (not (ignored-p "gen/*" "gen/"))))
+    (testing "a class never matches the slash, as git's does not"
+      ;; Checked with git check-ignore: a/b.lisp is kept for both.
+      (ok (not (ignored-p "a[[:punct:]]b.lisp" "a/b.lisp")))
+      (ok (ignored-p "a[[:punct:]]b.lisp" "a.b.lisp"))
+      (ok (not (ignored-p "a[/x]b.lisp" "a/b.lisp")))
+      (ok (ignored-p "a[/x]b.lisp" "axb.lisp")))
+    (testing "** not after a slash is a plain *: it matches nothing too"
+      ;; git: file.lisp** leaves out file.lisp itself.
+      (ok (ignored-p "file.lisp**" "file.lisp"))
+      (ok (ignored-p "file.lisp**" "file.lispX"))
+      (ok (ignored-p "a**b.lisp" "ab.lisp")))
     (testing "dir/** likewise: everything inside, not the directory"
       (ok (ignored-p "gen/**" "gen/x.lisp"))
       (ok (ignored-p "gen/**" "gen/sub/x.lisp"))
