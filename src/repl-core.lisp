@@ -333,7 +333,12 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
         (let ((pkg (%resolve-eval-package package)))
           (setf eval-package pkg)
           (let ((forms (handler-case
-                           (let ((*package* pkg)) (%read-all input (not safe-read)))
+                           ;; A #. form runs here: what it writes, a warning
+                           ;; WARN prints included, is the call's output too.
+                           (let ((*package* pkg)
+                                 (*standard-output* stdout)
+                                 (*error-output* stderr))
+                             (%read-all input (not safe-read)))
                          (end-of-file (e)
                            ;; Scope END-OF-FILE handling to the read phase only.
                            ;; Runtime EOF (e.g. reading from an empty stream in user

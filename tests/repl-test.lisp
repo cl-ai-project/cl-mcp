@@ -996,6 +996,16 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
             (format nil "~D bytes to bound 1 000 000 characters, against ~D to retain them"
                     bounding retaining))))))
 
+(deftest repl-eval-captures-what-the-read-phase-writes
+  ;; With the warning handler gone, a #. form's warning -- and its output --
+  ;; went to the worker's own streams: the read ran outside the capture.
+  (multiple-value-bind (printed raw stdout stderr)
+      (repl-eval "#.(progn (warn \"read-time probe\") (princ \"read-out\") 42)" :safe-read nil)
+    (declare (ignore raw))
+    (ok (equal "42" printed))
+    (ok (search "read-time probe" stderr) (format nil "stderr: ~S" stderr))
+    (ok (search "read-out" stdout) (format nil "stdout: ~S" stdout))))
+
 (deftest repl-eval-capture-limit-edges
   (testing "a zero limit suppresses the output rather than falling back"
     ;; max_output_length is declared (integer 0), and zero asks for the output
