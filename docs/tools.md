@@ -1392,9 +1392,11 @@ Output:
 - `pending` (integer): Number of tests that only skipped and so checked nothing (when reported by the framework).
   With Rove, a test whose only results are `(skip ...)`, however deep inside `testing` blocks, is pending,
   not passed, although Rove's own result object calls it passed
-- `skipped_tests` (array, Rove, present when any test skipped): `test_name` and `reasons` of every test that
-  skipped anything, including one that passed on what it did check, so a skip is never hidden inside a
-  pass; the summary text lists them under `Skipped`
+- `skipped_tests` (array, Rove, present when any test skipped): `test_name`, `status` and
+  `reasons` of every test that skipped anything, including one that passed on what it did check,
+  so a skip is never hidden inside a pass. `status` is how the test was counted: `"pending"` (it
+  checked nothing), `"passed"` or `"failed"`; the summary text lists them under `Skipped` as
+  `NAME (pending)`, `NAME (passed the rest)` or `NAME (failed)`
 - `unreached_tests` (array, FiveAM whole-system run, present when any): tests defined in the
   system's packages that the run did not reach: held by no suite that ran, and neither
   started nor skipped by FiveAM during the run, a run nested in a test included (a test run
@@ -1418,7 +1420,11 @@ Output:
   `Warnings (N) -- ASDF refuses a file that compiles with a WARNING:`, and its hint says to
   fix the file and run again, as it does for a file that did not compile for an error alone;
   only when every one of them is package variance does it send you to `pool-kill-worker`,
-  since then the file is right and the worker's image is stale
+  since then the file is right and the worker's image is stale. A load failure's reason
+  names the file that was compiling or loading when the error was signalled (`while
+  compiling tests/item-test.lisp`), for an error such as FiveAM's `Unknown suite` that names
+  none itself, and its compiler output holds neither redefinition notices nor a bare copy of
+  a warning the compiler's own block already writes
 - `framework` (string): Framework or outcome category used (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, `"load-error"`, `"unresolved"`, or `"timeout"`)
 - `counts_available` (boolean, ASDF fallback only): `false` — `asdf:test-system` reports no counts
 - `success` (boolean|null, ASDF fallback only): `false` when `asdf:test-system` signalled; `null` when it
@@ -1438,10 +1444,20 @@ Prove is supported for prove-asdf test systems (`:defsystem-depends-on ("prove-a
   - `description`: Rove — the assertion's description; FiveAM — the test's docstring
   - `form`: The failing assertion form. Rove and FiveAM print it as the test's own
     package reads it (a test's local is `H`, not `MY-APP/TESTS/FOO::H`); prove prints
-    it from the runner's package
+    it from the runner's package. A Rove form that is `NIL` is `"NIL"`; an error that
+    escaped a Rove test body has none (Rove records the placeholder `T` for it)
   - `values`: Evaluated values (Rove and prove), printed the same way as `form`
-  - `reason`: Error message (string). For FiveAM this is the framework's own
-    message with its blank lines removed, so one mismatch stays one short block
+  - `reason`: Error message (string); for a condition, `CLASS: message`. For FiveAM this
+    is the framework's own message with its blank lines removed, so one mismatch stays
+    one short block
+  - `signalled` (Rove, present when true): the failure is an error that escaped the test
+    body; the summary prints its reason as `Error:`
+  - `error_frame` (Rove, with `signalled`, when found): where it was signalled, the first
+    frame that is neither the runner's nor the implementation's -- frames are judged by the
+    package of the name they run, CL's, SBCL's, ASDF's and cl-mcp's passed over, and Rove's
+    first one ends the search -- as
+    `NAME`, `NAME (file)` or `NAME (file:line)`, the file relative to the project root;
+    the summary prints it as `In:`
   - `source`: Source location, file and line (**Rove only** — FiveAM records no
     source location for a test, so locate a FiveAM failure by `test_name` and
     `description`)

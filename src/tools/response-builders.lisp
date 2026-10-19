@@ -836,8 +836,10 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
             (when (plusp (length skipped-tests))
               (format s "~%Skipped (~D test~:P):~%" (length skipped-tests))
               (loop for entry across skipped-tests
-                    do (format s "  ~A — ~{~A~^; ~}~%"
+                    do (format s "  ~A~@[ (~A)~] — ~{~A~^; ~}~%"
                                (gethash "test_name" entry)
+                               (let ((status (gethash "status" entry)))
+                                 (if (equal status "passed") "passed the rest" status))
                                (coerce (gethash "reasons" entry) 'list))))
             (when unreached
               (format s "~%Did not run (~D): ~{~A~^, ~}~%  Defined in this system's ~
@@ -874,8 +876,10 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                              (format s "     Got: ~{~A~^, ~}~%"
                                      (coerce vals 'list)))))
                        (when (gethash "reason" fail)
-                         (format s "     Reason: ~A~%"
-                                 (gethash "reason" fail)))))
+                         (format s "     ~:[Reason~;Error~]: ~A~%"
+                                 (gethash "signalled" fail) (gethash "reason" fail)))
+                       (when (gethash "error_frame" fail)
+                         (format s "     In: ~A~%" (gethash "error_frame" fail)))))
             ;; A test system refused for a warning: the warning with its
             ;; place, written as load-system writes it.
             (let ((refusing (remove-if-not
