@@ -86,8 +86,33 @@ circularity check in %MAKE-WALK-GUARD rather than the input guard."
   "Test macro that expands into itself, to exercise the expansion cap."
   '(self-reproducing-macro))
 
+(defmacro def-flag-probe (name)
+  "Test macro that interns at expansion time, as DEF-FLAG in issue #238 does.
+The symbol lands in whatever *PACKAGE* the expander runs under, which is what
+COMPILE-FILE makes the file's own package."
+  `(defvar ,(intern (format nil "*~A-FLAG-PROBE*" name)) nil))
+
+(defvar *expected-readtable* nil
+  "The readtable READTABLE-PROBE compares *READTABLE* with at expansion time.")
+
+(defmacro readtable-probe ()
+  "Test macro that reports, at expansion time, whether *READTABLE* is
+*EXPECTED-READTABLE*: an expander that reads (READ-FROM-STRING and the like)
+reads with whatever *READTABLE* it runs under."
+  `',(if (eq *readtable* *expected-readtable*) :expected-readtable :other-readtable))
+
 (defparameter *fixture-package* "CL-MCP/TESTS/LISP-MACROEXPAND-TEST"
   "Name of this test package, used as the expansion package.")
+
+(defun %forget-cl-user-symbol (name)
+  "Unintern NAME from CL-USER, where a run before the fix of issue #238 left
+it, and from this package, where an earlier run of the fixed code left it, so
+the tests below see only what this run interns: otherwise, in a reused image,
+\"it was interned in the target package\" would hold whatever the code did."
+  (dolist (package (list :cl-user *fixture-package*))
+    (let ((symbol (find-symbol name package)))
+      (when symbol
+        (unintern symbol package)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; macroexpand-core
@@ -119,6 +144,44 @@ circularity check in %MAKE-WALK-GUARD rather than the input guard."
           (macroexpand-package-error (e)
             (and (search "load-system" (princ-to-string e)) t)))
         "the error message should tell the caller to load the system")))
+
+(deftest macroexpand-source-runs-the-expander-in-the-target-package
+  ;; Issue #238: *PACKAGE* was bound only around reading and printing, so an
+  ;; expander that interns ran in the worker's CL-USER.  The header said the
+  ;; target package and the expansion showed common-lisp-user::*foo-flag*.
+  ;; *PACKAGE* is bound to CL-USER here as the worker's request has it.
+  (dolist (level '("once" "full" "all"))
+    (let* ((name (format nil "~:@(~A~)" level))
+           (symbol-name (format nil "*~A-FLAG-PROBE*" name)))
+      (%forget-cl-user-symbol symbol-name)
+      (let ((printed (let ((*package* (find-package :cl-user)))
+                       (macroexpand-source (format nil "(def-flag-probe ~A)" name)
+                                           :package *fixture-package* :level level))))
+        ;; "full" and "all" go on to expand the DEFVAR itself, so only the
+        ;; generated name is compared, printed relative to the target package.
+        (ok (and (search (format nil "*~(~A~)-flag-probe*" name) printed)
+                 (null (search "common-lisp-user::" printed)))
+            (format nil "level ~A: the generated name is the target package's: ~A"
+                    level printed))
+        (ok (find-symbol symbol-name *fixture-package*)
+            (format nil "level ~A: it was interned in the target package" level))
+        (ok (null (find-symbol symbol-name :cl-user))
+            (format nil "level ~A: and nothing was left in CL-USER" level))))))
+
+(deftest macroexpand-source-runs-the-expander-under-the-given-readtable
+  ;; The same issue for *READTABLE*: an expander that reads must see the
+  ;; readtable the source was read with.
+  (if (not (%try-load :named-readtables))
+      (skip "named-readtables not available")
+      (let ((*expected-readtable*
+              (funcall (find-symbol "FIND-READTABLE" "EDITOR-HINTS.NAMED-READTABLES")
+                       :standard)))
+        (ok (string= "':expected-readtable"
+                     (let ((*readtable* (copy-readtable nil)))
+                       (macroexpand-source "(readtable-probe)"
+                                           :package *fixture-package*
+                                           :readtable "standard")))
+            "the expander ran under the named readtable"))))
 
 (deftest macroexpand-source-full-repeats-until-fixpoint
   (testing "level full keeps expanding while the head is a macro"
@@ -487,6 +550,31 @@ USE-WORKER-POOL to take the proxy branch instead."
            (ok (= 1 (gethash "count" payload)))
            (ok (search "(* 2 base)" text)
                "the nested call was expanded, not the enclosing defun")))))))
+
+(deftest lisp-macroexpand-file-mode-runs-the-expander-in-the-file-package
+  ;; Issue #238 in file mode, through sub_form: the expansion of a call inside
+  ;; a defun must use the file's package, as compiling the file does.
+  (%forget-cl-user-symbol "*FILE-MODE-FLAG-PROBE*")
+  (let ((*project-root* (asdf:system-source-directory :cl-mcp)))
+    (call-with-temp-source
+     "tests/tmp/macroexpand-interning.lisp"
+     "(in-package #:cl-mcp/tests/lisp-macroexpand-test)
+
+(defun uses-flag-probe ()
+  (def-flag-probe file-mode))
+"
+     (lambda (path)
+       (let ((text (let ((*package* (find-package :cl-user)))
+                     (response-text
+                      (lisp-macroexpand :path path
+                                        :form-type "defun"
+                                        :form-name "uses-flag-probe"
+                                        :sub-form "def-flag-probe")))))
+         (ok (search "(defvar *file-mode-flag-probe* nil)" text)
+             (format nil "the generated name is the file package's: ~A" text))
+         (ok (null (search "common-lisp-user::" text)) "not CL-USER's")
+         (ok (null (find-symbol "*FILE-MODE-FLAG-PROBE*" :cl-user))
+             "and nothing was left in CL-USER"))))))
 
 (deftest lisp-macroexpand-sub-form-multiple-matches
   (testing "every matching sub-form is expanded and labelled with its position"
