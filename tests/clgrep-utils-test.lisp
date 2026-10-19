@@ -220,6 +220,21 @@ Final line
       (ok (ignored-p "[\\]q]x.lisp" "]x.lisp"))
       (ok (ignored-p "[\\]q]x.lisp" "qx.lisp"))
       (ok (not (ignored-p "[\\]q]x.lisp" "\\x.lisp"))))
+    (testing "a POSIX class inside a class, as git reads it"
+      ;; Checked with git check-ignore.  Its ] does not close the class.
+      (ok (ignored-p "[[:digit:]].lisp" "5.lisp"))
+      (ok (not (ignored-p "[[:digit:]].lisp" "d].lisp")))
+      (ok (not (ignored-p "[[:digit:]].lisp" "t].lisp")))
+      (ok (ignored-p "[[:alpha:]x].lisp" "A.lisp"))
+      (ok (not (ignored-p "[[:alpha:]x].lisp" "5.lisp")))
+      (ok (ignored-p "[![:digit:]].lisp" "d.lisp"))
+      (ok (not (ignored-p "[![:digit:]].lisp" "5.lisp")))
+      (ok (ignored-p "[[:upper:][:digit:]].lisp" "A.lisp"))
+      (ok (not (ignored-p "[[:upper:][:digit:]].lisp" "a.lisp")))
+      (ok (ignored-p "[a[:digit:]].lisp" "a.lisp"))
+      ;; An unknown class name: git's pattern then matches nothing.
+      (ok (not (ignored-p "[[:foo:]].lisp" "f.lisp")))
+      (ok (not (ignored-p "[[:foo:]].lisp" "].lisp"))))
     (testing "an unclosed [ is literal"
       (ok (ignored-p "odd[name.lisp" "odd[name.lisp")))
     (testing "dir/* matches what is in the directory, not the directory itself"

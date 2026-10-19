@@ -239,10 +239,31 @@ lines it swallowed still belong to a form."
                   (cons :end-byte (toplevel-form-end-pos form)))))))
     nil))
 
+(defun posix-class-members (name)
+  "Return the regex class members a gitignore [:NAME:] stands for, as git's
+wildmatch reads them in the C locale, or NIL for a name it does not know."
+  (let ((tab (string #\Tab)) (newline (string #\Newline)))
+    (cond ((string= name "alpha") "a-zA-Z")
+          ((string= name "digit") "0-9")
+          ((string= name "alnum") "a-zA-Z0-9")
+          ((string= name "upper") "A-Z")
+          ((string= name "lower") "a-z")
+          ((string= name "xdigit") "0-9A-Fa-f")
+          ((string= name "blank") (concatenate 'string " " tab))
+          ((string= name "space")
+           (concatenate 'string " " tab newline
+                        (string #\Return) (string #\Page) (string (code-char 11))))
+          ((string= name "punct") "!-/:-@\\[-`{-~")
+          ((string= name "graph") "!-~")
+          ((string= name "print") " -~")
+          ((string= name "cntrl") "\\x00-\\x1f\\x7f"))))
+
 (defun glob-to-regex (pattern)
   "Convert a gitignore glob PATTERN to a regular expression string, matched with
 SCAN against a path relative to the root.  Handles *, ?, **, [...] classes ([!...]
-and [^...] negated) and a backslash that makes the next character literal.
+and [^...] negated, [:name:] inside one, POSIX-CLASS-MEMBERS; an unknown name
+makes the pattern match nothing, as in git) and a backslash that makes the next
+character literal.
 As git does, the pattern matches a path whole -- the path itself, a directory's
 ending in a slash, not what is under it (PATH-IGNORED-P judges that by its
 directories) -- with whole components: a slash at its start or in its middle
@@ -258,6 +279,7 @@ gen/* and gen/** match what is in gen/, not gen/ itself."
                          (find #\/ body)))
          (result (make-array 0 :element-type 'character :fill-pointer 0 :adjustable t))
          (i 0)
+         (never nil)
          (body-len (length body)))
     (labels ((emit (string)
                (loop for c across string do (vector-push-extend c result)))
@@ -273,12 +295,20 @@ gen/* and gen/** match what is in gen/, not gen/ itself."
                    (incf j))
                  (when (and (< j body-len) (char= (char body j) #\]))
                    (incf j))
-                 ;; A \ escapes the member after it, a ] included.
+                 ;; A \ escapes the member after it, a ] included, and the ]
+                 ;; of a [:name:] inside closes only that.
                  (loop while (< j body-len)
-                       do (case (char body j)
-                            (#\\ (incf j 2))
-                            (#\] (return j))
-                            (t (incf j)))))))
+                       do (cond ((char= (char body j) #\\) (incf j 2))
+                                ((posix-class-end j) (setf j (posix-class-end j)))
+                                ((char= (char body j) #\]) (return j))
+                                (t (incf j))))))
+             (posix-class-end (j)
+               ;; The index after the ] of a [:name:] starting at J, or NIL.
+               (when (and (< (1+ j) body-len)
+                          (char= (char body j) #\[)
+                          (char= (char body (1+ j)) #\:))
+                 (let ((close (search ":]" body :start2 (+ j 2))))
+                   (and close (+ close 2))))))
       (emit (if anchored-p "^" "(?:^|/)"))
       (loop while (< i body-len)
             do (let ((char (char body i)))
@@ -324,18 +354,30 @@ gen/* and gen/** match what is in gen/, not gen/ itself."
                       (emit (if negated "[^/" "["))
                       (loop with k = (if negated (1+ start) start)
                             while (< k end)
-                            do (let ((member (char body k))
-                                     (escaped nil))
-                                 ;; \x is the member x, - included: never a range.
-                                 (when (and (char= member #\\) (< (1+ k) end))
-                                   (setf member (char body (1+ k))
-                                         escaped t)
-                                   (incf k))
-                                 (when (or (find member "\\[]^")
-                                           (and escaped (char= member #\-)))
-                                   (vector-push-extend #\\ result))
-                                 (vector-push-extend member result)
-                                 (incf k)))
+                            do (if (posix-class-end k)
+                                   ;; [:name:] is its characters; a name git
+                                   ;; does not know makes the pattern match
+                                   ;; nothing, as in git.
+                                   (let ((members (posix-class-members
+                                                   (subseq body (+ k 2)
+                                                           (- (posix-class-end k) 2)))))
+                                     (if members
+                                         (emit members)
+                                         (setf never t))
+                                     (setf k (posix-class-end k)))
+                                   (let ((member (char body k))
+                                         (escaped nil))
+                                     ;; \x is the member x, - included: never a
+                                     ;; range.
+                                     (when (and (char= member #\\) (< (1+ k) end))
+                                       (setf member (char body (1+ k))
+                                             escaped t)
+                                       (incf k))
+                                     (when (or (find member "\\[]^")
+                                               (and escaped (char= member #\-)))
+                                       (vector-push-extend #\\ result))
+                                     (vector-push-extend member result)
+                                     (incf k))))
                       (emit "]")
                       (setf i (1+ end))))
                    (t
@@ -346,7 +388,7 @@ gen/* and gen/** match what is in gen/, not gen/ itself."
       ;; because its directory is (PATH-IGNORED-P), so a later ! line that
       ;; takes a directory back in takes nothing else with it.
       (emit (if directory-p "/$" "/?$")))
-    result))
+    (if never "(?!)" result)))
 
 (defun parse-gitignore (gitignore-path)
   "Parse a .gitignore file and return its patterns in file order, each a regex
