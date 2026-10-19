@@ -162,8 +162,8 @@ fixture did not create, so the cleanup fails while the body unwinds."
                          cl-mcp/src/utils/sanitize:sanitize-for-json
                          cl-mcp/src/utils/sanitize:sanitize-error-message)))
     (ok (= 3 (length (contract-names))))
-    (ok (= 53 (length (property-names))))
-    (ok (= 53 (length (remove-duplicates (property-names)))))
+    (ok (= 54 (length (property-names))))
+    (ok (= 54 (length (remove-duplicates (property-names)))))
     (ok (%same-names-p (remove-if-not (lambda (name)
                                         (string= "CL-MCP/SPECS/CONCURRENCY"
                                                  (package-name (symbol-package name))))
@@ -195,9 +195,11 @@ fixture did not create, so the cleanup fails while the body unwinds."
                                                  (package-name (symbol-package name))))
                                       (property-names))
                        (cl-mcp/specs/write-paths:property-names))
-        "the write-path properties are the five of specs/write-paths.lisp")
+        "the write-path properties are the six of specs/write-paths.lisp")
     (ok (member 'cl-mcp/specs/write-paths::write-preserves-safe-spellings (property-names))
         "the safe-spelling relation is listed under its own name")
+    (ok (member 'cl-mcp/specs/write-paths::writer-keeps-the-file-mode (property-names))
+        "so is the file-mode property")
     (ok (equal (sort (mapcar #'symbol-name
                              (remove-if-not (lambda (name)
                                               (string= "CL-MCP/SPECS/CORE-RECORDS"

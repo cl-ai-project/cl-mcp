@@ -42,9 +42,17 @@
 ;;;; sending every spelling to one wrong file, does not pass as agreement.  It
 ;;;; adds no rule about what is allowed.
 ;;;;
+;;;; WRITER-KEEPS-THE-FILE-MODE adds the permission bits to what an allowed write
+;;;; must leave alone (issue #259): an existing file, reached directly or through
+;;;; a file link, keeps the mode it had, drawn from *FILE-MODES*, and a new file
+;;;; gets the bits OPEN gives any new file there.  The owner and group are fixed
+;;;; cases in tests/fs-test.lisp, since changing them takes a supplementary group
+;;;; or root, which a check cannot assume.
+;;;;
 ;;;; Fixed cases only (tests/write-path-specs-test.lisp): dangling links, a file
 ;;;; as an ancestor, no file name, an unset or unresolvable root.  Not covered:
-;;;; races with the filesystem (TOCTOU), permissions, ACLs, hard links, mount
+;;;; races with the filesystem (TOCTOU), a file the process may not write,
+;;;; setuid, setgid and sticky bits, ACLs, extended attributes, hard links, mount
 ;;;; namespaces, link chains and loops, Windows paths, and what the MCP tools do
 ;;;; around FS-WRITE-FILE.
 
@@ -71,6 +79,8 @@
                 #:expected-write-decision
                 #:validator-agrees-p
                 #:writer-agrees-p
+                #:draw-mode-write-case
+                #:writer-keeps-mode-p
                 #:expected-write-native
                 #:no-changes-p
                 #:draw-safe-spelling-case
@@ -96,17 +106,18 @@
     write-refuses-outside-and-absolute
     write-follows-existing-links
     writer-changes-only-the-expected-entries
+    writer-keeps-the-file-mode
     write-preserves-safe-spellings))
 
 (defun spec-names ()
   "Return the named data specs this file defines."
-  '(project-write-case refused-write-case link-write-case any-write-case
+  '(project-write-case refused-write-case link-write-case any-write-case mode-write-case
     safe-spelling-write-case))
 
 (defun generator-names ()
   "Return the custom generators this file defines."
   '(project-write-case-generator refused-write-case-generator
-    link-write-case-generator any-write-case-generator
+    link-write-case-generator any-write-case-generator mode-write-case-generator
     safe-spelling-write-case-generator))
 
 (defun call-examples ()
@@ -207,6 +218,23 @@ temporary file included -- or signals WRITE-PATH-REFUSED and changes nothing."
     (:trials (:smoke 3 :normal 12))
     (with-write-fixture (fixture case)
       (writer-agrees-p fixture case)))
+  (defgenerator mode-write-case-generator ()
+    "Draw a project write and a mode for its existing target (DRAW-MODE-WRITE-CASE)."
+    (draw-mode-write-case))
+  (defspec mode-write-case list
+    (:generator mode-write-case-generator))
+  (defproperty writer-keeps-the-file-mode
+      ((case mode-write-case))
+    "FS-WRITE-FILE replaces an existing file's bytes and not its permission
+bits: whichever of *FILE-MODES* the file had just before the write, reached
+directly or through a file link, it has after it.  A new file gets the bits
+OPEN gives any new file in its directory.  Every write also does exactly what
+WRITER-CHANGES-ONLY-THE-EXPECTED-ENTRIES demands of the tree."
+    (:about fs-write-file)
+    (:kind :preservation)
+    (:trials (:smoke 3 :normal 12))
+    (with-write-fixture (fixture (getf case :case))
+      (writer-keeps-mode-p fixture case)))
   (defgenerator safe-spelling-write-case-generator ()
     "Draw an allowed project write and the separator to double (DRAW-SAFE-SPELLING-CASE)."
     (draw-safe-spelling-case))
