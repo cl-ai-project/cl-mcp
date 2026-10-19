@@ -27,7 +27,9 @@
   (:import-from #:cl-mcp/src/paren-diagnostics
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis
-                #:format-overwrite-recovery)
+                #:format-overwrite-recovery
+                #:unreadable-dispatch-position
+                #:format-unreadable-dispatch)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
   (:import-from #:cl-mcp/src/utils/paths
@@ -924,6 +926,16 @@ because %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P opens it for exactly that case."
                     in this same process, and no tool registers one here, so no ~
                     structural edit of this file is possible. ~A"
                head (%rewrite-whole-file-instruction path)))
+      ((file-unparseable-unreadable-dispatch condition)
+       ;; No readtable reads it, so the readtable parameter is no way round
+       ;; it, and %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P opens the overwrite path.
+       ;; Not HEAD: the reader's message ends by recommending the readtable
+       ;; parameter, which cannot help here.
+       (format nil "Cannot parse ~A: ~A No structural edit of this file is possible. ~A"
+               path
+               (apply #'format-unreadable-dispatch
+                      (file-unparseable-unreadable-dispatch condition))
+               (%rewrite-whole-file-instruction path)))
       (t
        ;; The reader stopped on something other than a delimiter. When the
        ;; scan also found a delimiter problem, both are shown: the reader's
@@ -958,7 +970,13 @@ because %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P opens it for exactly that case."
                           :documentation
                           "The readtable the file's own (in-readtable ...) names, when this
 process cannot resolve it; NIL otherwise. Set by
-MAKE-FILE-UNPARSEABLE-CONDITION from the file's text."))
+MAKE-FILE-UNPARSEABLE-CONDITION from the file's text.")
+   (unreadable-dispatch :initarg :unreadable-dispatch :initform nil
+                        :reader file-unparseable-unreadable-dispatch
+                        :documentation
+                        "(LINE COLUMN SUB-CHAR) of a # no standard readtable reads
+(UNREADABLE-DISPATCH-POSITION), when the reader failed on something other than
+a delimiter and no readtable was supplied; NIL otherwise."))
   (:report (lambda (c s) (write-string (file-unparseable-message c) s)))
   (:documentation "Signaled when the target file cannot be parsed into top-level forms.
 RECOVERABLE is T when the failure is a delimiter problem (missing or stray
@@ -1006,6 +1024,13 @@ the forms it could still show."
                   :unavailable-readtable
                   (and (typep cause 'readtable-unavailable)
                        (readtable-unavailable-designator cause))
+                  :unreadable-dispatch
+                  (and (null readtable)
+                       (not (%delimiter-failure-p cause))
+                       (not (typep cause 'readtable-unavailable))
+                       (multiple-value-bind (line column sub-char)
+                           (unreadable-dispatch-position text)
+                         (and line (list line column sub-char))))
                   :cause (sanitize-condition-text cause)))
 
 (defun signal-file-unparseable (abs text cause &key readtable editable-prefix)
@@ -1536,7 +1561,11 @@ The second value says why: :DELIMITER (the primary value is T), :PARSED (the
 file parses cleanly, so a scan verdict against it is a false positive),
 :READER-LEVEL (it fails, but not on a delimiter, and a readtable this process
 has could still make it editable), :READTABLE-UNAVAILABLE (the primary value
-is T; see above), or :TRUNCATED. The third
+is T; see above), :UNREADABLE-DISPATCH (the primary value is T: the file
+declares no readtable and holds a #<, #) or # and whitespace, which the standard
+makes the reader reject, per UNREADABLE-DISPATCH-POSITION -- an object printed
+unreadably and pasted as source, which no readtable parameter can fix either),
+or :TRUNCATED. The third
 value is T when the failing parse still returned forms (the lenient
 CL-reader pass after an IN-READTABLE switch keeps the forms before the
 breakage), so those forms remain editable with lisp-edit-form and the
@@ -1561,15 +1590,18 @@ by lisp-check-parens so its next-step hint rests on the same verdict."
                      (values t :delimiter (and nodes t)))
                     ((typep swallowed 'readtable-unavailable)
                      (values t :readtable-unavailable (and nodes t)))
+                    ((unreadable-dispatch-position source)
+                     (values t :unreadable-dispatch (and nodes t)))
                     (t (values nil :reader-level (and nodes t)))))
           (readtable-unavailable ()
             ;; Reached only with a caller-supplied readtable, which this
             ;; hook never passes; kept so the classification is total.
             (values t :readtable-unavailable nil))
           (error (e)
-            (if (%delimiter-failure-p e)
-                (values t :delimiter nil)
-                (values nil :reader-level nil)))))))
+            (cond ((%delimiter-failure-p e) (values t :delimiter nil))
+                  ((unreadable-dispatch-position source)
+                   (values t :unreadable-dispatch nil))
+                  (t (values nil :reader-level nil))))))))
 
 ;; Register at load time so fs-write-file's overwrite guard agrees with the
 ;; edit tools about which files are unparseable.
