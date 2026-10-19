@@ -80,6 +80,9 @@
            #:validator-refuses-p
            #:validator-agrees-p
            #:writer-agrees-p
+           #:*file-modes*
+           #:draw-mode-write-case
+           #:writer-keeps-mode-p
            #:*safe-spellings*
            #:draw-safe-spelling-case
            #:safe-spelling-variants
@@ -419,6 +422,76 @@ the whole tree; a refused one signals WRITE-PATH-REFUSED and changes nothing."
        (and (getf observed :refused)
             (no-changes-p changes)
             t)))))
+
+(defparameter *file-modes* '(#o600 #o640 #o644 #o664 #o700 #o750 #o755 #o775)
+  "Permission bits a mode check gives an existing target just before the write.
+Each keeps the owner's read and write, so the check itself can still list and
+remove the file; they differ in execute and in the group and other bits.  No
+setuid, setgid or sticky bit: the kernel drops setgid from a file whose group
+the process is not in, whoever writes it.")
+
+(defun draw-mode-write-case ()
+  "Return (:CASE CASE :MODE MODE).  CASE writes inside the project: to a new
+or existing file reached directly, to an existing one, or to an existing one
+through a file link at the root of project/; spelled relative, as a relative
+pathname or, when reached directly, with a detour.  MODE, one of
+*FILE-MODES*, is given to an existing target just before the write."
+  ;; LET* draws in order, so a seed replays the same case.
+  (let* ((shape (random 3))
+         (case (ecase shape
+                 (0 (write-case (draw-write-target :project)
+                                :spelling (%pick '(:relative :relative-pathname :detour))
+                                :root-alias (%chance 30)))
+                 (1 (write-case (draw-write-target :project :new-dirs-percent 0
+                                                            :existing-percent 100)
+                                :spelling (%pick '(:relative :relative-pathname :detour))
+                                :root-alias (%chance 30)))
+                 (2 (write-case (draw-write-target :project :new-dirs-percent 0
+                                                            :existing-percent 100)
+                                :link (list :region :project :kind :file
+                                            :name (%pick *link-names*))
+                                :spelling (%pick '(:relative :relative-pathname))
+                                :root-alias (%chance 30)))))
+         (mode (%pick *file-modes*)))
+    (list :case case :mode mode)))
+
+(defun %file-mode (native)
+  "Return the permission bits of the file at the native path NATIVE, following
+a link."
+  (logand #o7777 (sb-posix:stat-mode (sb-posix:stat native))))
+
+(defun %default-file-mode (native)
+  "Return the permission bits OPEN gives a new file in the directory of the
+native path NATIVE -- #o666 less the process's umask -- by creating one there.
+The fixture removes it with the rest of the tree."
+  (let ((control (concatenate 'string
+                              (subseq native 0 (1+ (position #\/ native :from-end t)))
+                              ".mode-control")))
+    (with-open-file (stream (uiop:parse-native-namestring control)
+                            :direction :output :if-exists :supersede
+                            :if-does-not-exist :create)
+      (declare (ignorable stream)))
+    (%file-mode control)))
+
+(defun writer-keeps-mode-p (fixture mode-case &optional (contents *write-contents*))
+  "True when FS-WRITE-FILE, given a fresh argument for MODE-CASE's case, does
+what WRITER-AGREES-P demands and, when the write is allowed, leaves the file
+with the expected permission bits: an existing file keeps the MODE it was given
+just before the call, and a new file gets the bits OPEN gives a new file in its
+directory.  Reading the bits after WRITER-AGREES-P has judged the tree keeps
+the control file out of its listings."
+  (let* ((case (getf mode-case :case))
+         (existing (getf (getf case :target) :leaf-exists))
+         (allowed (eq :allowed (expected-write-decision case)))
+         (native (and allowed (expected-write-native fixture case))))
+    (when (and allowed existing)
+      (sb-posix:chmod native (getf mode-case :mode)))
+    (and (writer-agrees-p fixture case contents)
+         (or (not allowed)
+             (= (%file-mode native)
+                (if existing
+                    (getf mode-case :mode)
+                    (%default-file-mode native)))))))
 
 ;;; ------------------------------------------------------------------------
 ;;; Safe spellings of one allowed target

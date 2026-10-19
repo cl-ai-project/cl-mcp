@@ -1170,6 +1170,7 @@ the argument as it is after the call cannot see."
         (link-writes (%bundle-name :property "WRITE-FOLLOWS-EXISTING-LINKS"))
         (writes (%bundle-name :property "WRITER-CHANGES-ONLY-THE-EXPECTED-ENTRIES"))
         (spellings (%bundle-name :property "WRITE-PRESERVES-SAFE-SPELLINGS"))
+        (modes (%bundle-name :property "WRITER-KEEPS-THE-FILE-MODE"))
         (availability (%bundle-name :property
                                     "CORE-RECORD-AVAILABILITY-SEPARATES-ABSENCE-FROM-NIL"))
         (seeds (%bundle-name :property "CORE-RECORD-SEEDS-STAY-DECIMAL-TEXT"))
@@ -1313,6 +1314,15 @@ the argument as it is after the call cannot see."
            :replacement (%write-path-misreading-doubled-separators real-write)
            :targets (list (list :property spellings) (list :property project-writes))
            :must-fail (list (list :property spellings)))
+     ;; The tree's listings compare bytes, not permission bits, so only the mode
+     ;; property can see a write that carries nothing of the replaced file over.
+     (list :function 'cl-mcp/src/fs::%carry-file-attributes
+           :description "carries nothing of the replaced file over, as before issue #259"
+           :replacement (lambda (fd status pn)
+                          (declare (ignore fd status pn))
+                          nil)
+           :targets (list (list :property modes) (list :property writes))
+           :must-fail (list (list :property modes)))
      ;; Record fidelity.  Each wrong function calls the real one and bends one
      ;; rule of its answer, so the fault is that rule and nothing else.  The
      ;; properties call these functions on records they build; nothing reaches

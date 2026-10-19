@@ -3,7 +3,7 @@
 (defpackage #:cl-mcp/tests/fs-test
   (:use #:cl)
   (:import-from #:rove
-                #:deftest #:testing #:ok #:ng)
+                #:deftest #:testing #:ok #:ng #:skip)
   (:import-from #:uiop #:getcwd #:ensure-directory-pathname
                 #:merge-pathnames* #:native-namestring)
   (:import-from #:bordeaux-threads
@@ -31,6 +31,10 @@
   ;; tests below drive a real lisp-edit-form against it.
   (:import-from #:cl-mcp/src/lisp-edit-form
                 #:lisp-edit-form)
+  ;; Both structural editors write through FS-WRITE-FILE, so the mode tests
+  ;; below drive each of them as well (issue #259).
+  (:import-from #:cl-mcp/src/lisp-patch-form
+                #:lisp-patch-form)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-read-source-text
@@ -527,6 +531,84 @@ summary text and the result hash."
            (content (and payload (gethash "content" payload))))
       (values (and content (plusp (length content)) (gethash "text" (aref content 0)))
               payload))))
+
+(defun %status (abs)
+  "The SB-POSIX:STAT of the file at the absolute pathname ABS."
+  (sb-posix:stat (native-namestring abs)))
+
+(defun %mode (abs)
+  "The permission bits of the file at the absolute pathname ABS."
+  (logand #o7777 (sb-posix:stat-mode (%status abs))))
+
+(defmacro with-owned-scratch-file ((abs relative content) &body body)
+  "Run BODY under the test project root with ABS bound to the absolute pathname
+of RELATIVE, written with CONTENT by FS-WRITE-FILE first; delete it after."
+  `(with-test-project-root
+     (let ((,abs (merge-pathnames ,relative cl-mcp/src/project-root:*project-root*)))
+       (unwind-protect
+            (progn
+              (ensure-directories-exist ,abs)
+              (fs-write-file ,relative ,content)
+              ,@body)
+         (ignore-errors (delete-file ,abs))))))
+
+(deftest write-tools-keep-the-file-mode
+  ;; Issue #259: every write replaced the file with a fresh temporary one, so
+  ;; the file took the umask's bits whichever tool wrote it.
+  (with-owned-scratch-file (abs "tests/tmp/keeps-mode.lisp"
+                                (format nil "(defun keeps-mode (x)~%  x)~%"))
+    (sb-posix:chmod (native-namestring abs) #o755)
+    (fs-write-file "tests/tmp/keeps-mode.lisp"
+                   (format nil "(defun keeps-mode (x)~%  (1+ x))~%"))
+    (ok (= #o755 (%mode abs)) "fs-write-file keeps an executable executable")
+    (sb-posix:chmod (native-namestring abs) #o750)
+    (lisp-edit-form :file-path (native-namestring abs) :form-type "defun"
+                    :form-name "keeps-mode" :operation "replace"
+                    :content (format nil "(defun keeps-mode (x)~%  (+ x 2))"))
+    (ok (= #o750 (%mode abs)) "so does lisp-edit-form")
+    (sb-posix:chmod (native-namestring abs) #o600)
+    (lisp-patch-form :file-path (native-namestring abs) :form-type "defun"
+                     :form-name "keeps-mode" :old-text "(+ x 2)" :new-text "(+ x 3)")
+    (ok (= #o600 (%mode abs)) "and lisp-patch-form keeps a private file private")
+    (ok (search "(+ x 3)" (uiop:read-file-string abs)) "while each edit landed")))
+
+(defun %other-group ()
+  "A group this process is in besides its effective one, or NIL."
+  (let ((egid (sb-posix:getegid)))
+    (find-if (lambda (gid) (and gid (/= gid egid)))
+             (mapcar (lambda (field) (parse-integer field :junk-allowed t))
+                     (uiop:split-string
+                      (string-trim '(#\Space #\Newline)
+                                   (or (ignore-errors
+                                        (uiop:run-program '("id" "-G") :output :string))
+                                       ""))
+                      :separator " ")))))
+
+(deftest fs-write-file-keeps-a-group-the-process-is-in
+  ;; Any process may give its own file a group it is in, so the group is kept
+  ;; without root.
+  (let ((gid (%other-group)))
+    (if (null gid)
+        (skip "this process is in no group but its effective one")
+        (with-owned-scratch-file (abs "tests/tmp/keeps-group.txt" "before")
+          (sb-posix:chown (native-namestring abs) (sb-posix:geteuid) gid)
+          (fs-write-file "tests/tmp/keeps-group.txt" "after")
+          (ok (= gid (sb-posix:stat-gid (%status abs))) "the group is kept")
+          (ok (string= "after" (uiop:read-file-string abs)) "and the content changed")))))
+
+(deftest fs-write-file-keeps-the-owner-when-root
+  ;; The case reported in issue #259: a server running as root in a container
+  ;; edits files that belong to the host's user.
+  (if (/= 0 (sb-posix:geteuid))
+      (skip "only root may give a file to another owner")
+      (with-owned-scratch-file (abs "tests/tmp/keeps-owner.txt" "before")
+        (sb-posix:chown (native-namestring abs) 65534 65534)
+        (sb-posix:chmod (native-namestring abs) #o664)
+        (fs-write-file "tests/tmp/keeps-owner.txt" "after")
+        (let ((status (%status abs)))
+          (ok (= 65534 (sb-posix:stat-uid status)) "the owner is kept")
+          (ok (= 65534 (sb-posix:stat-gid status)) "the group is kept")
+          (ok (= #o664 (%mode abs)) "and the mode")))))
 
 (deftest fs-read-file-offset-and-limit-both-count-characters
   (testing "a multibyte character before the window does not shift it"

@@ -21,7 +21,7 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/utils/paths:allowed-read-path` | none (see *Read access*) | `read-allows-project-files-as-themselves`, `read-follows-dependency-registration`, `read-denies-unlisted-regions`, `read-judges-symlinks-by-their-target` |
 | `cl-mcp/src/utils/paths:resolve-readable-path` | none | the same four |
 | `cl-mcp/src/utils/paths:ensure-write-path` | none (see *Write access*) | `write-resolves-project-targets-without-creating`, `write-refuses-outside-and-absolute`, `write-follows-existing-links`, `writer-changes-only-the-expected-entries`, `write-preserves-safe-spellings` |
-| `cl-mcp/src/fs:fs-write-file` | none | `write-refuses-outside-and-absolute`, `writer-changes-only-the-expected-entries` |
+| `cl-mcp/src/fs:fs-write-file` | none | `write-refuses-outside-and-absolute`, `writer-changes-only-the-expected-entries`, `writer-keeps-the-file-mode` |
 | `cl-mcp/src/spec-core-record:field-availability` | none (see *Record fidelity*) | `core-record-availability-separates-absence-from-nil`, `core-record-ignores-order-duplicates-and-unknown-keys` |
 | `cl-mcp/src/spec-core-record:validate-versioned-record` | none | `core-record-validation-separates-ok-unsupported-malformed` |
 | `cl-mcp/src/spec-core-record:project-record` | none | `core-record-projects-each-field-by-its-role`, `core-record-seeds-stay-decimal-text`, `core-record-ignores-order-duplicates-and-unknown-keys`, `core-record-reports-every-cut` |
@@ -356,12 +356,38 @@ What changes for callers:
 - The check and the write are not atomic. A directory swapped for a symlink
   between them is not detected.
 
+### Owner and permission bits
+
+Every write puts a fresh temporary file in place with `rename`. Until issue
+#259, that file kept what `open` gave it: the server's user and group, and
+`#o666` less the umask. An executable lost its `x` bits, a private file became
+readable by everyone, and a server running as root in a container turned the
+host user's files into root's, which the user could then no longer write in
+place.
+
+`%write-string-to-file` now gives the temporary file the replaced file's owner,
+group and permission bits (`%carry-file-attributes`), before it writes any
+content into it. The owner and group go first, because changing them clears a
+setuid or setgid bit. Only root may give a file to another owner, and any
+other process only a group it is in. When the owner cannot be kept, the group
+is tried alone, and what could not be kept is logged as
+`fs.write.owner-not-kept`. Neither step can stop a write: a filesystem
+without POSIX permissions refuses both, and the file then ends up as a new
+file would. A new file still gets what `open` gives it.
+
+`writer-keeps-the-file-mode` checks the permission bits. The owner and group
+are fixed cases in `tests/fs-test.lisp`: the group one runs when the process
+is in a supplementary group, and the owner one only as root. ACLs, extended
+attributes and hard links are still not carried over, since `rename` replaces
+the inode.
+
 | Property | About | Checks |
 |---|---|---|
 | `write-resolves-project-targets-without-creating` | `ensure-write-path` | project targets (existing, new, below one or two new directories) are allowed as their real path, in relative, pathname and detour spellings, with or without a root alias; absolute spellings and a detour back over a new directory are refused; nothing is created |
 | `write-refuses-outside-and-absolute` | both | a target in the dependency, `outside/` or `project-other/` is refused before, during and after the dependency's registration, and `fs-write-file` refuses it while registered; a project control is allowed relative and refused absolute in every phase |
 | `write-follows-existing-links` | `ensure-write-path` | one link in `project/` or `outside/`, to the target's directory or to an existing target file, decides by where it leads, for new and existing targets alike; `..` right after a link is refused |
 | `writer-changes-only-the-expected-entries` | both | on any of the above, `fs-write-file` adds exactly the expected directories and file with exactly the bytes written, or replaces the existing file's bytes, and nothing else in the tree changes, temporary files included; or it refuses and nothing changes |
+| `writer-keeps-the-file-mode` | `fs-write-file` | a write inside the project, to an existing file reached directly or through a file link, leaves the file with the permission bits it had just before (drawn from `#o600` to `#o775`, owner-writable, no setuid, setgid or sticky bit); a new file gets the bits `open` gives any new file in its directory; and the tree changes exactly as for the property above |
 
 ### Observing writes
 
@@ -1930,7 +1956,7 @@ spec-check   {"property": "cl-mcp/specs/paths::read-denies-unlisted-regions",
 ```
 
 The write boundary works the same way; run `symbol=` on each function, since
-`fs-write-file` has two of the four properties:
+`fs-write-file` has three of the six properties:
 
 ```text
 spec-symbol  {"symbol": "cl-mcp/src/utils/paths:ensure-write-path"}

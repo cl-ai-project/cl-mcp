@@ -421,9 +421,48 @@ cleanup), not overwritten by the next write."
                    :type "tmp"
                    :defaults pn)))
 
+(defun %existing-file-status (pn)
+  "Return the SB-POSIX:STAT of the file PN names, or NIL when there is none.
+PN is the real path ENSURE-WRITE-PATH returned, and it is passed natively, so a
+bracket or an asterisk stays part of the name."
+  (handler-case (sb-posix:stat (uiop:native-namestring pn))
+    (sb-posix:syscall-error () nil)))
+
+(defun %carry-file-attributes (fd status pn)
+  "Give the file open on FD the owner, group and permission bits in STATUS, the
+SB-POSIX:STAT of PN, the file it is about to replace (issue #259).
+
+The owner and group go first, since changing them clears a setuid or setgid
+bit, and the bits last.  Only root may give a file to another owner, and any
+other process only a group it is in: when the owner cannot be kept the group is
+tried alone, and what could not be kept is logged.  Neither step stops the
+write -- a filesystem without POSIX permissions refuses both -- so at worst the
+file ends up as a new file would, which is what every write did before."
+  (let ((uid (sb-posix:stat-uid status))
+        (gid (sb-posix:stat-gid status)))
+    (handler-case (sb-posix:fchown fd uid gid)
+      (sb-posix:syscall-error ()
+        (let ((group-kept (handler-case
+                              ;; (uid_t) -1 leaves the owner as it is.
+                              (progn (sb-posix:fchown fd (ldb (byte 32 0) -1) gid) t)
+                            (sb-posix:syscall-error () nil))))
+          (log-event :info "fs.write.owner-not-kept"
+                     "path" (namestring pn)
+                     "uid" uid
+                     "gid" gid
+                     "group_kept" (if group-kept "true" "false"))))))
+  (handler-case (sb-posix:fchmod fd (logand #o7777 (sb-posix:stat-mode status)))
+    (sb-posix:syscall-error ()
+      (log-event :info "fs.write.mode-not-kept" "path" (namestring pn)))))
+
 (defun %write-string-to-file (pn content)
   "Write CONTENT to PN atomically via write-to-temp-then-rename.
 On failure the original file is preserved.
+
+When PN already exists, the temp file takes its permission bits and, as far as
+the process may set them, its owner and group (%CARRY-FILE-ATTRIBUTES) before
+any content is written, so a write changes the content and not who may read,
+write or run the file.  A new file gets what OPEN gives it, as before.
 
 The temp file is unique to this call (%TEMP-PATHNAME-FOR) and the cleanup
 deletes only that file, so concurrent writers in the same directory cannot
@@ -432,7 +471,8 @@ nothing on its own; it does not order two writes. A caller that must not lose
 another writer's change takes CL-MCP/SRC/FS:WITH-FILE-LOCK around its whole
 read-modify-write, as FS-WRITE-FILE does."
   (ensure-directories-exist pn)
-  (let ((tmp (%temp-pathname-for pn)))
+  (let ((tmp (%temp-pathname-for pn))
+        (original (%existing-file-status pn)))
     (unwind-protect
          (progn
            (with-open-file (out tmp
@@ -440,6 +480,8 @@ read-modify-write, as FS-WRITE-FILE does."
                                 :if-exists :supersede
                                 :if-does-not-exist :create
                                 :element-type 'character)
+             (when original
+               (%carry-file-attributes (sb-sys:fd-stream-fd out) original pn))
              (write-string content out)
              (finish-output out))
            ;; RENAME-FILE merges the new name with TMP, so a PN without a

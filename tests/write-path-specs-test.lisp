@@ -46,6 +46,8 @@
                 #:same-entries-p
                 #:validator-agrees-p
                 #:writer-agrees-p
+                #:draw-mode-write-case
+                #:writer-keeps-mode-p
                 #:expected-write-native
                 #:*safe-spellings*
                 #:draw-safe-spelling-case
@@ -379,6 +381,46 @@ dleaf -> nothing.txt, doleaf -> ../outside/nothing.txt."
                          :added `(("project/n1/" :directory nil)
                                   ("project/n1/new.txt" :file ,(octets *write-contents*)))))))
 
+(defun file-mode (native)
+  "The permission bits of the file at NATIVE, following a link."
+  (logand #o7777 (sb-posix:stat-mode (sb-posix:stat native))))
+
+(deftest writer-keeps-the-mode-of-an-existing-file
+  ;; Issue #259: the write went through a fresh temporary file that the rename
+  ;; put in place, so the file took the umask's bits -- an executable lost its
+  ;; x bits and a private file became readable by everyone.
+  (with-table-tree (fixture)
+    (let ((a (real-path fixture "project/src/a.txt"))
+          (plain (real-path fixture "project/plain.txt")))
+      (sb-posix:chmod a #o755)
+      (ok (wrote-exactly-p (write-to fixture "src/a.txt")
+                           :changed `(("project/src/a.txt" :file ,(octets *write-contents*)))))
+      (ok (= #o755 (file-mode a)) "an executable stays executable")
+      (sb-posix:chmod a #o600)
+      (ok (wrote-exactly-p (write-to fixture "link-リンク" "through the link")
+                           :changed `(("project/src/a.txt" :file
+                                                           ,(octets "through the link")))))
+      (ok (= #o600 (file-mode a)) "a private file written through a file link stays private")
+      (sb-posix:chmod plain #o664)
+      (write-to fixture "plain.txt")
+      (ok (= #o664 (file-mode plain)) "a group-writable file stays group-writable")))
+  (with-tree (fixture :places (list (place :project '() "Makefile")))
+    (let ((makefile (real-path fixture "project/Makefile")))
+      (sb-posix:chmod makefile #o750)
+      (write-to fixture "Makefile")
+      (ok (= #o750 (file-mode makefile)) "so does a file without a type"))))
+
+(deftest writer-gives-a-new-file-the-default-mode
+  (with-tree (fixture :places (list (place :project '("src") "a" "txt")))
+    (ok (wrote-exactly-p (write-to fixture "src/new.txt")
+                         :added `(("project/src/new.txt" :file ,(octets *write-contents*)))))
+    (let ((control (real-path fixture "project/src/control.txt")))
+      (with-open-file (stream (uiop:parse-native-namestring control)
+                              :direction :output :if-does-not-exist :create)
+        (declare (ignorable stream)))
+      (ok (= (file-mode control) (file-mode (real-path fixture "project/src/new.txt")))
+          "a new file gets what OPEN gives any new file there"))))
+
 (deftest writer-refusals-change-nothing
   (with-table-tree (fixture)
     (add-dangling-links fixture)
@@ -553,6 +595,14 @@ dleaf -> nothing.txt, doleaf -> ../outside/nothing.txt."
         (with-write-fixture (fixture case)
           (ok (validator-agrees-p fixture case) (prin1-to-string case))
           (ok (writer-agrees-p fixture case) (prin1-to-string case)))))))
+
+(deftest generated-mode-write-cases-agree-on-a-fixed-sample
+  ;; WRITER-KEEPS-THE-FILE-MODE's body on a fixed sample, without cl-spec.
+  (let ((*random-state* (sb-ext:seed-random-state 20261020)))
+    (dotimes (i 6)
+      (let ((mode-case (draw-mode-write-case)))
+        (with-write-fixture (fixture (getf mode-case :case))
+          (ok (writer-keeps-mode-p fixture mode-case) (prin1-to-string mode-case)))))))
 
 (defun spelling-case (target doubled &rest options)
   "A write case for TARGET with OPTIONS, whose repeated-separator spelling

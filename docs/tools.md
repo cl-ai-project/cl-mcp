@@ -446,6 +446,13 @@ After a `.lisp`/`.asd` file is written its content is parsed: the write still su
 when the file does not parse the response adds `unparseable: true`, a `WARNING` with the
 diagnosis, and a reminder that the next write to it needs `allow_unparseable_overwrite`.
 
+Ownership: the write goes to a temporary file that is then renamed over the target. Replacing an
+existing file keeps its permission bits and, as far as the server's user may set them, its owner
+and group: all three when the server runs as root, otherwise the group when the server's user is
+in it. What could not be kept is logged as `fs.write.owner-not-kept`. A new file gets the server
+user's owner and `#o666` less its umask. `lisp-edit-form` and `lisp-patch-form` write the same
+way. Running in a container: see the README's *Running in a Container*.
+
 Policy: writes outside the project root are rejected. An existing `.lisp`/`.asd` file is never
 overwritten by default (`existing_lisp_overwrite_forbidden`; use `lisp-edit-form`). With
 `allow_unparseable_overwrite: true` the file is parsed first, and the write is allowed in three

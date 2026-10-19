@@ -361,6 +361,40 @@ Known v1 limitations:
   stays alive) keeps the runtime owned by that session (no migration) but is not
   auto-retried on the same worker — recover it with `pool-kill-worker`.
 
+## Running in a Container
+
+When cl-mcp runs in a container and the project is bind-mounted into it, the
+files it writes belong to the user the server runs as. Editing an existing file
+keeps that file's permission bits and, when the server runs as root, its owner
+and group too; as another user it keeps the group when that user is in it, and
+the file becomes the server user's otherwise. A **new** file or directory always
+belongs to the server's user, so a server running as root leaves root-owned
+files in your working tree that you cannot edit in place.
+
+Run the container as your own user, so that every file the server writes is
+yours:
+
+```bash
+docker run --rm -it \
+  --user "$(id -u):$(id -g)" \
+  -e HOME=/tmp/cl-mcp-home \
+  -v "$PWD":"$PWD" -w "$PWD" \
+  your-cl-mcp-image
+```
+
+With Docker Compose, set `user: "1000:1000"` (your `id -u` and `id -g`) on the
+service.
+
+- Your user has to be able to read the image's Lisp installation (Roswell,
+  Quicklisp), and to write a home directory and ASDF's FASL cache
+  (`~/.cache/common-lisp`). Point `HOME` at a writable directory as above, or
+  mount a volume there, so the cache survives restarts.
+- Mount the project directory, not single files. Every write replaces the file
+  with `rename`, and the kernel refuses to rename onto a file that is itself a
+  bind mount (`EBUSY`).
+- Mounting the project at the same path as on the host, as above, keeps the
+  paths the server reports valid on the host.
+
 ## Security Model
 
 **cl-mcp is a trusted, localhost-only development tool.** `repl-eval` executes
