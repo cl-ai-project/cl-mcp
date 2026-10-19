@@ -939,22 +939,29 @@ names returned are strings and stay valid after the package is deleted."
               (let ((*read-eval* nil)
                     (*package* (or scan-package own-package))
                     (names nil))
-                (loop
-                 (let ((form (handler-case (read stream nil :eof)
-                               (error () :eof))))
-                   (when (eq form :eof) (return))
-                   (when (and (consp form)
-                              (symbolp (car form))
-                              (or (string= (symbol-name (car form)) "DEFPACKAGE")
-                                  (string= (symbol-name (car form)) "DEFINE-PACKAGE"))
-                              (consp (cdr form)))
-                     (let ((name-form (second form)))
-                       (push
-                        (cond
-                          ((stringp name-form) name-form)
-                          ((symbolp name-form) (symbol-name name-form))
-                          (t nil))
-                        names)))))
+                (labels ((note (form)
+                           (when (and (consp form) (symbolp (car form)))
+                             (let ((head (symbol-name (car form))))
+                               (cond
+                                 ((and (member head '("DEFPACKAGE" "DEFINE-PACKAGE")
+                                               :test #'string=)
+                                       (consp (cdr form)))
+                                  (let ((name-form (second form)))
+                                    (push (cond ((stringp name-form) name-form)
+                                                ((symbolp name-form) (symbol-name name-form))
+                                                (t nil))
+                                          names)))
+                                 ;; Still top level: a DEFPACKAGE inside one is
+                                 ;; the file's as much as a bare one.
+                                 ((and (string= head "EVAL-WHEN") (listp (cdr form)))
+                                  (mapc #'note (cddr form)))
+                                 ((member head '("PROGN" "LOCALLY") :test #'string=)
+                                  (mapc #'note (cdr form))))))))
+                  (loop
+                   (let ((form (handler-case (read stream nil :eof)
+                                 (error () :eof))))
+                     (when (eq form :eof) (return))
+                     (note form))))
                 (remove-if-not #'stringp (nreverse names))))
           (error () nil))
       (when own-package

@@ -1780,60 +1780,70 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
   ;; A test compiled under repl-eval names no file, so it was dropped whenever a
   ;; reloaded file defined its package -- a dependency's too, which the reload
   ;; does not make again: its failing test vanished and the run read as a pass.
+  ;; The dependency's DEFPACKAGE may be wrapped in an EVAL-WHEN, too.
   (if (null (asdf:find-system "fiveam" nil))
       (rove:skip "FiveAM is not installed")
-      (let ((dir (uiop:ensure-directory-pathname
-                  (uiop:merge-pathnames*
-                   (format nil "cl-mcp-fiveam-share-~A/" (random 1000000))
-                   (uiop:temporary-directory))))
-            (package-text "(defpackage #:fiveam-share-probe/tests (:use #:cl #:fiveam))
+      (dolist (wrap '(nil t))
+        (testing (format nil "the dependency's defpackage ~:[bare~;in an eval-when~]" wrap)
+          (let ((dir (uiop:ensure-directory-pathname
+                      (uiop:merge-pathnames*
+                       (format nil "cl-mcp-fiveam-share-~A/" (random 1000000))
+                       (uiop:temporary-directory))))
+                (defpackage-text
+                  "(defpackage #:fiveam-share-probe/tests (:use #:cl #:fiveam))")
+                (in-package-text "
 (in-package #:fiveam-share-probe/tests)
 "))
-        (asdf:load-system "fiveam")
-        (unwind-protect
-             (progn
-               (ensure-directories-exist dir)
-               (%write-fixture-file
-                dir "fiveam-share-probe-dep.asd"
-                "(asdf:defsystem \"fiveam-share-probe-dep\" :depends-on (\"fiveam\")
+            (asdf:load-system "fiveam")
+            (unwind-protect
+                 (progn
+                   (ensure-directories-exist dir)
+                   (%write-fixture-file
+                    dir "fiveam-share-probe-dep.asd"
+                    "(asdf:defsystem \"fiveam-share-probe-dep\" :depends-on (\"fiveam\")
   :components ((:file \"dep\")))")
-               (%write-fixture-file
-                dir "dep.lisp"
-                (concatenate 'string package-text
-                             "(def-suite :fiveam-share-probe)
+                   (%write-fixture-file
+                    dir "dep.lisp"
+                    (concatenate 'string
+                                 (if wrap
+                                     (format nil "(eval-when (:compile-toplevel :load-toplevel ~
+                                                  :execute)~%  ~A)" defpackage-text)
+                                     defpackage-text)
+                                 in-package-text
+                                 "(def-suite :fiveam-share-probe)
 (in-suite :fiveam-share-probe)
 (test dep-fails (is (= 1 2)))
 "))
-               (%write-fixture-file
-                dir "fiveam-share-probe.asd"
-                "(asdf:defsystem \"fiveam-share-probe\"
+                   (%write-fixture-file
+                    dir "fiveam-share-probe.asd"
+                    "(asdf:defsystem \"fiveam-share-probe\"
   :depends-on (\"fiveam\" \"fiveam-share-probe-dep\")
   :components ((:file \"main\")))")
-               (%write-fixture-file
-                dir "main.lisp"
-                (concatenate 'string package-text
-                             "(in-suite :fiveam-share-probe)
+                   (%write-fixture-file
+                    dir "main.lisp"
+                    (concatenate 'string defpackage-text in-package-text
+                                 "(in-suite :fiveam-share-probe)
 (test main-passes (is (= 1 1)))
 "))
-               (let ((asdf:*central-registry* (cons dir asdf:*central-registry*)))
-                 ;; FASLs written in the second of their sources are deleted
-                 ;; by run-tests, which would reload the dependency too.
-                 (sleep 1.5)
-                 ;; Through repl-eval, as an agent would: its compilation unit
-                 ;; names every function's source "repl-eval".
-                 (cl-mcp/src/repl-core:repl-eval
-                  "(asdf:load-system \"fiveam-share-probe\")")
-                 (let ((result (run-tests "fiveam-share-probe")))
-                   (ok (eql 1 (gethash "passed" result)))
-                   (ok (eql 1 (gethash "failed" result))
-                       (format nil "the dependency's failing test still counts: ~S failed"
-                               (gethash "failed" result))))))
-          (let ((var (uiop:find-symbol* '#:*toplevel-suites* :fiveam)))
-            (setf (symbol-value var) (remove :fiveam-share-probe (symbol-value var))))
-          (dolist (name '("fiveam-share-probe" "fiveam-share-probe-dep"))
-            (ignore-errors (asdf:clear-system name)))
-          (ignore-errors (delete-package "FIVEAM-SHARE-PROBE/TESTS"))
-          (ignore-errors (uiop:delete-directory-tree dir :validate t))))))
+                   (let ((asdf:*central-registry* (cons dir asdf:*central-registry*)))
+                     ;; FASLs written in the second of their sources are deleted
+                     ;; by run-tests, which would reload the dependency too.
+                     (sleep 1.5)
+                     ;; Through repl-eval, as an agent would: its compilation
+                     ;; unit names every function's source "repl-eval".
+                     (cl-mcp/src/repl-core:repl-eval
+                      "(asdf:load-system \"fiveam-share-probe\")")
+                     (let ((result (run-tests "fiveam-share-probe")))
+                       (ok (eql 1 (gethash "passed" result)))
+                       (ok (eql 1 (gethash "failed" result))
+                           (format nil "the dependency's failing test still counts: ~S failed"
+                                   (gethash "failed" result))))))
+              (let ((var (uiop:find-symbol* '#:*toplevel-suites* :fiveam)))
+                (setf (symbol-value var) (remove :fiveam-share-probe (symbol-value var))))
+              (dolist (name '("fiveam-share-probe" "fiveam-share-probe-dep"))
+                (ignore-errors (asdf:clear-system name)))
+              (ignore-errors (delete-package "FIVEAM-SHARE-PROBE/TESTS"))
+              (ignore-errors (uiop:delete-directory-tree dir :validate t))))))))
 
 (defun %call-with-inferred-test-fixture (primary framework file-text thunk)
   "Write a package-inferred PRIMARY to a fresh directory on ASDF's central
