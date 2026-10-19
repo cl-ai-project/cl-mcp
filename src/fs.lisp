@@ -759,7 +759,9 @@ characters, so a window can be paged through without loading the whole file.
 At most 1048576 characters are read in one call. Whenever text is left past
 the returned window -- because of limit or that cap -- the text ends with a
 [TRUNCATED: ... Use offset=N to read more.] line and the result carries
-truncated, next_offset, file_length (bytes) and read_length.
+truncated, next_offset, file_length (bytes) and read_length.  An empty answer
+says why: [Nothing read: offset N is at or past the end of the file.], or that
+the limit was 0, or that the file is empty.
 It can only open files in the project or in loaded dependent libraries.
 
 For .lisp and .asd files, prefer 'lisp-read-file' instead - it provides
@@ -784,13 +786,22 @@ collapsed signatures view that saves ~70% of context window tokens."
            (next-offset (and more (+ (or offset 0) (length content-string))))
            (ht (make-ht "content"
                         (text-content
-                         (if more
-                             (format nil "~A~%~%[TRUNCATED: showing ~:D characters from ~
-                                          offset ~:D~@[ of a ~:D-byte file~]. Use ~
-                                          offset=~D to read more.]"
-                                     content-string (length content-string) (or offset 0)
-                                     file-length next-offset)
-                             content-string))
+                         (cond
+                           (more
+                            (format nil "~A~%~%[TRUNCATED: showing ~:D character~:P from ~
+                                         offset ~:D~@[ of a ~:D-byte file~]. Use ~
+                                         offset=~D to read more.]"
+                                    content-string (length content-string) (or offset 0)
+                                    file-length next-offset))
+                           ;; An empty answer says why: it otherwise reads as an
+                           ;; empty file.
+                           ((plusp (length content-string)) content-string)
+                           ((eql limit 0) "[Nothing read: limit is 0.]")
+                           ((and offset (plusp offset))
+                            (format nil "[Nothing read: offset ~D is at or past the end of ~
+                                         the file~@[ (a ~:D-byte file)~].]"
+                                    offset file-length))
+                           (t "[The file is empty.]")))
                         "text" content-string
                         "path" path
                         "offset" offset

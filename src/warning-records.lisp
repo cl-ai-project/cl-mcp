@@ -135,7 +135,14 @@ ends, after every COMPILE-FILE has returned, with the place of the reference."
         (ignore-errors (%compiler-place))
       (list :severity (%warning-severity warning)
             :class class
-            :message (or (ignore-errors (princ-to-string warning)) class)
+            ;; Printed at a wide margin: SBCL formats many compiler messages
+            ;; in a logical block, which the default margin breaks mid-sentence.
+            ;; A finite one: with none the pretty printer never flushes a line
+            ;; and rescans what it has queued, quadratic in a large constant.
+            :message (or (ignore-errors
+                          (let ((*print-right-margin* 1000))
+                            (princ-to-string warning)))
+                         class)
             :kind-key (ignore-errors (%warning-kind-key warning))
             :compiling (and *compile-file-truename* t)
             :file (and (typep file '(or pathname string)) file)
