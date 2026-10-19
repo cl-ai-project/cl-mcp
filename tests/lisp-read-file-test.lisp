@@ -510,7 +510,9 @@ tests/tmp/NAME.lisp."
     (flet ((shown (expected)
              (ok (some (lambda (line) (search expected line)) lines)
                  (format nil "~S is shown" expected))))
-      (shown "(defpackage #:sig-named-pkg ...)")
+      ;; A symbol name is shown as name_pattern matches it and as the nine
+      ;; definers show theirs: lower-cased, without a package or #:.
+      (shown "(defpackage sig-named-pkg ...)")
       (shown "(define-condition unexpected-contact ...)")
       (shown "(deftype contact-type ...)")
       (shown "(deftest require-access-token ...)")
@@ -536,6 +538,60 @@ tests/tmp/NAME.lisp."
       (let ((content (gethash "content" (lisp-read-file path :name-pattern "^beta-test$"))))
         (ok (search "(deftest alpha-test ...)" content) "the other test is named")
         (ok (search "(ok 2)" content) "the matched test is expanded")))))
+
+(deftest lisp-read-file-name-pattern-matches-a-list-name-as-shown
+  ;; In a file whose package exists only while the file is read, the reader's
+  ;; temporary package leaves NAME's symbols homeless.  name_pattern was
+  ;; matched against PRIN1-TO-STRING, which printed (#:show ...) while the
+  ;; collapsed view showed (show ...), so the name as shown matched nothing.
+  (with-temp-lisp-file "tests/tmp/sig-list-name.lisp"
+      (format nil "~{~A~%~}"
+              '("(defpackage #:sig-list-name-absent-pkg (:use #:cl))"
+                "(in-package #:sig-list-name-absent-pkg)"
+                "(define-controller (show :require-token t) (render))"
+                "(define-controller (index :require-token nil) (render))"))
+    (lambda (path)
+      (let ((collapsed (gethash "content" (lisp-read-file path))))
+        (ok (search "(define-controller (show :require-token t) ...)" collapsed)
+            "the list name is shown without #:"))
+      (let* ((result (lisp-read-file path :name-pattern "^\\(show :require-token t\\)$"))
+             (content (gethash "content" result)))
+        (ok (search "(define-controller (show :require-token t) (render))" content)
+            "the name as shown is the name name_pattern matches")
+        (ok (search "(define-controller (index :require-token nil) ...)" content)
+            "and the other form stays collapsed")))))
+
+(deftest lisp-read-file-collapsed-view-keeps-a-name-on-one-line
+  ;; A newline inside a name used to reach the collapsed line, which then
+  ;; spilled onto a second, unnumbered line.
+  (let ((lines (%collapsed-lines "tests/tmp/sig-newline-name.lisp"
+                                 (format nil "(defsystem \"line1~%line2\" :depends-on ())~%~%(defun after () 1)~%"))))
+    (ok (= 2 (length lines)) (format nil "two forms, two lines: ~S" lines))
+    (ok (search "(defsystem \"line1 line2\" ...)" (first lines))
+        "the newline is shown as a space")))
+
+(deftest lisp-read-file-collapsed-view-cuts-a-name-between-tokens
+  ;; Cut at a fixed width, :k16 came out as :k1, which reads as a different
+  ;; token, so a token-shaped last word proves nothing: the shown part must be
+  ;; a prefix of the name that ends where the name has a space.
+  (let* ((full (format nil "(thing ~{~A~^ ~})"
+                       (loop for i below 100 collect (format nil ":k~D" i))))
+         (line (%collapsed-line "sig-cut-name" (format nil "(define-thing ~A body)~%" full)))
+         (start (search "(define-thing " line))
+         (end (search " ...)" line :from-end t))
+         (shown (and start end (subseq line (+ start (length "(define-thing ")) end))))
+    (ok (and shown
+             (< (length shown) (length full))
+             (string= shown full :end2 (length shown))
+             (char= #\Space (char full (length shown))))
+        (format nil "the name is cut where it has a space: ~S" shown))))
+
+(deftest lisp-read-file-collapsed-view-survives-a-dotted-definition
+  ;; (SECOND FORM) signalled on (deftest . foo) and took the whole view down.
+  (let ((lines (%collapsed-lines "tests/tmp/sig-dotted.lisp"
+                                 (format nil "(deftest . foo)~%~%(defun after () 1)~%"))))
+    (ok (= 2 (length lines)) (format nil "both forms are listed: ~S" lines))
+    (ok (search "(defun after ()" (second lines)) "and the one after it is named")))
 
 (defun %try-load (system)
   "Attempt to load SYSTEM via Quicklisp or ASDF. Returns T on success, NIL on failure."

@@ -784,6 +784,8 @@ said of the same tree."
     (ok (string= "create-limit"
                  (extract-form-signature
                   (format nil "(deftest create-limit~%  (testing \"entire period\"~%    (ok t))~%  (testing \"range\"~%    (ok t)))"))))
+    ;; An edge case rather than the regression: with nothing after the name
+    ;; the old scan fell back to the name too.
     (ok (string= "empty-test" (extract-form-signature "(deftest empty-test)"))
         "a deftest with no body at all"))
   (testing "should extract signatures from package-qualified heads"

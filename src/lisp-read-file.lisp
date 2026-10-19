@@ -325,17 +325,37 @@ PATTERN is a non-empty string that is not valid regex syntax."
           (concatenate 'string (subseq line 0 77) "...")
           line))))
 
+(defun %definition-name-text (name)
+  "Return NAME, a definition's name, as the text name_pattern matches and the
+collapsed view shows.  A symbol gives its name lower-cased, without a package
+or #:, as the nine definers have always shown it.  Anything else -- a string, a
+list such as (setf foo) or (show :require-token t) -- is printed as a signature
+is: by *SIGNATURE-PPRINT-DISPATCH*, so a symbol left homeless by the reader's
+temporary package prints without #:, on one line, with every whitespace run
+made one space.  PRIN1-TO-STRING printed both differently, so a list name
+shown as (show ...) had to be matched as (#:show ...)."
+  (if (symbolp name)
+      (string-downcase (symbol-name name))
+      (%collapse-whitespace-runs
+       (let ((*print-case* :downcase)
+             (*print-circle* nil)
+             (*print-pprint-dispatch* *signature-pprint-dispatch*)
+             (*print-right-margin* most-positive-fixnum))
+         (with-output-to-string (out)
+           (write name :stream out :pretty t :escape t :case :downcase))))))
+
 (defun %definition-names (form)
-  "Return a list of stringified definition names for FORM, when applicable."
-  (when (consp form)
+  "Return a list of stringified definition names for FORM, when applicable:
+the text %DEFINITION-NAME-TEXT gives its second element, when its head is a
+symbol starting with DEF or DEFINE- and it has one."
+  (when (and (consp form) (consp (cdr form)))
     (let ((head (car form))
           (name (second form)))
       (when (and (symbolp head)
                  (let ((n (symbol-name head)))
                    (or (and (>= (length n) 3) (string= n "DEF" :end1 3))
                        (and (>= (length n) 7) (string= n "DEFINE-" :end1 7)))))
-        (list (string-downcase
-               (if (symbolp name) (symbol-name name) (prin1-to-string name))))))))
+        (list (%definition-name-text name))))))
 
 (defun %form->string (form)
   "Return FORM printed as Lisp source text for display.
@@ -449,21 +469,21 @@ object across multiple positions in the form tree."
   "Collapse FORM, a definition whose head is not one of the nine
 %COLLAPSE-DEF-FORM knows, to (HEAD NAME ...): deftest, define-condition,
 deftype, defpackage, a project's define-* and the like (issue #261).  They are
-the forms %DEFINITION-NAMES names, so the overview shows the name name_pattern
-matches.  Only for those nine is the third element known to be a lambda list,
-so nothing after the name is shown.  The name is printed as a signature is, on
-one line, and cut at *DEFINITION-NAME-MAX-CHARS*; the signature's own \" ...\"
-follows, so the cut gets no marker of its own."
-  (let ((text (let ((*print-case* :downcase)
-                    (*print-circle* nil)
-                    (*print-pprint-dispatch* *signature-pprint-dispatch*)
-                    (*print-right-margin* most-positive-fixnum))
-                (with-output-to-string (out)
-                  (write (second form) :stream out :pretty t :case :downcase)))))
-    (format nil "(~(~A~) ~A ...)" (car form)
-            (if (> (length text) *definition-name-max-chars*)
-                (string-right-trim " " (subseq text 0 *definition-name-max-chars*))
-                text))))
+the forms %DEFINITION-NAMES names, and NAME is the same text, so what the
+overview shows is what name_pattern matches.  Only for those nine is the third
+element known to be a lambda list, so nothing after the name is shown.  A name
+longer than *DEFINITION-NAME-MAX-CHARS* is cut at the last space before the
+limit, so the cut never leaves part of a token that reads as another; the
+signature's own \" ...\" follows, so the cut gets no marker of its own."
+  (let* ((text (%definition-name-text (second form)))
+         (shown (if (> (length text) *definition-name-max-chars*)
+                    (let ((space (position #\Space text :from-end t
+                                                         :end *definition-name-max-chars*)))
+                      (subseq text 0 (if (and space (plusp space))
+                                         space
+                                         *definition-name-max-chars*)))
+                    text)))
+    (format nil "(~(~A~) ~A ...)" (car form) shown)))
 
 (defun %collapse-generic (form)
   (cond
