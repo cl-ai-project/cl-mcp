@@ -136,15 +136,23 @@ Input schema (JSON):
 Output fields:
 - `content`: last value as text
 - `stdout`: concatenated standard output from evaluation
-- `stderr`: concatenated standard error from evaluation. A warning is written here
-  as `Warning: ...` and evaluation goes on, except a full `WARNING` signalled while a
-  file compiles: that one is left to the compiler, which reports it here with its
-  place and counts it, so `(asdf:load-system ...)` fails with `COMPILE-FILE-ERROR`,
-  as it does outside `repl-eval`. An undefined variable is the exception: it is
-  reported at the end of `repl-eval`'s compilation unit, after `compile-file` has
-  returned, so it is written as `Warning: ...` and a `compile-file` called
-  directly returns a false failure-p for it (`asdf:load-system` loads such a file
-  everywhere)
+- `stderr`: concatenated standard error from evaluation. Warnings are reported here as they are
+  outside `repl-eval`. One signalled while the compiler runs (`compile-file`, `compile`, or the
+  compile behind an evaluated `defun`) is the compiler's: it is written with its place and
+  counted, so `(asdf:load-system ...)` fails with `COMPILE-FILE-ERROR` on a full `WARNING`, and
+  `compile` returns its warnings-p and failure-p. An error that unwinds through nested
+  compilation units (a refused compile, say) is counted once for each here (`caught 1 fatal
+  ERROR condition` for one), even when the code handled the error itself. Any other warning is
+  written by `warn` to `*error-output*` (`WARNING: ...`, a style warning too), which is this
+  stream unless the evaluated code rebinds it, and evaluation goes on. A `WARNING: redefining
+  ...` notice is shown when the earlier definition came from a file, as `load-system` loads it;
+  everything `repl-eval` compiles, or loads from source, is recorded as coming from the source
+  `repl-eval` (#249), and SBCL keeps quiet about a redefinition from the same source, so
+  redefining it there again is quiet. A FASL compiled elsewhere keeps the file it was compiled
+  from, so loading it through `repl-eval` shows the notice again. An undefined variable is
+  reported at the end of `repl-eval`'s compilation unit, after a `compile-file` it called has
+  returned, so that `compile-file`'s failure-p does not count it (`asdf:load-system` loads such
+  a file everywhere)
 - `result_object_id` (string|null): an opaque id, such as `"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-17"`; when the result is a non-primitive object (list, hash-table, CLOS instance, etc.), this ID can be used with `inspect-object` to drill down into its internal structure
 - `result_preview` (object, with `result_object_id`): a lightweight structural preview of the
   result — its kind, type and first elements or slots — shaped like `inspect-object`'s output
