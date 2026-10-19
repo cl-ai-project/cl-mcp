@@ -65,11 +65,13 @@
          (specializers (coerce (gethash "specializers" form) 'list)))
     (ok (equal '("class" "eql" "class") (mapcar (lambda (s) (gethash "kind" s)) specializers)))
     (ok (equal '("b:node" "(eql :x)" "T") (mapcar (lambda (s) (gethash "token" s)) specializers)))
-    (ok (equal '("A" nil "COMMON-LISP")
-               (mapcar (lambda (s) (and (string= (gethash "kind" s) "class")
-                                        (string-upcase (gethash "in_package" s))))
-                       specializers))
+    (ok (equal '("A" "A" "COMMON-LISP")
+               (mapcar (lambda (s) (string-upcase (gethash "in_package" s))) specializers))
         "an unspecialized parameter is CL's T")
+    (ok (equal "b:caller" (gethash "name_token"
+                                   (first (scan-text "(in-package :a) (defun b:caller () (combine))"
+                                                     "COMBINE"))))
+        "the definition's name as written, its prefix kept")
     (ok (null (gethash "specializers"
                        (first (scan-text "(defun d () (combine 1))" "COMBINE"))))
         "no specializers for a form that is no method")))

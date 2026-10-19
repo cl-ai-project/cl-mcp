@@ -345,6 +345,7 @@ missing package, counting the sites that could not be judged."
                       :test-framework (gethash "test_framework" form)
                       :context (gethash "context" form)
                       :in-package (gethash "in_package" form)
+                      :name-token (gethash "name_token" form)
                       :specializers (sequence->list (gethash "specializers" form))
                       :sites (nreverse kept))
                 resolved))))
@@ -559,12 +560,16 @@ token list per required parameter, (\"t\") for one not specialized."
 (defun %specializer-key (specializer)
   "Return the key %STALE-ENTRY-FORM compares SPECIALIZER, a method specializer as
 SBCL names it -- a class name or (EQL datum) --, by: (:CLASS PACKAGE NAME) for a
-symbol, so a class is never taken for its namesake in another package, and
-(:EQL . tokens) for an EQL datum, its printed text as %NAME-TOKENS splits it."
+symbol, so a class is never taken for its namesake in another package;
+(:EQL-SYMBOL PACKAGE NAME) for an EQL datum that is a symbol, likewise; and
+(:EQL . tokens) for any other datum, its printed text as %NAME-TOKENS splits it."
   (cond ((and (consp specializer) (symbolp (first specializer))
               (string= (symbol-name (first specializer)) "EQL"))
-         (cons :eql (%name-tokens (let ((*package* (find-package "KEYWORD")))
-                                    (prin1-to-string (second specializer))))))
+         (let ((datum (second specializer)))
+           (if (and (symbolp datum) (symbol-package datum))
+               (list :eql-symbol (package-name (symbol-package datum)) (symbol-name datum))
+               (cons :eql (%name-tokens (let ((*package* (find-package "KEYWORD")))
+                                          (prin1-to-string datum)))))))
         ((and (symbolp specializer) (symbol-package specializer))
          (list :class (package-name (symbol-package specializer)) (symbol-name specializer)))
         (t (list :unknown (princ-to-string specializer)))))
@@ -594,6 +599,18 @@ in this image.  Nothing is interned."
               (multiple-value-bind (symbol status) (find-symbol name package)
                 (and status symbol)))))))))
 
+(defun %quoted-symbol-text (datum)
+  "Return the symbol token DATUM, an EQL datum's source text, writes when it is a
+quoted symbol ('x or (quote x)) or a keyword (:x), or NIL for any other datum."
+  (let ((text (string-trim '(#\Space #\Tab #\Newline) datum)))
+    (cond ((zerop (length text)) nil)
+          ((char= (char text 0) #\') (string-left-trim "' " (subseq text 1)))
+          ((char= (char text 0) #\:) text)
+          ((char= (char text 0) #\()
+           (let ((parts (%list-elements text 0)))
+             (and (= 2 (length parts)) (string-equal (first parts) "quote") (second parts))))
+          (t nil))))
+
 (defun %form-specializer-keys (specializers)
   "Return the specializer keys (%SPECIALIZER-KEY) of SPECIALIZERS, a defmethod
 form's specializer objects as the scan writes them (each with kind, token and,
@@ -604,8 +621,18 @@ that is not found gets a key no specializer has."
   (mapcar (lambda (specializer)
             (let ((token (gethash "token" specializer)))
               (if (equal (gethash "kind" specializer) "eql")
-                  (let ((inner (%list-elements token 0)))
-                    (cons :eql (%name-tokens (or (second inner) ""))))
+                  (let* ((inner (%list-elements token 0))
+                         (datum (or (second inner) ""))
+                         (symbol-text (%quoted-symbol-text datum)))
+                    (if symbol-text
+                        ;; 'a:node or :k: the symbol it names, as a class is.
+                        (let ((symbol (%token-symbol symbol-text
+                                                     (gethash "in_package" specializer))))
+                          (if symbol
+                              (list :eql-symbol (package-name (symbol-package symbol))
+                                    (symbol-name symbol))
+                              (list :unresolved datum)))
+                        (cons :eql (%name-tokens datum))))
                   (let ((symbol (%token-symbol token (gethash "in_package" specializer))))
                     (if symbol
                         (%specializer-key symbol)
@@ -635,6 +662,14 @@ line, which name a different form once forms were inserted above or removed."
                           (tokens (and (stringp form-name) (%name-tokens form-name)))
                           (form-type (string-downcase (or (getf form :form-type) ""))))
                      (and (equal name (first tokens))
+                          ;; The name as a symbol where the form says how it was
+                          ;; written: A:CALLER is not B:CALLER.
+                          (or (not (and (getf form :name-token) (getf form :in-package)))
+                              (let ((symbol (%token-symbol (getf form :name-token)
+                                                           (getf form :in-package))))
+                                (and symbol
+                                     (equal (qualified-symbol-name symbol)
+                                            (getf entry :caller-symbol)))))
                           (if method-p
                               (and (equal form-type "defmethod")
                                    ;; The qualifiers sit between the name and

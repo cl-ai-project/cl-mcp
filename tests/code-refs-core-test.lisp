@@ -524,6 +524,57 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
       (delete-package a)
       (delete-package b))))
 
+(deftest merge-references-tells-a-caller-and-an-eql-datum-from-their-namesakes
+  ;; The caller was matched by its bare name, so A:CALLER's stale entry was met
+  ;; with B:CALLER's definition; and (eql 'a:node) keyed as (eql 'b:node).
+  (let ((a (or (find-package "CLMCP-NAME-PROBE-A") (make-package "CLMCP-NAME-PROBE-A" :use '())))
+        (b (or (find-package "CLMCP-NAME-PROBE-B") (make-package "CLMCP-NAME-PROBE-B" :use '()))))
+    (unwind-protect
+         (let ((a-caller (intern "CALLER" a))
+               (a-node (intern "NODE" a)))
+           (intern "CALLER" b)
+           (export (intern "NODE" b) b)
+           (flet ((met (entry forms)
+                    (let ((ref (first (%with-origin (merge-references (list entry) forms)
+                                                    "xref+source"))))
+                      (and ref (gethash "line" ref))))
+                  (defun-form (index line package)
+                    (append (%resolved "/abs/a.lisp" index :start-line line :form-name "caller")
+                            (list :name-token "caller" :in-package package)))
+                  (eql-form (index line token)
+                    (append (%resolved-of-type "/abs/a.lisp" index "defmethod"
+                                               "combine ((n (eql 'node)))" :start-line line)
+                            (list :name-token "combine" :in-package "CLMCP-NAME-PROBE-A"
+                                  :specializers
+                                  (list (cl-mcp/src/tools/helpers:make-ht
+                                         "kind" "eql" "token" token
+                                         "in_package" "CLMCP-NAME-PROBE-A"))))))
+             (let ((entry (%xref "/abs/a.lisp" 5 :caller "caller"
+                                 :caller-symbol (cl-mcp/src/code-refs-core:qualified-symbol-name
+                                                 a-caller)
+                                 :line 50 :stale t)))
+               (ok (null (met entry (list (defun-form 5 50 "CLMCP-NAME-PROBE-B"))))
+                   "A:CALLER's entry is not met with B:CALLER's definition")
+               (ok (eql 60 (met entry (list (defun-form 5 50 "CLMCP-NAME-PROBE-B")
+                                            (defun-form 6 60 "CLMCP-NAME-PROBE-A"))))
+                   "and is met with its own"))
+             (let ((entry (append (%xref "/abs/a.lisp" 5
+                                         :caller "(defmethod combine ((eql node)))"
+                                         :caller-symbol
+                                         (cl-mcp/src/code-refs-core:qualified-symbol-name
+                                          (intern "COMBINE" a))
+                                         :line 50 :stale t)
+                                  (list :specializer-keys
+                                        (cl-mcp/src/code-refs-core::%method-specializer-keys
+                                         `(sb-pcl::fast-method combine ((eql ,a-node))))))))
+               (ok (null (met entry (list (eql-form 5 50 "(eql 'clmcp-name-probe-b:node)"))))
+                   "(eql 'a:node) is not (eql 'b:node)")
+               (ok (eql 60 (met entry (list (eql-form 5 50 "(eql 'clmcp-name-probe-b:node)")
+                                            (eql-form 6 60 "(eql 'node)"))))
+                   "and is met with its own"))))
+      (delete-package a)
+      (delete-package b))))
+
 (deftest merge-references-leaves-out-a-definition-gone-from-a-reloaded-file
   ;; Staleness is per definition: after a reload, a definition deleted from the
   ;; file keeps its old date, and that one entry made every form of the file
