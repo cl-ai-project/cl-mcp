@@ -592,6 +592,7 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
                (ok (not (same-p #\A "#\\a")) "#\\A is not #\\a")
                (ok (same-p 5 "5"))
                (ok (not (same-p 1 "1.0")) "1 is not 1.0")
+               (ok (same-p 16 "#x10") "a number in another notation")
                (ok (not (same-p 5 "five")) "a datum the source does not spell as a literal"))))
       (delete-package a)
       (delete-package b))))

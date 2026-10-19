@@ -627,6 +627,9 @@ package, so nothing is interned anywhere that lasts."
     (when (and (plusp (length text))
                (or (char= (char text 0) #\")
                    (and (> (length text) 2) (string= "#\\" text :end2 2))
+                   ;; #x10, #b101, #o17, #c(1 2): numbers in another notation.
+                   (and (> (length text) 2) (char= (char text 0) #\#)
+                        (find (char text 1) "xXbBoOcC"))
                    (digit-char-p (char text 0))
                    (and (> (length text) 1)
                         (find (char text 0) "+-.")
