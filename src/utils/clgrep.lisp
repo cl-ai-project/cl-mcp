@@ -361,7 +361,8 @@ gen/* and gen/** match what is in gen/, not gen/ itself."
                       ;; Never the slash, whatever the class holds -- / itself,
                       ;; [:punct:], a range across it --, as in git.
                       (emit (if negated "[^/" "(?!/)["))
-                      (loop with k = (if negated (1+ start) start)
+                      (loop with first = (if negated (1+ start) start)
+                            with k = first
                             while (< k end)
                             do (if (posix-class-end k)
                                    ;; [:name:] is its characters; a name git
@@ -382,8 +383,11 @@ gen/* and gen/** match what is in gen/, not gen/ itself."
                                        (setf member (char body (1+ k))
                                              escaped t)
                                        (incf k))
+                                     ;; A - first is a member too: after the /
+                                     ;; of a negated class it would be a range.
                                      (when (or (find member "\\[]^")
-                                               (and escaped (char= member #\-)))
+                                               (and (char= member #\-)
+                                                    (or escaped (= k first))))
                                        (vector-push-extend #\\ result))
                                      (vector-push-extend member result)
                                      (incf k))))
@@ -455,7 +459,8 @@ the directories above PATH, for a walk that has made it on the way down."
   "Return the patterns that leave a path under ROOT-DIR out of the project: its
 .gitignore's, in order, then .git/, last so no ! line takes it back in.  Matched
 with PATH-IGNORED-P.  A line whose pattern is no regular expression -- a reversed
-range such as [z-a] -- is dropped, alone, as git ignores a line it cannot use.
+range such as [z-a] -- is dropped, alone, and leaves nothing out (git keeps such
+a line and reads the range's start alone).
 Compiled here, once: given as strings, CL-PPCRE:SCAN compiles each again for
 every entry of the walk, which took seconds over a large project's tree."
   (flet ((compiled (regex)

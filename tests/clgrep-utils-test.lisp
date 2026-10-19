@@ -245,6 +245,12 @@ Final line
       ;; git never ignores gen/ for gen/*: a re-include under it stays reachable.
       (ok (ignored-p "gen/*" "gen/x.lisp"))
       (ok (not (ignored-p "gen/*" "gen/"))))
+    (testing "a - first in a class is a member, negated or not"
+      ;; git: [!-a] is anything but - and a; the / in front of it made a range.
+      (ok (ignored-p "[!-a].lisp" "Z.lisp"))
+      (ok (ignored-p "[!-a].lisp" "_.lisp"))
+      (ok (not (ignored-p "[!-a].lisp" "-.lisp")))
+      (ok (ignored-p "[-a].lisp" "-.lisp")))
     (testing "a class never matches the slash, as git's does not"
       ;; Checked with git check-ignore: a/b.lisp is kept for both.
       (ok (not (ignored-p "a[[:punct:]]b.lisp" "a/b.lisp")))
