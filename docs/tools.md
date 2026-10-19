@@ -555,8 +555,19 @@ Inputs:
 - `collapsed` (boolean, default `true`): when `true` and the file is Lisp source
   (`.lisp`, `.asd`, `.ros`, `.cl`, `.lsp`), return only top-level signatures
   (e.g., `(defun name (args) ...)`) while keeping `in-package` forms fully
-  shown. A definition's docstring follows as `;; first line`, taken from where its
-  definer puts one: after a variable's value, a `defstruct`'s name, or a function's
+  shown. The nine CL definers `defun`, `defmacro`, `defvar`, `defparameter`,
+  `defconstant`, `defclass`, `defstruct`, `defgeneric` and `defmethod` show their
+  lambda list (or value, superclasses, first slot); every other form whose head starts
+  with `def` or `define-` -- `deftest`, `define-condition`, `deftype`, `defpackage`,
+  `defsystem`, a project's own `define-*` -- shows its name alone, `(deftest my-test ...)`,
+  in exactly the text `name_pattern` matches: lower-cased, on one line, each whitespace run
+  made one space -- a symbol without its package or `#:` (`(defpackage my-app ...)`), a
+  string with its quotes (`(defsystem "mylib" ...)` for `"MyLib"`), and a list such as
+  `(define-controller (show :require-token t) ...)`. A name over 80 characters is cut at
+  the last space before the limit, or at 80 when it has none. A top-level call whose head
+  merely starts with `def` (`(default-handler x)`) is shown the same way. Any other form
+  shows its head, `(progn ...)`. A definition's docstring follows as `;; first line`, taken
+  from where its definer puts one: after a variable's value, a `defstruct`'s name, or a function's
   lambda list (never a function's only form, which is its value), so a variable whose
   value is a string does not show that value as its documentation. A variable's value is cut
   at 80 characters. A definition behind `#+`/`#-` shows its feature expressions in front of
@@ -1041,8 +1052,9 @@ Output:
   - `line`, `match`: the first hit; `match_lines`: every hit in the form, as `{line, match}`
   - `package`: from the last `in-package` above the hit, upper-cased (`"UNKNOWN"` if none)
   - `form-type`, `form-name` (either may be null), `signature` (`(name lambda-list)` for
-    `defun`, `defmacro`, `defgeneric`, `defmethod`, `define-compiler-macro` and `deftest`;
-    `(name superclasses)` for `defclass`; the bare name otherwise)
+    `defun`, `defmacro`, `defgeneric`, `defmethod` and `define-compiler-macro`;
+    `(name superclasses)` for `defclass`; the bare name otherwise, `deftest` included, since
+    neither Rove's nor Prove's takes a lambda list)
   - `form-start-line`, `form-end-line`, `form-start-byte`, `form-end-byte` (the last two are
     character offsets)
   - `form` (with `include_form`), `unterminated: true` (for a hit inside an unclosed form)

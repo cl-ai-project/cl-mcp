@@ -493,6 +493,131 @@ tests/tmp/NAME.lisp."
     (ok (search "(defvar *sig-long* \"aaa" line) "it still starts with the value")
     (ok (search ";; Doc." line) "and keeps the docstring")))
 
+(deftest lisp-read-file-collapsed-view-names-every-definition
+  ;; Issue #261: only nine CL definers were named; every other definition was
+  ;; printed as (head ...), although name_pattern matches it by that name.
+  (let ((lines (%collapsed-lines
+                "tests/tmp/sig-named-definers.lisp"
+                (format nil "~{~A~%~}"
+                        '("(defpackage #:sig-named-pkg (:use #:cl))"
+                          "(define-condition unexpected-contact (error) ())"
+                          "(deftype contact-type () '(member :a :b))"
+                          "(deftest require-access-token (ok (let ((x 1)) x)))"
+                          "(define-repository-function create-total-topup-limit ((m money)) m)"
+                          "(define-controller (show :require-token t) (render))"
+                          "(defsystem \"sig-named-system\" :depends-on (\"a\"))"
+                          "(progn (setup))")))))
+    (flet ((shown (expected)
+             (ok (some (lambda (line) (search expected line)) lines)
+                 (format nil "~S is shown" expected))))
+      ;; A symbol name is shown as name_pattern matches it and as the nine
+      ;; definers show theirs: lower-cased, without a package or #:.
+      (shown "(defpackage sig-named-pkg ...)")
+      (shown "(define-condition unexpected-contact ...)")
+      (shown "(deftype contact-type ...)")
+      (shown "(deftest require-access-token ...)")
+      (shown "(define-repository-function create-total-topup-limit ...)")
+      (shown "(define-controller (show :require-token t) ...)")
+      (shown "(defsystem \"sig-named-system\" ...)")
+      (shown "(progn ...)"))
+    (ok (= 8 (length lines)) "every form stays on one line")))
+
+(deftest lisp-read-file-collapsed-view-bounds-a-definitions-name
+  ;; A name can be a list of any length, as in (define-controller (show ...)).
+  (let ((line (%collapsed-line "sig-long-name"
+                               (format nil "(define-thing (thing ~{~A~^ ~}) body)~%"
+                                       (loop for i below 100 collect (format nil ":k~D" i))))))
+    (ok (< (length line) 200) (format nil "the line is bounded: ~D" (length line)))
+    (ok (search "(define-thing (thing :k0 :k1" line) "it still starts with the name")))
+
+(deftest lisp-read-file-name-pattern-finds-what-the-collapsed-view-names
+  ;; The collapsed view now shows the name name_pattern matches.
+  (with-temp-lisp-file "tests/tmp/sig-named-expand.lisp"
+      (format nil "(deftest alpha-test (ok 1))~%~%(deftest beta-test (ok 2))~%")
+    (lambda (path)
+      (let ((content (gethash "content" (lisp-read-file path :name-pattern "^beta-test$"))))
+        (ok (search "(deftest alpha-test ...)" content) "the other test is named")
+        (ok (search "(ok 2)" content) "the matched test is expanded")))))
+
+(deftest lisp-read-file-name-pattern-matches-a-list-name-as-shown
+  ;; In a file whose package exists only while the file is read, the reader's
+  ;; temporary package leaves NAME's symbols homeless.  name_pattern was
+  ;; matched against PRIN1-TO-STRING, which printed (#:show ...) while the
+  ;; collapsed view showed (show ...), so the name as shown matched nothing.
+  (with-temp-lisp-file "tests/tmp/sig-list-name.lisp"
+      (format nil "~{~A~%~}"
+              '("(defpackage #:sig-list-name-absent-pkg (:use #:cl))"
+                "(in-package #:sig-list-name-absent-pkg)"
+                "(define-controller (show :require-token t) (render))"
+                "(define-controller (index :require-token nil) (render))"))
+    (lambda (path)
+      (let ((collapsed (gethash "content" (lisp-read-file path))))
+        (ok (search "(define-controller (show :require-token t) ...)" collapsed)
+            "the list name is shown without #:"))
+      (let* ((result (lisp-read-file path :name-pattern "^\\(show :require-token t\\)$"))
+             (content (gethash "content" result)))
+        (ok (search "(define-controller (show :require-token t) (render))" content)
+            "the name as shown is the name name_pattern matches")
+        (ok (search "(define-controller (index :require-token nil) ...)" content)
+            "and the other form stays collapsed")))))
+
+(deftest lisp-read-file-collapsed-view-keeps-a-name-on-one-line
+  ;; A newline inside a name used to reach the collapsed line, which then
+  ;; spilled onto a second, unnumbered line.
+  (let ((lines (%collapsed-lines "tests/tmp/sig-newline-name.lisp"
+                                 (format nil "(defsystem \"line1~%line2\" :depends-on ())~%~%~
+                                              (defun after () 1)~%"))))
+    (ok (= 2 (length lines)) (format nil "two forms, two lines: ~S" lines))
+    (ok (search "(defsystem \"line1 line2\" ...)" (first lines))
+        "the newline is shown as a space")))
+
+(deftest lisp-read-file-collapsed-view-cuts-a-name-between-tokens
+  ;; Cut at a fixed width, :k16 came out as :k1, which reads as a different
+  ;; token, so a token-shaped last word proves nothing: the shown part must be
+  ;; a prefix of the name that ends where the name has a space.
+  (let* ((full (format nil "(thing ~{~A~^ ~})"
+                       (loop for i below 100 collect (format nil ":k~D" i))))
+         (line (%collapsed-line "sig-cut-name" (format nil "(define-thing ~A body)~%" full)))
+         (start (search "(define-thing " line))
+         (end (search " ...)" line :from-end t))
+         (shown (and start end (subseq line (+ start (length "(define-thing ")) end))))
+    (ok (and shown
+             (< (length shown) (length full))
+             (string= shown full :end2 (length shown))
+             (char= #\Space (char full (length shown))))
+        (format nil "the name is cut where it has a space: ~S" shown))))
+
+(deftest lisp-read-file-collapsed-view-survives-a-dotted-definition
+  ;; (SECOND FORM) signalled on (deftest . foo), and on (defun . foo) in
+  ;; %COLLAPSE-DEF-FORM, and took the whole view down.
+  (let ((lines (%collapsed-lines "tests/tmp/sig-dotted.lisp"
+                                 (format nil "(deftest . foo)~%~%(defun . foo)~%~%~
+                                              (defun after () 1)~%"))))
+    (ok (= 3 (length lines)) (format nil "every form is listed: ~S" lines))
+    (ok (search "(defun after ()" (third lines)) "and the one after them is named")))
+
+(deftest lisp-read-file-name-pattern-ignores-the-case-of-a-name
+  ;; name_pattern is matched against the lower-cased name, a string name's
+  ;; contents included, and the collapsed view shows that same text.
+  (with-temp-lisp-file "tests/tmp/sig-name-case.lisp"
+      (format nil "(defsystem \"MyLib\" :depends-on ())~%~%(defsystem \"Other\" :depends-on ())~%")
+    (lambda (path)
+      (ok (search "(defsystem \"mylib\" ...)" (gethash "content" (lisp-read-file path)))
+          "the name is shown lower-cased")
+      (let ((content (gethash "content" (lisp-read-file path :name-pattern "^\"mylib\"$"))))
+        (ok (search "(defsystem \"MyLib\" :depends-on ())" content)
+            "and matched as shown")
+        (ok (search "(defsystem \"other\" ...)" content) "the other stays collapsed")))))
+
+(deftest lisp-read-file-collapsed-view-keeps-a-symbol-name-on-one-line
+  ;; A symbol's name was shown raw, so one with a newline split the entry.
+  (let ((lines (%collapsed-lines "tests/tmp/sig-newline-symbol.lisp"
+                                 (format nil "(define-thing |sym~%with newline| 1)~%~%~
+                                              (defun after () 1)~%"))))
+    (ok (= 2 (length lines)) (format nil "two forms, two lines: ~S" lines))
+    (ok (search "(define-thing sym with newline ...)" (first lines))
+        "the newline is shown as a space")))
+
 (defun %try-load (system)
   "Attempt to load SYSTEM via Quicklisp or ASDF. Returns T on success, NIL on failure."
   (handler-case
