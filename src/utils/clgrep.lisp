@@ -250,9 +250,8 @@ wildmatch reads them in the C locale, or NIL for a name it does not know."
           ((string= name "lower") "a-z")
           ((string= name "xdigit") "0-9A-Fa-f")
           ((string= name "blank") (concatenate 'string " " tab))
-          ((string= name "space")
-           (concatenate 'string " " tab newline
-                        (string #\Return) (string #\Page) (string (code-char 11))))
+          ;; git's own isspace: no vertical tab or form feed.
+          ((string= name "space") (concatenate 'string " " tab newline (string #\Return)))
           ((string= name "punct") "!-/:-@\\[-`{-~")
           ((string= name "graph") "!-~")
           ((string= name "print") " -~")
@@ -304,11 +303,16 @@ gen/* and gen/** match what is in gen/, not gen/ itself."
                                 (t (incf j))))))
              (posix-class-end (j)
                ;; The index after the ] of a [:name:] starting at J, or NIL.
+               ;; As git reads it: the first ] after the [: ends it, and only
+               ;; when a : comes right before; otherwise the [ is a member.
                (when (and (< (1+ j) body-len)
                           (char= (char body j) #\[)
                           (char= (char body (1+ j)) #\:))
-                 (let ((close (search ":]" body :start2 (+ j 2))))
-                   (and close (+ close 2))))))
+                 (let ((close (position #\] body :start (+ j 2))))
+                   (and close
+                        (>= close (+ j 3))
+                        (char= (char body (1- close)) #\:)
+                        (1+ close))))))
       (emit (if anchored-p "^" "(?:^|/)"))
       (loop while (< i body-len)
             do (let ((char (char body i)))

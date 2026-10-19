@@ -234,7 +234,11 @@ Final line
       (ok (ignored-p "[a[:digit:]].lisp" "a.lisp"))
       ;; An unknown class name: git's pattern then matches nothing.
       (ok (not (ignored-p "[[:foo:]].lisp" "f.lisp")))
-      (ok (not (ignored-p "[[:foo:]].lisp" "].lisp"))))
+      (ok (not (ignored-p "[[:foo:]].lisp" "].lisp")))
+      ;; The first ] after [: ends it: [[:a]b:]] is the class [, :, a, then b:]].
+      (ok (ignored-p "[[:a]b:]].lisp" "ab:]].lisp"))
+      ;; git's isspace has no form feed.
+      (ok (not (ignored-p "[[:space:]].lisp" (format nil "~C.lisp" #\Page)))))
     (testing "an unclosed [ is literal"
       (ok (ignored-p "odd[name.lisp" "odd[name.lisp")))
     (testing "dir/* matches what is in the directory, not the directory itself"
