@@ -268,14 +268,14 @@ Output fields:
   dependency's, which come first since dependencies load first -- follow, summed up by kind as
   `Nx <headline>`, or `Nx e.g. <headline>` when the kind's messages differ (a kind of one
   warning is written without `1x`); at most eight kinds are listed. A headline is a message's
-  first sentence: its first line, joined with the lines after it, up to a blank line, while
-  the text does not yet end in `.`, `:`, `!` or `?` (SBCL breaks some messages mid-sentence).
-  What the joining adds is cut at 200 characters; a longer first line is kept whole. Style
-  warnings are summed up by kind: how many there are and up to three of them, the project's
-  before a dependency's, each in file and line order. A kind whose warnings all read the same is
-  headed by that headline and lists their places; one whose messages differ -- SBCL signals
-  every unused variable and every undefined function as one kind -- is headed `Nx of one kind:`
-  and gives each listed warning its place and its own headline. Kinds holding a warning of the
+  first sentence: its first line, joined with the lines after it, up to a blank line, while the
+  text does not yet end in `.`, `:`, `!` or `?` (SBCL breaks some messages mid-sentence). What
+  the joining adds is cut at 200 characters; a longer first line is kept whole. Style warnings
+  are summed up by kind: how many there are and up to three of them, the project's before a
+  dependency's, each in file and line order. A kind whose warnings all read the same is headed
+  by that headline and lists their places; one whose messages differ -- SBCL signals every
+  unused variable and every undefined function as one kind -- is headed `Nx of one kind:` and
+  gives each listed warning its place and its own headline. Kinds holding a warning of the
   project's come first; eight kinds are written so, as many again past them get one line each
   (count, first warning, its place) -- an undefined function, reported when the compilation unit
   ends, is often in that last group -- and any further kinds are counted. A failed load sums its
@@ -284,10 +284,15 @@ Output fields:
   (`fails_compile`) and says to fix them. A full warning signalled earlier, while another file
   loaded, is listed apart as `Other warnings before the error`; when the refused compile had no
   warning of its own (it failed on an error, which the compiler output shows) no warning is
-  blamed for it; a warning a compile was refused for is written whole wherever it comes from. A
-  package at variance ("also exports") that refused the compile, or one of the project's at
-  variance on a load that went on, or any other error, adds a hint to get a fresh worker with
-  `pool-kill-worker`
+  blamed for it; a warning a compile was refused for is written whole wherever it comes from.
+  The text ends with a hint by cause, the same one `run-tests` gives: a package at variance (an
+  export, use or shadow the file no longer declares) that refused the compile, or one of the
+  project's on a load that went on, gets a fresh worker with `pool-kill-worker`, which only that
+  cures; a dependency ASDF cannot find is named, with where to register it; a system named that
+  ASDF knows nowhere, the name to check; a `DEFCONSTANT` given a value not `EQL` to its own (a
+  list or string is a new object on each compile), `defparameter` or
+  `alexandria:define-constant`; a compile that failed on an error, the file to fix; any other
+  error, a fresh worker only if the error is about what this worker holds
 - `system` (string): echoed system name
 - `status` (string): `"loaded"`, `"timeout"`, or `"error"`. A full `WARNING` signalled while
   a file compiles (a duplicate definition, a type conflict, package variance, a wrong argument

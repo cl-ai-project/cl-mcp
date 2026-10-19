@@ -1586,6 +1586,27 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
        (ok (search ":import-from" text) "with the way to fix the load order")
        (ok (search ":suite nil" text) "and the other cause, a test in no suite")))))
 
+(deftest run-tests-sends-to-a-fresh-worker-only-for-the-workers-state
+  ;; A missing dependency and a DEFCONSTANT given a list fell to "the worker
+  ;; process may have a broken package state. Use pool-kill-worker".
+  (flet ((reason (condition)
+           (gethash "reason" (aref (gethash "failed_tests"
+                                            (cl-mcp/src/test-runner-core:make-load-failure-result
+                                             "fake-system/tests" condition))
+                                   0))))
+    (let ((text (reason (make-condition 'cl-mcp/src/test-runner-core::test-system-load-failed
+                                        :kind :missing-dependency :detail "no-such-lib"
+                                        :format-control "Component \"no-such-lib\" not found"
+                                        :format-arguments '()))))
+      (ok (search "no-such-lib" text))
+      (ok (null (search "pool-kill-worker" text)) text))
+    (let ((text (reason (make-condition 'cl-mcp/src/test-runner-core::test-system-load-failed
+                                        :kind :defconstant
+                                        :format-control "+STATES+ is being redefined"
+                                        :format-arguments '()))))
+      (ok (search "defparameter" text) text)
+      (ok (null (search "pool-kill-worker" text))))))
+
 (deftest run-tests-forgets-a-fiveam-test-deleted-from-its-file
   ;; FiveAM keeps every test it was given.  The reload re-created the suite
   ;; without a deleted test, which stayed registered on the worker, reached by

@@ -21,6 +21,8 @@
   ;; The warning records load-system reports, so a load refused for a
   ;; warning names it and its place the same way here.
   (:import-from #:cl-mcp/src/warning-records
+                #:load-failure-kind
+                #:load-failure-hint
                 #:%make-warning-record
                 #:%warning-record-tables
                 #:%in-project-predicate
@@ -517,6 +519,15 @@ load-system's warning records (%WARNING-RECORD-TABLES), each with its place,
 and empty when only an error failed it.  Its own type, so the load failure sends
 the caller to the file rather than to a fresh worker."))
 
+(define-condition test-system-load-failed (simple-error)
+  ((kind :initarg :kind :initform nil :reader test-system-load-failed-kind)
+   (detail :initarg :detail :initform nil :reader test-system-load-failed-detail))
+  (:documentation "Loading the test system stopped on an error a fresh worker
+would meet again, with a cause of its own (LOAD-FAILURE-KIND): KIND is
+:MISSING-DEPENDENCY, DETAIL then the system's name, or :DEFCONSTANT.  Its own
+type, so the load failure names that cause rather than sending the caller to
+replace a worker that is fine."))
+
 (defun %format-load-error (system-name condition stderr)
   "Format a test-system load-failure message.
 When STDERR contains captured compiler output, the tail of it is
@@ -570,11 +581,8 @@ them."
                   ((typep condition 'transient-error) text)
                   ;; Nothing is wrong with the worker: the name is unknown.
                   ((typep condition 'test-system-not-found)
-                   (format nil "~A~%~%Hint: ASDF knows no system ~A, and no ~A.asd was ~
-                                found under the project root. Check the name, or ~
-                                register its .asd with load-system or asdf:load-asd, ~
-                                then retry run-tests."
-                           text system-name (asdf:primary-system-name system-name)))
+                   (format nil "~A~%~%~A" text
+                           (load-failure-hint :missing-system "run-tests" system-name)))
                   ;; Nothing in the file is wrong: the worker still exports what
                   ;; the file no longer declares, and only a fresh worker cures
                   ;; that.
@@ -583,12 +591,14 @@ them."
                                  (equal "SB-INT:PACKAGE-AT-VARIANCE"
                                         (gethash "class" record)))
                                records))
-                   (format nil "~A~%~%Hint: package-variance warnings mean the running ~
-                                image has stale exports. Use pool-kill-worker to get a ~
-                                fresh worker, then retry run-tests. If they come back ~
-                                on a fresh worker, two definitions of the package ~
-                                disagree: make them agree."
-                           text))
+                   (format nil "~A~%~%~A" text (load-failure-hint :variance "run-tests")))
+                  ;; A cause a fresh worker meets again: a dependency ASDF cannot
+                  ;; find, a constant given a value not EQL to its own.
+                  ((typep condition 'test-system-load-failed)
+                   (format nil "~A~%~%~A" text
+                           (load-failure-hint (test-system-load-failed-kind condition)
+                                              "run-tests"
+                                              (test-system-load-failed-detail condition))))
                   ;; The warning is the cause, and a fresh worker would meet it
                   ;; again -- unless it is about what this worker holds.
                   (records
@@ -617,10 +627,7 @@ them."
                                 earlier in it. Fix the file and run the tests again."
                            text))
                   (t
-                   (format nil "~A~%~%Hint: the worker process may have a broken ~
-                                package state. Use pool-kill-worker to get a fresh ~
-                                worker, then retry run-tests."
-                           text)))))))))
+                   (format nil "~A~%~%~A" text (load-failure-hint nil "run-tests"))))))))))
     (when records
       (setf (gethash "warning_records" result) (coerce records 'vector)))
     result))
@@ -1062,8 +1069,15 @@ COMPILE-FILE-ERROR."
                                    (reverse refusing)
                                    :in-project (%in-project-predicate system-name)))))
             (t
-             (error "~A"
-                    (%format-load-error system-name c combined)))))))))
+             (multiple-value-bind (kind detail) (load-failure-kind c)
+               (if kind
+                   (error 'test-system-load-failed
+                          :kind kind :detail detail
+                          :format-control "~A"
+                          :format-arguments
+                          (list (%format-load-error system-name c combined)))
+                   (error "~A"
+                          (%format-load-error system-name c combined)))))))))))
 
 (defun %rove-result-symbol (name)
   "Return Rove's ROVE/CORE/RESULT symbol NAME, resolved at run time since Rove
