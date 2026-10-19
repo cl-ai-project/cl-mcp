@@ -485,6 +485,37 @@ MERGE-REFERENCES only trusts an index whose form holds the entry's line."
                                                   :start-line 50))))
         "an EQL specializer and an unspecialized parameter")))
 
+(deftest merge-references-tells-a-class-from-its-namesake-in-another-package
+  ;; The specializers were compared by name alone, so the entry of a deleted
+  ;; method on A:NODE was met with the method on B:NODE still in the file.
+  (let ((a (or (find-package "CLMCP-SPEC-PROBE-A") (make-package "CLMCP-SPEC-PROBE-A" :use '())))
+        (b (or (find-package "CLMCP-SPEC-PROBE-B") (make-package "CLMCP-SPEC-PROBE-B" :use '()))))
+    (unwind-protect
+         (let* ((a-node (intern "NODE" a))
+                (entry (append (%xref "/abs/a.lisp" 5
+                                      :caller "(defmethod combine (node))"
+                                      :caller-symbol "P::COMBINE" :line 50 :stale t)
+                               (list :specializer-keys
+                                     (cl-mcp/src/code-refs-core::%method-specializer-keys
+                                      `(sb-pcl::fast-method combine (,a-node))))))
+                (b-node-form (append (%resolved-of-type "/abs/a.lisp" 5 "defmethod"
+                                                        "combine ((n node))" :start-line 50)
+                                     (list :in-package "CLMCP-SPEC-PROBE-B")))
+                (a-node-form (append (%resolved-of-type "/abs/a.lisp" 6 "defmethod"
+                                                        "combine ((n node))" :start-line 60)
+                                     (list :in-package "CLMCP-SPEC-PROBE-A"))))
+           (intern "NODE" b)
+           (flet ((met (forms)
+                    (let ((ref (first (%with-origin (merge-references (list entry) forms)
+                                                    "xref+source"))))
+                      (and ref (gethash "line" ref)))))
+             (ok (null (met (list b-node-form)))
+                 "A:NODE's method is not met with B:NODE's")
+             (ok (eql 60 (met (list b-node-form a-node-form)))
+                 "and is met with its own")))
+      (delete-package a)
+      (delete-package b))))
+
 (deftest merge-references-leaves-out-a-definition-gone-from-a-reloaded-file
   ;; Staleness is per definition: after a reload, a definition deleted from the
   ;; file keeps its old date, and that one entry made every form of the file

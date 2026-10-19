@@ -13,7 +13,8 @@
                 #:arg-validation-error
                 #:make-ht
                 #:json-bool)
-  (:export #:sequence->list
+  (:export #:%method-specializer-keys
+           #:sequence->list
            #:parse-symbol-text
            #:parse-target-designator
            #:find-package-named
@@ -554,6 +555,55 @@ token list per required parameter, (\"t\") for one not specialized."
                           (if (second parts) (%name-tokens (second parts)) (list "t")))
                         (list "t"))))))
 
+(defun %specializer-key (specializer)
+  "Return the key %STALE-ENTRY-FORM compares SPECIALIZER, a method specializer as
+SBCL names it -- a class name or (EQL datum) --, by: (:CLASS PACKAGE NAME) for a
+symbol, so a class is never taken for its namesake in another package, and
+(:EQL . tokens) for an EQL datum, its printed text as %NAME-TOKENS splits it."
+  (cond ((and (consp specializer) (symbolp (first specializer))
+              (string= (symbol-name (first specializer)) "EQL"))
+         (cons :eql (%name-tokens (let ((*package* (find-package "KEYWORD")))
+                                    (prin1-to-string (second specializer))))))
+        ((and (symbolp specializer) (symbol-package specializer))
+         (list :class (package-name (symbol-package specializer)) (symbol-name specializer)))
+        (t (list :unknown (princ-to-string specializer)))))
+
+(defun %method-specializer-keys (caller-name)
+  "Return the specializer keys (%SPECIALIZER-KEY) of CALLER-NAME, an xref caller
+as SBCL gives it -- (SB-PCL::FAST-METHOD NAME QUALIFIER... (SPECIALIZER...)) or
+(:METHOD ...) --, or NIL when it is no method."
+  (when (and (consp caller-name) (symbolp (first caller-name))
+             (member (symbol-name (first caller-name))
+                     '("FAST-METHOD" "SLOW-METHOD" "METHOD") :test #'string=))
+    (let ((specializers (first (last caller-name))))
+      (and (listp specializers) (mapcar #'%specializer-key specializers)))))
+
+(defun %form-name-specializer-keys (form-name in-package)
+  "Return the specializer keys of FORM-NAME, a defmethod's form name, its class
+names looked up in IN-PACKAGE, the package the form is read in -- with
+FIND-SYMBOL, nothing interned.  A name that is not found gets a key no
+specializer has.  NIL when FORM-NAME has no lambda list."
+  (let ((open (position #\( form-name)))
+    (when open
+      (loop for parameter in (%list-elements form-name open)
+            until (char= (char parameter 0) #\&)
+            collect (let* ((parts (and (char= (char parameter 0) #\()
+                                       (%list-elements parameter 0)))
+                           (text (if parts (second parts) "t")))
+                      (cond ((null text) (list :class "COMMON-LISP" "T"))
+                            ((char= (char text 0) #\()
+                             (let ((inner (%list-elements text 0)))
+                               (if (equalp (first inner) "eql")
+                                   (cons :eql (%name-tokens (or (second inner) "")))
+                                   (list :unknown text))))
+                            (t
+                             (multiple-value-bind (symbol status)
+                                 (ignore-errors
+                                  (resolve-target text :package (or in-package "CL-USER")))
+                               (if (eq status :found)
+                                   (%specializer-key symbol)
+                                   (list :unresolved text))))))))))
+
 (defparameter *non-function-definers*
   '("defclass" "defstruct" "define-condition" "deftype" "defvar" "defparameter"
     "defconstant" "defpackage" "in-package")
@@ -591,8 +641,15 @@ line, which name a different form once forms were inserted above or removed."
                                    ;; In order, parameter by parameter: (A B)
                                    ;; is not (B A), and a parameter named like
                                    ;; a class is no specializer.
-                                   (equal specializers
-                                          (%form-name-specializers form-name)))
+                                   ;; By symbol where both sides can say it:
+                                   ;; A:NODE is not B:NODE.
+                                   (if (and (getf entry :specializer-keys)
+                                            (getf form :in-package))
+                                       (equal (getf entry :specializer-keys)
+                                              (%form-name-specializer-keys
+                                               form-name (getf form :in-package)))
+                                       (equal specializers
+                                              (%form-name-specializers form-name))))
                               (not (member form-type *non-function-definers*
                                            :test #'string=))))))
                  forms)))

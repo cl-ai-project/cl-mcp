@@ -14,6 +14,7 @@
   (:import-from #:uiop
                 #:read-file-string #:ensure-pathname #:absolute-pathname-p)
   (:import-from #:cl-mcp/src/code-refs-core
+                #:%method-specializer-keys
                 #:sequence->list
                 #:parse-symbol-text
                 #:resolve-target
@@ -986,6 +987,10 @@ index of its top-level form in the file."
                                     :caller caller
                                     :caller-symbol (and caller-symbol
                                                         (qualified-symbol-name caller-symbol))
+                                    ;; A method's specializers as symbols, so
+                                    ;; a stale entry tells A:NODE from B:NODE.
+                                    :specializer-keys (ignore-errors
+                                                       (%method-specializer-keys caller-name))
                                     :truename (%truename-string pathname)
                                     :path path
                                     :line line
