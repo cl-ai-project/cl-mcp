@@ -427,8 +427,10 @@ the whole tree; a refused one signals WRITE-PATH-REFUSED and changes nothing."
   "Permission bits a mode check gives an existing target just before the write.
 Each keeps the owner's read and write, so the check itself can still list and
 remove the file; they differ in execute and in the group and other bits.  No
-setuid, setgid or sticky bit: the kernel drops setgid from a file whose group
-the process is not in, whoever writes it.")
+setuid, setgid or sticky bit: FS-WRITE-FILE carries only the read, write and
+execute bits.  #o644 and #o664 stay in although one of them is usually what the
+umask gives a new file, so a trial drawing it cannot tell a kept mode from a
+fresh one; the other modes can.")
 
 (defun draw-mode-write-case ()
   "Return (:CASE CASE :MODE MODE).  CASE writes inside the project: to a new

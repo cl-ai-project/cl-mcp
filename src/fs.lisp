@@ -432,26 +432,40 @@ bracket or an asterisk stays part of the name."
   "Give the file open on FD the owner, group and permission bits in STATUS, the
 SB-POSIX:STAT of PN, the file it is about to replace (issue #259).
 
-The owner and group go first, since changing them clears a setuid or setgid
-bit, and the bits last.  Only root may give a file to another owner, and any
-other process only a group it is in: when the owner cannot be kept the group is
-tried alone, and what could not be kept is logged.  Neither step stops the
-write -- a filesystem without POSIX permissions refuses both -- so at worst the
-file ends up as a new file would, which is what every write did before."
-  (let ((uid (sb-posix:stat-uid status))
-        (gid (sb-posix:stat-gid status)))
-    (handler-case (sb-posix:fchown fd uid gid)
-      (sb-posix:syscall-error ()
-        (let ((group-kept (handler-case
-                              ;; (uid_t) -1 leaves the owner as it is.
-                              (progn (sb-posix:fchown fd (ldb (byte 32 0) -1) gid) t)
-                            (sb-posix:syscall-error () nil))))
-          (log-event :info "fs.write.owner-not-kept"
-                     "path" (namestring pn)
-                     "uid" uid
-                     "gid" gid
-                     "group_kept" (if group-kept "true" "false"))))))
-  (handler-case (sb-posix:fchmod fd (logand #o7777 (sb-posix:stat-mode status)))
+Only root may give a file to another owner, and any other process only a group
+it is in.  The temp file is already the process's own, so the owner is changed
+only when PN belongs to someone else, and the group is set alone when the owner
+cannot be (or need not be) changed; what could not be kept is logged as
+fs.write.ownership-not-kept.  The permission bits go last, since changing the
+owner clears them in part.  Only the read, write and execute bits are carried:
+the kernel strips a setuid or setgid bit from a file a process without
+CAP_FSETID writes, so keeping them would depend on who runs the server.
+Nothing here stops the write -- a filesystem without POSIX permissions refuses
+all of it -- so at worst the file ends up as a new file would, which is what
+every write did before."
+  (let* ((uid (sb-posix:stat-uid status))
+         (gid (sb-posix:stat-gid status))
+         (owner-kept (= uid (sb-posix:geteuid)))
+         (group-kept nil))
+    (unless owner-kept
+      (handler-case (progn (sb-posix:fchown fd uid gid)
+                           (setf owner-kept t
+                                 group-kept t))
+        (sb-posix:syscall-error () nil)))
+    (unless group-kept
+      (handler-case (progn
+                      ;; (uid_t) -1 leaves the owner as it is.
+                      (sb-posix:fchown fd (ldb (byte 32 0) -1) gid)
+                      (setf group-kept t))
+        (sb-posix:syscall-error () nil)))
+    (unless (and owner-kept group-kept)
+      (log-event :info "fs.write.ownership-not-kept"
+                 "path" (namestring pn)
+                 "uid" uid
+                 "gid" gid
+                 "owner_kept" (if owner-kept "true" "false")
+                 "group_kept" (if group-kept "true" "false"))))
+  (handler-case (sb-posix:fchmod fd (logand #o777 (sb-posix:stat-mode status)))
     (sb-posix:syscall-error ()
       (log-event :info "fs.write.mode-not-kept" "path" (namestring pn)))))
 

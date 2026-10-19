@@ -401,9 +401,17 @@ dleaf -> nothing.txt, doleaf -> ../outside/nothing.txt."
                            :changed `(("project/src/a.txt" :file
                                                            ,(octets "through the link")))))
       (ok (= #o600 (file-mode a)) "a private file written through a file link stays private")
-      (sb-posix:chmod plain #o664)
+      ;; Not #o644 or #o664: either may be what the umask gives a new file, and
+      ;; an assertion on it could not tell a kept mode from a fresh one.
+      (sb-posix:chmod plain #o640)
       (write-to fixture "plain.txt")
-      (ok (= #o664 (file-mode plain)) "a group-writable file stays group-writable")))
+      (ok (= #o640 (file-mode plain)) "a file closed to others stays closed")
+      ;; The kernel strips setuid from a file a process without CAP_FSETID
+      ;; writes, so only the read, write and execute bits are carried, whoever
+      ;; runs the server.
+      (sb-posix:chmod a #o4755)
+      (write-to fixture "src/a.txt")
+      (ok (= #o755 (file-mode a)) "setuid is not carried over")))
   (with-tree (fixture :places (list (place :project '() "Makefile")))
     (let ((makefile (real-path fixture "project/Makefile")))
       (sb-posix:chmod makefile #o750)

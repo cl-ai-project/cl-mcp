@@ -365,9 +365,10 @@ Known v1 limitations:
 
 When cl-mcp runs in a container and the project is bind-mounted into it, the
 files it writes belong to the user the server runs as. Editing an existing file
-keeps that file's permission bits and, when the server runs as root, its owner
-and group too; as another user it keeps the group when that user is in it, and
-the file becomes the server user's otherwise. A **new** file or directory always
+keeps that file's read, write and execute bits and, when the server runs as
+root, its owner and group too. Run as another user, the server keeps the group
+when that user is in it, and the owner becomes the server's user either way. A
+**new** file or directory always
 belongs to the server's user, so a server running as root leaves root-owned
 files in your working tree that you cannot edit in place.
 
@@ -388,7 +389,10 @@ service.
 - Your user has to be able to read the image's Lisp installation (Roswell,
   Quicklisp), and to write a home directory and ASDF's FASL cache
   (`~/.cache/common-lisp`). Point `HOME` at a writable directory as above, or
-  mount a volume there, so the cache survives restarts.
+  mount a volume there, so the cache survives restarts. Roswell looks for its
+  installation in `$ROSWELL_HOME`, or else `$HOME/.roswell`: when the image
+  installed it under its own user's home, set `ROSWELL_HOME` to that directory
+  as well, or the moved `HOME` hides it.
 - Mount the project directory, not single files. Every write replaces the file
   with `rename`, and the kernel refuses to rename onto a file that is itself a
   bind mount (`EBUSY`).
