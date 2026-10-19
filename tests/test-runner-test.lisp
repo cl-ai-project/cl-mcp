@@ -1724,6 +1724,158 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
                    (gethash "unreached_tests" result)))
        (ok (equal "✓ PASS" (%headline result)) "a plain pass")))))
 
+(deftest run-tests-forgets-a-suite-it-called-outside-once-it-is-nested
+  ;; FiveAM never removes a name from *toplevel-suites*: a suite first defined
+  ;; without :in stayed listed there after the file nested it, and run-tests
+  ;; kept calling it outside the root suite, advice the file already followed --
+  ;; and ran it twice, under its own name and under the root.
+  (flet ((sub-file (parent &optional (check "(= 1 1)"))
+           (%fiveam-fixture-file "fiveam-nest-probe/sub" "sub-suite"
+                                 `(("sub-check" ,check)) parent)))
+    (%call-with-fiveam-fixture
+     "fiveam-nest-probe"
+     (list (cons "main.lisp" (%fiveam-fixture-file "fiveam-nest-probe/main"
+                                                   ":fiveam-nest-probe"
+                                                   '(("main-check" "(= 1 1)"))))
+           (cons "sub.lisp" (sub-file nil)))
+     (lambda (dir)
+       (ok (gethash "suites_outside_root" (run-tests "fiveam-nest-probe"))
+           "a suite without :in is outside the root suite")
+       (%write-fixture-file dir "sub.lisp" (sub-file ":fiveam-nest-probe"))
+       (let ((result (run-tests "fiveam-nest-probe")))
+         (ok (null (gethash "suites_outside_root" result))
+             (format nil "nested now, it is not called outside: ~S"
+                     (gethash "suites_outside_root" result)))
+         (ok (equal "✓ PASS" (%headline result)) "a plain pass")
+         (ok (eql 2 (gethash "passed" result))))
+       (%write-fixture-file dir "sub.lisp" (sub-file ":fiveam-nest-probe" "(= 1 2)"))
+       (let ((result (run-tests "fiveam-nest-probe")))
+         (ok (eql 1 (length (gethash "failed_tests" result)))
+             (format nil "the nested suite runs once: ~D failure entries"
+                     (length (gethash "failed_tests" result)))))))))
+
+(deftest run-tests-forgets-a-fiveam-test-a-repl-eval-compile-left
+  ;; repl-eval compiles under a compilation unit whose source namestring is
+  ;; "repl-eval", so a test loaded that way names "repl-eval" as its file and
+  ;; the purge, which matches files, never forgot it once deleted.
+  (%call-with-fiveam-fixture
+   "fiveam-repl-probe"
+   (list (cons "main.lisp" (%fiveam-fixture-file "fiveam-repl-probe/main" ":fiveam-repl-probe"
+                                                 '(("kept" "(= 1 1)") ("deleted" "(= 2 2)")))))
+   (lambda (dir)
+     (let ((source (uiop:merge-pathnames* "main.lisp" dir)))
+       (with-compilation-unit (:override t :source-namestring "repl-eval")
+         (load (compile-file source :output-file (uiop:merge-pathnames* "repl.fasl" dir)
+                                    :verbose nil :print nil))))
+     (%write-fixture-file dir "main.lisp"
+                          (%fiveam-fixture-file "fiveam-repl-probe/main" ":fiveam-repl-probe"
+                                                '(("kept" "(= 1 1)"))))
+     (let ((result (run-tests "fiveam-repl-probe")))
+       (ok (= 1 (gethash "passed" result)) "the test still in the file runs")
+       (ok (null (gethash "unreached_tests" result))
+           (format nil "the deleted test is not reported (~S)"
+                   (gethash "unreached_tests" result)))))))
+
+(deftest run-tests-keeps-a-fiveam-test-of-another-file-in-the-package
+  ;; Any relative source name was taken for repl-eval's, so a test of a file
+  ;; loaded apart from the system -- named "external.lisp" -- went with the
+  ;; package: its failure vanished and the run read as a pass.
+  (%call-with-fiveam-fixture
+   "fiveam-extern-probe"
+   (list (cons "main.lisp" (%fiveam-fixture-file "fiveam-extern-probe/main"
+                                                 ":fiveam-extern-probe"
+                                                 '(("main-passes" "(= 1 1)")))))
+   (lambda (dir)
+     (run-tests "fiveam-extern-probe")
+     (let ((external (uiop:merge-pathnames* "external.lisp" dir)))
+       (%write-fixture-file
+        dir "external.lisp"
+        "(in-package #:fiveam-extern-probe/main)
+(in-suite :fiveam-extern-probe)
+(test external-fails (is (= 1 2)))
+")
+       (with-compilation-unit (:override t :source-namestring "external.lisp")
+         (load (compile-file external :output-file (uiop:merge-pathnames* "ext.fasl" dir)
+                                      :verbose nil :print nil))))
+     (let ((result (run-tests "fiveam-extern-probe")))
+       ;; Kept, it is counted or -- its suite made again by the reload, as
+       ;; FiveAM does -- named as not run; either way never a plain pass.
+       (ok (or (eql 1 (gethash "failed" result))
+               (find "FIVEAM-EXTERN-PROBE/MAIN::EXTERNAL-FAILS"
+                     (gethash "unreached_tests" result) :test #'equal))
+           (format nil "the other file's failing test is kept: ~S failed, ~S unreached"
+                   (gethash "failed" result) (gethash "unreached_tests" result)))
+       (ok (not (equal "✓ PASS" (%headline result))) (%headline result))))))
+
+(deftest run-tests-keeps-a-repl-eval-test-of-a-dependency-sharing-the-package
+  ;; A test compiled under repl-eval names no file, so it was dropped whenever a
+  ;; reloaded file defined its package -- a dependency's too, which the reload
+  ;; does not make again: its failing test vanished and the run read as a pass.
+  ;; The dependency's DEFPACKAGE may be wrapped in an EVAL-WHEN, too.
+  (if (null (asdf:find-system "fiveam" nil))
+      (rove:skip "FiveAM is not installed")
+      (dolist (wrap '(nil t))
+        (testing (format nil "the dependency's defpackage ~:[bare~;in an eval-when~]" wrap)
+          (let ((dir (uiop:ensure-directory-pathname
+                      (uiop:merge-pathnames*
+                       (format nil "cl-mcp-fiveam-share-~A/" (random 1000000))
+                       (uiop:temporary-directory))))
+                (defpackage-text
+                  "(defpackage #:fiveam-share-probe/tests (:use #:cl #:fiveam))")
+                (in-package-text "
+(in-package #:fiveam-share-probe/tests)
+"))
+            (asdf:load-system "fiveam")
+            (unwind-protect
+                 (progn
+                   (ensure-directories-exist dir)
+                   (%write-fixture-file
+                    dir "fiveam-share-probe-dep.asd"
+                    "(asdf:defsystem \"fiveam-share-probe-dep\" :depends-on (\"fiveam\")
+  :components ((:file \"dep\")))")
+                   (%write-fixture-file
+                    dir "dep.lisp"
+                    (concatenate 'string
+                                 (if wrap
+                                     (format nil "(eval-when (:compile-toplevel :load-toplevel ~
+                                                  :execute)~%  ~A)" defpackage-text)
+                                     defpackage-text)
+                                 in-package-text
+                                 "(def-suite :fiveam-share-probe)
+(in-suite :fiveam-share-probe)
+(test dep-fails (is (= 1 2)))
+"))
+                   (%write-fixture-file
+                    dir "fiveam-share-probe.asd"
+                    "(asdf:defsystem \"fiveam-share-probe\"
+  :depends-on (\"fiveam\" \"fiveam-share-probe-dep\")
+  :components ((:file \"main\")))")
+                   (%write-fixture-file
+                    dir "main.lisp"
+                    (concatenate 'string defpackage-text in-package-text
+                                 "(in-suite :fiveam-share-probe)
+(test main-passes (is (= 1 1)))
+"))
+                   (let ((asdf:*central-registry* (cons dir asdf:*central-registry*)))
+                     ;; FASLs written in the second of their sources are deleted
+                     ;; by run-tests, which would reload the dependency too.
+                     (sleep 1.5)
+                     ;; Through repl-eval, as an agent would: its compilation
+                     ;; unit names every function's source "repl-eval".
+                     (cl-mcp/src/repl-core:repl-eval
+                      "(asdf:load-system \"fiveam-share-probe\")")
+                     (let ((result (run-tests "fiveam-share-probe")))
+                       (ok (eql 1 (gethash "passed" result)))
+                       (ok (eql 1 (gethash "failed" result))
+                           (format nil "the dependency's failing test still counts: ~S failed"
+                                   (gethash "failed" result))))))
+              (let ((var (uiop:find-symbol* '#:*toplevel-suites* :fiveam)))
+                (setf (symbol-value var) (remove :fiveam-share-probe (symbol-value var))))
+              (dolist (name '("fiveam-share-probe" "fiveam-share-probe-dep"))
+                (ignore-errors (asdf:clear-system name)))
+              (ignore-errors (delete-package "FIVEAM-SHARE-PROBE/TESTS"))
+              (ignore-errors (uiop:delete-directory-tree dir :validate t))))))))
+
 (defun %call-with-inferred-test-fixture (primary framework file-text thunk)
   "Write a package-inferred PRIMARY to a fresh directory on ASDF's central
 registry: it depends on FRAMEWORK and on the inferred PRIMARY/tests/a, whose

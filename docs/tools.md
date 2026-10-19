@@ -1012,10 +1012,13 @@ Input:
   with `...` marking the gaps.
 
 Files searched: `.lisp`, `.asd` and `.ros`. The `.gitignore` of the search root (only that one)
-is honoured, with the common glob forms (`*`, `?`, `**`, a leading `/`) but not `!` negation.
-A pattern without a leading `/` matches anywhere in the path, as a substring, so it can exclude
-more than git would (`build` also skips `src/rebuild.lisp`). `.git/` is always skipped. Because only the root's own `.gitignore` applies, a directory that
-the project's `.gitignore` excludes is still searched when you pass it as `path`. A hit on a
+is honoured as git reads it: `*`, `?`, `**`, `[...]` and `[!...]` classes, `\` escapes, a
+leading or middle `/` anchoring to the root, a trailing `/` for directories only, and `!` lines
+taking a path back in, the last matching line deciding. A pattern matches whole path
+components (`build` does not skip `src/rebuild.lisp`), and a file under a directory left out
+stays out whatever follows, as in git. `.git/` is always skipped. Because only the root's own
+`.gitignore` applies, a directory that the project's `.gitignore` excludes is still searched
+when you pass it as `path`. A hit on a
 line outside every top-level form (a comment between forms) is dropped.
 
 Output:
@@ -1426,12 +1429,19 @@ Output:
   its file is not counted: before reloading, run-tests drops from FiveAM the tests made by the
   files the reload loads again, so one no longer in its file is gone. A test made by any other
   file stays, even in a package a reloaded file shares: a dependency's would not come back (the
-  tests of a test file since deleted are not counted either)
-- `suites_outside_root` (array, FiveAM, present when any): suites of the run other than the
-  root suite, the one named after the primary system. run-tests runs them, but a test-op that
-  runs the root suite (the scaffold's does) skips them; the summary says `⚠ PASS, BUT N SUITES
-  ARE OUTSIDE THE ROOT SUITE`, how to nest them with `:in`, and, for one that already says
-  `:in` the root, the `:import-from` that makes its file load after the root's
+  tests of a test file since deleted are not counted either). A test defined or compiled
+  through `repl-eval`, which names no file, goes when a reloaded file defines its package, also
+  when `test`/`tests` names it (a file you `load` from `repl-eval` counts as `repl-eval`'s):
+  put it in its file first. It stays when a dependency the run
+  does not reload defines that package too, since it may be that dependency's; a test deleted
+  from a reloaded file there then stays as well -- not run, or, when its suite is the
+  dependency's, still run -- until a fresh worker (`pool-kill-worker`)
+- `suites_outside_root` (array, FiveAM, present when any): suites of the run other than the root
+  suite, the one named after the primary system, that the root suite's tree does not hold (a
+  suite nested with `:in` since an earlier load is not one). run-tests runs them, but a test-op
+  that runs the root suite (the scaffold's does) skips them; the summary says `⚠ PASS, BUT N
+  SUITES ARE OUTSIDE THE ROOT SUITE`, how to nest them with `:in`, and, for one that already
+  says `:in` the root, the `:import-from` that makes its file load after the root's
 - `warning_records` (array, `✗ LOAD FAILED` only, present when any): the full warnings ASDF
   refused a file the load compiled for (a dependency's file too), as the objects of load-system's `warning_records` (see
   there), each with `fails_compile` true. The summary lists them with their places under
