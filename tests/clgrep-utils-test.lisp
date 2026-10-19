@@ -774,6 +774,18 @@ said of the same tree."
                  (extract-form-signature "(defstruct my-struct field1 field2)")))
     ;; Non-recognized form
     (ok (null (extract-form-signature "(my-custom-form foo)"))))
+  (testing "a deftest has no lambda list, so its signature is its name (issue #260)"
+    ;; DEFTEST was listed with the definers that take a lambda list, so the
+    ;; first body form was printed as one: a test wrapped in one LET* or
+    ;; TESTING block came back whole as its "signature".
+    (ok (string= "find-total-topup-limit"
+                 (extract-form-signature
+                  (format nil "(deftest find-total-topup-limit~%  (let* ((money (make-money))~%         (limit (make-limit money)))~%    (ok (eq limit (find-limit money)))))"))))
+    (ok (string= "create-limit"
+                 (extract-form-signature
+                  (format nil "(deftest create-limit~%  (testing \"entire period\"~%    (ok t))~%  (testing \"range\"~%    (ok t)))"))))
+    (ok (string= "empty-test" (extract-form-signature "(deftest empty-test)"))
+        "a deftest with no body at all"))
   (testing "should extract signatures from package-qualified heads"
     ;; EXTRACT-FORM-TYPE-AND-NAME reports DEFUN for (CL:DEFUN ...), so the
     ;; signature scan has to look past the qualifier it dropped. Otherwise a row
@@ -781,16 +793,17 @@ said of the same tree."
     (ok (string= "(foo x y)"
                  (extract-form-signature "(cl:defun foo (x y) x)")))
     ;; (ROVE:DEFTEST ...) is the everyday case: rove is commonly qualified
-    ;; rather than :USEd into the test package.
-    (ok (string= "(my-test ok t)"
+    ;; rather than :USEd into the test package.  It has no lambda list, so
+    ;; once recognized through its qualifier it is named alone (issue #260).
+    (ok (string= "my-test"
                  (extract-form-signature "(rove:deftest my-test (ok t))")))
     (ok (string= "(emit (l json) e)"
                  (extract-form-signature "(cl:defmethod emit ((l json) e) e)")))
     ;; defclass takes a separate branch and needs the same treatment.
     (ok (string= "(k p)" (extract-form-signature "(cl:defclass k (p) ())")))
     ;; A package name with a dot or a slash reaches the same path.
-    (ok (string= "(my-test ok t)"
-                 (extract-form-signature "(my.lib::deftest my-test (ok t))")))
+    (ok (string= "(mac a b)"
+                 (extract-form-signature "(my.lib::defmacro mac (a b) a)")))
     ;; Types outside those two branches already returned the bare name.
     (ok (string= "foo"
                  (extract-form-signature "(routes:define-rule foo (x) x)"))))
@@ -804,7 +817,7 @@ said of the same tree."
                  (extract-form-signature "(DEFUN foo (x y) x)")))
     (ok (string= "(foo x)" (extract-form-signature "(Defun foo (x) x)")))
     (ok (string= "(k p)" (extract-form-signature "(CL:DEFCLASS k (p) ())")))
-    (ok (string= "(my-test ok t)"
+    (ok (string= "my-test"
                  (extract-form-signature "(ROVE:DEFTEST my-test (ok t))")))
     ;; Only the head is matched case-insensitively: the name is reported with
     ;; the case the source used.

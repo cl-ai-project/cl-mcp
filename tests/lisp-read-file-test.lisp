@@ -493,6 +493,50 @@ tests/tmp/NAME.lisp."
     (ok (search "(defvar *sig-long* \"aaa" line) "it still starts with the value")
     (ok (search ";; Doc." line) "and keeps the docstring")))
 
+(deftest lisp-read-file-collapsed-view-names-every-definition
+  ;; Issue #261: only nine CL definers were named; every other definition was
+  ;; printed as (head ...), although name_pattern matches it by that name.
+  (let ((lines (%collapsed-lines
+                "tests/tmp/sig-named-definers.lisp"
+                (format nil "~{~A~%~}"
+                        '("(defpackage #:sig-named-pkg (:use #:cl))"
+                          "(define-condition unexpected-contact (error) ())"
+                          "(deftype contact-type () '(member :a :b))"
+                          "(deftest require-access-token (ok (let ((x 1)) x)))"
+                          "(define-repository-function create-total-topup-limit ((money money)) money)"
+                          "(define-controller (show :require-token t) (render))"
+                          "(defsystem \"sig-named-system\" :depends-on (\"a\"))"
+                          "(progn (setup))")))))
+    (flet ((shown (expected)
+             (ok (some (lambda (line) (search expected line)) lines)
+                 (format nil "~S is shown" expected))))
+      (shown "(defpackage #:sig-named-pkg ...)")
+      (shown "(define-condition unexpected-contact ...)")
+      (shown "(deftype contact-type ...)")
+      (shown "(deftest require-access-token ...)")
+      (shown "(define-repository-function create-total-topup-limit ...)")
+      (shown "(define-controller (show :require-token t) ...)")
+      (shown "(defsystem \"sig-named-system\" ...)")
+      (shown "(progn ...)"))
+    (ok (= 8 (length lines)) "every form stays on one line")))
+
+(deftest lisp-read-file-collapsed-view-bounds-a-definitions-name
+  ;; A name can be a list of any length, as in (define-controller (show ...)).
+  (let ((line (%collapsed-line "sig-long-name"
+                               (format nil "(define-thing (thing ~{~A~^ ~}) body)~%"
+                                       (loop for i below 100 collect (format nil ":k~D" i))))))
+    (ok (< (length line) 200) (format nil "the line is bounded: ~D" (length line)))
+    (ok (search "(define-thing (thing :k0 :k1" line) "it still starts with the name")))
+
+(deftest lisp-read-file-name-pattern-finds-what-the-collapsed-view-names
+  ;; The collapsed view now shows the name name_pattern matches.
+  (with-temp-lisp-file "tests/tmp/sig-named-expand.lisp"
+      (format nil "(deftest alpha-test (ok 1))~%~%(deftest beta-test (ok 2))~%")
+    (lambda (path)
+      (let ((content (gethash "content" (lisp-read-file path :name-pattern "^beta-test$"))))
+        (ok (search "(deftest alpha-test ...)" content) "the other test is named")
+        (ok (search "(ok 2)" content) "the matched test is expanded")))))
+
 (defun %try-load (system)
   "Attempt to load SYSTEM via Quicklisp or ASDF. Returns T on success, NIL on failure."
   (handler-case

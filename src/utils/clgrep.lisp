@@ -659,9 +659,13 @@ every entry of the walk, which took seconds over a large project's tree."
          (form-name (cdr (assoc :name type-info))))
     (when (and form-type form-name)
       (cond
-        ;; Forms with lambda-list: defun, defmacro, defgeneric, defmethod
+        ;; Forms with lambda-list: defun, defmacro, defgeneric, defmethod.
+        ;; Not deftest: neither Rove's nor Prove's takes one, so what follows
+        ;; its name is the first body form, and printed as a lambda list it
+        ;; made the whole test the signature (issue #260).  It falls through
+        ;; to the name alone.
         ((member form-type '("defun" "defmacro" "defgeneric" "defmethod"
-                             "define-compiler-macro" "deftest")
+                             "define-compiler-macro")
                  :test #'string=)
          (let* ((trimmed (string-trim '(#\Space #\Tab #\Newline) form-text))
                 (name-pattern (%head-scan-pattern form-type form-name))

@@ -441,6 +441,30 @@ object across multiple positions in the form tree."
                     "")
                 args-display doc))))
 
+(defparameter *definition-name-max-chars* 80
+  "Characters of a definition's name shown in the collapsed line that
+%COLLAPSE-NAMED-FORM gives it; a name can be a list of any length.")
+
+(defun %collapse-named-form (form)
+  "Collapse FORM, a definition whose head is not one of the nine
+%COLLAPSE-DEF-FORM knows, to (HEAD NAME ...): deftest, define-condition,
+deftype, defpackage, a project's define-* and the like (issue #261).  They are
+the forms %DEFINITION-NAMES names, so the overview shows the name name_pattern
+matches.  Only for those nine is the third element known to be a lambda list,
+so nothing after the name is shown.  The name is printed as a signature is, on
+one line, and cut at *DEFINITION-NAME-MAX-CHARS*; the signature's own \" ...\"
+follows, so the cut gets no marker of its own."
+  (let ((text (let ((*print-case* :downcase)
+                    (*print-circle* nil)
+                    (*print-pprint-dispatch* *signature-pprint-dispatch*)
+                    (*print-right-margin* most-positive-fixnum))
+                (with-output-to-string (out)
+                  (write (second form) :stream out :pretty t :case :downcase)))))
+    (format nil "(~(~A~) ~A ...)" (car form)
+            (if (> (length text) *definition-name-max-chars*)
+                (string-right-trim " " (subseq text 0 *definition-name-max-chars*))
+                text))))
+
 (defun %collapse-generic (form)
   (cond
     ((consp form)
@@ -594,6 +618,10 @@ whitespace."
                              (%collapse-def-form form)))
                     ((eq head 'in-package)
                      (%form->string form))
+                    ;; Any other definition is named, as name_pattern sees it.
+                    ((and names (consp (cdr form)))
+                     (format nil "~VD: ~@[~A ~]~A" line-width start-line prefix
+                             (%collapse-named-form form)))
                     (t (format nil "~VD: ~@[~A ~]~A" line-width start-line prefix
                                (%collapse-generic form))))))
     (values display expand?)))
