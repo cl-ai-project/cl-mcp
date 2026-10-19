@@ -2341,9 +2341,10 @@ reload makes its suite again, and still run when that suite is the dependency's
                 (when (and object (not (%fiveam-suite-p object)))
                   (cond ((member file files :test #'equal)
                          (funcall rem-test name))
-                        ((and (stringp file)
-                              (not (uiop:absolute-pathname-p
-                                    (uiop:parse-native-namestring file)))
+                        ;; repl-eval's own marker only: any other relative
+                        ;; name is a file loaded apart from the system, whose
+                        ;; test the reload would not make again.
+                        ((and (equal file "repl-eval")
                               (symbolp name)
                               (member (symbol-package name) packages))
                          (push name by-package))))))

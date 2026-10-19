@@ -1776,6 +1776,37 @@ given, an IN-SUITE of it, and TESTS, each (NAME FORM)."
            (format nil "the deleted test is not reported (~S)"
                    (gethash "unreached_tests" result)))))))
 
+(deftest run-tests-keeps-a-fiveam-test-of-another-file-in-the-package
+  ;; Any relative source name was taken for repl-eval's, so a test of a file
+  ;; loaded apart from the system -- named "external.lisp" -- went with the
+  ;; package: its failure vanished and the run read as a pass.
+  (%call-with-fiveam-fixture
+   "fiveam-extern-probe"
+   (list (cons "main.lisp" (%fiveam-fixture-file "fiveam-extern-probe/main"
+                                                 ":fiveam-extern-probe"
+                                                 '(("main-passes" "(= 1 1)")))))
+   (lambda (dir)
+     (run-tests "fiveam-extern-probe")
+     (let ((external (uiop:merge-pathnames* "external.lisp" dir)))
+       (%write-fixture-file
+        dir "external.lisp"
+        "(in-package #:fiveam-extern-probe/main)
+(in-suite :fiveam-extern-probe)
+(test external-fails (is (= 1 2)))
+")
+       (with-compilation-unit (:override t :source-namestring "external.lisp")
+         (load (compile-file external :output-file (uiop:merge-pathnames* "ext.fasl" dir)
+                                      :verbose nil :print nil))))
+     (let ((result (run-tests "fiveam-extern-probe")))
+       ;; Kept, it is counted or -- its suite made again by the reload, as
+       ;; FiveAM does -- named as not run; either way never a plain pass.
+       (ok (or (eql 1 (gethash "failed" result))
+               (find "FIVEAM-EXTERN-PROBE/MAIN::EXTERNAL-FAILS"
+                     (gethash "unreached_tests" result) :test #'equal))
+           (format nil "the other file's failing test is kept: ~S failed, ~S unreached"
+                   (gethash "failed" result) (gethash "unreached_tests" result)))
+       (ok (not (equal "✓ PASS" (%headline result))) (%headline result))))))
+
 (deftest run-tests-keeps-a-repl-eval-test-of-a-dependency-sharing-the-package
   ;; A test compiled under repl-eval names no file, so it was dropped whenever a
   ;; reloaded file defined its package -- a dependency's too, which the reload
