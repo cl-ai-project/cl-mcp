@@ -389,9 +389,10 @@ sanitization so the limit applies to the characters actually emitted."
   "Expand SOURCE in the already-resolved PACKAGE.
 Returns the tail of the result plist (everything except :LABEL).
 
-The expander runs with *PACKAGE* bound to PACKAGE and *READTABLE* to READTABLE
-(when one is given), as COMPILE-FILE runs it after the file's IN-PACKAGE and
-IN-READTABLE.  A macro that interns at expansion time -- INTERN, a
+The expander runs with *PACKAGE* bound to PACKAGE, as COMPILE-FILE runs it
+after the file's IN-PACKAGE, and *READTABLE* to READTABLE when the caller gave
+one (a file's own IN-READTABLE is not looked up here; it has to be passed as
+READTABLE).  A macro that interns at expansion time -- INTERN, a
 SYMBOLICATE, FORMAT-SYMBOL with *PACKAGE* -- therefore makes the symbols the
 compiler makes.  Before issue #238 only reading and printing were bound, so the
 expander ran in the worker's CL-USER: the result showed

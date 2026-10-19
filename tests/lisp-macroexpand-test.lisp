@@ -101,15 +101,18 @@ COMPILE-FILE makes the file's own package."
 reads with whatever *READTABLE* it runs under."
   `',(if (eq *readtable* *expected-readtable*) :expected-readtable :other-readtable))
 
-(defun %forget-cl-user-symbol (name)
-  "Unintern NAME from CL-USER if a run before the fix of issue #238 left it
-there, so the tests below see only what this run interns."
-  (let ((symbol (find-symbol name :cl-user)))
-    (when symbol
-      (unintern symbol :cl-user))))
-
 (defparameter *fixture-package* "CL-MCP/TESTS/LISP-MACROEXPAND-TEST"
   "Name of this test package, used as the expansion package.")
+
+(defun %forget-cl-user-symbol (name)
+  "Unintern NAME from CL-USER, where a run before the fix of issue #238 left
+it, and from this package, where an earlier run of the fixed code left it, so
+the tests below see only what this run interns: otherwise, in a reused image,
+\"it was interned in the target package\" would hold whatever the code did."
+  (dolist (package (list :cl-user *fixture-package*))
+    (let ((symbol (find-symbol name package)))
+      (when symbol
+        (unintern symbol package)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; macroexpand-core
