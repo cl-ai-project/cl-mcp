@@ -277,9 +277,36 @@ remove everything again."
          (ok (search "COMPILE-FILE-ERROR" printed))
          (ok (search "COMPILE-FILE-ERROR" (getf error-context :condition-type)))
          (ok (search "called with three arguments" stderr)
-             "the warning's text is still in stderr"))))))
+             "the warning's text is still in stderr")
+         ;; Printed when repl-eval's compilation unit ends, which it now does
+         ;; before stderr is read; the error is caught inside that unit, so
+         ;; only ASDF's unit is aborted and the count is plain ASDF's.
+         (ok (search "caught 1 fatal ERROR condition" stderr)
+             (format nil "the compilation unit's trailer is in stderr: ~A" stderr)))))))
 
-(deftest repl-eval-muffles-a-full-warning-outside-a-compile
+(deftest repl-eval-error-leaves-no-compilation-trailer
+  ;; Caught outside repl-eval's own compilation unit, an error aborted that
+  ;; unit, which then reported "compilation unit aborted / caught 1 fatal ERROR
+  ;; condition" for an evaluation that compiled nothing wrong.
+  (multiple-value-bind (printed value stdout stderr error-context)
+      (repl-eval "(error \"boom\")")
+    (declare (ignore value stdout))
+    (ok (search "boom" printed))
+    (ok (getf error-context :condition-type) "it is reported as an error")
+    (ok (string= "" stderr) (format nil "stderr is empty: ~S" stderr))))
+
+(deftest repl-eval-an-unwind-a-cleanup-takes-over-is-a-result
+  ;; A cleanup form may leave for an exit point of its own, abandoning the
+  ;; unwind repl-eval's error handler began (CLHS 5.2).  The evaluation then
+  ;; completes, and its value is the result -- not an error, and not a
+  ;; TYPE-ERROR from treating that value as the error's message.
+  (multiple-value-bind (printed value stdout stderr error-context)
+      (repl-eval "(block b (unwind-protect (error \"a\") (return-from b :cleaned)))")
+    (declare (ignore value stdout stderr))
+    (ok (equal ":cleaned" printed) (format nil "the value is the result: ~A" printed))
+    (ok (null error-context) "and no error is reported")))
+
+(deftest repl-eval-writes-a-full-warning-outside-a-compile-once
   (testing "a WARN in evaluated code is written once to stderr and evaluation goes on"
     (multiple-value-bind (printed value stdout stderr)
         (repl-eval "(progn (warn \"plain probe warning\") :after)")
@@ -289,6 +316,52 @@ remove everything again."
         (ok first "the warning is in stderr")
         (ok (eql first (search "plain probe warning" stderr :from-end t))
             "and only once")))))
+
+(deftest repl-eval-compile-counts-a-full-warning-as-sbcl-does
+  ;; Muffled by repl-eval, the warning never reached the compiler, and COMPILE
+  ;; said there was none: (f NIL NIL) where SBCL says (f T T).
+  (multiple-value-bind (printed value stdout stderr)
+      (repl-eval "(rest (multiple-value-list
+                         (compile nil '(lambda () (the fixnum \"not a number\")))))")
+    (declare (ignore value stdout))
+    (ok (equal "(t t)" printed) (format nil "warnings-p and failure-p: ~A" printed))
+    (ok (search "not a number" stderr) "the compiler wrote the warning to stderr")))
+
+(deftest repl-eval-style-warning-in-a-compile-keeps-its-place
+  ;; Written as `Warning: ...', a compiler's style warning lost the form it was
+  ;; in; left to the compiler, it is reported with it, as outside repl-eval.
+  (%call-with-warning-system
+   "(defun style-only () (let ((unused 1)) 2))"
+   (lambda (system file)
+     (declare (ignore system))
+     (multiple-value-bind (printed value stdout stderr)
+         (repl-eval (format nil "(nth-value 1 (compile-file ~S :output-file ~S))"
+                            (namestring file)
+                            (namestring (make-pathname :name "style" :type "fasl"
+                                                       :defaults file))))
+       (declare (ignore value stdout))
+       (ok (equal "t" printed) "compile-file reports the style warning")
+       (ok (search "UNUSED" stderr) "the warning is in stderr")
+       (ok (search "in: DEFUN STYLE-ONLY" stderr)
+           (format nil "with the form it is in: ~A" stderr))))))
+
+(deftest repl-eval-leaves-uninteresting-redefinitions-to-sbcl
+  ;; SBCL muffles a redefinition from the same source (sb-ext:*muffled-warnings*),
+  ;; but only a warning no handler took.  repl-eval took every one, so loading a
+  ;; file twice printed `redefining ...' for each definition in it.  (Under
+  ;; repl-eval every definition's source is recorded as "repl-eval" (#249), so
+  ;; loading two different files would be quiet too.)
+  (%call-with-warning-system
+   "(defun loaded-twice () 1)"
+   (lambda (system file)
+     (declare (ignore system))
+     (multiple-value-bind (printed value stdout stderr)
+         (repl-eval (format nil "(progn (load ~S) (load ~S) :loaded)"
+                            (namestring file) (namestring file)))
+       (declare (ignore value stdout))
+       (ok (equal ":loaded" printed) "both loads ran")
+       (ok (not (search "redefining" stderr))
+           (format nil "no redefinition notice: ~A" stderr))))))
 
 (deftest repl-eval-suppresses-compiler-trace-output
   (testing "compiler trace output is discarded"
@@ -922,6 +995,16 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
         (ok (< bounding (floor retaining 4))
             (format nil "~D bytes to bound 1 000 000 characters, against ~D to retain them"
                     bounding retaining))))))
+
+(deftest repl-eval-captures-what-the-read-phase-writes
+  ;; With the warning handler gone, a #. form's warning -- and its output --
+  ;; went to the worker's own streams: the read ran outside the capture.
+  (multiple-value-bind (printed raw stdout stderr)
+      (repl-eval "#.(progn (warn \"read-time probe\") (princ \"read-out\") 42)" :safe-read nil)
+    (declare (ignore raw))
+    (ok (equal "42" printed))
+    (ok (search "read-time probe" stderr) (format nil "stderr: ~S" stderr))
+    (ok (search "read-out" stdout) (format nil "stdout: ~S" stdout))))
 
 (deftest repl-eval-capture-limit-edges
   (testing "a zero limit suppresses the output rather than falling back"

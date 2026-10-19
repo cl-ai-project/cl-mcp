@@ -1004,3 +1004,27 @@ parens (min count room) is the IF's else branch; by indentation it is not.")
   (testing "a balanced diagnosis has nothing to explain"
     (ok (null (format-delimiter-diagnosis (diagnose-delimiters "(+ 1 2)"))))
     (ok (null (format-delimiter-diagnosis (list :ok t) :target "content")))))
+
+(deftest unreadable-dispatch-position-finds-only-what-no-readtable-reads
+  (flet ((position-of (text)
+           (multiple-value-list
+            (cl-mcp/src/paren-diagnostics::unreadable-dispatch-position text))))
+    (testing "an object printed unreadably, with or without a numeric argument"
+      (ok (equal '(2 9 #\<) (position-of (format nil "(a)~%(eq nil #<ledger>)"))))
+      (ok (equal '(1 4 #\)) (position-of "(a #)")))
+      (ok (equal '(1 9 #\<) (position-of "(eq nil #3<ledger>)"))
+          "the column of the #, not of its digits"))
+    (testing "text an undefined dispatch reads is not evidence"
+      ;; Under *read-suppress* the reader skips #? and then reads the regex's
+      ;; body with standard syntax, where " #<" starts a token: that file is
+      ;; valid under cl-interpol's readtable, and must keep its guard.
+      (ok (equal '(nil) (position-of (format nil "(defun a ()~%  (scan #?/foo #<bar>/ x))")))
+          "#? first")
+      (ok (equal '(nil) (position-of "#?/(?x) \\d+ # <digits>/")))
+      (ok (equal '(nil) (position-of "#>eof>text #<obj> eof")))
+      (ok (equal '(nil) (position-of (format nil "(list #~Cfoo #<bar>~C)"
+                                             (code-char 171) (code-char 187))))
+          "a non-ASCII dispatch character too"))
+    (testing "inside a string, a comment or a character, no position"
+      (dolist (text '("\"#<x>\"" "; #<x>" "#| #<x> |#" "#\\#<" "|a#<b|"))
+        (ok (equal '(nil) (position-of text)) text)))))

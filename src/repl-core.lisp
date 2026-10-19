@@ -165,8 +165,19 @@ a caller than knowing only that something was lost."
   #-sbcl
   (funcall thunk))
 
-(defun %eval-forms (forms package stdout stderr safe-read)
-  (let ((last-value nil))
+(defun %eval-forms (forms package stdout stderr safe-read on-error)
+  "Evaluate FORMS in PACKAGE with output captured in STDOUT and STDERR, and
+return (values LAST-VALUE COMPLETED-P).  An error (other than a package or
+reader error, which the caller handles) is passed to ON-ERROR, a function of
+the condition, while its frames are live, and ends the evaluation: COMPLETED-P
+is then NIL.  It is caught inside the compilation unit
+%CALL-WITH-COMPILER-STREAMS opens, so leaving it does not abort that unit -- an
+aborted unit reports 'caught 1 fatal ERROR condition' for an evaluation that
+compiled nothing wrong, and counts a refused COMPILE-FILE a second time.  A
+cleanup form that takes over the unwind for an exit of its own lets the
+evaluation complete, and COMPLETED-P says so."
+  (let ((last-value nil)
+        (completed nil))
     (let ((*package* package)
           (*read-eval* (not safe-read))
           (*print-readably* nil)
@@ -211,9 +222,15 @@ a caller than knowing only that something was lost."
          stdout
          stderr
          (lambda ()
-           (dolist (form forms)
-             (setf last-value (eval form)))))))
-    last-value))
+           (block evaluation
+             (handler-bind ((error (lambda (e)
+                                     (unless (typep e '(or package-error reader-error))
+                                       (funcall on-error e)
+                                       (return-from evaluation)))))
+               (dolist (form forms)
+                 (setf last-value (eval form)))
+               (setf completed t)))))))
+    (values last-value completed)))
 
 (defun %live-package-p (package)
   "Return true when PACKAGE is a package object that has not been deleted.
@@ -246,6 +263,7 @@ pretty-printed at a 100-column margin, so it reads as source.
 ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL otherwise."
   (let ((last-value nil)
         (error-context nil)
+        (error-message nil)
         (eval-package nil)
         (stdout (%make-capture-stream max-output-length))
         (stderr (%make-capture-stream max-output-length)))
@@ -254,89 +272,108 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
     (when output-streams
       (setf (car output-streams) stdout
             (cdr output-streams) stderr))
-    (handler-bind ((warning (lambda (w)
-                              ;; A full WARNING inside a COMPILE-FILE is declined:
-                              ;; the compiler counts it towards FAILURE-P only when
-                              ;; no outer handler muffles it, and ASDF refuses the
-                              ;; file on that flag.  The compiler writes it to
-                              ;; stderr itself.
-                              (unless (and *compile-file-pathname*
-                                           (not (typep w 'style-warning)))
-                                (format stderr "~&Warning: ~A~%" w)
-                                (when (find-restart 'muffle-warning)
-                                  (invoke-restart 'muffle-warning)))))
-                   (package-error
-                    (lambda (e)
-                      (let* ((raw-msg (format nil "Package error: ~A" e))
-                             (msg (%truncate-output raw-msg max-output-length)))
-                        (return-from %do-repl-eval
-                          (values msg msg
-                                  (%captured-output stdout)
-                                  (%captured-output stderr)
-                                  (list :condition-type (princ-to-string (type-of e))
-                                        :message msg
-                                        :restarts nil
-                                        :frames nil))))))
-                   (reader-error
-                    (lambda (e)
-                      (let* ((raw-msg (format nil "Reader error: ~A" e))
-                             (msg (%truncate-output raw-msg max-output-length)))
-                        (return-from %do-repl-eval
-                          (values msg msg
-                                  (%captured-output stdout)
-                                  (%captured-output stderr)
-                                  (list :condition-type (princ-to-string (type-of e))
-                                        :message msg
-                                        :restarts nil
-                                        :frames nil))))))
-                   (error (lambda (e)
-                            ;; Capture structured error context
-                            (setf error-context
-                                  (capture-error-context e
-                                                         :max-frames 20
-                                                         :print-level (or print-level 3)
-                                                         :print-length (or print-length 10)
-                                                         :locals-preview-frames (or locals-preview-frames 0)
-                                                         :preview-max-depth (or locals-preview-max-depth 1)
-                                                         :preview-max-elements (or locals-preview-max-elements 5)
-                                                         :locals-preview-skip-internal locals-preview-skip-internal))
-                            (setf last-value
-                                  (let ((*print-readably* nil))
-                                    (handler-case (format nil "~A" e)
-                                      (error ()
-                                        (format nil "<error formatting ~A>"
-                                                (type-of e))))))
-                            (return-from %do-repl-eval
-                              (values (%truncate-output last-value max-output-length)
-                                      last-value
-                                      (%captured-output stdout)
-                                      (%captured-output stderr)
-                                      error-context)))))
-      (let ((pkg (%resolve-eval-package package)))
-        (setf eval-package pkg)
-        (let ((forms (handler-case
-                         (let ((*package* pkg)) (%read-all input (not safe-read)))
-                       (end-of-file (e)
-                         ;; Scope END-OF-FILE handling to the read phase only.
-                         ;; Runtime EOF (e.g. reading from an empty stream in user
-                         ;; code) must NOT be silently rewritten as an input error.
-                         (declare (ignore e))
-                         (let ((msg "Reader error: unexpected end of file -- check for unbalanced parentheses"))
+    (flet ((note-error (e)
+             ;; Capture structured error context while the frames are live.
+             (setf error-context
+                   (capture-error-context
+                    e
+                    :max-frames 20
+                    :print-level (or print-level 3)
+                    :print-length (or print-length 10)
+                    :locals-preview-frames (or locals-preview-frames 0)
+                    :preview-max-depth (or locals-preview-max-depth 1)
+                    :preview-max-elements (or locals-preview-max-elements 5)
+                    :locals-preview-skip-internal locals-preview-skip-internal)
+                   error-message
+                   (let ((*print-readably* nil))
+                     (handler-case (format nil "~A" e)
+                       (error ()
+                         (format nil "<error formatting ~A>" (type-of e))))))))
+      ;; No WARNING handler: a warning is Lisp's to report, as outside repl-eval.
+      ;; One signalled while the compiler runs is the compiler's -- it writes it
+      ;; to stderr with its place and counts it, so COMPILE's and COMPILE-FILE's
+      ;; flags, and ASDF's refusal of a file, are what they are elsewhere.  Any
+      ;; other is WARN's, which writes it to *ERROR-OUTPUT*, unless it is one SBCL
+      ;; muffles (SB-EXT:*MUFFLED-WARNINGS*) -- that applies only to a warning
+      ;; no handler took, so a handler here would print every redefinition.
+      ;; The ERROR handler here serves the read phase; an error while the forms
+      ;; are evaluated is caught inside %EVAL-FORMS, within its compilation unit.
+      (handler-bind ((package-error
+                       (lambda (e)
+                         (let* ((raw-msg (format nil "Package error: ~A" e))
+                                (msg (%truncate-output raw-msg max-output-length)))
                            (return-from %do-repl-eval
                              (values msg msg
                                      (%captured-output stdout)
                                      (%captured-output stderr)
-                                     (list :condition-type "END-OF-FILE"
+                                     (list :condition-type (princ-to-string (type-of e))
                                            :message msg
                                            :restarts nil
-                                           :frames nil))))))))
-          (setf last-value (%eval-forms forms pkg stdout stderr safe-read)))))
+                                           :frames nil))))))
+                     (reader-error
+                       (lambda (e)
+                         (let* ((raw-msg (format nil "Reader error: ~A" e))
+                                (msg (%truncate-output raw-msg max-output-length)))
+                           (return-from %do-repl-eval
+                             (values msg msg
+                                     (%captured-output stdout)
+                                     (%captured-output stderr)
+                                     (list :condition-type (princ-to-string (type-of e))
+                                           :message msg
+                                           :restarts nil
+                                           :frames nil))))))
+                     (error (lambda (e)
+                              (note-error e)
+                              (return-from %do-repl-eval
+                                (values (%truncate-output error-message max-output-length)
+                                        error-message
+                                        (%captured-output stdout)
+                                        (%captured-output stderr)
+                                        error-context)))))
+        (let ((pkg (%resolve-eval-package package)))
+          (setf eval-package pkg)
+          (let ((forms (handler-case
+                           ;; A #. form runs here: what it writes, a warning
+                           ;; WARN prints included, is the call's output too.
+                           (let ((*package* pkg)
+                                 (*standard-output* stdout)
+                                 (*error-output* stderr))
+                             (%read-all input (not safe-read)))
+                         (end-of-file (e)
+                           ;; Scope END-OF-FILE handling to the read phase only.
+                           ;; Runtime EOF (e.g. reading from an empty stream in user
+                           ;; code) must NOT be silently rewritten as an input error.
+                           (declare (ignore e))
+                           (let ((msg (concatenate
+                                       'string
+                                       "Reader error: unexpected end of file -- "
+                                       "check for unbalanced parentheses")))
+                             (return-from %do-repl-eval
+                               (values msg msg
+                                       (%captured-output stdout)
+                                       (%captured-output stderr)
+                                       (list :condition-type "END-OF-FILE"
+                                             :message msg
+                                             :restarts nil
+                                             :frames nil))))))))
+            (multiple-value-bind (value completed)
+                (%eval-forms forms pkg stdout stderr safe-read #'note-error)
+              ;; Read once the evaluation is over, its compilation unit's
+              ;; report included.
+              (unless completed
+                (return-from %do-repl-eval
+                  (values (%truncate-output error-message max-output-length)
+                          error-message
+                          (%captured-output stdout)
+                          (%captured-output stderr)
+                          error-context)))
+              (setf last-value value))))))
     ;; This block is a SIBLING of the HANDLER-BIND above, not nested inside
     ;; it, so PKG's binding has already unwound by the time we get here and
     ;; *PACKAGE* is whatever the caller had.  EVAL-PACKAGE carries the
     ;; resolved package across that boundary; without it every symbol prints
     ;; fully package-qualified relative to the caller.  Every error path
-    ;; RETURN-FROMs before reaching here, so EVAL-PACKAGE is always set.
+    ;; returns before reaching here, so EVAL-PACKAGE is always set.
     ;; User code may have deleted it, though -- (delete-package :my-app) from
     ;; inside MY-APP -- and no handler is in scope here, so binding *PACKAGE*
     ;; to a dead package would let the printer signal straight out of
