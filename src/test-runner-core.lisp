@@ -917,7 +917,9 @@ result instead of a timeout."
 
 (defun %extract-defpackage-names-from-file (pathname &optional scan-package)
   "Return a list of package names mentioned in `(defpackage ...)' forms
-of the Lisp source file at PATHNAME. Silently returns NIL on any error.
+of the Lisp source file at PATHNAME, top level or inside an EVAL-WHEN, PROGN or
+LOCALLY; one a macro the file defines writes is not seen. Silently returns NIL
+on any error.
 
 READ interns every unqualified symbol it reads into *PACKAGE*, so the scan
 must not run in CL-USER: one %ROVE-PURGE-GHOST-SUITES traversal of a large
@@ -961,7 +963,8 @@ names returned are strings and stay valid after the package is deleted."
                    (let ((form (handler-case (read stream nil :eof)
                                  (error () :eof))))
                      (when (eq form :eof) (return))
-                     (note form))))
+                     ;; A malformed form -- (progn . x) -- skips itself only.
+                     (ignore-errors (note form)))))
                 (remove-if-not #'stringp (nreverse names))))
           (error () nil))
       (when own-package
