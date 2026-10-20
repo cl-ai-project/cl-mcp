@@ -215,10 +215,11 @@
   ;; Replenishment ended a worker it could not register while holding
   ;; *POOL-LOCK* -- up to two seconds in which no session could be served.
   (with-concurrent-pool (ledger :warmup 0 :max-size 4)
-    (let ((gate (%gate-spawns ledger)))
+    (let ((base (%spawns-begun ledger))
+          (gate (%gate-spawns ledger)))
       (setf cl-mcp/src/pool:*worker-pool-warmup* 1)
       (cl-mcp/src/pool::%schedule-replenish)
-      (%await (lambda () (>= (%spawns-begun ledger) 1)))
+      (%await (lambda () (>= (%spawns-begun ledger) (1+ base))))
       ;; The spawn in flight becomes a surplus: it was started for a pool
       ;; generation that is no longer the running one.  (Not by lowering the
       ;; cap: the replenishment thread has bound the value it started with.)
@@ -254,10 +255,11 @@
   ;; initialized after it: the spawn completes into the new pool, which
   ;; must not take the old one's worker.
   (with-concurrent-pool (ledger :warmup 0 :max-size 4)
-    (let ((gate (%gate-spawns ledger)))
+    (let ((base (%spawns-begun ledger))
+          (gate (%gate-spawns ledger)))
       (setf cl-mcp/src/pool:*worker-pool-warmup* 1)
       (cl-mcp/src/pool::%schedule-replenish)
-      (%await (lambda () (>= (%spawns-begun ledger) 1)))
+      (%await (lambda () (>= (%spawns-begun ledger) (1+ base))))
       ;; Give the shutdown one second to wait, then start the next pool.
       (setf cl-mcp/src/worker-client::*worker-startup-timeout* -14
             cl-mcp/src/pool:*worker-pool-warmup* 0)

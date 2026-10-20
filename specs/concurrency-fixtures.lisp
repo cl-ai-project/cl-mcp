@@ -439,27 +439,38 @@ has begun."
   "How many spawns have begun."
   (with-ledger (ledger) (ledger-spawns-begun ledger)))
 
+(defparameter +shutdown-waits+
+  '(cl-mcp/src/pool::%wait-for-work-in-flight cl-mcp/src/pool::%wait-for-endings)
+  "The functions SHUTDOWN-POOL waits for work in flight in: the spawns and
+endings it owed when it stopped, then the endings its snapshot missed.")
+
 (defun %call-observing-the-wait (function)
   "Call FUNCTION with a function of no arguments that is true while
-SHUTDOWN-POOL is inside %WAIT-FOR-WORK-IN-FLIGHT, and return its values.
-Whatever that function is when this is called -- a test's replacement
-included -- is what the shutdown runs, and it is put back afterwards.
+SHUTDOWN-POOL is inside one of +SHUTDOWN-WAITS+, and return its values.
+Whatever those functions are when this is called -- a test's replacement
+included -- is what the shutdown runs, and they are put back afterwards.
 
-A correct shutdown with work in flight stops in that wait; one that does not
-wait passes it at once, so the observation tells the two apart without a
-guess at how long the rest of the shutdown takes."
-  (let* ((name 'cl-mcp/src/pool::%wait-for-work-in-flight)
-         (wait (fdefinition name))
-         (waiting nil))
+A correct shutdown with work in flight stops in such a wait; one that does
+not wait passes it at once, so the observation tells the two apart without a
+guess at how long the rest of the shutdown takes.  It is a sample, not a
+proof: a shutdown descheduled in the microseconds a wait that does not wait
+takes could be seen inside it."
+  (let ((originals (mapcar #'fdefinition +shutdown-waits+))
+        (waiting nil))
     (unwind-protect
          (progn
-           (setf (fdefinition name)
-                 (lambda (&rest arguments)
-                   (setf waiting t)
-                   (unwind-protect (apply wait arguments)
-                     (setf waiting nil))))
+           (loop for name in +shutdown-waits+
+                 for wait in originals
+                 do (let ((wait wait))
+                      (setf (fdefinition name)
+                            (lambda (&rest arguments)
+                              (setf waiting t)
+                              (unwind-protect (apply wait arguments)
+                                (setf waiting nil))))))
            (funcall function (lambda () waiting)))
-      (setf (fdefinition name) wait))))
+      (loop for name in +shutdown-waits+
+            for wait in originals
+            do (setf (fdefinition name) wait)))))
 
 (defun run-shutdown-scenario (scenario)
   "Run SCENARIO and return what happened, as a plist of observations.
@@ -482,11 +493,16 @@ SHUTDOWN-POOL is then called on a thread of its own.  Once it has begun, an
 acquire of s5 is made when :LATE-ACQUIRE says so, and the gates are opened
 in :RELEASE-ORDER -- the spawn gate for any of the spawn kinds, the ending's
 for :ENDING; a held RPC is let go only by the shutdown's own signal.  A gate
-opens only once the shutdown has returned or is waiting for work in flight
+opens once the shutdown has returned or is waiting for work in flight
 (%CALL-OBSERVING-THE-WAIT): opened while a shutdown that does not wait is
 still on its way out, the work would finish before it returned, and nothing
-would show it had not waited.  If the shutdown has not returned within
-*SHUTDOWN-BOUND-SECONDS*, everything is let go and that is recorded."
+would show it had not waited.  A shutdown that has done neither within
+*SHUTDOWN-BOUND-SECONDS* has its gate opened all the same and is recorded as
+blocked, and so is one that has not returned within *SHUTDOWN-BOUND-SECONDS*
+of the last gate, after which everything is let go.
+
+Signals an error when an in-flight kind does not get under way: a scenario
+with nothing in flight would check nothing."
   (destructuring-bind (&key in-flight release-order late-acquire) scenario
     (with-concurrent-pool (ledger :warmup 0 :max-size 8)
       (let ((workers (list :s2 (get-or-assign-worker "s2")
@@ -499,32 +515,41 @@ would show it had not waited.  If the shutdown has not returned within
             ;; Counted from the spawns s2, s3 and s4 took, or each wait below
             ;; would be over before its spawn had begun.
             (spawns-expected (%spawns-begun ledger)))
-        (flet ((expect-spawn () (incf spawns-expected)))
+        (flet ((expect-spawn () (incf spawns-expected))
+               (in-flight (kind predicate)
+                 ;; Work that never got under way would leave the shutdown
+                 ;; nothing to owe, and the scenario nothing to check.
+                 (unless (%await predicate)
+                   (error "The scenario's ~(~S~) never came to be in flight." kind))))
           (when (member :acquire-spawn in-flight)
             (expect-spawn)
             (setf acquire (bt:make-thread
                            (lambda () (%outcome (lambda () (get-or-assign-worker "s1"))))
                            :name "scenario-acquire"))
-            (%await (lambda () (>= (%spawns-begun ledger) spawns-expected))))
+            (in-flight :acquire-spawn
+                       (lambda () (>= (%spawns-begun ledger) spawns-expected))))
           (when (member :replenish-spawn in-flight)
             (expect-spawn)
             (setf *worker-pool-warmup* 1)
             (cl-mcp/src/pool::%schedule-replenish)
-            (%await (lambda () (>= (%spawns-begun ledger) spawns-expected))))
+            (in-flight :replenish-spawn
+                       (lambda () (>= (%spawns-begun ledger) spawns-expected))))
           (when (member :recovery-spawn in-flight)
             (expect-spawn)
             (with-ledger (ledger)
               (setf (gethash (getf workers :s2) (ledger-dead ledger)) t))
             (cl-mcp/src/pool::%check-worker-health)
-            (%await (lambda () (>= (%spawns-begun ledger) spawns-expected))))
+            (in-flight :recovery-spawn
+                       (lambda () (>= (%spawns-begun ledger) spawns-expected))))
           (when (member :ending in-flight)
             (with-ledger (ledger)
               (setf (gethash (getf workers :s3) (ledger-end-gates ledger)) end-gate))
             (setf release (bt:make-thread (lambda () (release-session "s3"))
                                           :name "scenario-release"))
-            (%await (lambda ()
-                      (with-ledger (ledger)
-                        (member (getf workers :s3) (ledger-ends-begun ledger))))))
+            (in-flight :ending
+                       (lambda ()
+                         (with-ledger (ledger)
+                           (member (getf workers :s3) (ledger-ends-begun ledger))))))
           (when (member :rpc-held in-flight)
             (let ((worker (getf workers :s4))
                   (hold (sb-thread:make-semaphore)))
@@ -541,6 +566,7 @@ would show it had not waited.  If the shutdown has not returned within
         (%call-observing-the-wait
          (lambda (waiting-p)
            (let* ((returned-at nil)
+                  (gate-overdue nil)
                   (shutdown (bt:make-thread
                              (lambda () (shutdown-pool) (setf returned-at (%stamp)))
                              :name "scenario-shutdown")))
@@ -551,15 +577,17 @@ would show it had not waited.  If the shutdown has not returned within
                            :name "scenario-late-acquire")))
              (dolist (kind release-order)
                (sleep 0.05)
-               (unless (eq kind :rpc-held)
-                 (%await (lambda () (or returned-at (funcall waiting-p)))
-                         :within *shutdown-bound-seconds*))
+               (unless (or (eq kind :rpc-held)
+                           (%await (lambda () (or returned-at (funcall waiting-p)))
+                                   :within *shutdown-bound-seconds*))
+                 (setf gate-overdue t))
                (case kind
                  ((:acquire-spawn :replenish-spawn :recovery-spawn)
                   (sb-thread:signal-semaphore spawn-gate 10))
                  (:ending (sb-thread:signal-semaphore end-gate))))
-             (let ((blocked (not (%await (lambda () returned-at)
-                                         :within *shutdown-bound-seconds*))))
+             (let ((blocked (or (not (%await (lambda () returned-at)
+                                             :within *shutdown-bound-seconds*))
+                                gate-overdue)))
                (when blocked (%open-every-gate ledger))
                (%await (lambda () returned-at) :within *shutdown-bound-seconds*)
                (let ((after (and returned-at
