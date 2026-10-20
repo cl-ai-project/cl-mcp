@@ -503,10 +503,10 @@ opens once the shutdown has returned or is waiting for work in flight
 only wait that covers spawns; for an ending, in either.  Opened while a
 shutdown that does not wait is still on its way out, the work would finish
 before it returned, and nothing would show it had not waited.  A shutdown
-that has done neither within
-*SHUTDOWN-BOUND-SECONDS* has its gate opened all the same and is recorded as
-blocked, and so is one that has not returned within *SHUTDOWN-BOUND-SECONDS*
-of the last gate, after which everything is let go.
+that has done neither within *SHUTDOWN-BOUND-SECONDS* has its gate opened all
+the same and is recorded as blocked, and so is one that has not returned
+within *SHUTDOWN-BOUND-SECONDS* of the last gate, after which everything is
+let go.
 
 Signals an error when an in-flight kind does not get under way: a scenario
 with nothing in flight would check nothing."
