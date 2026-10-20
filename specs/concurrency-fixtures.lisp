@@ -72,12 +72,12 @@
 (defstruct (ledger (:conc-name ledger-))
   "What the fake lifecycle saw, written by it and by nothing in the pool."
   (lock (bt:make-lock "concurrency-ledger"))
-  ;; Every worker spawned, oldest first, when its spawn completed, and the
-  ;; pool generation that was running when it began.
+  ;; Every worker spawned, oldest first, when its spawn completed (a
+  ;; %STAMP), and the pool generation that was running when it began.
   (spawned '())
   (spawned-at (make-hash-table :test 'eq))
   (spawned-in (make-hash-table :test 'eq))
-  ;; Worker -> when the pool ended it.
+  ;; Worker -> when the pool ended it (a %STAMP).
   (ended-at (make-hash-table :test 'eq))
   ;; Workers whose fake process has died.
   (dead (make-hash-table :test 'eq))
@@ -103,8 +103,18 @@
   `(bt:with-lock-held ((ledger-lock ,ledger)) ,@body))
 
 (defun %now ()
-  "The current internal real time."
+  "The current internal real time, for measuring how long something took.
+To say which of two events came first, use %STAMP."
   (get-internal-real-time))
+
+(defvar *stamps* (list 0)
+  "The last stamp %STAMP handed out, in a cons for SB-EXT:ATOMIC-INCF.")
+
+(defun %stamp ()
+  "A number greater than every one handed out before it, from any thread.
+An event that happens after another gets the greater stamp; the internal real
+time cannot say that, as two events can fall in one tick of its clock."
+  (1+ (sb-ext:atomic-incf (car *stamps*))))
 
 (defun %jitter (seconds)
   "Sleep a random time up to SECONDS, when SECONDS is positive."
@@ -123,7 +133,7 @@
     (with-ledger (ledger)
       (let ((worker (make-worker :id (incf (ledger-next-id ledger)) :state :standby)))
         (setf (ledger-spawned ledger) (append (ledger-spawned ledger) (list worker))
-              (gethash worker (ledger-spawned-at ledger)) (%now)
+              (gethash worker (ledger-spawned-at ledger)) (%stamp)
               (gethash worker (ledger-spawned-in ledger)) generation)
         worker))))
 
@@ -140,7 +150,7 @@ holding that stream."
     (kill-worker worker)
     (with-ledger (ledger)
       (unless (gethash worker (ledger-ended-at ledger))
-        (setf (gethash worker (ledger-ended-at ledger)) (%now))))))
+        (setf (gethash worker (ledger-ended-at ledger)) (%stamp))))))
 
 (defun %fake-alive-p (ledger worker)
   "True unless WORKER's fake process died or the pool ended it."
@@ -350,10 +360,10 @@ there."
         (nreverse violations)))))
 
 (defun after-shutdown-violations (ledger returned-at)
-  "Return what a pool shut down at RETURNED-AT, an internal real time, still
-owes: every worker it was handed is ended; no spawn or ending of its
-completed after the shutdown returned; its lists, counts and runtime owner
-are empty; and no thread it started is still running."
+  "Return what a pool shut down at RETURNED-AT, a %STAMP taken once it
+returned, still owes: every worker it was handed is ended; no spawn or ending
+of its completed after the shutdown returned; its lists, counts and runtime
+owner are empty; and no thread it started is still running."
   (let ((violations '()))
     (flet ((add (kind &rest detail) (push (list* :kind kind detail) violations)))
       (let ((state (pool-state)))
@@ -429,6 +439,28 @@ has begun."
   "How many spawns have begun."
   (with-ledger (ledger) (ledger-spawns-begun ledger)))
 
+(defun %call-observing-the-wait (function)
+  "Call FUNCTION with a function of no arguments that is true while
+SHUTDOWN-POOL is inside %WAIT-FOR-WORK-IN-FLIGHT, and return its values.
+Whatever that function is when this is called -- a test's replacement
+included -- is what the shutdown runs, and it is put back afterwards.
+
+A correct shutdown with work in flight stops in that wait; one that does not
+wait passes it at once, so the observation tells the two apart without a
+guess at how long the rest of the shutdown takes."
+  (let* ((name 'cl-mcp/src/pool::%wait-for-work-in-flight)
+         (wait (fdefinition name))
+         (waiting nil))
+    (unwind-protect
+         (progn
+           (setf (fdefinition name)
+                 (lambda (&rest arguments)
+                   (setf waiting t)
+                   (unwind-protect (apply wait arguments)
+                     (setf waiting nil))))
+           (funcall function (lambda () waiting)))
+      (setf (fdefinition name) wait))))
+
 (defun run-shutdown-scenario (scenario)
   "Run SCENARIO and return what happened, as a plist of observations.
 
@@ -449,9 +481,12 @@ until it is in flight:
 SHUTDOWN-POOL is then called on a thread of its own.  Once it has begun, an
 acquire of s5 is made when :LATE-ACQUIRE says so, and the gates are opened
 in :RELEASE-ORDER -- the spawn gate for any of the spawn kinds, the ending's
-for :ENDING; a held RPC is let go only by the shutdown's own signal.  If the
-shutdown has not returned within *SHUTDOWN-BOUND-SECONDS*, everything is let
-go and that is recorded."
+for :ENDING; a held RPC is let go only by the shutdown's own signal.  A gate
+opens only once the shutdown has returned or is waiting for work in flight
+(%CALL-OBSERVING-THE-WAIT): opened while a shutdown that does not wait is
+still on its way out, the work would finish before it returned, and nothing
+would show it had not waited.  If the shutdown has not returned within
+*SHUTDOWN-BOUND-SECONDS*, everything is let go and that is recorded."
   (destructuring-bind (&key in-flight release-order late-acquire) scenario
     (with-concurrent-pool (ledger :warmup 0 :max-size 8)
       (let ((workers (list :s2 (get-or-assign-worker "s2")
@@ -461,7 +496,9 @@ go and that is recorded."
             (holding (sb-thread:make-semaphore))
             (end-gate (sb-thread:make-semaphore))
             (spawn-gate (%gate-spawns ledger))
-            (spawns-expected 0))
+            ;; Counted from the spawns s2, s3 and s4 took, or each wait below
+            ;; would be over before its spawn had begun.
+            (spawns-expected (%spawns-begun ledger)))
         (flet ((expect-spawn () (incf spawns-expected)))
           (when (member :acquire-spawn in-flight)
             (expect-spawn)
@@ -501,43 +538,53 @@ go and that is recorded."
                      :name "scenario-rpc"))
               (sb-thread:wait-on-semaphore holding :timeout 10))))
         ;; The shutdown, and what happens once it has begun.
-        (let* ((returned-at nil)
-               (shutdown (bt:make-thread
-                          (lambda () (shutdown-pool) (setf returned-at (%now)))
-                          :name "scenario-shutdown")))
-          (%await (lambda () (not cl-mcp/src/pool::*pool-running*)))
-          (when late-acquire
-            (setf late (bt:make-thread
-                        (lambda () (%outcome (lambda () (get-or-assign-worker "s5"))))
-                        :name "scenario-late-acquire")))
-          (dolist (kind release-order)
-            (sleep 0.05)
-            (case kind
-              ((:acquire-spawn :replenish-spawn :recovery-spawn)
-               (sb-thread:signal-semaphore spawn-gate 10))
-              (:ending (sb-thread:signal-semaphore end-gate))))
-          (let ((blocked (not (%await (lambda () returned-at)
-                                      :within *shutdown-bound-seconds*))))
-            (when blocked (%open-every-gate ledger))
-            (%await (lambda () returned-at) :within *shutdown-bound-seconds*)
-            (let ((after (and returned-at (after-shutdown-violations ledger returned-at))))
-              ;; Everything the scenario started is let go and joined, so the
-              ;; next scenario starts from nothing -- and asked again: a spawn
-              ;; or an ending a wrong shutdown did not wait for may complete
-              ;; only now, and its time says it came after the shutdown.
-              (%open-every-gate ledger)
-              (%join-threads (remove nil (list shutdown acquire late release holder)) 10)
-              (%join-threads (with-ledger (ledger) (copy-list (ledger-threads ledger))) 5)
-              (when returned-at
-                (setf after (remove-duplicates
-                             (append after (after-shutdown-violations ledger returned-at))
-                             :test #'equal)))
-              (list :scenario scenario
-                    :blocked blocked
-                    :returned (and returned-at t)
-                    :after after
-                    :acquire (and acquire (bt:join-thread acquire))
-                    :late (and late (bt:join-thread late))))))))))
+        (%call-observing-the-wait
+         (lambda (waiting-p)
+           (let* ((returned-at nil)
+                  (shutdown (bt:make-thread
+                             (lambda () (shutdown-pool) (setf returned-at (%stamp)))
+                             :name "scenario-shutdown")))
+             (%await (lambda () (not cl-mcp/src/pool::*pool-running*)))
+             (when late-acquire
+               (setf late (bt:make-thread
+                           (lambda () (%outcome (lambda () (get-or-assign-worker "s5"))))
+                           :name "scenario-late-acquire")))
+             (dolist (kind release-order)
+               (sleep 0.05)
+               (unless (eq kind :rpc-held)
+                 (%await (lambda () (or returned-at (funcall waiting-p)))
+                         :within *shutdown-bound-seconds*))
+               (case kind
+                 ((:acquire-spawn :replenish-spawn :recovery-spawn)
+                  (sb-thread:signal-semaphore spawn-gate 10))
+                 (:ending (sb-thread:signal-semaphore end-gate))))
+             (let ((blocked (not (%await (lambda () returned-at)
+                                         :within *shutdown-bound-seconds*))))
+               (when blocked (%open-every-gate ledger))
+               (%await (lambda () returned-at) :within *shutdown-bound-seconds*)
+               (let ((after (and returned-at
+                                 (after-shutdown-violations ledger returned-at))))
+                 ;; Everything the scenario started is let go and joined, so
+                 ;; the next scenario starts from nothing -- and asked again: a
+                 ;; spawn or an ending a wrong shutdown did not wait for may
+                 ;; complete only now, and its stamp says it came after the
+                 ;; shutdown.
+                 (%open-every-gate ledger)
+                 (%join-threads (remove nil (list shutdown acquire late release holder))
+                                10)
+                 (%join-threads (with-ledger (ledger) (copy-list (ledger-threads ledger)))
+                                5)
+                 (when returned-at
+                   (setf after (remove-duplicates
+                                (append after
+                                        (after-shutdown-violations ledger returned-at))
+                                :test #'equal)))
+                 (list :scenario scenario
+                       :blocked blocked
+                       :returned (and returned-at t)
+                       :after after
+                       :acquire (and acquire (bt:join-thread acquire))
+                       :late (and late (bt:join-thread late))))))))))))
 
 (defun shutdown-scenario-violations (observed)
   "Return what the shutdown in OBSERVED broke:
@@ -640,7 +687,7 @@ was lent after the shutdown returned."
              (returned-at nil)
              (lent (lambda (worker session)
                      (bt:with-lock-held (lock)
-                       (push (list worker session (%now)) lendings))))
+                       (push (list worker session (%stamp)) lendings))))
              (observer
                (bt:make-thread
                 (lambda ()
@@ -670,7 +717,7 @@ was lent after the shutdown returned."
                   ;; The observer goes on checking while the shutdown runs:
                   ;; what must hold at every moment holds during it too.
                   (shutdown-pool)
-                  (setf returned-at (%now)
+                  (setf returned-at (%stamp)
                         done t))
                 :name "concurrent-shutdown")))
         (unless (%await (lambda () returned-at) :within 60)
@@ -800,7 +847,7 @@ The new pool is then shut down, and owes nothing (AFTER-SHUTDOWN-VIOLATIONS)."
               (unless late-workers (add :late-spawn-never-returned))))
           (let ((returned-at nil))
             (shutdown-pool)
-            (setf returned-at (%now))
+            (setf returned-at (%stamp))
             (dolist (violation (after-shutdown-violations ledger returned-at))
               (push violation violations))))
         (nreverse violations)))))

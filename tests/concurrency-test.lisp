@@ -327,7 +327,8 @@
              (setf shutdown (bt:make-thread
                              (lambda ()
                                (shutdown-pool)
-                               (setf returned-at (get-internal-real-time)))
+                               (setf returned-at
+                                     (cl-mcp/specs/concurrency-fixtures::%stamp)))
                              :name "shutdown"))
              ;; Past its wait for work in flight -- there is none -- and
              ;; waiting for the stand-in recovery thread.
@@ -422,7 +423,8 @@
             "the replenishment is decided and about to start")
         (let ((shutdown (bt:make-thread
                          (lambda () (shutdown-pool)
-                           (setf returned-at (get-internal-real-time)))
+                           (setf returned-at
+                                 (cl-mcp/specs/concurrency-fixtures::%stamp)))
                          :name "replenish-shutdown")))
           (sleep 0.1)
           (ok (null returned-at) "the shutdown cannot pass the decision")
