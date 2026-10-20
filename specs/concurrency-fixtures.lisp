@@ -442,13 +442,17 @@ has begun."
 (defparameter +shutdown-waits+
   '(cl-mcp/src/pool::%wait-for-work-in-flight cl-mcp/src/pool::%wait-for-endings)
   "The functions SHUTDOWN-POOL waits for work in flight in: the spawns and
-endings it owed when it stopped, then the endings its snapshot missed.")
+endings it owed when it stopped, then the endings its snapshot missed.  Its
+wait for the replenishment and recovery threads is a loop of its own, not
+observed here: a shutdown stuck there with a gate closed is recorded as
+blocked.")
 
 (defun %call-observing-the-wait (function)
-  "Call FUNCTION with a function of no arguments that is true while
-SHUTDOWN-POOL is inside one of +SHUTDOWN-WAITS+, and return its values.
-Whatever those functions are when this is called -- a test's replacement
-included -- is what the shutdown runs, and they are put back afterwards.
+  "Call FUNCTION with a function of no arguments that returns the name of the
+one of +SHUTDOWN-WAITS+ SHUTDOWN-POOL is inside, or NIL, and return
+FUNCTION's values.  Whatever those functions are when this is called -- a
+test's replacement included -- is what the shutdown runs, and they are put
+back afterwards.
 
 A correct shutdown with work in flight stops in such a wait; one that does
 not wait passes it at once, so the observation tells the two apart without a
@@ -461,10 +465,11 @@ takes could be seen inside it."
          (progn
            (loop for name in +shutdown-waits+
                  for wait in originals
-                 do (let ((wait wait))
+                 do (let ((name name)
+                          (wait wait))
                       (setf (fdefinition name)
                             (lambda (&rest arguments)
-                              (setf waiting t)
+                              (setf waiting name)
                               (unwind-protect (apply wait arguments)
                                 (setf waiting nil))))))
            (funcall function (lambda () waiting)))
@@ -494,9 +499,11 @@ acquire of s5 is made when :LATE-ACQUIRE says so, and the gates are opened
 in :RELEASE-ORDER -- the spawn gate for any of the spawn kinds, the ending's
 for :ENDING; a held RPC is let go only by the shutdown's own signal.  A gate
 opens once the shutdown has returned or is waiting for work in flight
-(%CALL-OBSERVING-THE-WAIT): opened while a shutdown that does not wait is
-still on its way out, the work would finish before it returned, and nothing
-would show it had not waited.  A shutdown that has done neither within
+(%CALL-OBSERVING-THE-WAIT) -- for a spawn, in %WAIT-FOR-WORK-IN-FLIGHT, the
+only wait that covers spawns; for an ending, in either.  Opened while a
+shutdown that does not wait is still on its way out, the work would finish
+before it returned, and nothing would show it had not waited.  A shutdown
+that has done neither within
 *SHUTDOWN-BOUND-SECONDS* has its gate opened all the same and is recorded as
 blocked, and so is one that has not returned within *SHUTDOWN-BOUND-SECONDS*
 of the last gate, after which everything is let go.
@@ -564,7 +571,7 @@ with nothing in flight would check nothing."
               (sb-thread:wait-on-semaphore holding :timeout 10))))
         ;; The shutdown, and what happens once it has begun.
         (%call-observing-the-wait
-         (lambda (waiting-p)
+         (lambda (waiting-in)
            (let* ((returned-at nil)
                   (gate-overdue nil)
                   (shutdown (bt:make-thread
@@ -577,8 +584,16 @@ with nothing in flight would check nothing."
                            :name "scenario-late-acquire")))
              (dolist (kind release-order)
                (sleep 0.05)
+               ;; A spawn is waited for only in the first wait: a correct
+               ;; shutdown is never in the second while one is gated.
                (unless (or (eq kind :rpc-held)
-                           (%await (lambda () (or returned-at (funcall waiting-p)))
+                           (%await (lambda ()
+                                     (or returned-at
+                                         (let ((wait (funcall waiting-in)))
+                                           (if (eq kind :ending)
+                                               wait
+                                               (eq wait
+                                                   'cl-mcp/src/pool::%wait-for-work-in-flight)))))
                                    :within *shutdown-bound-seconds*))
                  (setf gate-overdue t))
                (case kind
@@ -618,7 +633,8 @@ with nothing in flight would check nothing."
   "Return what the shutdown in OBSERVED broke:
 
 - it returned, and within *SHUTDOWN-BOUND-SECONDS* without anything but its
-  own signal letting a held RPC go;
+  own signal letting a held RPC go, and no gate had to be opened at that
+  bound before it returned or waited for the work (RUN-SHUTDOWN-SCENARIO);
 - once it returned, the pool owed nothing (AFTER-SHUTDOWN-VIOLATIONS);
 - the acquire whose spawn it overtook, and any acquire made after it began,
   were refused rather than lent a worker."
