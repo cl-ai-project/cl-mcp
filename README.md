@@ -44,6 +44,10 @@ system loading, file operations, code introspection, and structure-aware editing
 
 For every tool's input/output schema, see [docs/tools.md](docs/tools.md).
 
+Source reading, editing, and patching preserve `#.` expressions and `#S` literals
+without evaluating expressions or invoking structure constructors. See the
+[source reading details](docs/tools.md#lisp-read-file) for how these forms are displayed.
+
 ## Requirements
 - SBCL 2.x (developed with SBCL 2.5.x)
 - Quicklisp (optional; pure ASDF also works)
