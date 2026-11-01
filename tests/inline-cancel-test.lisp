@@ -33,7 +33,9 @@
                                 (call-cancellable "inline-cancel-test" 3
                                                   (lambda ()
                                                     (setf started t)
-                                                    (loop (sleep 0.01d0))))
+                                                    ;; Each wait a cancellation point.
+                                                    (loop (sb-sys:with-interrupts
+                                                            (sleep 0.01d0)))))
                               (inline-request-cancelled () :cancelled))))
                     :name "inline-cancel-test-region")))
       (unwind-protect
@@ -49,3 +51,88 @@
                  (format nil "the region ended with the cancellation: ~S" outcome)))
         (when (bordeaux-threads:thread-alive-p thread)
           (ignore-errors (bordeaux-threads:destroy-thread thread)))))))
+
+(defun %busy (seconds)
+  "Spin for SECONDS without allocating or blocking."
+  (let ((end (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
+    (loop while (< (get-internal-real-time) end))))
+
+(deftest a-late-interruption-does-not-cancel-the-next-region
+  (testing "an interruption aimed at an ended region leaves the thread's next region alone"
+    ;; Hunchentoot runs a connection's requests on one thread: the cancel of
+    ;; request 1 can be delivered after 1 has ended and 2 has begun.
+    (let* ((phase nil)
+           (captured nil)
+           (go-on nil)
+           (outcome nil)
+           (thread (bordeaux-threads:make-thread
+                    (lambda ()
+                      (call-cancellable "inline-cancel-late" 1
+                                        (lambda ()
+                                          (setf phase :first)
+                                          (loop until captured do (sleep 0.01d0))))
+                      (setf outcome
+                            (handler-case
+                                (call-cancellable "inline-cancel-late" 2
+                                                  (lambda ()
+                                                    (setf phase :second)
+                                                    (loop until go-on do (sleep 0.01d0))
+                                                    :finished))
+                              (inline-request-cancelled () :cancelled))))
+                    :name "inline-cancel-test-late")))
+      (unwind-protect
+           (let ((entry nil))
+             ;; Catch region 1's entry as the canceller would have read it.
+             (loop repeat 300
+                   until (setf entry (gethash (cons "inline-cancel-late" 1)
+                                              cl-mcp/src/inline-cancel::*regions*))
+                   do (sleep 0.01d0))
+             (ok entry "region 1's entry was seen")
+             (setf captured t)
+             (loop repeat 300 until (eq phase :second) do (sleep 0.01d0))
+             (when entry
+               (cl-mcp/src/inline-cancel::%interrupt-region (car entry) (cdr entry)))
+             (sleep 0.1d0)
+             (setf go-on t)
+             (loop repeat 300
+                   while (bordeaux-threads:thread-alive-p thread)
+                   do (sleep 0.01d0))
+             (ok (eq :finished outcome)
+                 (format nil "region 2 ran to the end: ~S" outcome)))
+        (setf captured t
+              go-on t)
+        (when (bordeaux-threads:thread-alive-p thread)
+          (ignore-errors (bordeaux-threads:destroy-thread thread)))))))
+
+(deftest a-cancellation-lands-only-at-a-cancellation-point
+  (testing "outside SB-SYS:WITH-INTERRUPTS the region finishes its step first"
+    ;; The region may be in foreign code -- opendir, read -- that must not be
+    ;; unwound; only a step the region marks with WITH-INTERRUPTS is.
+    (flet ((timed-cancel (body)
+             (let* ((started nil)
+                    (thread (bordeaux-threads:make-thread
+                             (lambda ()
+                               (handler-case
+                                   (call-cancellable "inline-cancel-point" 9
+                                                     (lambda ()
+                                                       (setf started t)
+                                                       (funcall body)))
+                                 (inline-request-cancelled () :cancelled)))
+                             :name "inline-cancel-test-point"))
+                    (start nil))
+               (unwind-protect
+                    (progn
+                      (loop repeat 300 until started do (sleep 0.01d0))
+                      (setf start (get-internal-real-time))
+                      (cancel-inline-request "inline-cancel-point" 9)
+                      (loop repeat 500
+                            while (bordeaux-threads:thread-alive-p thread)
+                            do (sleep 0.01d0))
+                      (/ (- (get-internal-real-time) start)
+                         (float internal-time-units-per-second)))
+                 (when (bordeaux-threads:thread-alive-p thread)
+                   (ignore-errors (bordeaux-threads:destroy-thread thread)))))))
+      (let ((deferred (timed-cancel (lambda () (%busy 1))))
+            (prompt (timed-cancel (lambda () (sb-sys:with-interrupts (%busy 3))))))
+        (ok (>= deferred 0.8) (format nil "deferred to the end of the step: ~,2Fs" deferred))
+        (ok (< prompt 0.8) (format nil "taken at the cancellation point: ~,2Fs" prompt))))))

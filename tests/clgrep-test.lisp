@@ -15,7 +15,8 @@
                 #:clgrep-search)
   ;; Loaded for the session binding and the cancel notification the
   ;; cancellation test sends.
-  (:import-from #:cl-mcp/src/protocol))
+  (:import-from #:cl-mcp/src/protocol)
+  (:import-from #:cl-mcp/src/utils/deadline))
 
 (in-package #:cl-mcp/tests/clgrep-test)
 
@@ -458,27 +459,37 @@ destroyed on the way out whenever it is still running."
     (with-runaway-fixture ("tests/tmp/clgrep-cancel/")
       (let* ((session "clgrep-cancel-test")
              (root *project-root*)
+             (response nil)
              (thread (bordeaux-threads:make-thread
                       (lambda ()
                         (let ((cl-mcp/src/protocol:*current-session-id* session)
                               (*project-root* root))
-                          (cl-mcp/src/clgrep::clgrep-search-handler
-                           (cl-mcp/src/state:make-state) 77
-                           (cl-mcp/src/tools/helpers:make-ht
-                            "pattern" "(a*)*[^ab]"
-                            "path" "tests/tmp/clgrep-cancel/"
-                            "timeout_seconds" 60))))
+                          (setf response
+                                (cl-mcp/src/clgrep::clgrep-search-handler
+                                 (cl-mcp/src/state:make-state) 77
+                                 (cl-mcp/src/tools/helpers:make-ht
+                                  "pattern" "(a*)*[^ab]"
+                                  "path" "tests/tmp/clgrep-cancel/"
+                                  "timeout_seconds" 60)))))
                       :name "clgrep-test-cancelled-search")))
         (unwind-protect
              (progn
-               (sleep 0.5d0)
+               ;; The cancellation is sent once the search's region exists.
+               (ok (cl-mcp/src/utils/deadline:wait-until
+                    (lambda ()
+                      (gethash (cons session 77) cl-mcp/src/inline-cancel::*regions*))
+                    :timeout 10)
+                   "the search is running")
                (let ((cl-mcp/src/protocol:*current-session-id* session))
                  (cl-mcp/src/protocol::%handle-cancel-notification
                   (cl-mcp/src/tools/helpers:make-ht "requestId" 77)))
-               (ok (loop repeat 300
-                         while (bordeaux-threads:thread-alive-p thread)
-                         do (sleep 0.01d0)
-                         finally (return (not (bordeaux-threads:thread-alive-p thread))))
-                   "the search ends within three seconds of the cancellation"))
+               (ok (cl-mcp/src/utils/deadline:wait-until
+                    (lambda () (not (bordeaux-threads:thread-alive-p thread)))
+                    :timeout 3)
+                   "the search ends within three seconds of the cancellation")
+               (let ((payload (and response (gethash "result" response))))
+                 (ok (and payload (eq t (gethash "isError" payload)))
+                     (format nil "it answers with an error result: ~S"
+                             (and payload (gethash "content" payload))))))
           (when (bordeaux-threads:thread-alive-p thread)
             (ignore-errors (bordeaux-threads:destroy-thread thread))))))))

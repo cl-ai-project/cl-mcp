@@ -818,7 +818,10 @@ Returns an alist like extract-toplevel-form, or NIL."
            (loop for line = (read-line stream nil nil)
                  for line-number from 1
                  while line
-                 when (scan scanner line)
+                 ;; The one place a deadline or a cancellation may interrupt:
+                 ;; a match can backtrack for minutes, and it holds no lock and
+                 ;; no foreign resource.
+                 when (sb-sys:with-interrupts (scan scanner line))
                  do (let ((package (%find-package-for-line package-map line-number))
                           (form-info (%find-form-for-line
                                       forms-cache content line-number)))
@@ -947,12 +950,18 @@ Returns an alist like extract-toplevel-form, or NIL."
                      (dolist (result file-results)
                        (push result all-results)))))))
       ;; One match of a regex can backtrack for minutes on a single line, so a
-      ;; check between lines would not stop it: the timer interrupts wherever
-      ;; the search is.  SB-EXT:TIMEOUT is no ERROR, so SEARCH-IN-FILE's
-      ;; per-file handler does not swallow it.  What was collected is kept.
+      ;; check between lines would not stop it: the timer interrupts the match
+      ;; itself.  Only the match: the search runs with interrupts disabled and
+      ;; SEARCH-IN-FILE allows them around SCAN alone, so no interruption
+      ;; unwinds out of opendir, read or a lock of the C library, which would
+      ;; hang every thread of the server.  SB-EXT:TIMEOUT is no ERROR, so
+      ;; SEARCH-IN-FILE's per-file handler does not swallow it.  What was
+      ;; collected is kept.
       (if timeout-seconds
           (handler-case (sb-ext:with-timeout timeout-seconds
-                          (search-files))
+                          (sb-sys:without-interrupts
+                            (sb-sys:allow-with-interrupts
+                              (search-files))))
             (sb-ext:timeout ()
               (setf timed-out t)))
           (search-files)))

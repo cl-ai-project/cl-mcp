@@ -20,7 +20,11 @@
                 #:http-session-active-requests
                 #:http-session-active-requests-lock)
   (:import-from #:usocket)
-  (:import-from #:bordeaux-threads))
+  (:import-from #:bordeaux-threads)
+  ;; For the clgrep cancellation test: its region table, the wait, the pool flag.
+  (:import-from #:cl-mcp/src/inline-cancel)
+  (:import-from #:cl-mcp/src/utils/deadline)
+  (:import-from #:cl-mcp/src/proxy))
 
 (in-package #:cl-mcp/tests/http-test)
 
@@ -602,3 +606,89 @@ Host header's value, which is 127.0.0.1:PORT otherwise."
                                        (symbol-value groups-symbol))))
                        (stop-http-server))))
               (setf (symbol-value groups-symbol) previous)))))))
+
+(defun %header-value (headers name)
+  "Return the value of header NAME in the raw HEADERS string, or NIL."
+  (let ((start (search (format nil "~A: " name) headers :test #'char-equal)))
+    (when start
+      (let* ((from (+ start (length name) 2))
+             (end (position-if (lambda (c) (member c '(#\Return #\Newline))) headers
+                               :start from)))
+        (subseq headers from end)))))
+
+(deftest http-cancellation-stops-a-running-clgrep-search
+  (testing "notifications/cancelled, posted while a search runs, ends it (issue #286)"
+    (if (not (http-port-available-p))
+        (ok t "port unavailable")
+        (let* ((root (asdf:system-source-directory :cl-mcp))
+               (dir (merge-pathnames "tests/tmp/http-clgrep-cancel/" root))
+               (previous-pool cl-mcp/src/proxy:*use-worker-pool*))
+          (ensure-directories-exist dir)
+          (with-open-file (out (merge-pathnames "runaway.lisp" dir)
+                               :direction :output :if-exists :supersede)
+            ;; Forty a's and a b: (a*)*[^ab] backtracks on it without end.
+            (format out "(defun runaway ()~%  \"~%~Ab~%\")~%"
+                    (make-string 40 :initial-element #\a)))
+          (unwind-protect
+               (multiple-value-bind (acceptor port)
+                   (start-http-server :host "127.0.0.1" :port 0 :token nil
+                                      :worker-pool nil)
+                 (declare (ignore acceptor))
+                 (flet ((post (body &optional session)
+                          (send-http-request
+                           port "POST" "/mcp"
+                           :body body
+                           :headers (append
+                                     '(("Content-Type" . "application/json")
+                                       ("Accept" . "application/json, text/event-stream"))
+                                     (and session (list (cons "Mcp-Session-Id" session)))))))
+                   (let ((session (multiple-value-bind (status headers)
+                                      (post (concatenate
+                                             'string
+                                             "{\"jsonrpc\":\"2.0\",\"id\":1,"
+                                             "\"method\":\"initialize\",\"params\":{}}"))
+                                    (declare (ignore status))
+                                    (%header-value headers "Mcp-Session-Id")))
+                         (answer nil)
+                         (search nil))
+                     (ok session "initialize gave a session id")
+                     (post (format nil "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",~
+\"params\":{\"name\":\"fs-set-project-root\",\"arguments\":{\"path\":~S}}}"
+                                   (uiop:native-namestring root))
+                           session)
+                     (setf search
+                           (bordeaux-threads:make-thread
+                            (lambda ()
+                              (setf answer
+                                    (nth-value
+                                     2 (post (format nil "{\"jsonrpc\":\"2.0\",\"id\":5,~
+\"method\":\"tools/call\",\"params\":{\"name\":\"clgrep-search\",\"arguments\":~
+{\"pattern\":\"(a*)*[^ab]\",\"path\":~S,\"timeout_seconds\":60}}}"
+                                                     (uiop:native-namestring dir))
+                                             session))))
+                            :name "http-test-clgrep-search"))
+                     (unwind-protect
+                          (progn
+                            (ok (cl-mcp/src/utils/deadline:wait-until
+                                 (lambda ()
+                                   (gethash (cons session 5)
+                                            cl-mcp/src/inline-cancel::*regions*))
+                                 :timeout 10)
+                                "the search is running")
+                            (post (concatenate
+                                   'string
+                                   "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\","
+                                   "\"params\":{\"requestId\":5}}")
+                                  session)
+                            (ok (cl-mcp/src/utils/deadline:wait-until
+                                 (lambda () (not (bordeaux-threads:thread-alive-p search)))
+                                 :timeout 5)
+                                "the search's response came within five seconds")
+                            (ok (and answer (search "cancelled" answer)
+                                     (search "\"isError\":true" answer))
+                                (format nil "it says it was cancelled: ~A" answer)))
+                       (when (bordeaux-threads:thread-alive-p search)
+                         (ignore-errors (bordeaux-threads:destroy-thread search)))))))
+            (stop-http-server)
+            (setf cl-mcp/src/proxy:*use-worker-pool* previous-pool)
+            (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))))

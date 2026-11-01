@@ -13,10 +13,10 @@
   (:import-from #:cl-mcp/src/utils/clgrep
                 #:semantic-grep)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content #:json-bool #:tool-error
+                #:make-ht #:result #:text-content #:json-bool
                 #:arg-validation-error)
   (:import-from #:cl-mcp/src/state
-                #:*current-session-id* #:protocol-version)
+                #:*current-session-id*)
   (:import-from #:cl-mcp/src/inline-cancel
                 #:call-cancellable #:inline-request-cancelled)
   (:import-from #:cl-mcp/src/tools/define-tool
@@ -307,6 +307,9 @@ line."))
         (%clgrep-search-response id pattern path recursive case-insensitive form-types
                                  limit include-form
                                  (or timeout-seconds *clgrep-default-timeout-seconds*))
+      ;; An error result on every protocol version, as the proxy answers a
+      ;; cancelled worker request: the call was valid, so not -32602.
       (inline-request-cancelled ()
-        (tool-error id "clgrep-search was cancelled before it finished."
-                    :protocol-version (protocol-version state))))))
+        (result id (make-ht "content"
+                            (text-content "clgrep-search was cancelled before it finished.")
+                            "isError" t))))))
