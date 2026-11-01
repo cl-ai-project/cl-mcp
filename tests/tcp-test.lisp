@@ -232,7 +232,8 @@ returns."
   (when port
     (ignore-errors
      (usocket:socket-close
-      (usocket:socket-connect "127.0.0.1" port :element-type 'character))))
+      (usocket:socket-connect "127.0.0.1" port :element-type 'character
+                                               :timeout 1.0d0))))
   (loop repeat 1000
         while (bordeaux-threads:thread-alive-p thread)
         do (sleep 0.01d0))
@@ -356,6 +357,7 @@ interrupted -- so a failing test leaves no server or client thread behind."
                               (let ((parsed (and first (ignore-errors
                                                         (yason:parse first)))))
                                 (ok (and (hash-table-p parsed)
+                                         (hash-table-p (gethash "error" parsed))
                                          (eql -32700 (gethash "code"
                                                               (gethash "error" parsed)))
                                          (multiple-value-bind (id present)
