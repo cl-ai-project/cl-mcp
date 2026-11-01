@@ -178,6 +178,19 @@ next form's first character, and return that character, or NIL at the end."
                          (incf depth)))))
         (t (return char))))))
 
+(defparameter *feature-readtable*
+  (let ((readtable (copy-readtable nil)))
+    (set-macro-character #\`
+                         (lambda (stream char)
+                           (declare (ignore char))
+                           (error 'reader-error :stream stream))
+                         nil readtable)
+    readtable)
+  "The standard readtable with backquote made an error, for reading a #+/#-
+feature expression.  A feature expression is symbols and lists of them, so a
+backquote in one is never valid, and SBCL's backquote reader never returns from
+a template with a circular tail, `(a . #1=(b . #1#)).")
+
 (defun %read-form-whole-p (stream)
   "Return T when the next form on STREAM may be a header form and is to be
 read whole: a list whose first element is written as a symbol that names a
@@ -193,14 +206,18 @@ somewhere inside it: the caller rewinds."
        (let ((sign (peek-char nil stream nil nil)))
          (when (member sign '(#\+ #\-))
            (read-char stream)
-           (let ((feature (handler-case
-                              (let ((*package* (find-package "KEYWORD")))
-                                (read-preserving-whitespace stream nil nil))
-                            (error () nil))))
-             ;; FEATUREP walks the expression, so a circular one is no header.
-             (and (not (circular-p feature))
-                  (eq (and (sb-int:featurep feature) t) (char= sign #\+))
-                  (%read-form-whole-p stream))))))
+           ;; Any failure -- end of input, a read error, an expression
+           ;; FEATUREP rejects -- means no header: the scan goes on.
+           (let ((holds
+                   (handler-case
+                       (let ((feature (let ((*package* (find-package "KEYWORD"))
+                                            (*readtable* *feature-readtable*))
+                                        (read-preserving-whitespace stream t))))
+                         ;; FEATUREP walks it, so a circular one is no header.
+                         (and (not (circular-p feature))
+                              (eq (and (sb-int:featurep feature) t) (char= sign #\+))))
+                     (error () nil))))
+             (and holds (%read-form-whole-p stream))))))
       ((eql first #\()
        (read-char stream)
        (let ((char (%skip-to-next-form stream)))

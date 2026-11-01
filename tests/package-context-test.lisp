@@ -291,3 +291,51 @@ whenever it is still running."
                                                 (in-package :my-app)"))))
       (ok (and (stringp name) (string-equal name "MY-APP"))
           (format nil "answered ~S" name)))))
+
+(deftest extract-in-package-judges-feature-expressions
+  (testing "nested and qualified conditionals are judged as the reader would"
+    (dolist (case (list (format nil "#+sbcl #-sbcl (foo) (in-package :my-app)")
+                        (format nil "#-sbcl #+sbcl (in-package :other) (in-package :my-app)")
+                        "#+(and sbcl (not windows)) (in-package :my-app)"
+                        "#+sb-thread (in-package :my-app)"))
+      (let ((name (%extract-within 2 case)))
+        (ok (and (stringp name) (string-equal name "MY-APP"))
+            (format nil "answered ~S for ~S" name case)))))
+  (testing "a feature expression FEATUREP rejects is no header and no failure"
+    (dolist (pair (list (cons (format nil "#+(version>= 9) (defun g ())~%~
+                                           (in-package :my-app)")
+                              ;; Skipped like any form the reader would reject
+                              ;; before a header, so the header is found.
+                              "MY-APP")
+                        (cons (format nil "(in-package :my-app)~%~
+                                           #+(version>= 9) (defun g ())")
+                              "MY-APP")
+                        (cons "#+(and . sbcl) (in-package :my-app)" nil)
+                        (cons "#+" nil)))
+      (let ((name (%extract-within 2 (car pair))))
+        (ok (if (cdr pair)
+                (and (stringp name) (string-equal name (cdr pair)))
+                (null name))
+            (format nil "answered ~S for ~S" name (car pair))))))
+  (testing "a backquote template in a feature expression does not hang the scan"
+    (dolist (case (list (format nil "#+`(a . #1=(b . #1#)) (defun f ())~%~
+                                     (in-package :my-app)")
+                        (format nil "#-`(a . #1=(b . #1#)) (in-package :other)~%~
+                                     (in-package :my-app)")))
+      (let ((name (%extract-within 2 case)))
+        (ok (not (eq name :timeout)) (format nil "answered ~S for ~S" name case))))))
+
+(deftest package-specs-in-file-survives-a-feature-expression-featurep-rejects
+  (testing "a bad conditional after the header keeps the package's spec"
+    (call-with-temp-project
+     (lambda (root)
+       (let* ((file (write-source root "probe.lisp"
+                                  (format nil "(defpackage :probe-pkg (:use :cl)~%  ~
+                                                 (:local-nicknames (:a :alexandria)))~%~
+                                               (in-package :probe-pkg)~%~
+                                               #+(version>= 8 2)~%(defun g () 1)~%")))
+              (specs (cl-mcp/src/package-context::%package-specs-in-file file)))
+         (ok (find "PROBE-PKG" specs
+                   :key #'cl-mcp/src/package-context::package-spec-name
+                   :test #'string-equal)
+             (format nil "the defpackage's spec is kept: ~S" specs)))))))
