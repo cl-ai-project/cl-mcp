@@ -228,10 +228,12 @@
 
 (deftest sanitize-condition-text-bounds-a-circular-report
   (testing "a report holding a circular object comes back instead of looping"
+    ;; Its car and its cdr are both itself: bounding the level and the length
+    ;; alone still leaves 50^8 elements to print.
     (let ((object (list 1 2))
           (result nil)
           (thread nil))
-      (setf (cddr object) object)
+      (setf (cddr object) (cons object object))
       (unwind-protect
            (progn
              (setf thread (bordeaux-threads:make-thread
@@ -248,5 +250,5 @@
         (when (and thread (bordeaux-threads:thread-alive-p thread))
           (ignore-errors (bordeaux-threads:destroy-thread thread))))
       (ok (stringp result) "answered")
-      (ok (and (stringp result) (search "cannot use (1 2 1 2" result))
+      (ok (and (stringp result) (search "cannot use #1=(1 2 #1# . #1#)" result))
           (format nil "the report is kept, cut short: ~A" result)))))

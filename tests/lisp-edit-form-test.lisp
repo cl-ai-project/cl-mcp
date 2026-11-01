@@ -4313,3 +4313,32 @@ thread behind."
                                       :content "(defun target () :new)" :dry-run t)))
         (ok (hash-table-p function)
             (format nil "a function beside them is found: ~A" function))))))
+
+(deftest lisp-edit-form-answers-beside-a-form-with-a-list-head
+  ;; A top-level form whose head is not a symbol -- a lambda form, or a circular
+  ;; list -- was taken apart with SYMBOL-NAME, and the TYPE-ERROR printed its
+  ;; circular datum forever.
+  (with-temp-file "tests/tmp/edit-form-list-head.lisp"
+      (format nil "((lambda (x) x) 1)~%~%(#1=(a . #1#) foo)~%~%(defun target () :old)~%")
+    (lambda (path)
+      (let ((function (%edit-within 2 :file-path path :form-type "defun"
+                                      :form-name "target" :operation "replace"
+                                      :content "(defun target () :new)" :dry-run t)))
+        (ok (hash-table-p function)
+            (format nil "the function after them is found: ~A" function)))
+      (let ((missing (%edit-within 2 :file-path path :form-type "defun"
+                                     :form-name "nope" :operation "delete"
+                                     :dry-run t)))
+        (ok (typep missing 'error) (format nil "not found is an error: ~A" missing))))))
+
+(deftest lisp-edit-form-refuses-a-circular-feature-expression
+  (testing "a #+ with a circular feature expression in content is refused promptly"
+    (with-temp-file "tests/tmp/edit-form-circular-feature.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((answer (%edit-within 2 :file-path path :form-type "defun"
+                                      :form-name "target" :operation "replace"
+                                      :content (format nil "#+#1=(and . #1#)~%~
+                                                            (defun target () :new)")
+                                      :dry-run t)))
+          (ok (typep answer 'error) (format nil "refused: ~A" answer)))))))

@@ -1543,7 +1543,8 @@ Issue #285: printing them without *PRINT-CIRCLE* never ends.")
                 "the forms after them are still listed")))))))
 
 (defstruct circular-fixture-node
-  "A structure #S can build in the image that reads the fixtures below."
+  "A structure the #S fixture below names, so the read fails for the reason
+the test is about rather than for an unknown structure name."
   label next)
 
 (deftest lisp-read-file-circular-top-level-forms-and-structures
@@ -1560,9 +1561,10 @@ Issue #285: printing them without *PRINT-CIRCLE* never ends.")
               (ok (search "#1=#(a #1#)" content :test #'char-equal))
               (ok (search "(defun after () ..." content))))))))
   (testing "a #S that refers to itself is refused promptly"
-    ;; Eclector cannot fix up a reference inside a structure, so the file does
-    ;; not parse; the report of that failure holds the reader's circular fixup
-    ;; node, and printing it whole never ended.
+    ;; cl-mcp's Eclector client builds no structure for #S, so any #S -- even
+    ;; of a structure this image defines -- leaves the file unparseable.  The
+    ;; report of that failure holds the reader's fixup node for #1#, which is
+    ;; circular, and printing it whole never ended.
     (with-temp-lisp-file "tests/tmp/read-file-circular-structure.lisp"
         (format nil "(defparameter *node* '#1=#S(~S :label 1 :next #1#))~%"
                 'circular-fixture-node)
@@ -1594,3 +1596,13 @@ Issue #285: printing them without *PRINT-CIRCLE* never ends.")
           (ok (stringp content) (format nil "answered: ~A" content))
           (when (stringp content)
             (ok (search "(defparameter *table* '((0 . 0) (1 . 1)" content))))))))
+
+(deftest lisp-read-file-short-nested-value-is-shown-whole
+  (testing "the print level bounding a value does not cut what fits the summary"
+    (with-temp-lisp-file "tests/tmp/read-file-nested-value.lisp"
+        (format nil "(defparameter *nested* '(:a (:b (:c (:d (:e (:f 1)))))))~%")
+      (lambda (path)
+        (let ((content (%read-within 2 path)))
+          (ok (and (stringp content)
+                   (search "'(:a (:b (:c (:d (:e (:f 1)))))) ..." content))
+              (format nil "shown whole: ~A" content)))))))

@@ -1,7 +1,8 @@
 (defpackage #:cl-mcp/src/utils/printing
   (:use #:cl)
   (:export #:safe-prin1
-           #:circular-p))
+           #:circular-p
+           #:bounded-princ-to-string))
 
 (in-package #:cl-mcp/src/utils/printing)
 
@@ -47,11 +48,13 @@ Examples:
   "True for the objects CIRCULAR-P walks into: conses and, unless CONSES-ONLY,
 arrays whose elements can be any object and structure instances.  A string or
 a specialized array holds no object that could lead back to it; a standard
-object or a hash table prints as #<...> without printing what it holds."
+object or a hash table (a structure in SBCL, whose storage a weak table points
+back from) prints as #<...> without printing what it holds."
   (or (consp object)
       (and (not conses-only)
            (or (and (arrayp object) (eq (array-element-type object) t))
-               (typep object 'structure-object)))))
+               (and (typep object 'structure-object)
+                    (not (hash-table-p object)))))))
 
 (defun %walked-children (node)
   "Return the objects inside NODE, an array or a structure instance, that
@@ -113,3 +116,15 @@ costs one visit per distinct node instead of blowing up exponentially."
                    (setf (gethash visited finished) t))
                  found)))
       (walk object))))
+
+(defun bounded-princ-to-string (object)
+  "Return OBJECT PRINCed for a message -- a condition's report, say -- with
+*PRINT-CIRCLE* on and *PRINT-LEVEL* 8 and *PRINT-LENGTH* 50.  What a report
+prints can be anything it was given, circular structure included, and only
+all three bound together guarantee the printing ends soon: circle notation
+stops a cycle, and the level and length stop a merely huge object (the bounds
+alone do not stop #1=(#1# . #1#), which holds 50^8 elements within them)."
+  (let ((*print-circle* t)
+        (*print-level* 8)
+        (*print-length* 50))
+    (princ-to-string object)))

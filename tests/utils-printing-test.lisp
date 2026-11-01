@@ -75,7 +75,11 @@
       (ok (circular-p node) "through a slot and a list")
       (ok (circular-p (list 'quote node)) "inside a quoted literal"))
     (ok (not (circular-p (make-circular-p-node :label 1 :next (make-circular-p-node))))
-        "a chain of structures")))
+        "a chain of structures")
+    ;; A hash table is a structure in SBCL, and a weak one's storage points
+    ;; back at it; it prints as #<...>, so it is not entered.
+    (ok (not (circular-p (list (make-hash-table :weakness :key))))
+        "a hash table is a leaf")))
 
 (deftest circular-p-conses-only
   (testing "with :conses-only, only a cycle through conses counts"

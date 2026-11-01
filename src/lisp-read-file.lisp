@@ -421,7 +421,7 @@ collapsed signature.")
 *VARIABLE-VALUE-MAX-CHARS* of it are shown, and printing a long literal table
 whole at an unbounded right margin took seconds per read.")
 
-(defparameter *variable-value-print-level* 4
+(defparameter *variable-value-print-level* 8
   "*PRINT-LEVEL* for a variable's value in its collapsed signature, for the
 same reason as *VARIABLE-VALUE-PRINT-LENGTH*.")
 

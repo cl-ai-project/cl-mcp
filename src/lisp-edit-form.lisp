@@ -43,6 +43,8 @@
                 #:sanitize-error-message
                 #:sanitize-condition-text
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/utils/printing
+                #:bounded-princ-to-string)
   (:import-from #:cl-mcp/src/utils/strings
                 #:ensure-trailing-newline)
   (:import-from #:cl-mcp/src/utils/nesting
@@ -639,14 +641,18 @@ condition false in this process is as valid as a true one."
     ((> depth 64) "it is nested too deeply")
     ((symbolp expression) nil)
     ((not (and (consp expression) (ignore-errors (list-length expression))))
-     (format nil "~S is neither a symbol nor a proper list" expression))
+     ;; Not a proper list: it may be circular, as #+#1=(and . #1#) reads.
+     (let ((*print-circle* t))
+       (format nil "~S is neither a symbol nor a proper list" expression)))
     ((not (and (symbolp (first expression))
                (member (symbol-name (first expression)) '("AND" "OR" "NOT")
                        :test #'string=)))
      ;; By name: its package was the reader's scratch one, deleted by now.
      (format nil "~A is not AND, OR or NOT"
              (let ((operator (first expression)))
-               (if (symbolp operator) (symbol-name operator) (prin1-to-string operator)))))
+               (if (symbolp operator)
+                   (symbol-name operator)
+                   (let ((*print-circle* t)) (prin1-to-string operator))))))
     ((and (string= (symbol-name (first expression)) "NOT")
           (/= 1 (length (rest expression))))
      "NOT takes exactly one feature expression")
@@ -1456,7 +1462,7 @@ without a guard."))
                     :protocol-version (protocol-version state)))
       (error (e)
         (let ((msg (sanitize-for-json
-                    (sanitize-error-message (format nil "~A" e)))))
+                    (sanitize-error-message (bounded-princ-to-string e)))))
           (if (and (protocol-version state)
                    (string>= (protocol-version state) "2025-11-25"))
               (result id (make-ht "content" (text-content msg) "isError" t))
