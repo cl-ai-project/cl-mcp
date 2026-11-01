@@ -17,6 +17,8 @@
                 #:record-homeless-on-teardown)
   (:import-from #:cl-mcp/src/utils/nesting
                 #:lisp-too-deep-p)
+  (:import-from #:cl-mcp/src/utils/printing
+                #:circular-p)
   (:import-from #:uiop
                 #:directory-files
                 #:ensure-directory-pathname
@@ -159,44 +161,77 @@ next form's first character, and return that character, or NIL at the end."
         ((char= char #\;) (read-line stream nil nil))
         ((char= char #\#)
          (read-char stream)
-         (let ((next (peek-char nil stream nil nil)))
-           (unless (eql next #\|)
-             (unread-char char stream)
-             (return char))
-           (read-char stream)
-           (loop with depth = 1
-                 for c = (read-char stream nil nil)
-                 while (and c (plusp depth))
-                 do (cond ((and (char= c #\|) (eql (peek-char nil stream nil nil) #\#))
-                           (read-char stream)
-                           (decf depth))
-                          ((and (char= c #\#) (eql (peek-char nil stream nil nil) #\|))
-                           (read-char stream)
-                           (incf depth))))))
+         (unless (eql (peek-char nil stream nil nil) #\|)
+           (unread-char char stream)
+           (return char))
+         (read-char stream)
+         ;; Stop right after the closing |#: the next character may be the
+         ;; form's own first one.
+         (loop with depth = 1
+               for c = (read-char stream nil nil)
+               while c
+               do (cond ((and (char= c #\|) (eql (peek-char nil stream nil nil) #\#))
+                         (read-char stream)
+                         (when (zerop (decf depth)) (return)))
+                        ((and (char= c #\#) (eql (peek-char nil stream nil nil) #\|))
+                         (read-char stream)
+                         (incf depth)))))
         (t (return char))))))
 
 (defun %read-form-whole-p (stream)
   "Return T when the next form on STREAM may be a header form and is to be
 read whole: a list whose first element is written as a symbol that names a
-header form (IN-PACKAGE, DEFPACKAGE and the like, see %HEADER-FORM-P), or a
-form behind #+ or #-, which is read whole as it always was.  Only that symbol
-is read, never the rest of the form, and STREAM is left somewhere inside it:
-the caller rewinds."
+header form (IN-PACKAGE, DEFPACKAGE and the like, see %HEADER-FORM-P).  A form
+behind #+ or #- is judged by the form it guards when its feature expression
+holds in this image, and is not a header otherwise.  Only the head symbol and
+a feature expression are read, never the rest of the form, and STREAM is left
+somewhere inside it: the caller rewinds."
   (let ((first (%skip-to-next-form stream)))
     (cond
       ((eql first #\#)
        (read-char stream)
-       (and (member (peek-char nil stream nil nil) '(#\+ #\-)) t))
+       (let ((sign (peek-char nil stream nil nil)))
+         (when (member sign '(#\+ #\-))
+           (read-char stream)
+           (let ((feature (handler-case
+                              (let ((*package* (find-package "KEYWORD")))
+                                (read-preserving-whitespace stream nil nil))
+                            (error () nil))))
+             ;; FEATUREP walks the expression, so a circular one is no header.
+             (and (not (circular-p feature))
+                  (eq (and (sb-int:featurep feature) t) (char= sign #\+))
+                  (%read-form-whole-p stream))))))
       ((eql first #\()
        (read-char stream)
-       (let ((char (peek-char t stream nil nil)))
+       (let ((char (%skip-to-next-form stream)))
          ;; A symbol token, not a list, a string, a quote or a dispatch.
          (and char
-              (not (find char "()'`,\"#;|"))
+              (not (find char "()'`,\"#"))
               (let ((head (handler-case (read-preserving-whitespace stream nil nil)
                             (error () nil))))
                 (%header-form-p (list head))))))
       (t nil))))
+
+(defun %skip-form (stream)
+  "Move STREAM past exactly one top-level form without building it, and return
+T, or NIL when no form is left.  A #+ or #- form is skipped with the form it
+guards: under *READ-SUPPRESS* the reader would read neither and go on to take
+the next form as well."
+  (let ((first (%skip-to-next-form stream)))
+    (cond
+      ((null first) nil)
+      ((and (eql first #\#)
+            (progn (read-char stream)
+                   (or (member (peek-char nil stream nil nil) '(#\+ #\-))
+                       (progn (unread-char first stream) nil))))
+       (read-char stream)
+       (let ((*read-suppress* t))
+         (read stream nil nil))
+       (%skip-form stream))
+      (t
+       (let ((*read-suppress* t))
+         (read stream nil nil))
+       t))))
 
 (defun %read-header-forms-from-text (text)
   "Read package-related header forms from TEXT using the CL reader.
@@ -207,12 +242,14 @@ custom reader syntax) ends the scan and the forms read so far are returned,
 so callers such as PARSE-TOP-LEVEL-FORMS can report the breakage themselves
 instead of failing here first.  Text nested too deeply to read safely
 (LISP-TOO-DEEP-P) yields no forms.
-Only a form whose head is written as a header symbol, or one behind #+ or #-,
-is read whole (see %READ-FORM-WHOLE-P); every other form is skipped with
-*READ-SUPPRESS*, which
-builds nothing.  SBCL's reader never returns from some valid text -- a
-backquote template with a circular tail, `(a . #1=(b . #1#)), whose last cons
-it looks for -- and this scan runs on every file the Lisp-aware tools open."
+Only a form whose head is written as a header symbol, directly or behind a
+#+/#- that holds, is read whole (see %READ-FORM-WHOLE-P); every other form is
+skipped with *READ-SUPPRESS*, which builds nothing.  SBCL's reader never
+returns from some valid text -- a backquote template with a circular tail,
+`(a . #1=(b . #1#)), whose last cons it looks for -- and this scan runs on
+every file the Lisp-aware tools open.  Skipping also means a form the reader
+would reject (an unknown package prefix, #. or another dispatch it does not
+know) no longer ends the scan before a header that follows it."
   (when (lisp-too-deep-p text)
     (return-from %read-header-forms-from-text nil))
   (call-with-lenient-packages
@@ -225,8 +262,9 @@ it looks for -- and this scan runs on every file the Lisp-aware tools open."
                  for header-p = (%read-form-whole-p stream)
                  for form = (progn
                               (file-position stream start)
-                              (handler-case (let ((*read-suppress* (not header-p)))
-                                              (read stream nil :eof))
+                              (handler-case (if header-p
+                                                (read stream nil :eof)
+                                                (if (%skip-form stream) :skipped :eof))
                                 (error () :eof)))
                  until (eq form :eof)
                  do (cond

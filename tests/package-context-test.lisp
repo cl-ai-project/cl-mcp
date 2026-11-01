@@ -259,18 +259,35 @@ whenever it is still running."
   (dolist (text (list (format nil "(defmacro q () `(a . #1=(b . #1#)))~%~
                                    (in-package :my-app)")
                       (format nil "(in-package :my-app)~%~
-                                   (defmacro q () `(a . #1=(b . #1#)))")))
+                                   (defmacro q () `(a . #1=(b . #1#)))")
+                      (format nil "#+sbcl (defmacro q () `(a . #1=(b . #1#)))~%~
+                                   (in-package :my-app)")
+                      (format nil "#-sbcl (defmacro q () `(a . #1=(b . #1#)))~%~
+                                   (in-package :my-app)")))
     (let ((name (%extract-within 2 text)))
       (ok (and (stringp name) (string-equal name "MY-APP"))
           (format nil "answered ~S for ~S" name text)))))
 
 (deftest extract-in-package-still-finds-headers-written-other-ways
-  (testing "a qualified head, comments before it and a #+ header still count"
+  (testing "headers behind comments, qualified, quoted or conditional still count"
     (dolist (case (list (format nil ";; header~%#| block #| nested |# |#~%~
                                      (cl:in-package :my-app)")
+                        "#| c |#(in-package :my-app)"
+                        "#||#(in-package :my-app)"
+                        (format nil "(;c~% in-package :my-app)")
+                        "(#|c|# in-package :my-app)"
+                        "(|IN-PACKAGE| :my-app)"
                         (format nil "(defpackage :my-app (:use :cl))~%~
                                      (in-package :my-app)")
-                        (format nil "#+sbcl (in-package :my-app)~%(defun f () 1)")))
+                        (format nil "#+sbcl (in-package :my-app)~%(defun f () 1)")
+                        (format nil "#+(or) (in-package :other)~%(in-package :my-app)")))
       (let ((name (%extract-within 2 case)))
         (ok (and (stringp name) (string-equal name "MY-APP"))
-            (format nil "answered ~S for ~S" name case))))))
+            (format nil "answered ~S for ~S" name case)))))
+  (testing "a form the reader would reject before the header no longer hides it"
+    ;; Forms that are not headers are skipped without being read, so an
+    ;; unknown package prefix in one no longer ends the scan.
+    (let ((name (%extract-within 2 (format nil "(defun f () (nopkg:bar))~%~
+                                                (in-package :my-app)"))))
+      (ok (and (stringp name) (string-equal name "MY-APP"))
+          (format nil "answered ~S" name)))))

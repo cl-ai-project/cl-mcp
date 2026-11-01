@@ -4330,7 +4330,9 @@ thread behind."
       (let ((missing (%edit-within 2 :file-path path :form-type "defun"
                                      :form-name "nope" :operation "delete"
                                      :dry-run t)))
-        (ok (typep missing 'error) (format nil "not found is an error: ~A" missing))))))
+        (ok (and (typep missing 'error)
+                 (search "Form defun nope not found" (princ-to-string missing)))
+            (format nil "not found is reported as such: ~A" missing))))))
 
 (deftest lisp-edit-form-refuses-a-circular-feature-expression
   (testing "a #+ with a circular feature expression in content is refused promptly"
