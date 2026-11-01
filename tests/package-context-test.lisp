@@ -390,3 +390,59 @@ whenever it is still running."
            (when (bordeaux-threads:thread-alive-p thread)
              (ignore-errors (bordeaux-threads:destroy-thread thread))))
          (ok (null specs) (format nil "no spec, promptly: ~S" specs)))))))
+
+(defun %header-heads (text)
+  "Return the heads of the header forms the scan reads from TEXT, as strings,
+or :TIMEOUT."
+  (let ((forms :timeout)
+        (thread nil))
+    (unwind-protect
+         (progn
+           (setf thread (bordeaux-threads:make-thread
+                         (lambda ()
+                           (setf forms (cl-mcp/src/package-context::%read-header-forms-from-text
+                                        text)))
+                         :name "package-context-test-header-heads"))
+           (loop repeat 200
+                 while (bordeaux-threads:thread-alive-p thread)
+                 do (sleep 0.01d0)))
+      (when (and thread (bordeaux-threads:thread-alive-p thread))
+        (ignore-errors (bordeaux-threads:destroy-thread thread))))
+    (if (listp forms)
+        (mapcar (lambda (form) (string-downcase (symbol-name (car form)))) forms)
+        forms)))
+
+(deftest header-scan-keeps-headers-real-libraries-write
+  ;; Shapes from Quicklisp libraries the rewritten scan lost and main found.
+  (testing "a top-level conditional that does not hold is passed over"
+    (dolist (pair (list
+                   ;; drakma.asd
+                   (cons (format nil "(in-package :cl-user)~%~
+                                      #+:lispworks (unless (find-symbol \"X\") (y))~%~
+                                      (defpackage :drakma-asd (:use :cl :asdf))~%~
+                                      (in-package :drakma-asd)")
+                         '("in-package" "defpackage" "in-package"))
+                   ;; cl+ssl's src/package.lisp
+                   (cons (format nil "(in-package :cl-user)~%~
+                                      #+(or) (in-package #:cl+ssl)~%~
+                                      (defpackage :cl+ssl (:use :cl))")
+                         '("in-package" "defpackage"))
+                   ;; moptilities.lisp
+                   (cons (format nil "(defpackage :m (:use :cl))~%~
+                                      #+Ignore (eval-when (:compile-toplevel) (x))~%~
+                                      (in-package :m)")
+                         '("defpackage" "in-package"))))
+      (ok (equal (%header-heads (car pair)) (cdr pair))
+          (format nil "~S for ~S" (%header-heads (car pair)) (car pair)))))
+  (testing "a defpackage that shares a clause through a label is read"
+    ;; Eclector's code/base/package.lisp.
+    (let ((text (format nil "(defpackage :e (:use :cl)~%  ~
+                              (:shadow . #1=(#:end-of-file #:read-char))~%  ~
+                              (:export . #1#))~%(in-package :e)")))
+      (ok (equal (%header-heads text) '("defpackage" "in-package"))
+          (format nil "~S" (%header-heads text)))))
+  (testing "a suppressed branch of a header form may hold any dispatch"
+    (let ((text (format nil "(defpackage :p (:use :cl) #-sbcl (:export #.(x) #'y))~%~
+                             (in-package :p)")))
+      (ok (equal (%header-heads text) '("defpackage" "in-package"))
+          (format nil "~S" (%header-heads text))))))
