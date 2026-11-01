@@ -248,7 +248,16 @@ Return T, or NIL when the stream failed (the client is gone)."
             (format nil "tcp-~A" conn-id)))
       (loop
         ;; Use timeout as a heartbeat to check for the stop flag
-        for ready = (usocket:wait-for-input (list socket) :timeout *tcp-read-timeout*)
+        ;; WAIT-FOR-INPUT calls LISTEN, which reads, so a reset that arrived
+        ;; since the last read is met here as often as in the read itself.
+        for ready = (handler-case
+                        (usocket:wait-for-input (list socket)
+                                                :timeout *tcp-read-timeout*)
+                      (stream-error (e)
+                        (log-event :warn "tcp.read.error"
+                                   "conn" conn-id
+                                   "error" (princ-to-string e))
+                        (return)))
         do (cond
              ((null ready)
               ;; Timeout occurred. Do not close the connection immediately.
@@ -312,13 +321,14 @@ Return T, or NIL when the stream failed (the client is gone)."
                ;; below, holding the session and its worker for good.  So
                ;; every serious condition (a STORAGE-CONDITION or an
                ;; SB-EXT:TIMEOUT is not an ERROR) ends the connection, and
-               ;; a report that itself signals cannot escape the handler.
+               ;; nothing the report signals can escape the handler.
                (handler-case (%process-stream stream client conn-id remote)
                  (serious-condition (e)
-                   (ignore-errors
-                    (log-event :warn "tcp.conn.error"
-                               "conn" conn-id
-                               "error" (princ-to-string e)))))))
+                   (handler-case
+                       (log-event :warn "tcp.conn.error"
+                                  "conn" conn-id
+                                  "error" (princ-to-string e))
+                     (serious-condition () nil))))))
            t)
       (when stream (ignore-errors (close stream)))
       (when client (ignore-errors (usocket:socket-close client)))

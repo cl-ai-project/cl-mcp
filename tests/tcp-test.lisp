@@ -226,18 +226,40 @@
 (defun %call-with-one-shot-server (function)
   "Run SERVE-TCP for one connection on a thread and call FUNCTION with its port.
 Return the server thread once FUNCTION returns; the caller decides how long to
-wait for it to finish."
+wait for it to finish.  When the server does not come up, FUNCTION is not
+called and the server is asked to stop, so no thread is left listening.
+The server runs without a worker pool, bound on its own thread: these tests
+use no worker, and starting and stopping a pool would add seconds to the
+server's return on a loaded machine."
   (let* ((port nil)
          (thread (make-thread
                   (lambda ()
-                    (serve-tcp :host "127.0.0.1" :port 0
-                               :on-listening (lambda (p) (setf port p))
-                               :accept-once t))
+                    (let ((cl-mcp/src/proxy:*use-worker-pool* nil))
+                      (serve-tcp :host "127.0.0.1" :port 0
+                                 :on-listening (lambda (p) (setf port p))
+                                 :accept-once t)))
                   :name "tcp-test-one-shot-server")))
     (loop repeat 200 until port do (sleep 0.01d0))
     (ok port "the one-shot server is listening")
-    (funcall function port)
+    (if port
+        (funcall function port)
+        (setf cl-mcp/src/tcp::*tcp-stop-flag* t))
     thread))
+
+(defun %call-capturing-log (function)
+  "Call FUNCTION and return the log lines written meanwhile, by any thread.
+The server's threads read the global *LOG-STREAM*, so it is set rather than
+bound; the lines still reach the previous stream as well."
+  (let ((capture (make-string-output-stream))
+        (previous cl-mcp/src/log:*log-stream*))
+    (unwind-protect
+         (progn
+           (setf cl-mcp/src/log:*log-stream*
+                 (make-broadcast-stream previous capture))
+           (funcall function))
+      (setf cl-mcp/src/log:*log-stream* previous))
+    (bordeaux-threads:with-lock-held (cl-mcp/src/log::*log-lock*)
+      (get-output-stream-string capture))))
 
 (defun %thread-ends-within-p (thread seconds)
   "Return T when THREAD finishes within SECONDS, NIL when it is still running."
@@ -312,44 +334,85 @@ wait for it to finish."
   (testing "a reset from the client ends the read loop instead of stopping the thread"
     (if (not (socket-available-p))
         (ok t "socket unavailable")
-        (let ((log (make-string-output-stream))
-              (previous-log-stream cl-mcp/src/log:*log-stream*))
+        (let ((text
+                (%call-capturing-log
+                 (lambda ()
+                   (let ((thread
+                           (%call-with-one-shot-server
+                            (lambda (port)
+                              (let* ((sock (usocket:socket-connect
+                                            "127.0.0.1" port
+                                            :element-type 'character))
+                                     (stream (usocket:socket-stream sock)))
+                                (write-line
+                                 "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"
+                                 stream)
+                                (finish-output stream)
+                                ;; Wait for the response and leave it unread in
+                                ;; the kernel: closing a socket with unread data
+                                ;; makes the kernel send a reset instead of a
+                                ;; FIN, which the server meets in its next read.
+                                ;; Poll the descriptor itself: LISTEN, and
+                                ;; USOCKET:WAIT-FOR-INPUT, which calls it, would
+                                ;; read the response into the stream's buffer.
+                                (ok (sb-unix:unix-simple-poll
+                                     (sb-bsd-sockets:socket-file-descriptor
+                                      (usocket:socket sock))
+                                     :input 5000)
+                                    "the response has arrived")
+                                (usocket:socket-close sock))))))
+                     (ok (%thread-ends-within-p thread 5)
+                         "the connection ends and the server returns"))))))
+          ;; The server meets the reset in WAIT-FOR-INPUT or in the read,
+          ;; whichever runs first after it arrives; both log it the same way.
+          (ok (search "\"tcp.read.error\"" text)
+              "the server met the reset, not an orderly close")
+          (ok (not (search "\"tcp.read.eof\"" text))
+              "the connection did not end at EOF")))))
+
+(deftest tcp-reset-met-while-waiting-is-a-read-error
+  (testing "a reset already pending when the server waits for input is a read error"
+    (if (not (socket-available-p))
+        (ok t "socket unavailable")
+        (let* ((listener (usocket:socket-listen "127.0.0.1" 0
+                                                :reuse-address t
+                                                :element-type 'character))
+               (client (usocket:socket-connect "127.0.0.1"
+                                               (usocket:get-local-port listener)
+                                               :element-type 'character))
+               (server-side (usocket:socket-accept listener
+                                                   :element-type 'character)))
           (unwind-protect
-               (progn
-                 ;; The server thread reads the global, so the log of this
-                 ;; connection lands here and says which path it took.
-                 (setf cl-mcp/src/log:*log-stream* log)
-                 (let ((thread
-                         (%call-with-one-shot-server
-                          (lambda (port)
-                            (let* ((sock (usocket:socket-connect
-                                          "127.0.0.1" port :element-type 'character))
-                                   (stream (usocket:socket-stream sock)))
-                              (write-line
-                               "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"
-                               stream)
-                              (finish-output stream)
-                              ;; Wait for the response and leave it unread in
-                              ;; the kernel: closing a socket with unread data
-                              ;; makes the kernel send a reset instead of a
-                              ;; FIN, which the server meets in its next read.
-                              ;; Poll the descriptor itself: LISTEN, and
-                              ;; USOCKET:WAIT-FOR-INPUT, which calls it, would
-                              ;; read the response into the stream's buffer.
-                              (ok (sb-unix:unix-simple-poll
-                                   (sb-bsd-sockets:socket-file-descriptor
-                                    (usocket:socket sock))
-                                   :input 5000)
-                                  "the response has arrived")
-                              (usocket:socket-close sock))))))
-                   (ok (%thread-ends-within-p thread 5)
-                       "the connection ends and the server returns")))
-            (setf cl-mcp/src/log:*log-stream* previous-log-stream))
-          (let ((text (get-output-stream-string log)))
-            (ok (search "\"tcp.read.error\"" text)
-                "the server met the reset, not an orderly close")
-            (ok (not (search "\"tcp.read.eof\"" text))
-                "the connection did not end at EOF"))))))
+               (let ((text
+                       (%call-capturing-log
+                        (lambda ()
+                          ;; Leave data unread on the client and close it, so
+                          ;; the kernel resets the connection before the server
+                          ;; side is ever read: its first WAIT-FOR-INPUT, which
+                          ;; calls LISTEN, meets the reset.
+                          (let ((out (usocket:socket-stream server-side)))
+                            (write-line "unread" out)
+                            (finish-output out))
+                          (sb-unix:unix-simple-poll
+                           (sb-bsd-sockets:socket-file-descriptor
+                            (usocket:socket client))
+                           :input 5000)
+                          (usocket:socket-close client)
+                          (sleep 0.1d0)
+                          (let ((thread
+                                  (make-thread
+                                   (lambda ()
+                                     (funcall 'cl-mcp/src/tcp::%tcp-handle-client
+                                              server-side 9003))
+                                   :name "tcp-test-reset-while-waiting")))
+                            (ok (%thread-ends-within-p thread 5)
+                                "the client thread ends"))))))
+                 (ok (search "\"tcp.read.error\"" text)
+                     "the reset is logged as a read error")
+                 (ok (not (search "\"tcp.conn.error\"" text))
+                     "not as an unexpected condition"))
+            (ignore-errors (usocket:socket-close client))
+            (ignore-errors (usocket:socket-close listener)))))))
 
 (deftest tcp-client-thread-survives-a-failing-socket
   (testing "an error outside the line read still ends the connection and runs its cleanup"
