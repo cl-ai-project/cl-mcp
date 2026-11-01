@@ -31,6 +31,8 @@
                 #:send-root-to-session-worker)
   (:import-from #:cl-mcp/src/proxy
                 #:cancel-request)
+  (:import-from #:cl-mcp/src/inline-cancel
+                #:cancel-inline-request)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json
                 #:replace-lone-surrogates)
@@ -282,7 +284,9 @@ Extracts requestId from PARAMS and calls cancel-request for that request of
 *current-session-id* -- the session is part of the request's identity, so
 another session's request with the same id is untouched.  A request that has
 not reached its worker is stopped before it runs; one its worker is running
-is stopped with the worker; one already answered is left alone."
+is stopped with the worker; one already answered is left alone.  A request a
+tool runs inline is stopped only inside a region it declared cancellable
+(CALL-CANCELLABLE): clgrep-search's scan."
   (let ((request-id (and (hash-table-p params)
                          (gethash "requestId" params))))
     (when request-id
@@ -292,7 +296,10 @@ is stopped with the worker; one already answered is left alone."
       ;; propagate to process-json-line's handler-case, which would
       ;; generate a JSON-RPC error response for a notification —
       ;; violating the spec ("Server MUST NOT reply to a Notification").
-      (ignore-errors (cancel-request request-id *current-session-id*))))
+      (ignore-errors (cancel-request request-id *current-session-id*))
+      ;; A tool running inline in this process has no worker to stop; if it
+      ;; is in a cancellable region (a search), that region is interrupted.
+      (ignore-errors (cancel-inline-request *current-session-id* request-id))))
   nil)
 
 (defun handle-notification (state method params)

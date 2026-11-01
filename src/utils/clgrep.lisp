@@ -877,8 +877,11 @@ Returns an alist like extract-toplevel-form, or NIL."
                     condition)))
     (nreverse results)))
 
-(defun semantic-grep (root-directory pattern &key (recursive t) case-insensitive form-types (include-form t) limit)
+(defun semantic-grep (root-directory pattern &key (recursive t) case-insensitive form-types
+                                                  (include-form t) limit timeout-seconds)
   "Search for PATTERN across all Lisp files in ROOT-DIRECTORY.
+   Return two values: the results, and true when TIMEOUT-SECONDS ran out
+   first, in which case the results are those collected until then.
 
    Keyword arguments:
      :recursive        - If true (default), search subdirectories recursively
@@ -888,6 +891,9 @@ Returns an alist like extract-toplevel-form, or NIL."
      :include-form     - If true (default), include full form text in results.
                          Set to NIL to omit :form field (saves tokens).
      :limit            - Maximum number of results to return. If NIL, return all.
+     :timeout-seconds  - Stop the search after this many seconds, wherever it
+                         is (a regex can backtrack for minutes on one line).
+                         If NIL, no deadline.
 
    Returns a list of alists, each containing:
      :file            - The file's PATHNAME, not a namestring. Callers that
@@ -919,25 +925,36 @@ Returns an alist like extract-toplevel-form, or NIL."
   (handler-case (cl-ppcre:create-scanner pattern)
     (cl-ppcre:ppcre-syntax-error (e)
       (error "Invalid regex pattern ~S: ~A" pattern e)))
-  (let ((files (collect-target-files root-directory :recursive recursive))
-        (all-results nil)
-        (count 0))
-    (dolist (file files)
-      (when (and limit (>= count limit))
-        (return))
-      (let ((file-results (search-in-file file pattern
-                                          :case-insensitive case-insensitive
-                                          :form-types form-types
-                                          :include-form include-form)))
-        (if limit
-            ;; With limit: add results up to limit
-            (dolist (result file-results)
-              (when (>= count limit)
-                (return))
-              (push result all-results)
-              (incf count))
-            ;; Without limit: collect via push (O(n) instead of O(n^2) append)
-            (dolist (result file-results)
-              (push result all-results)))))
-    (nreverse all-results)))
+  (let ((all-results nil)
+        (count 0)
+        (timed-out nil))
+    (flet ((search-files ()
+             (dolist (file (collect-target-files root-directory :recursive recursive))
+               (when (and limit (>= count limit))
+                 (return))
+               (let ((file-results (search-in-file file pattern
+                                                   :case-insensitive case-insensitive
+                                                   :form-types form-types
+                                                   :include-form include-form)))
+                 (if limit
+                     ;; With limit: add results up to limit
+                     (dolist (result file-results)
+                       (when (>= count limit)
+                         (return))
+                       (push result all-results)
+                       (incf count))
+                     ;; Without limit: collect via push (O(n) instead of O(n^2) append)
+                     (dolist (result file-results)
+                       (push result all-results)))))))
+      ;; One match of a regex can backtrack for minutes on a single line, so a
+      ;; check between lines would not stop it: the timer interrupts wherever
+      ;; the search is.  SB-EXT:TIMEOUT is no ERROR, so SEARCH-IN-FILE's
+      ;; per-file handler does not swallow it.  What was collected is kept.
+      (if timeout-seconds
+          (handler-case (sb-ext:with-timeout timeout-seconds
+                          (search-files))
+            (sb-ext:timeout ()
+              (setf timed-out t)))
+          (search-files)))
+    (values (nreverse all-results) timed-out)))
 

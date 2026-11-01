@@ -12,7 +12,10 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:native-path-namestring)
   (:import-from #:cl-mcp/src/clgrep
-                #:clgrep-search))
+                #:clgrep-search)
+  ;; Loaded for the session binding and the cancel notification the
+  ;; cancellation test sends.
+  (:import-from #:cl-mcp/src/protocol))
 
 (in-package #:cl-mcp/tests/clgrep-test)
 
@@ -389,3 +392,93 @@ return (VALUES text payload): the rendered summary and the result hash."
                      (format nil "~S must name the file on disk" found)))))
         (ignore-errors (delete-file file))
         (ignore-errors (uiop:delete-empty-directory dir))))))
+
+(defparameter *runaway-source*
+  (format nil "(defun runaway ()~%  \"~%~A~%\")~%"
+          (concatenate 'string (make-string 40 :initial-element #\a) "b"))
+  "A line of forty a's and a b, on which (a*)*[^ab] backtracks exponentially --
+26 already take seconds -- so the search does not end on its own: issue #286.")
+
+(defun %call-within (seconds thunk)
+  "Call THUNK on a thread of its own and return (VALUES result finished-p),
+FINISHED-P false when it has not returned within SECONDS.  The thread is
+destroyed on the way out whenever it is still running."
+  (let* ((result nil)
+         (done nil)
+         (thread (bordeaux-threads:make-thread
+                  (lambda ()
+                    (setf result (multiple-value-list (funcall thunk))
+                          done t))
+                  :name "clgrep-test-call-within")))
+    (unwind-protect
+         (progn
+           (loop repeat (round (* seconds 100))
+                 until done
+                 do (sleep 0.01d0))
+           (values result done))
+      (when (bordeaux-threads:thread-alive-p thread)
+        (ignore-errors (bordeaux-threads:destroy-thread thread))))))
+
+(defmacro with-runaway-fixture ((relative-dir) &body body)
+  "Create RELATIVE-DIR under the cl-mcp project root holding runaway.lisp, bind
+*project-root* to that root, run BODY, delete the directory."
+  `(let* ((*project-root* (asdf:system-source-directory :cl-mcp))
+          (dir (uiop:ensure-directory-pathname
+                (merge-pathnames ,relative-dir *project-root*))))
+     (ensure-directories-exist dir)
+     (unwind-protect
+          (progn
+            (with-open-file (out (merge-pathnames "runaway.lisp" dir)
+                                 :direction :output :if-exists :supersede)
+              (write-string *runaway-source* out))
+            ,@body)
+       (uiop:delete-directory-tree dir :validate t))))
+
+(deftest clgrep-search-tool-stops-at-its-deadline
+  (testing "a pattern that backtracks without end is stopped and says so"
+    (with-runaway-fixture ("tests/tmp/clgrep-runaway/")
+      (multiple-value-bind (result finished)
+          (let ((root *project-root*))
+            ;; A new thread sees the global *PROJECT-ROOT*, not this binding.
+            (%call-within 10 (lambda ()
+                               (let ((*project-root* root))
+                                 (%call-clgrep "(a*)*[^ab]"
+                                               "path" "tests/tmp/clgrep-runaway/"
+                                               "timeout_seconds" 1)))))
+        (ok finished "the search answered within ten seconds")
+        (when finished
+          (destructuring-bind (text payload) result
+            (ok (and payload (eq t (gethash "timed_out" payload)))
+                (format nil "timed_out is true: ~S" (and payload (gethash "timed_out" payload))))
+            (ok (and text (search "stopped after 1 second" text))
+                (format nil "the text says the search was cut short: ~A" text))))))))
+
+(deftest clgrep-search-tool-stops-when-its-request-is-cancelled
+  (testing "notifications/cancelled for a running search ends it"
+    (with-runaway-fixture ("tests/tmp/clgrep-cancel/")
+      (let* ((session "clgrep-cancel-test")
+             (root *project-root*)
+             (thread (bordeaux-threads:make-thread
+                      (lambda ()
+                        (let ((cl-mcp/src/protocol:*current-session-id* session)
+                              (*project-root* root))
+                          (cl-mcp/src/clgrep::clgrep-search-handler
+                           (cl-mcp/src/state:make-state) 77
+                           (cl-mcp/src/tools/helpers:make-ht
+                            "pattern" "(a*)*[^ab]"
+                            "path" "tests/tmp/clgrep-cancel/"
+                            "timeout_seconds" 60))))
+                      :name "clgrep-test-cancelled-search")))
+        (unwind-protect
+             (progn
+               (sleep 0.5d0)
+               (let ((cl-mcp/src/protocol:*current-session-id* session))
+                 (cl-mcp/src/protocol::%handle-cancel-notification
+                  (cl-mcp/src/tools/helpers:make-ht "requestId" 77)))
+               (ok (loop repeat 300
+                         while (bordeaux-threads:thread-alive-p thread)
+                         do (sleep 0.01d0)
+                         finally (return (not (bordeaux-threads:thread-alive-p thread))))
+                   "the search ends within three seconds of the cancellation"))
+          (when (bordeaux-threads:thread-alive-p thread)
+            (ignore-errors (bordeaux-threads:destroy-thread thread))))))))

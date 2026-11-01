@@ -13,7 +13,12 @@
   (:import-from #:cl-mcp/src/utils/clgrep
                 #:semantic-grep)
   (:import-from #:cl-mcp/src/tools/helpers
-                #:make-ht #:result #:text-content)
+                #:make-ht #:result #:text-content #:json-bool #:tool-error
+                #:arg-validation-error)
+  (:import-from #:cl-mcp/src/state
+                #:*current-session-id* #:protocol-version)
+  (:import-from #:cl-mcp/src/inline-cancel
+                #:call-cancellable #:inline-request-cancelled)
   (:import-from #:cl-mcp/src/tools/define-tool
                 #:define-tool)
   (:export
@@ -49,7 +54,15 @@ Accepts a list of strings, a vector of strings, a single string, or NIL."
     ((stringp form-types) (list form-types))
     (t nil)))
 
-(defun clgrep-search (pattern &key path recursive case-insensitive form-types limit include-form)
+(defparameter *clgrep-default-timeout-seconds* 15
+  "Seconds a clgrep-search runs before it is stopped, when the call names no
+timeout_seconds.  The search runs inline in the server process, and over stdio
+nothing else is answered while it runs, so a pattern that backtracks without
+end -- (a*)*[^ab] against a long run of a's -- must not hold it for longer.
+A search of a whole project normally takes well under a second.")
+
+(defun clgrep-search (pattern &key path recursive case-insensitive form-types limit include-form
+                                   (timeout-seconds *clgrep-default-timeout-seconds*))
   "Perform semantic grep search for PATTERN in Lisp files.
 
 Arguments:
@@ -63,8 +76,12 @@ Arguments:
   FORM-TYPES       - Filter by form types, e.g., '(\"defun\" \"defmethod\") (optional)
   LIMIT            - Maximum number of results to return (optional)
   INCLUDE-FORM     - If true, include full form text in results (default: NIL)
+  TIMEOUT-SECONDS  - Stop the search after this many seconds (default:
+                     *CLGREP-DEFAULT-TIMEOUT-SECONDS*; NIL for none)
 
-Returns a list of alists, each containing:
+Returns two values: a list of alists, and true when the search was stopped by
+TIMEOUT-SECONDS, its results then being those found until then.  Each alist
+contains:
   :file            - File path, relative to the project root (not to PATH), or
                      absolute when the file lives outside it, as every other
                      tool reports a path. It can be passed straight to
@@ -81,22 +98,25 @@ Returns a list of alists, each containing:
   (when (or (null pattern)
             (zerop (length (string-trim '(#\Space #\Tab) pattern))))
     (error "Pattern cannot be empty"))
-  (let* ((effective-limit (or limit 200))
-         (search-path (resolve-readable-path path :must-exist t))
-         (types (%parse-form-types form-types))
-         (results (semantic-grep search-path pattern
-                                 :recursive recursive
-                                 :case-insensitive case-insensitive
-                                 :form-types types
-                                 :include-form include-form
-                                 :limit effective-limit)))
-    (log-event :info "clgrep.search"
-               "pattern" pattern
-               "path" (native-path-namestring search-path)
-               "limit" limit
-               "include-form" include-form
-               "matches" (length results))
-    (mapcar #'%normalize-result results)))
+  (let ((effective-limit (or limit 200))
+        (search-path (resolve-readable-path path :must-exist t))
+        (types (%parse-form-types form-types)))
+    (multiple-value-bind (results timed-out)
+        (semantic-grep search-path pattern
+                       :recursive recursive
+                       :case-insensitive case-insensitive
+                       :form-types types
+                       :include-form include-form
+                       :limit effective-limit
+                       :timeout-seconds timeout-seconds)
+      (log-event :info "clgrep.search"
+                 "pattern" pattern
+                 "path" (native-path-namestring search-path)
+                 "limit" limit
+                 "include-form" include-form
+                 "matches" (length results)
+                 "timed-out" timed-out)
+      (values (mapcar #'%normalize-result results) timed-out))))
 
 (defun %format-clgrep-results (results)
   "Convert clgrep results (list of alists) to a vector of hash tables.
@@ -162,6 +182,59 @@ a broken file that matched nothing is not this search's problem."
                   notes)))))
     (nreverse notes)))
 
+(defun %clgrep-search-response (id pattern path recursive case-insensitive form-types limit
+                                include-form timeout-seconds)
+  "Run the search for the clgrep-search tool's call ID and return its result.
+The search is the cancellable region of the call (CALL-CANCELLABLE): a
+notifications/cancelled for ID in this session interrupts it.  When
+TIMEOUT-SECONDS runs out first, the matches found until then are returned with
+'timed_out' true and a line in the text that says so."
+  (multiple-value-bind (results timed-out)
+      (call-cancellable *current-session-id* id
+                        (lambda ()
+                          (clgrep-search pattern
+                                         :path path
+                                         :recursive recursive
+                                         :case-insensitive case-insensitive
+                                         :form-types form-types
+                                         :limit limit
+                                         :include-form include-form
+                                         :timeout-seconds timeout-seconds)))
+    (let* ((effective-limit (or limit 200))
+           (formatted (%format-clgrep-results results))
+           (notes (%unparseable-notes results))
+           (payload
+             (make-ht "content"
+                      (text-content
+                       (with-output-to-string (s)
+                         (format s "~D ~:[matches~;match~] for ~S~@[ in ~A~]:~%"
+                                 (length formatted) (= 1 (length formatted))
+                                 pattern path)
+                         (loop for match across formatted
+                               do (format s "  ~A:~A [~A] ~A~%"
+                                          (gethash "file" match)
+                                          (gethash "line" match)
+                                          (gethash "form-type" match)
+                                          (or (gethash "signature" match)
+                                              (gethash "form-name" match))))
+                         ;; Notes go in the text: sibling JSON fields
+                         ;; are not rendered by most clients.
+                         (dolist (note notes)
+                           (format s "~A~%" note))
+                         (when timed-out
+                           (format s "Search stopped after ~A second~:P (timeout_seconds): ~
+the matches above are those found until then.  A pattern that backtracks -- a ~
+nested repetition such as (a*)* -- can take minutes on one long line; simplify ~
+it, or narrow path.~%"
+                                   timeout-seconds))))
+                      "matches" formatted
+                      "count" (length formatted)
+                      "limited" (<= effective-limit (length results))
+                      "timed_out" (json-bool timed-out))))
+      (when notes
+        (setf (gethash "notes" payload) (coerce notes 'vector)))
+      (result id payload))))
+
 (define-tool "clgrep-search"
   :description "Perform semantic grep search for a pattern in Lisp files.
 Unlike regular grep, this tool understands Lisp structure and returns
@@ -189,6 +262,9 @@ lisp-read-file an absolute path for such a file.
 Only .lisp, .asd and .ros files are searched, honouring the .gitignore of the
 search root alone. A line outside every top-level form is never reported.
 
+The search stops after timeout_seconds (default 15) and returns what it found
+by then, saying so; a cancelled request (notifications/cancelled) stops it too.
+
 Recommended workflow:
 1. clgrep-search to locate functions/usages across the project
 2. lisp-read-file with name_pattern to read specific definitions in detail"
@@ -215,39 +291,22 @@ kept")
 reached")
          (include-form :type :boolean :json-name "include_form"
                        :description "Add each form's text to the JSON matches (default: false; the
-content text shows signatures either way)"))
+content text shows signatures either way)")
+         (timeout-seconds :type :number :json-name "timeout_seconds"
+                          :description "Stop the search after this many seconds and return the
+matches found until then (optional, default 15); the text then says so and the JSON 'timed_out' is
+true. A pattern with nested repetition, such as (a*)*, can backtrack for minutes on one long
+line."))
   :body
-  (let* ((effective-limit (or limit 200))
-         (results
-          (clgrep-search pattern
-                         :path path
-                         :recursive recursive
-                         :case-insensitive case-insensitive
-                         :form-types form-types
-                         :limit limit
-                         :include-form include-form))
-         (formatted (%format-clgrep-results results))
-         (notes (%unparseable-notes results))
-         (payload
-          (make-ht "content" (text-content
-                              (with-output-to-string (s)
-                                (format s "~D ~:[matches~;match~] for ~S~@[ in ~A~]:~%"
-                                        (length formatted) (= 1 (length formatted))
-                                        pattern path)
-                                (loop for match across formatted
-                                      do (format s "  ~A:~A [~A] ~A~%"
-                                                 (gethash "file" match)
-                                                 (gethash "line" match)
-                                                 (gethash "form-type" match)
-                                                 (or (gethash "signature" match)
-                                                     (gethash "form-name" match))))
-                                ;; Notes go in the text: sibling JSON fields
-                                ;; are not rendered by most clients.
-                                (dolist (note notes)
-                                  (format s "~A~%" note))))
-                   "matches" formatted
-                   "count" (length formatted)
-                   "limited" (<= effective-limit (length results)))))
-    (when notes
-      (setf (gethash "notes" payload) (coerce notes 'vector)))
-    (result id payload)))
+  (progn
+    (when (and timeout-seconds (not (plusp timeout-seconds)))
+      (error 'arg-validation-error
+             :arg-name "timeout_seconds"
+             :message "timeout_seconds must be a positive number"))
+    (handler-case
+        (%clgrep-search-response id pattern path recursive case-insensitive form-types
+                                 limit include-form
+                                 (or timeout-seconds *clgrep-default-timeout-seconds*))
+      (inline-request-cancelled ()
+        (tool-error id "clgrep-search was cancelled before it finished."
+                    :protocol-version (protocol-version state))))))
