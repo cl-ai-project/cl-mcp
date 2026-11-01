@@ -178,59 +178,65 @@ next form's first character, and return that character, or NIL at the end."
                          (incf depth)))))
         (t (return char))))))
 
-(defun %refuse-in-header (stream &rest arguments)
-  "A reader macro of *HEADER-READTABLE* for syntax no header form needs: a
-READER-ERROR, unless *READ-SUPPRESS* is on -- inside a #+/#- branch that does
-not hold -- where the object after it is read, suppressed, and NIL returned,
-as the standard macro would build nothing there either."
-  (declare (ignore arguments))
-  (if *read-suppress*
-      (progn (read stream t nil t) nil)
-      (error 'reader-error :stream stream)))
+(defun %refusing (standard)
+  "Return a reader macro function for *HEADER-READTABLE* and
+*FEATURE-READTABLE* that stands for STANDARD, the standard readtable's
+function for the same syntax: a READER-ERROR, unless *READ-SUPPRESS* is on --
+inside a #+/#- branch that does not hold -- where STANDARD runs, since it then
+builds nothing and consumes exactly what the reader would (a whole #(...),
+say)."
+  (lambda (stream &rest arguments)
+    (if *read-suppress*
+        (apply standard stream arguments)
+        (error 'reader-error :stream stream))))
 
-(defun %header-conditional (stream sub-char argument)
-  "The #+ and #- of *HEADER-READTABLE*: the standard ones, except that a
-circular feature expression -- #+#1=(and . #1#), which FEATUREP would walk
-forever -- is a READER-ERROR.  Labels are allowed in a header form, so the
-feature expression is read and checked before it is judged."
-  (declare (ignore argument))
-  (if *read-suppress*
-      (progn (read stream t nil t) (read stream t nil t) nil)
-      (let ((feature (let ((*package* (find-package "KEYWORD")))
-                       (read stream t nil t))))
-        (when (circular-p feature)
-          (error 'reader-error :stream stream))
-        (if (eq (and (sb-int:featurep feature) t) (char= sub-char #\+))
-            (read stream t nil t)
-            (progn (let ((*read-suppress* t)) (read stream t nil t))
-                   (values))))))
-
-(defparameter *header-readtable*
-  (let ((readtable (copy-readtable nil)))
-    (set-macro-character #\` #'%refuse-in-header nil readtable)
-    ;; Of the # dispatches only comments, uninterned symbols, characters,
-    ;; labels and feature expressions are kept.  A label can make a header
-    ;; form circular, but no macro that is kept walks what it reads: the
-    ;; ones that do (backquote, #(, #A, #C, #S, and FEATUREP behind #+) are
-    ;; refused or checked, and the scan drops a circular result.  No #n(
-    ;; asks for a huge vector either.
+(defun %make-header-readtable (kept)
+  "Return the standard readtable with backquote and every # dispatch whose
+sub-character is not in KEPT made a refusal (%REFUSING), and with #+/#-
+replaced by %HEADER-CONDITIONAL (named, so it may be defined later)."
+  (let ((standard (copy-readtable nil))
+        (readtable (copy-readtable nil)))
+    (set-macro-character #\` (%refusing (get-macro-character #\` standard))
+                         nil readtable)
     (loop for code from 0 below 128
           for char = (code-char code)
-          unless (or (digit-char-p char) (find char "|:\\+-=#"))
-            do (when (get-dispatch-macro-character #\# char readtable)
-                 (set-dispatch-macro-character #\# char #'%refuse-in-header
-                                               readtable)))
-    (set-dispatch-macro-character #\# #\+ #'%header-conditional readtable)
-    (set-dispatch-macro-character #\# #\- #'%header-conditional readtable)
-    readtable)
-  "The readtable for what the header scan reads for real -- a #+/#- feature
-expression and a header form: the standard one with backquote and every #
-dispatch but #|, #:, #\\, #n=, #n#, #+ and #- refused (%REFUSE-IN-HEADER), and
-#+/#- refusing a circular feature expression (%HEADER-CONDITIONAL).  A header
-form or a feature expression needs nothing refused (IN-PACKAGE's and
-DEFPACKAGE's arguments are not evaluated), and with it valid text such as
-`(a . #1=(b . #1#)) or #+(and . #1=(x . #1#)) made the reader run forever or
-exhaust the heap.")
+          for function = (get-dispatch-macro-character #\# char standard)
+          unless (or (digit-char-p char) (find char kept) (null function))
+            do (set-dispatch-macro-character #\# char (%refusing function) readtable))
+    (set-dispatch-macro-character #\# #\+ '%header-conditional readtable)
+    (set-dispatch-macro-character #\# #\- '%header-conditional readtable)
+    readtable))
+
+(defparameter *header-readtable* (%make-header-readtable "|:\\+-=#")
+  "The readtable for a header form the scan reads whole.  Of the # dispatches
+it keeps #|, #:, #\\, #+, #- and the labels #n= and #n# (Eclector's defpackage
+shares a clause through one); backquote and every other # dispatch are
+refused (%REFUSING).  A header form needs none of them -- IN-PACKAGE's and
+DEFPACKAGE's arguments are not evaluated -- and those that walk what they read
+(backquote, #(, #A, #C, #S) ran forever on valid circular text such as
+`(a . #1=(b . #1#)), or asked for a huge vector (#n().  A label can still make
+the form circular; the scan drops such a form.")
+
+(defparameter *feature-readtable* (%make-header-readtable "|:\\+-")
+  "*HEADER-READTABLE* without labels, for a #+/#- feature expression: FEATUREP
+walks it, and through labels it could be circular, or a tree of shared nodes
+with 2^n paths that FEATUREP would walk one by one.")
+
+(defun %header-conditional (stream sub-char argument)
+  "The #+ and #- of *HEADER-READTABLE*, with the standard semantics -- the
+feature expression is read and tested even under *READ-SUPPRESS*, and a test
+that fails yields no value -- except that the expression is read with
+*FEATURE-READTABLE*, which has no labels: FEATUREP walks it, and a label could
+make it circular or a shared tree of 2^n paths."
+  (declare (ignore argument))
+  (let ((feature (let ((*package* (find-package "KEYWORD"))
+                       (*read-suppress* nil)
+                       (*readtable* *feature-readtable*))
+                   (read stream t nil t))))
+    (if (eq (and (sb-int:featurep feature) t) (char= sub-char #\+))
+        (read stream t nil t)
+        (progn (let ((*read-suppress* t)) (read stream t nil t))
+               (values)))))
 
 (defun %skip-conditional (stream sub-char argument)
   "The #+ and #- of *SKIP-READTABLE*: read the feature expression and the form
@@ -239,7 +245,10 @@ feature expression with *READ-SUPPRESS* off, even inside a form being skipped,
 so a backquote there was read for real.  One value is returned, never none: in
 a place that takes one object ('#+sbcl a #-sbcl b) no value would make the
 reader take the next object too.  A top-level #+ never comes here; %SKIP-FORM
-handles it."
+handles it.  This differs from the reader, which tests the feature even under
+*READ-SUPPRESS* and yields nothing when it fails: in a form being skipped that
+changes nothing but how many objects a chain like #-sbcl #-sbcl a b takes, and
+testing would mean reading the feature expression for real."
   (declare (ignore sub-char argument))
   (let ((*read-suppress* t))
     (read stream t nil t)
@@ -277,7 +286,7 @@ form, and STREAM is left somewhere inside it: the caller rewinds."
            (let ((verdict
                    (handler-case
                        (let ((feature (let ((*package* (find-package "KEYWORD"))
-                                            (*readtable* *header-readtable*)
+                                            (*readtable* *feature-readtable*)
                                             (*read-eval* nil))
                                         (read-preserving-whitespace stream t))))
                          ;; FEATUREP walks it, so a circular one is no header.

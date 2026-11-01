@@ -442,7 +442,28 @@ or :TIMEOUT."
       (ok (equal (%header-heads text) '("defpackage" "in-package"))
           (format nil "~S" (%header-heads text)))))
   (testing "a suppressed branch of a header form may hold any dispatch"
-    (let ((text (format nil "(defpackage :p (:use :cl) #-sbcl (:export #.(x) #'y))~%~
-                             (in-package :p)")))
-      (ok (equal (%header-heads text) '("defpackage" "in-package"))
-          (format nil "~S" (%header-heads text))))))
+    (dolist (branch '("(:export #.(x) #'y)" "(:export #(x y))" "(:export #())"
+                      "(:export #3(x))" "(:export #* )" "(:export `(x ,y))"))
+      (let* ((text (format nil "(defpackage :p (:use :cl) #-sbcl ~A (:nicknames :q))~%~
+                                (in-package :p)"
+                           branch))
+             (forms (cl-mcp/src/package-context::%read-header-forms-from-text text)))
+        (ok (and (= 2 (length forms))
+                 (find '(:nicknames :q) (first forms) :test #'equal))
+            (format nil "~S for ~A" forms branch))))))
+
+(deftest header-scan-judges-shared-feature-expressions-quickly
+  (testing "a feature expression built of shared labels is not walked exponentially"
+    ;; #30=(and #29# #29#) and so on down: thirty labels, 2^30 paths.
+    (let ((dag (let ((text "#1=(and)"))
+                 (loop for k from 2 to 30
+                       do (setf text (format nil "#~D=(and ~A #~D#)" k text (1- k))))
+                 text)))
+      (dolist (text (list (format nil "#+~A (in-package :q)~%(in-package :p)" dag)
+                          (format nil "(in-package #+~A :q :p)" dag)))
+        (let ((name (%extract-within 2 text)))
+          (ok (not (eq name :timeout)) (format nil "answered ~S" name))))))
+  (testing "a doubly false conditional in a header form reads as the reader does"
+    (let ((forms (cl-mcp/src/package-context::%read-header-forms-from-text
+                  "(defpackage :p #-sbcl #-sbcl (:use :a) (:use :b))")))
+      (ok (equal forms '((defpackage :p))) (format nil "~S" forms)))))
