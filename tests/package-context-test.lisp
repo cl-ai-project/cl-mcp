@@ -459,10 +459,14 @@ or :TIMEOUT."
                  (loop for k from 2 to 30
                        do (setf text (format nil "#~D=(and ~A #~D#)" k text (1- k))))
                  text)))
-      (dolist (text (list (format nil "#+~A (in-package :q)~%(in-package :p)" dag)
-                          (format nil "(in-package #+~A :q :p)" dag)))
-        (let ((name (%extract-within 2 text)))
-          (ok (not (eq name :timeout)) (format nil "answered ~S" name))))))
+      (dolist (pair (list (cons (format nil "#+~A (in-package :q)~%(in-package :p)" dag)
+                                "P")
+                          (cons (format nil "(in-package #+~A :q :p)" dag) nil)))
+        (let ((name (%extract-within 2 (car pair))))
+          (ok (if (cdr pair)
+                  (and (stringp name) (string-equal name (cdr pair)))
+                  (null name))
+              (format nil "answered ~S" name))))))
   (testing "a doubly false conditional in a header form reads as the reader does"
     (let ((forms (cl-mcp/src/package-context::%read-header-forms-from-text
                   "(defpackage :p #-sbcl #-sbcl (:use :a) (:use :b))")))
