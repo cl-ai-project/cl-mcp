@@ -404,10 +404,11 @@ hide the events a test looks for; the lines still reach the previous stream."
                            :input 5000)
                           (usocket:socket-close client)
                           ;; The reset makes the server's descriptor readable.
-                          (sb-unix:unix-simple-poll
-                           (sb-bsd-sockets:socket-file-descriptor
-                            (usocket:socket server-side))
-                           :input 5000)
+                          (ok (sb-unix:unix-simple-poll
+                               (sb-bsd-sockets:socket-file-descriptor
+                                (usocket:socket server-side))
+                               :input 5000)
+                              "the reset has reached the server side")
                           (let ((thread
                                   (make-thread
                                    (lambda ()
