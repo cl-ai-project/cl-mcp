@@ -92,7 +92,8 @@
              (loop repeat 300 until (eq phase :second) do (sleep 0.01d0))
              (when entry
                (cl-mcp/src/inline-cancel::%interrupt-region (car entry) (cdr entry)))
-             (sleep 0.1d0)
+             ;; Region 2 has no cancellation point, so the interruption is
+             ;; taken when it ends; the token check there is what is tested.
              (setf go-on t)
              (loop repeat 300
                    while (bordeaux-threads:thread-alive-p thread)

@@ -452,7 +452,34 @@ destroyed on the way out whenever it is still running."
             (ok (and payload (eq t (gethash "timed_out" payload)))
                 (format nil "timed_out is true: ~S" (and payload (gethash "timed_out" payload))))
             (ok (and text (search "stopped after 1 second" text))
-                (format nil "the text says the search was cut short: ~A" text))))))))
+                (format nil "the text says the search was cut short: ~A" text))
+            ;; Lines 1 and 2 of runaway.lisp match before the line the
+            ;; deadline strikes; they are found until then, so returned.
+            (ok (and payload (plusp (gethash "count" payload)))
+                (format nil "the hits found before the deadline are kept: ~A" text))))))))
+
+(deftest clgrep-search-skips-what-is-not-a-regular-file
+  (testing "a FIFO named like a Lisp file is not opened, so the search cannot block on it"
+    (with-runaway-fixture ("tests/tmp/clgrep-fifo/")
+      (let ((fifo (merge-pathnames "tests/tmp/clgrep-fifo/pipe.lisp" *project-root*))
+            (root *project-root*))
+        (uiop:run-program (list "mkfifo" (uiop:native-namestring fifo)))
+        (unwind-protect
+             (multiple-value-bind (result finished)
+                 (%call-within 5 (lambda ()
+                                   (let ((*project-root* root))
+                                     (%call-clgrep "defun" "path" "tests/tmp/clgrep-fifo/"
+                                                   "timeout_seconds" 1))))
+               (ok finished "the search answered")
+               (when finished
+                 (ok (search "runaway.lisp" (first result))
+                     (format nil "the regular file is still searched: ~A" (first result)))))
+          ;; A reader blocked in open is released by a writer.
+          (bordeaux-threads:make-thread
+           (lambda ()
+             (ignore-errors
+              (with-open-file (out fifo :direction :output :if-exists :append))))
+           :name "clgrep-test-fifo-writer"))))))
 
 (deftest clgrep-search-tool-stops-when-its-request-is-cancelled
   (testing "notifications/cancelled for a running search ends it"

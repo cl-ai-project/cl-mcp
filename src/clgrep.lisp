@@ -109,13 +109,16 @@ contains:
                        :include-form include-form
                        :limit effective-limit
                        :timeout-seconds timeout-seconds)
-      (log-event :info "clgrep.search"
-                 "pattern" pattern
-                 "path" (native-path-namestring search-path)
-                 "limit" limit
-                 "include-form" include-form
-                 "matches" (length results)
-                 "timed-out" timed-out)
+      ;; LOG-EVENT's lock would allow interrupts inside a cancellable region
+      ;; and a cancellation could cut the line short; it runs without them.
+      (sb-sys:without-interrupts
+        (log-event :info "clgrep.search"
+                   "pattern" pattern
+                   "path" (native-path-namestring search-path)
+                   "limit" limit
+                   "include-form" include-form
+                   "matches" (length results)
+                   "timed-out" timed-out))
       (values (mapcar #'%normalize-result results) timed-out))))
 
 (defun %format-clgrep-results (results)

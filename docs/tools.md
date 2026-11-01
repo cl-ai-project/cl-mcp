@@ -1037,10 +1037,13 @@ Input:
 - `timeout_seconds` (positive number, default `15`): stop the search after this long and
   return the hits found until then. The search runs in the parent, and over stdio nothing else
   is answered meanwhile, so a pattern that backtracks without end — a nested repetition such
-  as `(a*)*` against a long run of `a`s — is cut off rather than holding the server. The timer
-  interrupts the regex wherever it is, mid-line included.
+  as `(a*)*` against a long run of `a`s — is cut off rather than holding the server. The
+  deadline is taken during a regex match, mid-line included, and only there: reading a file
+  or listing a directory runs to its end, so nothing is cut out of a system call. Hits found
+  before it are kept, those of the file it struck included.
 
-Files searched: `.lisp`, `.asd` and `.ros`. The `.gitignore` of the search root (only that one)
+Files searched: regular files named `.lisp`, `.asd` and `.ros` (a FIFO or a device so named
+is skipped, symbolic links followed). The `.gitignore` of the search root (only that one)
 is honoured as git reads it: `*`, `?`, `**`, `[...]` and `[!...]` classes, `\` escapes, a
 leading or middle `/` anchoring to the root, a trailing `/` for directories only, and `!` lines
 taking a path back in, the last matching line deciding. A pattern matches whole path

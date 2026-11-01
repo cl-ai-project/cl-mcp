@@ -65,9 +65,13 @@ by, and THUNK just runs."
                (sb-sys:without-interrupts
                  (sb-sys:allow-with-interrupts
                    (funcall thunk))))
-          (bordeaux-threads:with-lock-held (*regions-lock*)
-            (when (eq (cdr (gethash key *regions*)) token)
-              (remhash key *regions*)))))
+          ;; Interrupts stay off here (WITH-LOCK-HELD would otherwise allow
+          ;; them), so a cancellation pending at the end cannot unwind out
+          ;; before the entry is gone; it is taken after, still in the region.
+          (sb-sys:without-interrupts
+            (bordeaux-threads:with-lock-held (*regions-lock*)
+              (when (eq (cdr (gethash key *regions*)) token)
+                (remhash key *regions*))))))
       (funcall thunk)))
 
 (defun %interrupt-region (thread token)
@@ -90,5 +94,6 @@ otherwise."
   (let ((entry (bordeaux-threads:with-lock-held (*regions-lock*)
                  (gethash (%region-key session-id request-id) *regions*))))
     (when (and entry (bordeaux-threads:thread-alive-p (car entry)))
-      (%interrupt-region (car entry) (cdr entry))
-      t)))
+      ;; The thread can end between the check and the interruption.
+      (handler-case (progn (%interrupt-region (car entry) (cdr entry)) t)
+        (error () nil)))))
