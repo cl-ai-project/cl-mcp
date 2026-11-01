@@ -1470,9 +1470,10 @@ message it signals, or NIL when it returns normally."
 
 (defun %read-within (seconds relative &rest arguments)
   "Return the content LISP-READ-FILE gives for RELATIVE with ARGUMENTS, the
-condition it signalled, or :TIMEOUT when it has not answered within SECONDS
-(its thread is then destroyed, so a test of a hang fails instead of hanging
-the suite)."
+condition it signalled, or :TIMEOUT when it has not answered within SECONDS.
+The read runs on a thread of its own, destroyed on the way out whenever it is
+still running -- a hang, or a wait that was itself interrupted -- so a test of
+a hang fails instead of hanging the suite, and leaves no thread behind."
   (let* ((result nil)
          (thread (bordeaux-threads:make-thread
                   (lambda ()
@@ -1482,13 +1483,14 @@ the suite)."
                                        (apply #'lisp-read-file relative arguments))
                             (serious-condition (c) c))))
                   :name "lisp-read-file-test-read-within")))
-    (loop repeat (round (* seconds 100))
-          while (bordeaux-threads:thread-alive-p thread)
-          do (sleep 0.01d0))
-    (cond ((bordeaux-threads:thread-alive-p thread)
-           (ignore-errors (bordeaux-threads:destroy-thread thread))
-           :timeout)
-          (t result))))
+    (unwind-protect
+         (progn
+           (loop repeat (round (* seconds 100))
+                 while (bordeaux-threads:thread-alive-p thread)
+                 do (sleep 0.01d0))
+           (if (bordeaux-threads:thread-alive-p thread) :timeout result))
+      (when (bordeaux-threads:thread-alive-p thread)
+        (ignore-errors (bordeaux-threads:destroy-thread thread))))))
 
 (defparameter *circular-literal-source*
   (format nil "(in-package #:cl-user)~%~%~

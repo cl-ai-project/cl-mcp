@@ -231,19 +231,22 @@
     (let ((object (list 1 2))
           (result nil)
           (thread nil))
-      (setf (cddr object) object
-            thread (bordeaux-threads:make-thread
-                    (lambda ()
-                      (setf result
-                            (sanitize-condition-text
-                             (make-condition 'circular-report-error
-                                             :object object))))
-                    :name "sanitize-test-circular-report"))
-      (loop repeat 200
-            while (bordeaux-threads:thread-alive-p thread)
-            do (sleep 0.01d0))
-      (when (bordeaux-threads:thread-alive-p thread)
-        (ignore-errors (bordeaux-threads:destroy-thread thread)))
+      (setf (cddr object) object)
+      (unwind-protect
+           (progn
+             (setf thread (bordeaux-threads:make-thread
+                           (lambda ()
+                             (setf result
+                                   (sanitize-condition-text
+                                    (make-condition 'circular-report-error
+                                                    :object object))))
+                           :name "sanitize-test-circular-report"))
+             (loop repeat 200
+                   while (bordeaux-threads:thread-alive-p thread)
+                   do (sleep 0.01d0)))
+        ;; A hang must fail the test, not leave a thread looping behind it.
+        (when (and thread (bordeaux-threads:thread-alive-p thread))
+          (ignore-errors (bordeaux-threads:destroy-thread thread))))
       (ok (stringp result) "answered")
       (ok (and (stringp result) (search "cannot use (1 2 1 2" result))
           (format nil "the report is kept, cut short: ~A" result)))))

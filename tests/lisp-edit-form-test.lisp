@@ -4267,21 +4267,24 @@ Return the condition it signals, or NIL when it succeeds."
 
 (defun %edit-within (seconds &rest arguments)
   "Return what LISP-EDIT-FORM gives for ARGUMENTS -- its result, or the
-condition it signalled -- or :TIMEOUT when it has not answered within SECONDS
-(the thread is then destroyed, so a hang fails the test instead of the suite)."
+condition it signalled -- or :TIMEOUT when it has not answered within SECONDS.
+The edit runs on a thread of its own, destroyed on the way out whenever it is
+still running, so a hang fails the test instead of the suite and leaves no
+thread behind."
   (let* ((result nil)
          (thread (bordeaux-threads:make-thread
                   (lambda ()
                     (setf result (handler-case (apply #'lisp-edit-form arguments)
                                    (serious-condition (c) c))))
                   :name "lisp-edit-form-test-edit-within")))
-    (loop repeat (round (* seconds 100))
-          while (bordeaux-threads:thread-alive-p thread)
-          do (sleep 0.01d0))
-    (cond ((bordeaux-threads:thread-alive-p thread)
-           (ignore-errors (bordeaux-threads:destroy-thread thread))
-           :timeout)
-          (t result))))
+    (unwind-protect
+         (progn
+           (loop repeat (round (* seconds 100))
+                 while (bordeaux-threads:thread-alive-p thread)
+                 do (sleep 0.01d0))
+           (if (bordeaux-threads:thread-alive-p thread) :timeout result))
+      (when (bordeaux-threads:thread-alive-p thread)
+        (ignore-errors (bordeaux-threads:destroy-thread thread))))))
 
 (deftest lisp-edit-form-answers-beside-circular-literals
   ;; Issue #285: names and method signatures were printed without
