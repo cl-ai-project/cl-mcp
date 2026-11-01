@@ -65,8 +65,11 @@
         "a heavily shared tree is walked once per cons")))
 
 (defstruct circular-p-node
-  "A structure for CIRCULAR-P's tests: its default printer writes its slots."
-  label next)
+  "A structure for CIRCULAR-P's tests: its default printer writes its slots.
+LABEL is any value; NEXT holds what the node refers to, which a test makes
+lead back to the node."
+  (label nil)  ; Any value.
+  (next nil))  ; What the node refers to; a test points it back at the node.
 
 (deftest circular-p-walks-structure-slots
   (testing "a cycle through a structure's slots is circular, a plain one is not"

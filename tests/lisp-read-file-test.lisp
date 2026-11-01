@@ -1544,8 +1544,10 @@ Issue #285: printing them without *PRINT-CIRCLE* never ends.")
 
 (defstruct circular-fixture-node
   "A structure the #S fixture below names, so the read fails for the reason
-the test is about rather than for an unknown structure name."
-  label next)
+the test is about rather than for an unknown structure name.
+LABEL is any value; NEXT is the node it refers to, itself in the fixture."
+  (label nil)  ; Any value; the fixture gives 1.
+  (next nil))  ; The node referred to: the fixture's #1#, the node itself.
 
 (deftest lisp-read-file-circular-top-level-forms-and-structures
   (testing "a circular head and a top-level circular vector are summarized"
