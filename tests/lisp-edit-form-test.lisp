@@ -4264,3 +4264,49 @@ Return the condition it signals, or NIL when it succeeds."
             (ok (typep (%insert-block path "replace" "a" "(defun a () 10)" :guard guard)
                        'edit-guard-conflict-error))
             (ok (string= file (fs-read-file path)))))))))
+
+(defun %edit-within (seconds &rest arguments)
+  "Return what LISP-EDIT-FORM gives for ARGUMENTS -- its result, or the
+condition it signalled -- or :TIMEOUT when it has not answered within SECONDS
+(the thread is then destroyed, so a hang fails the test instead of the suite)."
+  (let* ((result nil)
+         (thread (bordeaux-threads:make-thread
+                  (lambda ()
+                    (setf result (handler-case (apply #'lisp-edit-form arguments)
+                                   (serious-condition (c) c))))
+                  :name "lisp-edit-form-test-edit-within")))
+    (loop repeat (round (* seconds 100))
+          while (bordeaux-threads:thread-alive-p thread)
+          do (sleep 0.01d0))
+    (cond ((bordeaux-threads:thread-alive-p thread)
+           (ignore-errors (bordeaux-threads:destroy-thread thread))
+           :timeout)
+          (t result))))
+
+(deftest lisp-edit-form-answers-beside-circular-literals
+  ;; Issue #285: names and method signatures were printed without
+  ;; *PRINT-CIRCLE*, and a circular method spine was walked for qualifiers.
+  (with-temp-file "tests/tmp/edit-form-circular.lisp"
+      (format nil "(defthing #1=(a . #1#))~%~%~
+                   (defmethod m #2=(x . #2#) 1)~%~%~
+                   (defmethod spun . #3=(:before . #3#))~%~%~
+                   (defmethod other ((x integer)) 2)~%~%~
+                   (defun target () :old)~%")
+    (lambda (path)
+      (let ((missing (%edit-within 2 :file-path path :form-type "defun"
+                                     :form-name "nope" :operation "delete"
+                                     :dry-run t)))
+        (ok (typep missing 'error) (format nil "not found is an error: ~A" missing))
+        (when (typep missing 'error)
+          (ok (search "target" (princ-to-string missing))
+              "the listing still names the forms")))
+      (let ((method (%edit-within 2 :file-path path :form-type "defmethod"
+                                    :form-name "other ((x integer))"
+                                    :operation "delete" :dry-run t)))
+        (ok (hash-table-p method)
+            (format nil "a method beside circular ones is found: ~A" method)))
+      (let ((function (%edit-within 2 :file-path path :form-type "defun"
+                                      :form-name "target" :operation "replace"
+                                      :content "(defun target () :new)" :dry-run t)))
+        (ok (hash-table-p function)
+            (format nil "a function beside them is found: ~A" function))))))

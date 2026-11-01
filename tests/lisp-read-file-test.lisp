@@ -1469,15 +1469,18 @@ message it signals, or NIL when it returns normally."
             text)))))
 
 (defun %read-within (seconds relative &rest arguments)
-  "Return the content LISP-READ-FILE gives for RELATIVE with ARGUMENTS, or
-:TIMEOUT when it has not answered within SECONDS (its thread is then
-destroyed, so a test of a hang fails instead of hanging the suite)."
+  "Return the content LISP-READ-FILE gives for RELATIVE with ARGUMENTS, the
+condition it signalled, or :TIMEOUT when it has not answered within SECONDS
+(its thread is then destroyed, so a test of a hang fails instead of hanging
+the suite)."
   (let* ((result nil)
          (thread (bordeaux-threads:make-thread
                   (lambda ()
                     (setf result
-                          (gethash "content"
-                                   (apply #'lisp-read-file relative arguments))))
+                          (handler-case
+                              (gethash "content"
+                                       (apply #'lisp-read-file relative arguments))
+                            (serious-condition (c) c))))
                   :name "lisp-read-file-test-read-within")))
     (loop repeat (round (* seconds 100))
           while (bordeaux-threads:thread-alive-p thread)
@@ -1500,12 +1503,12 @@ Issue #285: printing them without *PRINT-CIRCLE* never ends.")
   (testing "the collapsed view of circular values answers and summarizes them"
     (with-temp-lisp-file "tests/tmp/read-file-circular.lisp" *circular-literal-source*
       (lambda (path)
-        (let ((content (%read-within 5 path)))
-          (ok (stringp content) "answered")
+        (let ((content (%read-within 2 path)))
+          (ok (stringp content) (format nil "answered: ~A" content))
           (when (stringp content)
-            (ok (search "(defparameter *circ* " content))
-            (ok (search "(defparameter *car-circ* " content))
-            (ok (search "(defparameter *vector-circ* " content))
+            (ok (search "(defparameter *circ* '#1=(a b . #1#) ..." content))
+            (ok (search "(defparameter *car-circ* '#1=(#1#) ..." content))
+            (ok (search "(defparameter *vector-circ* '#1=#(a #1#) ..." content))
             (ok (search "(defun uses-circ () ..." content))))))))
 
 (deftest lisp-read-file-content-pattern-over-circular-literals
@@ -1513,8 +1516,8 @@ Issue #285: printing them without *PRINT-CIRCLE* never ends.")
     (with-temp-lisp-file "tests/tmp/read-file-circular-pattern.lisp"
         *circular-literal-source*
       (lambda (path)
-        (let ((none (%read-within 5 path :content-pattern "zzz"))
-              (some (%read-within 5 path :content-pattern "\\(a b")))
+        (let ((none (%read-within 2 path :content-pattern "zzz"))
+              (some (%read-within 2 path :content-pattern "\\(a b")))
           (ok (stringp none) "a pattern that matches nothing answers")
           (ok (stringp some) "a pattern that matches inside a cycle answers")
           (when (stringp some)
@@ -1529,10 +1532,63 @@ Issue #285: printing them without *PRINT-CIRCLE* never ends.")
                      (defmethod spun . #2=(:before . #2#))~%~%~
                      (defun after () 1)~%")
       (lambda (path)
-        (let ((content (%read-within 5 path)))
-          (ok (stringp content) "answered")
+        (let ((content (%read-within 2 path)))
+          (ok (stringp content) (format nil "answered: ~A" content))
           (when (stringp content)
-            (ok (search "(defthing " content))
-            (ok (search "(defmethod " content))
+            (ok (search "(defthing #1=(a . #1#) ..." content))
+            (ok (search "(defmethod spun ..." content))
             (ok (search "(defun after () ..." content)
                 "the forms after them are still listed")))))))
+
+(defstruct circular-fixture-node
+  "A structure #S can build in the image that reads the fixtures below."
+  label next)
+
+(deftest lisp-read-file-circular-top-level-forms-and-structures
+  (testing "a circular head and a top-level circular vector are summarized"
+    (with-temp-lisp-file "tests/tmp/read-file-circular-top-level.lisp"
+        (format nil "(#1=(a . #1#) foo)~%~%#2=#(a #2#)~%~%(defun after () 1)~%")
+      (lambda (path)
+        (dolist (arguments '(() (:content-pattern "zzz")))
+          (let ((content (apply #'%read-within 2 path arguments)))
+            (ok (stringp content)
+                (format nil "answered with ~S: ~A" arguments content))
+            (when (stringp content)
+              (ok (search "(#1=(a . #1#) ...)" content))
+              (ok (search "#1=#(a #1#)" content :test #'char-equal))
+              (ok (search "(defun after () ..." content))))))))
+  (testing "a #S that refers to itself is refused promptly"
+    ;; Eclector cannot fix up a reference inside a structure, so the file does
+    ;; not parse; the report of that failure holds the reader's circular fixup
+    ;; node, and printing it whole never ended.
+    (with-temp-lisp-file "tests/tmp/read-file-circular-structure.lisp"
+        (format nil "(defparameter *node* '#1=#S(~S :label 1 :next #1#))~%"
+                'circular-fixture-node)
+      (lambda (path)
+        (let ((answer (%read-within 2 path)))
+          (ok (or (stringp answer) (typep answer 'file-unparseable-error))
+              (format nil "answered: ~A" (if (typep answer 'condition)
+                                             (type-of answer)
+                                             answer))))))))
+
+(deftest lisp-read-file-circle-notation-stays-in-its-own-piece
+  (testing "a cycle in a body does not put labels on the lambda list"
+    (with-temp-lisp-file "tests/tmp/read-file-circular-body.lisp"
+        (format nil "(defun g (zz285unknown:x &optional (y zz285unknown:x))~%  ~
+                     '#1=(a . #1#))~%")
+      (lambda (path)
+        (let ((content (%read-within 2 path)))
+          (ok (stringp content) (format nil "answered: ~A" content))
+          (when (stringp content)
+            (ok (search "(defun g (x &optional (y x)) ..." content) content)))))))
+
+(deftest lisp-read-file-long-variable-value-is-summarized-quickly
+  (testing "a long literal value is printed only as far as the summary shows it"
+    (with-temp-lisp-file "tests/tmp/read-file-long-value.lisp"
+        (format nil "(defparameter *table* '(~{(~D . ~:*~D)~^ ~}))~%"
+                (loop for i below 20000 collect i))
+      (lambda (path)
+        (let ((content (%read-within 3 path)))
+          (ok (stringp content) (format nil "answered: ~A" content))
+          (when (stringp content)
+            (ok (search "(defparameter *table* '((0 . 0) (1 . 1)" content))))))))

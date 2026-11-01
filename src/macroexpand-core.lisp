@@ -244,7 +244,8 @@ nothing a handler could catch.
   - An expander that builds a *circular* expansion out of acyclic input
     makes MACROEXPAND-ALL descend forever through conses without
     necessarily expanding another macro, so the counter alone would not
-    trip.  Each expansion is therefore checked with %CIRCULAR-P at the
+    trip.  Each expansion is therefore checked with CIRCULAR-P (conses
+    only, the structure the walker follows) at the
     moment it is produced, which is the only point where the cycle is
     still small and reachable.  The cost is proportional to the expansion
     the walker is about to traverse anyway.
@@ -264,7 +265,7 @@ OUTER-HOOK is a function designator, which FUNCALL accepts, so the default
 not reach a fixpoint.  Use level \"once\" or \"full\"."
              *max-walk-expansions*))
     (let ((expansion (funcall outer-hook expander form env)))
-      (when (and (consp expansion) (circular-p expansion))
+      (when (and (consp expansion) (circular-p expansion :conses-only t))
         (error "Level \"all\" cannot expand ~S: its expansion is circular.  ~
 Use level \"once\" or \"full\"."
                (if (consp form) (first form) form)))
@@ -289,7 +290,9 @@ replacing it.
 
 Levels \"once\" and \"full\" only look at the head, so they accept
 circular input without this restriction."
-  (when (circular-p form)
+  ;; Only a cycle through conses makes MACROEXPAND-ALL loop; it does not
+  ;; descend into a vector or a structure.
+  (when (circular-p form :conses-only t)
     (error "Level \"all\" cannot expand a circular form; use \"once\" or \"full\"."))
   (let* ((counter (list 0))
          ;; Read the hook BEFORE rebinding it, so the guard can delegate to

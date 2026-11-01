@@ -46,8 +46,8 @@
 (defmacro shared-literal-macro ()
   "Test macro whose expansion shares one CONS in two places.
 Under *PRINT-CIRCLE* the sharing would surface as #1= / #1# markers.  The
-shared object must be a cons, not a string: %CIRCULAR-P only traverses
-conses, so a shared string would never reach its memoization path and the
+shared object must be a cons, not a string: CIRCULAR-P does not walk into
+strings, so a shared string would never reach its memoization path and the
 test would pass without exercising anything."
   (let ((shared (list 'quote (list 1 2))))
     (list 'list shared shared)))
@@ -300,6 +300,14 @@ the tests below see only what this run interns: otherwise, in a reused image,
       (declare (ignore expanded-p))
       (ok (search "#1=" printed)
           "printed with circle notation; nothing hangs or crashes"))))
+
+(deftest macroexpand-all-expands-a-form-holding-a-circular-vector
+  (testing "level all walks only conses, so a cycle through a vector is no refusal"
+    (multiple-value-bind (printed expanded-p)
+        (macroexpand-source "(list 1 '#1=#(a #1#))" :package "CL-USER" :level "all")
+      (declare (ignore expanded-p))
+      (ok (and printed (search "#1=#(" printed))
+          (format nil "expanded and printed with circle notation: ~A" printed)))))
 
 (deftest macroexpand-all-delegates-to-an-existing-macroexpand-hook
   (testing "the level-all guard does not displace a hook the image already had"

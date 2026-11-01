@@ -63,3 +63,26 @@
                            (dotimes (i 40 tree)
                              (setf tree (list tree tree))))))
         "a heavily shared tree is walked once per cons")))
+
+(defstruct circular-p-node
+  "A structure for CIRCULAR-P's tests: its default printer writes its slots."
+  label next)
+
+(deftest circular-p-walks-structure-slots
+  (testing "a cycle through a structure's slots is circular, a plain one is not"
+    (let ((node (make-circular-p-node :label 1)))
+      (setf (circular-p-node-next node) (list node))
+      (ok (circular-p node) "through a slot and a list")
+      (ok (circular-p (list 'quote node)) "inside a quoted literal"))
+    (ok (not (circular-p (make-circular-p-node :label 1 :next (make-circular-p-node))))
+        "a chain of structures")))
+
+(deftest circular-p-conses-only
+  (testing "with :conses-only, only a cycle through conses counts"
+    (ok (circular-p (read-from-string "#1=(a . #1#)") :conses-only t))
+    (ok (not (circular-p (read-from-string "(a #1=#(b #1#))") :conses-only t))
+        "a cycle through a vector is not one through conses")
+    (let ((node (make-circular-p-node)))
+      (setf (circular-p-node-next node) node)
+      (ok (not (circular-p (list 'quote node) :conses-only t))
+          "nor is one through a structure"))))

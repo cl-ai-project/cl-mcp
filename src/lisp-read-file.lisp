@@ -416,6 +416,15 @@ only form of a function that returns one."
   "Characters of a defvar's, defparameter's or defconstant's value shown in its
 collapsed signature.")
 
+(defparameter *variable-value-print-length* 20
+  "*PRINT-LENGTH* for a variable's value in its collapsed signature.  Only
+*VARIABLE-VALUE-MAX-CHARS* of it are shown, and printing a long literal table
+whole at an unbounded right margin took seconds per read.")
+
+(defparameter *variable-value-print-level* 4
+  "*PRINT-LEVEL* for a variable's value in its collapsed signature, for the
+same reason as *VARIABLE-VALUE-PRINT-LENGTH*.")
+
 (defun %collapse-def-form (form)
   "Collapse a definition form to a signature line.
 For defmethod, includes qualifiers like :before, :after, :around.
@@ -426,50 +435,61 @@ newline: the caller prefixes only the first line with a line number,
 so a signature that spilled onto a second line would corrupt the
 collapsed view. Forces *PRINT-CIRCLE* to NIL to avoid spurious
 `#1=#1#' self-references when the CST reader shares a single symbol
-object across multiple positions in the form tree, unless FORM is really
-circular, where printing without it would never end.  FORM must be a proper
-list: the qualifiers and the docstring are found by walking its spine."
+object across multiple positions in the form tree.  The name and the lambda
+list or value are each printed with circle notation only when that piece is
+circular, where printing without it would never end; a cycle elsewhere in the
+body leaves them unlabelled.  A variable's value is printed only to
+*VARIABLE-VALUE-PRINT-LENGTH* elements and *VARIABLE-VALUE-PRINT-LEVEL*
+levels, since no more of it is shown.  FORM must be a proper list: the
+qualifiers and the docstring are found by walking its spine."
   (let* ((*print-case* :downcase)
-         (*print-circle* (circular-p form))
+         (*print-circle* nil)
          (*print-pprint-dispatch* *signature-pprint-dispatch*)
          (head (car form))
          (name (second form))
+         (variable-p (member head '(defvar defparameter defconstant)))
          (qualifiers
-          (when (eq head 'defmethod)
-            (loop for part in (cddr form)
-                  while (and part (symbolp part))
-                  collect part)))
+           (when (eq head 'defmethod)
+             (loop for part in (cddr form)
+                   while (and part (symbolp part))
+                   collect part)))
          (args
-          (case head
-            ((defmethod) (or (find-if #'listp (cddr form)) (third form)))
-            ;; A defstruct has no lambda list: its docstring, when it has
-            ;; one, is shown as the docstring, and its first slot here.
-            ((defstruct) (if (stringp (third form)) (fourth form) (third form)))
-            (otherwise (third form))))
+           (case head
+             ((defmethod) (or (find-if #'listp (cddr form)) (third form)))
+             ;; A defstruct has no lambda list: its docstring, when it has
+             ;; one, is shown as the docstring, and its first slot here.
+             ((defstruct) (if (stringp (third form)) (fourth form) (third form)))
+             (otherwise (third form))))
          (args-display
-          (let ((text (if args
-                          (with-output-to-string (out)
-                            (let ((*print-right-margin* most-positive-fixnum))
-                              (write args :stream out :pretty t :case :downcase)))
-                          "()")))
-            ;; A variable's initial value can be any length; a signature
-            ;; summarizes it, bounded as the docstring beside it is.  The
-            ;; signature's own " ..." follows, so no marker of its own.
-            (if (and (member head '(defvar defparameter defconstant))
-                     (> (length text) *variable-value-max-chars*))
-                (string-right-trim " " (subseq text 0 *variable-value-max-chars*))
-                text)))
+           (let ((text (if args
+                           (with-output-to-string (out)
+                             (let ((*print-right-margin* most-positive-fixnum)
+                                   (*print-circle* (circular-p args))
+                                   (*print-length* (and variable-p
+                                                        *variable-value-print-length*))
+                                   (*print-level* (and variable-p
+                                                       *variable-value-print-level*)))
+                               (write args :stream out :pretty t :case :downcase)))
+                           "()")))
+             ;; A variable's initial value can be any length; a signature
+             ;; summarizes it, bounded as the docstring beside it is.  The
+             ;; signature's own " ..." follows, so no marker of its own.
+             (if (and variable-p
+                      (> (length text) *variable-value-max-chars*))
+                 (string-right-trim " " (subseq text 0 *variable-value-max-chars*))
+                 text)))
          (doc (%truncate-doc (%definition-docstring form)))
          ;; Use ~S to preserve colon for keyword qualifiers
          (qual-str (when qualifiers (format nil "~{~(~S~)~^ ~}" qualifiers))))
-    (if qual-str
-        (format nil "(~(~A~) ~(~A~) ~A ~A ...~@[ ;; ~A~])" head name qual-str
-                args-display doc)
-        (format nil "(~(~A~) ~(~A~) ~A ...~@[ ;; ~A~])" head
-                (if name
-                    name
-                    "")
-                args-display doc))))
+    (let ((*print-circle* (circular-p name)))
+      (if qual-str
+          (format nil "(~(~A~) ~(~A~) ~A ~A ...~@[ ;; ~A~])" head name qual-str
+                  args-display doc)
+          (format nil "(~(~A~) ~(~A~) ~A ...~@[ ;; ~A~])" head
+                  (if name
+                      name
+                      "")
+                  args-display doc)))))
 
 (defparameter *definition-name-max-chars* 80
   "Characters of a definition's name shown in the collapsed line that
@@ -496,10 +516,14 @@ signature's own \" ...\" follows, so the cut gets no marker of its own."
     (format nil "(~(~A~) ~A ...)" (car form) shown)))
 
 (defun %collapse-generic (form)
-  (cond
-    ((consp form)
-     (format nil "(~(~A~) ...)" (car form)))
-    (t (prin1-to-string form))))
+  "Summarize FORM, a top-level form that is not a definition: a list by its
+head, anything else printed whole -- with circle notation when it is circular,
+as a head such as #1=(a . #1#) or a vector #1=#(a #1#) can be."
+  (let ((*print-circle* (circular-p form)))
+    (cond
+      ((consp form)
+       (format nil "(~(~A~) ...)" (car form)))
+      (t (prin1-to-string form)))))
 
 (defun %comment-node-p (node)
   (and (typep node 'cst-node)

@@ -43,29 +43,49 @@ Examples:
     (error (e)
       (format nil "#<error printing: ~A>" e))))
 
-(defun %walked-container-p (object)
-  "True for the objects CIRCULAR-P walks into: conses, and arrays whose
-elements can be any object.  A string or a specialized array holds no object
-that could lead back to it."
+(defun %walked-container-p (object conses-only)
+  "True for the objects CIRCULAR-P walks into: conses and, unless CONSES-ONLY,
+arrays whose elements can be any object and structure instances.  A string or
+a specialized array holds no object that could lead back to it; a standard
+object or a hash table prints as #<...> without printing what it holds."
   (or (consp object)
-      (and (arrayp object) (eq (array-element-type object) t))))
+      (and (not conses-only)
+           (or (and (arrayp object) (eq (array-element-type object) t))
+               (typep object 'structure-object)))))
 
-(defun circular-p (object)
-  "Return T when OBJECT contains a cycle reachable through conses and arrays.
+(defun %walked-children (node)
+  "Return the objects inside NODE, an array or a structure instance, that
+CIRCULAR-P walks: every element of an array (fill pointer ignored), every
+tagged slot of a structure (raw slots hold numbers)."
+  (if (arrayp node)
+      (loop for i below (array-total-size node)
+            collect (row-major-aref node i))
+      (let ((children '()))
+        (sb-kernel:do-instance-tagged-slot (i node)
+          (push (sb-kernel:%instance-ref node i) children))
+        children)))
+
+(defun circular-p (object &key conses-only)
+  "Return T when OBJECT contains a cycle that printing it would follow.
 
 Source text can be circular: #n= is standard reader syntax, so
-\"#1=(a b . #1#)\" and \"#1=#(a #1#)\" read fine.  Printing such an object with
-*PRINT-CIRCLE* NIL never ends; callers that keep *PRINT-CIRCLE* off for
-readability (labels on merely shared structure are noise) switch it on when
-this says so.  Structure instances are not walked: their slots are not reached
-by the reader's #n= the way list and vector elements are, and a cycle through
-one is not something this guards against.
+\"#1=(a b . #1#)\", \"#1=#(a #1#)\" and a #S(...) that refers to itself read
+fine.  Printing such an object with *PRINT-CIRCLE* NIL never ends (or exhausts
+the stack); callers that keep *PRINT-CIRCLE* off for readability -- labels on
+merely shared structure are noise -- switch it on when this says so.  The walk
+follows conses, arrays whose elements can be any object (fill pointers
+ignored) and the tagged slots of structure instances, which the default
+printer writes as #S(...).  A standard object or a hash table prints as
+#<...> and is not entered.
 
-The cdr spine is walked iteratively and only cars and array elements recurse,
-so stack depth is bounded by nesting rather than by list length: a long quoted
-literal such as a generated lookup table is ordinary input.  Finished nodes are
-memoized, so a heavily shared but acyclic object costs one visit per distinct
-node instead of blowing up exponentially."
+With CONSES-ONLY, only conses are followed: the question is then whether a
+walk of the list structure, such as MACROEXPAND-ALL's, would loop.
+
+The cdr spine is walked iteratively and only cars and the children of arrays
+and structures recurse, so stack depth is bounded by nesting rather than by
+list length: a long quoted literal such as a generated lookup table is ordinary
+input.  Finished nodes are memoized, so a heavily shared but acyclic object
+costs one visit per distinct node instead of blowing up exponentially."
   (let ((on-path (make-hash-table :test #'eq))
         (finished (make-hash-table :test #'eq)))
     (labels ((walk (node)
@@ -73,7 +93,7 @@ node instead of blowing up exponentially."
                      (found nil))
                  (loop
                    (cond
-                     ((not (%walked-container-p node)) (return))
+                     ((not (%walked-container-p node conses-only)) (return))
                      ((gethash node on-path) (setf found t) (return))
                      ((gethash node finished) (return))
                      (t
@@ -86,11 +106,10 @@ node instead of blowing up exponentially."
                            (return))
                          (setf node (cdr node)))
                         (t
-                         (setf found (loop for i below (array-total-size node)
-                                           thereis (walk (row-major-aref node i))))
+                         (setf found (some #'walk (%walked-children node)))
                          (return))))))
                  (dolist (visited spine)
                    (remhash visited on-path)
                    (setf (gethash visited finished) t))
                  found)))
-      (and (walk object) t))))
+      (walk object))))
