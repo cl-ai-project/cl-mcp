@@ -170,6 +170,19 @@ supplied, uses *enabled-tool-groups*, which comes from MCP_ENABLE_TOOL_GROUPS."
           *tcp-listener* nil)
     :stopped))
 
+(defparameter *too-large-response*
+  (concatenate 'string
+               "{\"jsonrpc\":\"2.0\",\"id\":null,"
+               "\"error\":{\"code\":-32600,\"message\":\"Request too large\"}}")
+  "The response line to a request longer than +MAX-JSON-LINE-BYTES+.")
+
+(defparameter *undecodable-response*
+  (concatenate 'string
+               "{\"jsonrpc\":\"2.0\",\"id\":null,"
+               "\"error\":{\"code\":-32700,"
+               "\"message\":\"Parse error: the request is not valid UTF-8\"}}")
+  "The response line to a request line that is not UTF-8.")
+
 (defun %read-request-line (stream conn-id)
   "Read the next request line from STREAM.
 Return the line as a string, or one of these keywords:
@@ -255,16 +268,16 @@ Return T, or NIL when the stream failed (the client is gone)."
                    (return))
                   (:too-long
                    ;; Return JSON-RPC error and continue the connection
-                   (unless (%write-response-line
-                            "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Request too large\"}}"
-                            stream conn-id)
+                   (unless (%write-response-line *too-large-response*
+                                                 stream conn-id)
                      (return)))
                   (:undecodable
                    ;; JSON text is UTF-8 (RFC 8259), so a line that is not
                    ;; is not JSON: a parse error, and the connection goes on.
-                   (unless (%write-response-line
-                            "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error: the request is not valid UTF-8\"}}"
-                            stream conn-id)
+                   ;; stdio differs: SBCL decodes stdin with a replacement
+                   ;; character, so there the same bytes arrive as U+FFFD.
+                   (unless (%write-response-line *undecodable-response*
+                                                 stream conn-id)
                      (return)))
                   (t
                    (log-event :debug "tcp.read" "conn" conn-id "line" line)
@@ -296,12 +309,16 @@ Return T, or NIL when the stream failed (the client is gone)."
                (setf stream (usocket:socket-stream client))
                ;; This is a thread of its own: a condition left unhandled
                ;; here would stop it in the debugger before the cleanup
-               ;; below, holding the session and its worker for good.
+               ;; below, holding the session and its worker for good.  So
+               ;; every serious condition (a STORAGE-CONDITION or an
+               ;; SB-EXT:TIMEOUT is not an ERROR) ends the connection, and
+               ;; a report that itself signals cannot escape the handler.
                (handler-case (%process-stream stream client conn-id remote)
-                 (error (e)
-                   (log-event :warn "tcp.conn.error"
-                              "conn" conn-id
-                              "error" (princ-to-string e))))))
+                 (serious-condition (e)
+                   (ignore-errors
+                    (log-event :warn "tcp.conn.error"
+                               "conn" conn-id
+                               "error" (princ-to-string e)))))))
            t)
       (when stream (ignore-errors (close stream)))
       (when client (ignore-errors (usocket:socket-close client)))

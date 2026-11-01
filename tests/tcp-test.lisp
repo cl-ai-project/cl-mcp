@@ -282,7 +282,10 @@ wait for it to finish."
                             (send (concatenate
                                    '(vector (unsigned-byte 8))
                                    (sb-ext:string-to-octets
-                                    "{\"jsonrpc\":\"2.0\",\"id\":77,\"method\":\"ping\",\"params\":{\"x\":\""
+                                    (concatenate
+                                     'string
+                                     "{\"jsonrpc\":\"2.0\",\"id\":77,"
+                                     "\"method\":\"ping\",\"params\":{\"x\":\"")
                                     :external-format :utf-8)
                                    #(#xc3 #x28)
                                    (sb-ext:string-to-octets
@@ -309,33 +312,52 @@ wait for it to finish."
   (testing "a reset from the client ends the read loop instead of stopping the thread"
     (if (not (socket-available-p))
         (ok t "socket unavailable")
-        (let ((thread
-                (%call-with-one-shot-server
-                 (lambda (port)
-                   (let* ((sock (usocket:socket-connect "127.0.0.1" port
-                                                        :element-type 'character))
-                          (stream (usocket:socket-stream sock)))
-                     (write-line "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"
-                                 stream)
-                     (finish-output stream)
-                     ;; Wait for the response and leave it unread in the
-                     ;; kernel (wait-for-input polls; LISTEN would pull it into
-                     ;; the stream's buffer): closing a socket with unread data
-                     ;; makes the kernel send a reset instead of a FIN, which
-                     ;; the server meets in its next read.
-                     (ok (usocket:wait-for-input (list sock) :timeout 5
-                                                             :ready-only t)
-                         "the response has arrived")
-                     (usocket:socket-close sock))))))
-          (ok (%thread-ends-within-p thread 5)
-              "the connection ends and the server returns")))))
+        (let ((log (make-string-output-stream))
+              (previous-log-stream cl-mcp/src/log:*log-stream*))
+          (unwind-protect
+               (progn
+                 ;; The server thread reads the global, so the log of this
+                 ;; connection lands here and says which path it took.
+                 (setf cl-mcp/src/log:*log-stream* log)
+                 (let ((thread
+                         (%call-with-one-shot-server
+                          (lambda (port)
+                            (let* ((sock (usocket:socket-connect
+                                          "127.0.0.1" port :element-type 'character))
+                                   (stream (usocket:socket-stream sock)))
+                              (write-line
+                               "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"
+                               stream)
+                              (finish-output stream)
+                              ;; Wait for the response and leave it unread in
+                              ;; the kernel: closing a socket with unread data
+                              ;; makes the kernel send a reset instead of a
+                              ;; FIN, which the server meets in its next read.
+                              ;; Poll the descriptor itself: LISTEN, and
+                              ;; USOCKET:WAIT-FOR-INPUT, which calls it, would
+                              ;; read the response into the stream's buffer.
+                              (ok (sb-unix:unix-simple-poll
+                                   (sb-bsd-sockets:socket-file-descriptor
+                                    (usocket:socket sock))
+                                   :input 5000)
+                                  "the response has arrived")
+                              (usocket:socket-close sock))))))
+                   (ok (%thread-ends-within-p thread 5)
+                       "the connection ends and the server returns")))
+            (setf cl-mcp/src/log:*log-stream* previous-log-stream))
+          (let ((text (get-output-stream-string log)))
+            (ok (search "\"tcp.read.error\"" text)
+                "the server met the reset, not an orderly close")
+            (ok (not (search "\"tcp.read.eof\"" text))
+                "the connection did not end at EOF"))))))
 
 (deftest tcp-client-thread-survives-a-failing-socket
   (testing "an error outside the line read still ends the connection and runs its cleanup"
     (if (not (socket-available-p))
         (ok t "socket unavailable")
-        (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
-                                                              :element-type 'character))
+        (let* ((listener (usocket:socket-listen "127.0.0.1" 0
+                                                :reuse-address t
+                                                :element-type 'character))
                (client (usocket:socket-connect "127.0.0.1"
                                                (usocket:get-local-port listener)
                                                :element-type 'character))
@@ -352,5 +374,40 @@ wait for it to finish."
                                 :name "tcp-test-failing-socket")))
                    (ok (%thread-ends-within-p thread 5)
                        "the client thread ends instead of stopping in the debugger")))
+            (ignore-errors (usocket:socket-close client))
+            (ignore-errors (usocket:socket-close listener)))))))
+
+(define-condition test-serious-condition (serious-condition) ()
+  (:documentation "A SERIOUS-CONDITION that is not an ERROR, as STORAGE-CONDITION
+and SB-EXT:TIMEOUT are not."))
+
+(deftest tcp-client-thread-survives-a-serious-condition
+  (testing "a serious condition that is not an error still ends the connection"
+    (if (not (socket-available-p))
+        (ok t "socket unavailable")
+        (let* ((listener (usocket:socket-listen "127.0.0.1" 0
+                                                :reuse-address t
+                                                :element-type 'character))
+               (client (usocket:socket-connect "127.0.0.1"
+                                               (usocket:get-local-port listener)
+                                               :element-type 'character))
+               (server-side (usocket:socket-accept listener
+                                                   :element-type 'character))
+               (name 'cl-mcp/src/tcp::%process-stream)
+               (original (fdefinition name)))
+          (unwind-protect
+               (progn
+                 (setf (fdefinition name)
+                       (lambda (&rest arguments)
+                         (declare (ignore arguments))
+                         (error 'test-serious-condition)))
+                 (let ((thread (make-thread
+                                (lambda ()
+                                  (funcall 'cl-mcp/src/tcp::%tcp-handle-client
+                                           server-side 9002))
+                                :name "tcp-test-serious-condition")))
+                   (ok (%thread-ends-within-p thread 5)
+                       "the client thread ends instead of stopping in the debugger")))
+            (setf (fdefinition name) original)
             (ignore-errors (usocket:socket-close client))
             (ignore-errors (usocket:socket-close listener)))))))
