@@ -297,7 +297,12 @@ whenever it is still running."
     (dolist (case (list (format nil "#+sbcl #-sbcl (foo) (in-package :my-app)")
                         (format nil "#-sbcl #+sbcl (in-package :other) (in-package :my-app)")
                         "#+(and sbcl (not windows)) (in-package :my-app)"
-                        "#+sb-thread (in-package :my-app)"))
+                        "#+sb-thread (in-package :my-app)"
+                        ;; In a place that takes one object: after a quote.
+                        (format nil "(defun f () (foo '#+sbcl a #-sbcl b))~%~
+                                     (in-package :my-app)")
+                        (format nil "(defun f () (list #'#+sbcl a #-sbcl b))~%~
+                                     (in-package :my-app)")))
       (let ((name (%extract-within 2 case)))
         (ok (and (stringp name) (string-equal name "MY-APP"))
             (format nil "answered ~S for ~S" name case)))))
@@ -351,9 +356,21 @@ whenever it is still running."
              (format nil "the defpackage's spec is kept: ~S" specs)))))))
 
 (deftest header-scan-refuses-circular-or-backquoted-header-forms
-  (testing "a header form holding a backquote template is no header and no hang"
-    (let ((name (%extract-within 2 (format nil "(in-package `(a . #1=(b . #1#)))"))))
-      (ok (null name) (format nil "answered ~S" name))))
+  (testing "a header form whose read would walk a cycle is no header and no hang"
+    ;; Labels are an error in what the scan reads for real, so neither the
+    ;; backquote reader nor #+, #( or #C ever meets a cycle.
+    (dolist (pair '(("(in-package `(a . #1=(b . #1#)))" . nil)
+                    ("(in-package #+(and . #1=(sbcl . #1#)) :p)" . nil)
+                    ;; A conditional that cannot be judged is skipped whole.
+                    ("#+#+(and . #1=(sbcl . #1#)) x y (in-package :p)" . "P")
+                    ("(defpackage :p (:use #+(or . #1=(nope . #1#)) :cl))" . nil)
+                    ("(in-package #(a . #1=(b . #1#)))" . nil)
+                    ("(in-package #C#1=(1 2 . #1#))" . nil)))
+      (let ((name (%extract-within 2 (car pair))))
+        (ok (if (cdr pair)
+                (and (stringp name) (string-equal name (cdr pair)))
+                (null name))
+            (format nil "answered ~S for ~S" name (car pair))))))
   (testing "a circular header form is not walked for its package spec"
     (call-with-temp-project
      (lambda (root)
@@ -372,4 +389,4 @@ whenever it is still running."
                     do (sleep 0.01d0))
            (when (bordeaux-threads:thread-alive-p thread)
              (ignore-errors (bordeaux-threads:destroy-thread thread))))
-         (ok (listp specs) (format nil "answered: ~S" specs)))))))
+         (ok (null specs) (format nil "no spec, promptly: ~S" specs)))))))

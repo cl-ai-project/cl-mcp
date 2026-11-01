@@ -179,30 +179,41 @@ next form's first character, and return that character, or NIL at the end."
         (t (return char))))))
 
 (defparameter *header-readtable*
-  (let ((readtable (copy-readtable nil)))
-    (set-macro-character #\`
-                         (lambda (stream char)
-                           (declare (ignore char))
-                           (error 'reader-error :stream stream))
-                         nil readtable)
+  (let ((readtable (copy-readtable nil))
+        (refuse (lambda (stream &rest arguments)
+                  (declare (ignore arguments))
+                  (error 'reader-error :stream stream))))
+    (set-macro-character #\` refuse nil readtable)
+    ;; Of the # dispatches only comments, uninterned symbols, characters and
+    ;; feature expressions are kept.  Without #n= nothing read can be
+    ;; circular, so no reader macro (#+'s FEATUREP, #(, #A, #C, #S) walks a
+    ;; cycle, and no #n( asks for a huge vector.
+    (loop for code from 0 below 128
+          for char = (code-char code)
+          unless (or (digit-char-p char) (find char "|:\\+-"))
+            do (when (get-dispatch-macro-character #\# char readtable)
+                 (set-dispatch-macro-character #\# char refuse readtable)))
     readtable)
-  "The standard readtable with backquote made an error, for what the header
-scan reads for real: a #+/#- feature expression and a header form.  Neither
-ever holds a backquote (a feature expression is symbols and lists of them, and
-IN-PACKAGE's and DEFPACKAGE's arguments are not evaluated), and SBCL's
-backquote reader never returns from a template with a circular tail,
-`(a . #1=(b . #1#)).")
+  "The standard readtable for what the header scan reads for real -- a #+/#-
+feature expression and a header form -- with backquote and every # dispatch
+but #|, #:, #\\, #+ and #- made an error.  A header form or a feature expression
+needs none of them (IN-PACKAGE's and DEFPACKAGE's arguments are not evaluated),
+and with them a valid text such as `(a . #1=(b . #1#)) or #+(and . #1=(x . #1#))
+made the reader run forever or exhaust the heap.")
 
 (defun %skip-conditional (stream sub-char argument)
   "The #+ and #- of *SKIP-READTABLE*: read the feature expression and the form
-it guards, both under *READ-SUPPRESS*, and return no value.  SBCL's own #+
-reads its feature expression with *READ-SUPPRESS* off, even inside a form
-being skipped, so a backquote there was read for real."
+it guards, both under *READ-SUPPRESS*, and return NIL.  SBCL's own #+ reads its
+feature expression with *READ-SUPPRESS* off, even inside a form being skipped,
+so a backquote there was read for real.  One value is returned, never none: in
+a place that takes one object ('#+sbcl a #-sbcl b) no value would make the
+reader take the next object too.  A top-level #+ never comes here; %SKIP-FORM
+handles it."
   (declare (ignore sub-char argument))
   (let ((*read-suppress* t))
     (read stream t nil t)
     (read stream t nil t))
-  (values))
+  nil)
 
 (defparameter *skip-readtable*
   (let ((readtable (copy-readtable nil)))
@@ -244,7 +255,8 @@ somewhere inside it: the caller rewinds."
       ((eql first #\()
        (read-char stream)
        (let ((char (%skip-to-next-form stream)))
-         ;; A symbol token, not a list, a string, a quote or a dispatch.
+         ;; A symbol token, not a list, a string, a quote or a dispatch --
+         ;; so (#+sbcl in-package ...), a header to the reader, is not one here.
          (and char
               (not (find char "()'`,\"#"))
               (let ((head (handler-case (read-preserving-whitespace stream nil nil)
@@ -313,7 +325,9 @@ know) no longer ends the scan before a header that follows it."
                  until (eq form :eof)
                  do (cond
                       ;; A circular header form is no header: the spec
-                      ;; extraction walks its clauses.
+                      ;; extraction walks its clauses.  *HEADER-READTABLE*
+                      ;; refuses labels, so this is a second line; like any
+                      ;; non-header after a header, it ends the scan.
                       ((and header-p (%header-form-p form) (not (circular-p form)))
                        (push form forms)
                        (setf saw-header t))
