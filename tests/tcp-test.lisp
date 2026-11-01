@@ -223,15 +223,33 @@
                    (stop-tcp-server-thread)))
             (setf (symbol-value groups-symbol) previous))))))
 
+(defun %stop-one-shot-server (thread port)
+  "Make THREAD, an accept-once SERVE-TCP, return, and destroy it if it will not.
+The stop flag ends its accept loop at the next timeout; a connection that is
+closed at once ends it sooner, since the server accepts it, reads EOF and
+returns."
+  (setf cl-mcp/src/tcp::*tcp-stop-flag* t)
+  (when port
+    (ignore-errors
+     (usocket:socket-close
+      (usocket:socket-connect "127.0.0.1" port :element-type 'character))))
+  (loop repeat 1000
+        while (bordeaux-threads:thread-alive-p thread)
+        do (sleep 0.01d0))
+  (when (bordeaux-threads:thread-alive-p thread)
+    (ignore-errors (bordeaux-threads:destroy-thread thread))))
+
 (defun %call-with-one-shot-server (function)
   "Run SERVE-TCP for one connection on a thread and call FUNCTION with its port.
 Return the server thread once FUNCTION returns; the caller decides how long to
-wait for it to finish.  When the server does not come up, FUNCTION is not
-called and the server is asked to stop, so no thread is left listening.
+wait for it to finish.  When the server does not come up, or FUNCTION does not
+return normally, the server is stopped here (see %STOP-ONE-SHOT-SERVER), so no
+thread is left listening.
 The server runs without a worker pool, bound on its own thread: these tests
 use no worker, and starting and stopping a pool would add seconds to the
 server's return on a loaded machine."
   (let* ((port nil)
+         (returned nil)
          (thread (make-thread
                   (lambda ()
                     (let ((cl-mcp/src/proxy:*use-worker-pool* nil))
@@ -241,9 +259,12 @@ server's return on a loaded machine."
                   :name "tcp-test-one-shot-server")))
     (loop repeat 200 until port do (sleep 0.01d0))
     (ok port "the one-shot server is listening")
-    (if port
-        (funcall function port)
-        (setf cl-mcp/src/tcp::*tcp-stop-flag* t))
+    (unwind-protect
+         (when port
+           (funcall function port)
+           (setf returned t))
+      (unless returned
+        (%stop-one-shot-server thread port)))
     thread))
 
 (defun %call-capturing-log (function)
