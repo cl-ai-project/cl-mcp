@@ -1467,3 +1467,72 @@ message it signals, or NIL when it returns normally."
       (let ((text (gethash "content" (lisp-read-file relative :name-pattern "^a$"))))
         (ok (search (format nil "2: (defun a ()~%3:   1)~%5: (defun b () ...)") text)
             text)))))
+
+(defun %read-within (seconds relative &rest arguments)
+  "Return the content LISP-READ-FILE gives for RELATIVE with ARGUMENTS, or
+:TIMEOUT when it has not answered within SECONDS (its thread is then
+destroyed, so a test of a hang fails instead of hanging the suite)."
+  (let* ((result nil)
+         (thread (bordeaux-threads:make-thread
+                  (lambda ()
+                    (setf result
+                          (gethash "content"
+                                   (apply #'lisp-read-file relative arguments))))
+                  :name "lisp-read-file-test-read-within")))
+    (loop repeat (round (* seconds 100))
+          while (bordeaux-threads:thread-alive-p thread)
+          do (sleep 0.01d0))
+    (cond ((bordeaux-threads:thread-alive-p thread)
+           (ignore-errors (bordeaux-threads:destroy-thread thread))
+           :timeout)
+          (t result))))
+
+(defparameter *circular-literal-source*
+  (format nil "(in-package #:cl-user)~%~%~
+               (defparameter *circ* '#1=(a b . #1#))~%~%~
+               (defparameter *car-circ* '#2=(#2#))~%~%~
+               (defparameter *vector-circ* '#3=#(a #3#))~%~%~
+               (defun uses-circ ()~%  (let ((x '#4=(a b . #4#))) (car x)))~%")
+  "Circular literals in values and in a body: valid CL that Eclector reads.
+Issue #285: printing them without *PRINT-CIRCLE* never ends.")
+
+(deftest lisp-read-file-collapses-circular-literals
+  (testing "the collapsed view of circular values answers and summarizes them"
+    (with-temp-lisp-file "tests/tmp/read-file-circular.lisp" *circular-literal-source*
+      (lambda (path)
+        (let ((content (%read-within 5 path)))
+          (ok (stringp content) "answered")
+          (when (stringp content)
+            (ok (search "(defparameter *circ* " content))
+            (ok (search "(defparameter *car-circ* " content))
+            (ok (search "(defparameter *vector-circ* " content))
+            (ok (search "(defun uses-circ () ..." content))))))))
+
+(deftest lisp-read-file-content-pattern-over-circular-literals
+  (testing "content_pattern prints each form to match it, circular ones included"
+    (with-temp-lisp-file "tests/tmp/read-file-circular-pattern.lisp"
+        *circular-literal-source*
+      (lambda (path)
+        (let ((none (%read-within 5 path :content-pattern "zzz"))
+              (some (%read-within 5 path :content-pattern "\\(a b")))
+          (ok (stringp none) "a pattern that matches nothing answers")
+          (ok (stringp some) "a pattern that matches inside a cycle answers")
+          (when (stringp some)
+            (ok (search "(defparameter *circ* '#1=(a b . #1#))" some)
+                "the matching form is expanded from its source")
+            (ok (search "(let ((x '#4=(a b . #4#))) (car x))" some))))))))
+
+(deftest lisp-read-file-circular-names-and-spines
+  (testing "a circular definition name or a circular form spine is summarized"
+    (with-temp-lisp-file "tests/tmp/read-file-circular-spine.lisp"
+        (format nil "(defthing #1=(a . #1#))~%~%~
+                     (defmethod spun . #2=(:before . #2#))~%~%~
+                     (defun after () 1)~%")
+      (lambda (path)
+        (let ((content (%read-within 5 path)))
+          (ok (stringp content) "answered")
+          (when (stringp content)
+            (ok (search "(defthing " content))
+            (ok (search "(defmethod " content))
+            (ok (search "(defun after () ..." content)
+                "the forms after them are still listed")))))))

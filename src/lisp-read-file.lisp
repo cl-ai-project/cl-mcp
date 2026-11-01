@@ -45,6 +45,8 @@
   (:import-from #:uiop
                 #:ensure-pathname
                 #:pathname-type)
+  (:import-from #:cl-mcp/src/utils/printing
+                #:circular-p)
   (:export #:lisp-read-file
            #:lisp-source-path-p))
 
@@ -342,7 +344,7 @@ matched it and as the nine definers show their names."
     (if (symbolp name)
         (symbol-name name)
         (let ((*print-case* :downcase)
-              (*print-circle* nil)
+              (*print-circle* (circular-p name))
               (*print-pprint-dispatch* *signature-pprint-dispatch*)
               (*print-right-margin* most-positive-fixnum))
           (with-output-to-string (out)
@@ -373,11 +375,13 @@ single symbol object once and share it across multiple positions in
 the form tree. Under *PRINT-CIRCLE* T, that would cause the pretty
 printer to label the first occurrence with `#1=' and emit `#1#' on
 reuse — producing nonsense like `(in-package #1=#1#)' when the
-shared symbol is the sole argument of a form."
+shared symbol is the sole argument of a form.  A form that is really circular
+-- #n= is standard syntax, so '#1=(a . #1#) is a valid literal -- is printed
+with *PRINT-CIRCLE* T all the same: without it the printing never ends."
   (let ((*print-pretty* t)
         (*print-case* :downcase)
         (*print-right-margin* 80)
-        (*print-circle* nil)
+        (*print-circle* (circular-p form))
         (*print-pprint-dispatch* *source-pprint-dispatch*))
     (with-output-to-string (out)
       (write form :stream out :pretty t :right-margin 80))))
@@ -422,9 +426,11 @@ newline: the caller prefixes only the first line with a line number,
 so a signature that spilled onto a second line would corrupt the
 collapsed view. Forces *PRINT-CIRCLE* to NIL to avoid spurious
 `#1=#1#' self-references when the CST reader shares a single symbol
-object across multiple positions in the form tree."
+object across multiple positions in the form tree, unless FORM is really
+circular, where printing without it would never end.  FORM must be a proper
+list: the qualifiers and the docstring are found by walking its spine."
   (let* ((*print-case* :downcase)
-         (*print-circle* nil)
+         (*print-circle* (circular-p form))
          (*print-pprint-dispatch* *signature-pprint-dispatch*)
          (head (car form))
          (name (second form))
@@ -636,11 +642,13 @@ whitespace."
                     (expand?
                      (%add-line-numbers (%node-source-text node source-text)
                                         start-line line-width))
-                    ;; A dotted (defun . foo) has no second element to show, and
-                    ;; %COLLAPSE-DEF-FORM's SECOND would signal on it.
+                    ;; %COLLAPSE-DEF-FORM walks the form's spine, so a dotted
+                    ;; (defun . foo) or a circular (defmethod m . #1=(:a . #1#))
+                    ;; is summarized below instead.
                     ((and (member head '(defun defmacro defvar defparameter defconstant
                                           defclass defstruct defgeneric defmethod))
-                          (consp (cdr form)))
+                          (consp (cdr form))
+                          (ignore-errors (list-length form)))
                      (format nil "~VD: ~@[~A ~]~A" line-width start-line prefix
                              (%collapse-def-form form)))
                     ((eq head 'in-package)

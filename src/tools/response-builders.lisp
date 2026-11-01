@@ -15,7 +15,8 @@
                 #:format-inspect-elements)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
-  ;; No cycle: macroexpand-core imports only cl-mcp/src/utils/sanitize.
+  ;; No cycle: macroexpand-core imports only cl-mcp/src/utils/sanitize and
+  ;; cl-mcp/src/utils/printing.
   (:import-from #:cl-mcp/src/macroexpand-core
                 #:macroexpand-forms
                 #:macroexpand-package-error

@@ -3,7 +3,8 @@
   (:import-from #:rove
                 #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/utils/printing
-                #:safe-prin1))
+                #:safe-prin1
+                #:circular-p))
 
 (in-package #:cl-mcp/tests/utils-printing-test)
 
@@ -41,3 +42,24 @@
     ;; Default level is 3, length is 10
     (let ((deep '((((very deep nested structure))))))
       (ok (stringp (safe-prin1 deep))))))
+
+(deftest circular-p-finds-cycles-through-conses-and-vectors
+  (testing "a cycle through a cdr, a car or a vector is circular"
+    (ok (circular-p (read-from-string "#1=(a b . #1#)")) "cdr")
+    (ok (circular-p (read-from-string "#1=(#1#)")) "car")
+    (ok (circular-p (read-from-string "#1=#(a #1#)")) "vector")
+    (ok (circular-p (read-from-string "(x #1=#(a (b #1#)))")) "vector through a list")
+    (ok (circular-p (read-from-string "#1=#2A((a b) (c #1#))")) "multidimensional array")))
+
+(deftest circular-p-accepts-what-is-only-shared-or-long
+  (testing "shared structure, strings and long lists are not circular"
+    (ok (not (circular-p (read-from-string "(#1=(a b) #1# #1#)"))) "shared, acyclic")
+    (ok (not (circular-p (read-from-string "#(#1=#(a) #1#)"))) "shared vector")
+    (ok (not (circular-p "string")) "a string is a leaf")
+    (ok (not (circular-p 42)) "an atom")
+    (ok (not (circular-p (make-list 200000 :initial-element 'x)))
+        "a long list does not exhaust the stack")
+    (ok (not (circular-p (let ((tree nil))
+                           (dotimes (i 40 tree)
+                             (setf tree (list tree tree))))))
+        "a heavily shared tree is walked once per cons")))

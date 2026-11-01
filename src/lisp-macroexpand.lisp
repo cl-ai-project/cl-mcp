@@ -28,7 +28,8 @@
   (:import-from #:cl-mcp/src/tools/response-builders
                 #:expand-and-build-response)
   ;; Shared with response-builders, which reads these markers back out of the
-  ;; label.  No cycle: macroexpand-core imports only cl-mcp/src/utils/sanitize.
+  ;; label.  No cycle: macroexpand-core imports only cl-mcp/src/utils/sanitize
+  ;; and cl-mcp/src/utils/printing.
   (:import-from #:cl-mcp/src/macroexpand-core
                 #:*backquote-template-marker*
                 #:*shadowed-binding-marker*)

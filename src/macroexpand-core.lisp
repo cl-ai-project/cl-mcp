@@ -8,6 +8,8 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/utils/printing
+                #:circular-p)
   (:export #:macroexpand-forms
            #:macroexpand-source
            #:macroexpand-package-error
@@ -30,7 +32,7 @@ but shallow form can still print length^level elements — so
 `*expansion-max-output-length*` is the actual size guard.  Note also that
 this does NOT protect against a circular expansion — SBCL's pretty
 printer ignores it for the QUOTE abbreviation.  That case is handled by
-`%circular-p` in `%print-expansion`.")
+`circular-p` in `%print-expansion`.")
 
 (defparameter *expansion-print-length* 1000
   "Default `*print-length*` for printed macro expansions.")
@@ -228,43 +230,6 @@ rather than a fixpoint — the caller must not present it as fully expanded."
         (setf current expansion)
         (incf steps)))))
 
-(defun %circular-p (form)
-  "Return T when FORM contains a cycle reachable through conses.
-
-Only conses are traversed.  A cycle through a literal vector or structure
-is not something this guards against; macro expansions do not produce
-those, and walking them would cost more than it saves.
-
-The cdr spine is walked iteratively and only cars recurse, so stack depth
-is bounded by nesting rather than by list length.  That matters: a long
-quoted literal such as a generated lookup table is ordinary input here,
-and recursing along its spine would exhaust the control stack.
-
-Finished nodes are memoized, so a heavily shared but acyclic expansion
-costs one visit per distinct cons instead of blowing up exponentially."
-  (let ((on-path (make-hash-table :test #'eq))
-        (finished (make-hash-table :test #'eq)))
-    (labels ((walk (node)
-               (let ((spine '())
-                     (found nil))
-                 (loop
-                   (cond
-                     ((not (consp node)) (return))
-                     ((gethash node on-path) (setf found t) (return))
-                     ((gethash node finished) (return))
-                     (t
-                      (setf (gethash node on-path) t)
-                      (push node spine)
-                      (when (walk (car node))
-                        (setf found t)
-                        (return))
-                      (setf node (cdr node)))))
-                 (dolist (visited spine)
-                   (remhash visited on-path)
-                   (setf (gethash visited finished) t))
-                 found)))
-      (walk form))))
-
 (defun %make-walk-guard (counter outer-hook)
   "Return a *MACROEXPAND-HOOK* function bounding one level \"all\" walk.
 
@@ -299,7 +264,7 @@ OUTER-HOOK is a function designator, which FUNCALL accepts, so the default
 not reach a fixpoint.  Use level \"once\" or \"full\"."
              *max-walk-expansions*))
     (let ((expansion (funcall outer-hook expander form env)))
-      (when (and (consp expansion) (%circular-p expansion))
+      (when (and (consp expansion) (circular-p expansion))
         (error "Level \"all\" cannot expand ~S: its expansion is circular.  ~
 Use level \"once\" or \"full\"."
                (if (consp form) (first form) form)))
@@ -324,7 +289,7 @@ replacing it.
 
 Levels \"once\" and \"full\" only look at the head, so they accept
 circular input without this restriction."
-  (when (%circular-p form)
+  (when (circular-p form)
     (error "Level \"all\" cannot expand a circular form; use \"once\" or \"full\"."))
   (let* ((counter (list 0))
          ;; Read the hook BEFORE rebinding it, so the guard can delegate to
@@ -359,7 +324,7 @@ cannot be relied on to bound that case, because SBCL's pretty printer
 does not honour it for the QUOTE abbreviation, and the printing would
 never terminate."
   (let ((*package* package)
-        (*print-circle* (%circular-p form))
+        (*print-circle* (circular-p form))
         (*print-level* (max 1 (or print-level *expansion-print-level*)))
         (*print-length* (max 1 (or print-length *expansion-print-length*)))
         (*print-lines* nil)
