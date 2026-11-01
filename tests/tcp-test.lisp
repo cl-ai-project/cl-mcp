@@ -248,17 +248,22 @@ server's return on a loaded machine."
 
 (defun %call-capturing-log (function)
   "Call FUNCTION and return the log lines written meanwhile, by any thread.
-The server's threads read the global *LOG-STREAM*, so it is set rather than
-bound; the lines still reach the previous stream as well."
+The server's threads read the globals, so *LOG-STREAM* and *LOG-LEVEL* are set
+rather than bound (a binding on this thread would not reach them) and restored
+afterwards.  The level is :DEBUG so an MCP_LOG_LEVEL in the environment cannot
+hide the events a test looks for; the lines still reach the previous stream."
   (let ((capture (make-string-output-stream))
-        (previous cl-mcp/src/log:*log-stream*))
+        (previous-stream cl-mcp/src/log:*log-stream*)
+        (previous-level cl-mcp/src/log:*log-level*))
     (unwind-protect
          (progn
            (setf cl-mcp/src/log:*log-stream*
-                 (make-broadcast-stream previous capture))
+                 (make-broadcast-stream previous-stream capture)
+                 cl-mcp/src/log:*log-level* :debug)
            (funcall function))
-      (setf cl-mcp/src/log:*log-stream* previous))
-    (bordeaux-threads:with-lock-held (cl-mcp/src/log::*log-lock*)
+      (setf cl-mcp/src/log:*log-stream* previous-stream
+            cl-mcp/src/log:*log-level* previous-level))
+    (bordeaux-threads:with-lock-held (cl-mcp/src/log:*log-lock*)
       (get-output-stream-string capture))))
 
 (defun %thread-ends-within-p (thread seconds)
@@ -398,7 +403,11 @@ bound; the lines still reach the previous stream as well."
                             (usocket:socket client))
                            :input 5000)
                           (usocket:socket-close client)
-                          (sleep 0.1d0)
+                          ;; The reset makes the server's descriptor readable.
+                          (sb-unix:unix-simple-poll
+                           (sb-bsd-sockets:socket-file-descriptor
+                            (usocket:socket server-side))
+                           :input 5000)
                           (let ((thread
                                   (make-thread
                                    (lambda ()
@@ -415,7 +424,7 @@ bound; the lines still reach the previous stream as well."
             (ignore-errors (usocket:socket-close listener)))))))
 
 (deftest tcp-client-thread-survives-a-failing-socket
-  (testing "an error outside the line read still ends the connection and runs its cleanup"
+  (testing "a closed stream met while waiting for input ends the connection as a read error"
     (if (not (socket-available-p))
         (ok t "socket unavailable")
         (let* ((listener (usocket:socket-listen "127.0.0.1" 0
@@ -426,17 +435,21 @@ bound; the lines still reach the previous stream as well."
                                                :element-type 'character))
                (server-side (usocket:socket-accept listener :element-type 'character)))
           (unwind-protect
-               (progn
-                 ;; Close the descriptor under the server's socket object, so
-                 ;; its first WAIT-FOR-INPUT signals instead of reading.
-                 (close (usocket:socket-stream server-side))
-                 (let ((thread (make-thread
-                                (lambda ()
-                                  (funcall 'cl-mcp/src/tcp::%tcp-handle-client
-                                           server-side 9001))
-                                :name "tcp-test-failing-socket")))
-                   (ok (%thread-ends-within-p thread 5)
-                       "the client thread ends instead of stopping in the debugger")))
+               (let ((text
+                       (%call-capturing-log
+                        (lambda ()
+                          ;; Close the descriptor under the server's socket
+                          ;; object, so its first WAIT-FOR-INPUT signals.
+                          (close (usocket:socket-stream server-side))
+                          (let ((thread (make-thread
+                                         (lambda ()
+                                           (funcall 'cl-mcp/src/tcp::%tcp-handle-client
+                                                    server-side 9001))
+                                         :name "tcp-test-failing-socket")))
+                            (ok (%thread-ends-within-p thread 5)
+                                "the client thread ends instead of stopping in the debugger"))))))
+                 (ok (search "\"tcp.read.error\"" text)
+                     "the closed stream is logged as a read error"))
             (ignore-errors (usocket:socket-close client))
             (ignore-errors (usocket:socket-close listener)))))))
 
