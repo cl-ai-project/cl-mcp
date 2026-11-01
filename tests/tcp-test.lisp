@@ -288,11 +288,17 @@ hide the events a test looks for; the lines still reach the previous stream."
       (get-output-stream-string capture))))
 
 (defun %thread-ends-within-p (thread seconds)
-  "Return T when THREAD finishes within SECONDS, NIL when it is still running."
-  (loop repeat (round (* seconds 100))
-        while (bordeaux-threads:thread-alive-p thread)
-        do (sleep 0.01d0))
-  (not (bordeaux-threads:thread-alive-p thread)))
+  "Return T when THREAD finishes within SECONDS, NIL when it is still running.
+A thread still running then is destroyed -- as it is when the wait itself is
+interrupted -- so a failing test leaves no server or client thread behind."
+  (unwind-protect
+       (progn
+         (loop repeat (round (* seconds 100))
+               while (bordeaux-threads:thread-alive-p thread)
+               do (sleep 0.01d0))
+         (not (bordeaux-threads:thread-alive-p thread)))
+    (when (bordeaux-threads:thread-alive-p thread)
+      (ignore-errors (bordeaux-threads:destroy-thread thread)))))
 
 (defun %read-octet-line (stream)
   "Read one LF-terminated line of UTF-8 from the octet STREAM; NIL at EOF."
