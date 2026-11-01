@@ -123,7 +123,8 @@ costs one visit per distinct node instead of blowing up exponentially."
 prints can be anything it was given, circular structure included, and only
 all three bound together guarantee the printing ends soon: circle notation
 stops a cycle, and the level and length stop a merely huge object (the bounds
-alone do not stop #1=(#1# . #1#), which holds 50^8 elements within them)."
+alone do not stop #1=(#1# . #1#), which holds 50^8 elements within them).
+The price: an object the report prints twice is labelled, #1=x and #1#."
   (let ((*print-circle* t)
         (*print-level* 8)
         (*print-length* 50))

@@ -4319,7 +4319,8 @@ thread behind."
   ;; list -- was taken apart with SYMBOL-NAME, and the TYPE-ERROR printed its
   ;; circular datum forever.
   (with-temp-file "tests/tmp/edit-form-list-head.lisp"
-      (format nil "((lambda (x) x) 1)~%~%(#1=(a . #1#) foo)~%~%(defun target () :old)~%")
+      (format nil "((lambda (x) x) 1)~%~%(#1=(a . #1#) foo)~%~%(defun . 5)~%~%~
+                   (defun target () :old)~%")
     (lambda (path)
       (let ((function (%edit-within 2 :file-path path :form-type "defun"
                                       :form-name "target" :operation "replace"

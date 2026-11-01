@@ -149,6 +149,55 @@ other callers see a package definition edited between two calls.")
                results)))
     (walk (ensure-directory-pathname root))))
 
+(defun %skip-to-next-form (stream)
+  "Advance STREAM past whitespace and comments (; and #|...|#, nested) to the
+next form's first character, and return that character, or NIL at the end."
+  (loop
+    (let ((char (peek-char t stream nil nil)))
+      (cond
+        ((null char) (return nil))
+        ((char= char #\;) (read-line stream nil nil))
+        ((char= char #\#)
+         (read-char stream)
+         (let ((next (peek-char nil stream nil nil)))
+           (unless (eql next #\|)
+             (unread-char char stream)
+             (return char))
+           (read-char stream)
+           (loop with depth = 1
+                 for c = (read-char stream nil nil)
+                 while (and c (plusp depth))
+                 do (cond ((and (char= c #\|) (eql (peek-char nil stream nil nil) #\#))
+                           (read-char stream)
+                           (decf depth))
+                          ((and (char= c #\#) (eql (peek-char nil stream nil nil) #\|))
+                           (read-char stream)
+                           (incf depth))))))
+        (t (return char))))))
+
+(defun %read-form-whole-p (stream)
+  "Return T when the next form on STREAM may be a header form and is to be
+read whole: a list whose first element is written as a symbol that names a
+header form (IN-PACKAGE, DEFPACKAGE and the like, see %HEADER-FORM-P), or a
+form behind #+ or #-, which is read whole as it always was.  Only that symbol
+is read, never the rest of the form, and STREAM is left somewhere inside it:
+the caller rewinds."
+  (let ((first (%skip-to-next-form stream)))
+    (cond
+      ((eql first #\#)
+       (read-char stream)
+       (and (member (peek-char nil stream nil nil) '(#\+ #\-)) t))
+      ((eql first #\()
+       (read-char stream)
+       (let ((char (peek-char t stream nil nil)))
+         ;; A symbol token, not a list, a string, a quote or a dispatch.
+         (and char
+              (not (find char "()'`,\"#;|"))
+              (let ((head (handler-case (read-preserving-whitespace stream nil nil)
+                            (error () nil))))
+                (%header-form-p (list head))))))
+      (t nil))))
+
 (defun %read-header-forms-from-text (text)
   "Read package-related header forms from TEXT using the CL reader.
 Stops after the first non-header top-level form once package header forms
@@ -157,7 +206,13 @@ best-effort: a read error or premature end of file (a malformed later form,
 custom reader syntax) ends the scan and the forms read so far are returned,
 so callers such as PARSE-TOP-LEVEL-FORMS can report the breakage themselves
 instead of failing here first.  Text nested too deeply to read safely
-(LISP-TOO-DEEP-P) yields no forms."
+(LISP-TOO-DEEP-P) yields no forms.
+Only a form whose head is written as a header symbol, or one behind #+ or #-,
+is read whole (see %READ-FORM-WHOLE-P); every other form is skipped with
+*READ-SUPPRESS*, which
+builds nothing.  SBCL's reader never returns from some valid text -- a
+backquote template with a circular tail, `(a . #1=(b . #1#)), whose last cons
+it looks for -- and this scan runs on every file the Lisp-aware tools open."
   (when (lisp-too-deep-p text)
     (return-from %read-header-forms-from-text nil))
   (call-with-lenient-packages
@@ -166,11 +221,16 @@ instead of failing here first.  Text nested too deeply to read safely
        (with-input-from-string (stream text)
          (let ((forms nil)
                (saw-header nil))
-           (loop for form = (handler-case (read stream nil :eof)
-                              (error () :eof))
+           (loop for start = (file-position stream)
+                 for header-p = (%read-form-whole-p stream)
+                 for form = (progn
+                              (file-position stream start)
+                              (handler-case (let ((*read-suppress* (not header-p)))
+                                              (read stream nil :eof))
+                                (error () :eof)))
                  until (eq form :eof)
                  do (cond
-                      ((%header-form-p form)
+                      ((and header-p (%header-form-p form))
                        (push form forms)
                        (setf saw-header t))
                       (saw-header

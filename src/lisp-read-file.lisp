@@ -377,7 +377,9 @@ printer to label the first occurrence with `#1=' and emit `#1#' on
 reuse — producing nonsense like `(in-package #1=#1#)' when the
 shared symbol is the sole argument of a form.  A form that is really circular
 -- #n= is standard syntax, so '#1=(a . #1#) is a valid literal -- is printed
-with *PRINT-CIRCLE* T all the same: without it the printing never ends."
+with *PRINT-CIRCLE* T all the same: without it the printing never ends.  In
+such a form a repeated symbol of a package the file names but this image lacks
+is labelled too (#1=x ... #1#), so content_pattern sees those labels."
   (let ((*print-pretty* t)
         (*print-case* :downcase)
         (*print-right-margin* 80)

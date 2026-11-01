@@ -232,3 +232,45 @@ The source form is left out: it holds uninterned symbols, fresh on every read."
                                        (lambda () (setf seen *package*))
                                        :text "(in-package :cl-user)")
        (ok (eq seen (find-package :cl-user))))))))
+
+(defun %extract-within (seconds text)
+  "Return EXTRACT-IN-PACKAGE-NAME-FROM-TEXT of TEXT, or :TIMEOUT when it has
+not answered within SECONDS; the thread doing it is destroyed on the way out
+whenever it is still running."
+  (let* ((result nil)
+         (thread (bordeaux-threads:make-thread
+                  (lambda ()
+                    (setf result (handler-case (extract-in-package-name-from-text text)
+                                   (serious-condition (c) c))))
+                  :name "package-context-test-extract-within")))
+    (unwind-protect
+         (progn
+           (loop repeat (round (* seconds 100))
+                 while (bordeaux-threads:thread-alive-p thread)
+                 do (sleep 0.01d0))
+           (if (bordeaux-threads:thread-alive-p thread) :timeout result))
+      (when (bordeaux-threads:thread-alive-p thread)
+        (ignore-errors (bordeaux-threads:destroy-thread thread))))))
+
+(deftest extract-in-package-skips-a-circular-backquote-template
+  ;; Issue #285: SBCL's reader never returns from `(a . #1=(b . #1#)) -- its
+  ;; backquote reader walks the list to its last cons -- and the header scan
+  ;; read every form of a file with that reader.
+  (dolist (text (list (format nil "(defmacro q () `(a . #1=(b . #1#)))~%~
+                                   (in-package :my-app)")
+                      (format nil "(in-package :my-app)~%~
+                                   (defmacro q () `(a . #1=(b . #1#)))")))
+    (let ((name (%extract-within 2 text)))
+      (ok (and (stringp name) (string-equal name "MY-APP"))
+          (format nil "answered ~S for ~S" name text)))))
+
+(deftest extract-in-package-still-finds-headers-written-other-ways
+  (testing "a qualified head, comments before it and a #+ header still count"
+    (dolist (case (list (format nil ";; header~%#| block #| nested |# |#~%~
+                                     (cl:in-package :my-app)")
+                        (format nil "(defpackage :my-app (:use :cl))~%~
+                                     (in-package :my-app)")
+                        (format nil "#+sbcl (in-package :my-app)~%(defun f () 1)")))
+      (let ((name (%extract-within 2 case)))
+        (ok (and (stringp name) (string-equal name "MY-APP"))
+            (format nil "answered ~S for ~S" name case))))))

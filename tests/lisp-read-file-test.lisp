@@ -1606,3 +1606,18 @@ the test is about rather than for an unknown structure name."
           (ok (and (stringp content)
                    (search "'(:a (:b (:c (:d (:e (:f 1)))))) ..." content))
               (format nil "shown whole: ~A" content)))))))
+
+(deftest lisp-read-file-circular-backquote-template
+  (testing "a backquote template with a circular tail is read and summarized"
+    ;; SBCL's reader never returns from it; the package-header scan used that
+    ;; reader on every form before Eclector saw the file.
+    (with-temp-lisp-file "tests/tmp/read-file-circular-backquote.lisp"
+        (format nil "(in-package #:cl-user)~%~%~
+                     (defmacro q () `(a . #1=(b . #1#)))~%~%~
+                     (defun after () 1)~%")
+      (lambda (path)
+        (let ((content (%read-within 2 path)))
+          (ok (stringp content) (format nil "answered: ~A" content))
+          (when (stringp content)
+            (ok (search "(defmacro q () ..." content))
+            (ok (search "(defun after () ..." content))))))))

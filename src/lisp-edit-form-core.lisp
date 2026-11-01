@@ -585,9 +585,11 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
                             (eq (cst-node-kind node) :expr))
                     do (let ((value (cst-node-value node)))
                          ;; A head that is no symbol -- ((lambda (x) x) 1), or
-                         ;; a circular list -- names no form type.
+                         ;; a circular list -- names no form type, and a
+                         ;; dotted (defun . 5) has no name to match.
                          (when (and (consp value)
                                     (symbolp (car value))
+                                    (consp (cdr value))
                                     (string= (string-downcase (symbol-name (car value))) form-type)
                                     (let ((targets (if (%list-valued-name-p value form-type)
                                                        list-targets
