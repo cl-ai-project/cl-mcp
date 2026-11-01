@@ -293,7 +293,7 @@ whenever it is still running."
           (format nil "answered ~S" name)))))
 
 (deftest extract-in-package-judges-feature-expressions
-  (testing "nested and qualified conditionals are judged as the reader would"
+  (testing "nested conditionals are judged as the reader would"
     (dolist (case (list (format nil "#+sbcl #-sbcl (foo) (in-package :my-app)")
                         (format nil "#-sbcl #+sbcl (in-package :other) (in-package :my-app)")
                         "#+(and sbcl (not windows)) (in-package :my-app)"
@@ -310,6 +310,9 @@ whenever it is still running."
                         (cons (format nil "(in-package :my-app)~%~
                                            #+(version>= 9) (defun g ())")
                               "MY-APP")
+                        (cons (format nil "(defun f () #+(version>= 9) 1)~%~
+                                           (in-package :my-app)")
+                              "MY-APP")
                         (cons "#+(and . sbcl) (in-package :my-app)" nil)
                         (cons "#+" nil)))
       (let ((name (%extract-within 2 (car pair))))
@@ -318,12 +321,19 @@ whenever it is still running."
                 (null name))
             (format nil "answered ~S for ~S" name (car pair))))))
   (testing "a backquote template in a feature expression does not hang the scan"
+    ;; At top level, and inside a form that is skipped: there SBCL's #+ reads
+    ;; its feature expression with *READ-SUPPRESS* off.
     (dolist (case (list (format nil "#+`(a . #1=(b . #1#)) (defun f ())~%~
                                      (in-package :my-app)")
                         (format nil "#-`(a . #1=(b . #1#)) (in-package :other)~%~
+                                     (in-package :my-app)")
+                        (format nil "(defun f () #+`(a . #1=(b . #1#)) 1)~%~
+                                     (in-package :my-app)")
+                        (format nil "#+sbcl (defun f () #-`(a . #1=(b . #1#)) 1)~%~
                                      (in-package :my-app)")))
       (let ((name (%extract-within 2 case)))
-        (ok (not (eq name :timeout)) (format nil "answered ~S for ~S" name case))))))
+        (ok (and (stringp name) (string-equal name "MY-APP"))
+            (format nil "answered ~S for ~S" name case))))))
 
 (deftest package-specs-in-file-survives-a-feature-expression-featurep-rejects
   (testing "a bad conditional after the header keeps the package's spec"
@@ -339,3 +349,27 @@ whenever it is still running."
                    :key #'cl-mcp/src/package-context::package-spec-name
                    :test #'string-equal)
              (format nil "the defpackage's spec is kept: ~S" specs)))))))
+
+(deftest header-scan-refuses-circular-or-backquoted-header-forms
+  (testing "a header form holding a backquote template is no header and no hang"
+    (let ((name (%extract-within 2 (format nil "(in-package `(a . #1=(b . #1#)))"))))
+      (ok (null name) (format nil "answered ~S" name))))
+  (testing "a circular header form is not walked for its package spec"
+    (call-with-temp-project
+     (lambda (root)
+       (let* ((file (write-source root "circular-clauses.lisp"
+                                  (format nil "(defpackage :p3 . #1=((:use :cl) . #1#))~%~
+                                               (in-package :p3)~%")))
+              (specs :timeout)
+              (thread (bordeaux-threads:make-thread
+                       (lambda ()
+                         (setf specs
+                               (cl-mcp/src/package-context::%package-specs-in-file file)))
+                       :name "package-context-test-circular-clauses")))
+         (unwind-protect
+              (loop repeat 200
+                    while (bordeaux-threads:thread-alive-p thread)
+                    do (sleep 0.01d0))
+           (when (bordeaux-threads:thread-alive-p thread)
+             (ignore-errors (bordeaux-threads:destroy-thread thread))))
+         (ok (listp specs) (format nil "answered: ~S" specs)))))))

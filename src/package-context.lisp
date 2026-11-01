@@ -178,7 +178,7 @@ next form's first character, and return that character, or NIL at the end."
                          (incf depth)))))
         (t (return char))))))
 
-(defparameter *feature-readtable*
+(defparameter *header-readtable*
   (let ((readtable (copy-readtable nil)))
     (set-macro-character #\`
                          (lambda (stream char)
@@ -186,10 +186,32 @@ next form's first character, and return that character, or NIL at the end."
                            (error 'reader-error :stream stream))
                          nil readtable)
     readtable)
-  "The standard readtable with backquote made an error, for reading a #+/#-
-feature expression.  A feature expression is symbols and lists of them, so a
-backquote in one is never valid, and SBCL's backquote reader never returns from
-a template with a circular tail, `(a . #1=(b . #1#)).")
+  "The standard readtable with backquote made an error, for what the header
+scan reads for real: a #+/#- feature expression and a header form.  Neither
+ever holds a backquote (a feature expression is symbols and lists of them, and
+IN-PACKAGE's and DEFPACKAGE's arguments are not evaluated), and SBCL's
+backquote reader never returns from a template with a circular tail,
+`(a . #1=(b . #1#)).")
+
+(defun %skip-conditional (stream sub-char argument)
+  "The #+ and #- of *SKIP-READTABLE*: read the feature expression and the form
+it guards, both under *READ-SUPPRESS*, and return no value.  SBCL's own #+
+reads its feature expression with *READ-SUPPRESS* off, even inside a form
+being skipped, so a backquote there was read for real."
+  (declare (ignore sub-char argument))
+  (let ((*read-suppress* t))
+    (read stream t nil t)
+    (read stream t nil t))
+  (values))
+
+(defparameter *skip-readtable*
+  (let ((readtable (copy-readtable nil)))
+    (set-dispatch-macro-character #\# #\+ #'%skip-conditional readtable)
+    (set-dispatch-macro-character #\# #\- #'%skip-conditional readtable)
+    readtable)
+  "The standard readtable with #+ and #- skipping both their parts, for
+%SKIP-FORM's reads under *READ-SUPPRESS*: with it nothing in a skipped form,
+however deeply nested, is read for real.")
 
 (defun %read-form-whole-p (stream)
   "Return T when the next form on STREAM may be a header form and is to be
@@ -211,7 +233,8 @@ somewhere inside it: the caller rewinds."
            (let ((holds
                    (handler-case
                        (let ((feature (let ((*package* (find-package "KEYWORD"))
-                                            (*readtable* *feature-readtable*))
+                                            (*readtable* *header-readtable*)
+                                            (*read-eval* nil))
                                         (read-preserving-whitespace stream t))))
                          ;; FEATUREP walks it, so a circular one is no header.
                          (and (not (circular-p feature))
@@ -231,10 +254,13 @@ somewhere inside it: the caller rewinds."
 
 (defun %skip-form (stream)
   "Move STREAM past exactly one top-level form without building it, and return
-T, or NIL when no form is left.  A #+ or #- form is skipped with the form it
-guards: under *READ-SUPPRESS* the reader would read neither and go on to take
-the next form as well."
-  (let ((first (%skip-to-next-form stream)))
+T, or NIL when no form is left.  A top-level #+ or #- form is skipped with the
+form it guards: a read of it under *READ-SUPPRESS* would return no value and go
+on to take the next form as well.  The reads use *SKIP-READTABLE*, so a
+conditional nested in the form is not read for real either."
+  (let ((first (%skip-to-next-form stream))
+        (*readtable* *skip-readtable*)
+        (*read-suppress* t))
     (cond
       ((null first) nil)
       ((and (eql first #\#)
@@ -242,12 +268,10 @@ the next form as well."
                    (or (member (peek-char nil stream nil nil) '(#\+ #\-))
                        (progn (unread-char first stream) nil))))
        (read-char stream)
-       (let ((*read-suppress* t))
-         (read stream nil nil))
+       (read stream nil nil)
        (%skip-form stream))
       (t
-       (let ((*read-suppress* t))
-         (read stream nil nil))
+       (read stream nil nil)
        t))))
 
 (defun %read-header-forms-from-text (text)
@@ -260,8 +284,10 @@ so callers such as PARSE-TOP-LEVEL-FORMS can report the breakage themselves
 instead of failing here first.  Text nested too deeply to read safely
 (LISP-TOO-DEEP-P) yields no forms.
 Only a form whose head is written as a header symbol, directly or behind a
-#+/#- that holds, is read whole (see %READ-FORM-WHOLE-P); every other form is
-skipped with *READ-SUPPRESS*, which builds nothing.  SBCL's reader never
+#+/#- that holds, is read whole (see %READ-FORM-WHOLE-P), with backquote an
+error (*HEADER-READTABLE*), and kept only if it is not circular; every other
+form is skipped (%SKIP-FORM) with *READ-SUPPRESS*, which builds nothing, and
+with #+/#- that read nothing for real either.  SBCL's reader never
 returns from some valid text -- a backquote template with a circular tail,
 `(a . #1=(b . #1#)), whose last cons it looks for -- and this scan runs on
 every file the Lisp-aware tools open.  Skipping also means a form the reader
@@ -280,12 +306,15 @@ know) no longer ends the scan before a header that follows it."
                  for form = (progn
                               (file-position stream start)
                               (handler-case (if header-p
-                                                (read stream nil :eof)
+                                                (let ((*readtable* *header-readtable*))
+                                                  (read stream nil :eof))
                                                 (if (%skip-form stream) :skipped :eof))
                                 (error () :eof)))
                  until (eq form :eof)
                  do (cond
-                      ((and header-p (%header-form-p form))
+                      ;; A circular header form is no header: the spec
+                      ;; extraction walks its clauses.
+                      ((and header-p (%header-form-p form) (not (circular-p form)))
                        (push form forms)
                        (setf saw-header t))
                       (saw-header
