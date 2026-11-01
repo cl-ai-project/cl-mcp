@@ -222,3 +222,135 @@
                         (ok (equal '("CL-SPEC") (symbol-value groups-symbol))))
                    (stop-tcp-server-thread)))
             (setf (symbol-value groups-symbol) previous))))))
+
+(defun %call-with-one-shot-server (function)
+  "Run SERVE-TCP for one connection on a thread and call FUNCTION with its port.
+Return the server thread once FUNCTION returns; the caller decides how long to
+wait for it to finish."
+  (let* ((port nil)
+         (thread (make-thread
+                  (lambda ()
+                    (serve-tcp :host "127.0.0.1" :port 0
+                               :on-listening (lambda (p) (setf port p))
+                               :accept-once t))
+                  :name "tcp-test-one-shot-server")))
+    (loop repeat 200 until port do (sleep 0.01d0))
+    (ok port "the one-shot server is listening")
+    (funcall function port)
+    thread))
+
+(defun %thread-ends-within-p (thread seconds)
+  "Return T when THREAD finishes within SECONDS, NIL when it is still running."
+  (loop repeat (round (* seconds 100))
+        while (bordeaux-threads:thread-alive-p thread)
+        do (sleep 0.01d0))
+  (not (bordeaux-threads:thread-alive-p thread)))
+
+(defun %read-octet-line (stream)
+  "Read one LF-terminated line of UTF-8 from the octet STREAM; NIL at EOF."
+  (let ((octets (make-array 0 :element-type '(unsigned-byte 8)
+                              :adjustable t :fill-pointer 0)))
+    (loop for byte = (read-byte stream nil nil)
+          do (cond ((null byte)
+                    (return (and (plusp (length octets))
+                                 (sb-ext:octets-to-string
+                                  (coerce octets '(vector (unsigned-byte 8)))
+                                  :external-format :utf-8))))
+                   ((= byte 10)
+                    (return (sb-ext:octets-to-string
+                             (coerce octets '(vector (unsigned-byte 8)))
+                             :external-format :utf-8)))
+                   (t (vector-push-extend byte octets))))))
+
+(deftest tcp-undecodable-line-is-a-parse-error
+  (testing "a line that is not UTF-8 is answered with -32700 and the connection goes on"
+    (if (not (socket-available-p))
+        (ok t "socket unavailable")
+        (let ((thread
+                (%call-with-one-shot-server
+                 (lambda (port)
+                   ;; :timeout puts a receive timeout on the socket, so a
+                   ;; response that never comes fails the read, not the run.
+                   (let* ((sock (usocket:socket-connect
+                                 "127.0.0.1" port
+                                 :element-type '(unsigned-byte 8) :timeout 5))
+                          (stream (usocket:socket-stream sock)))
+                     (unwind-protect
+                          (flet ((send (octets)
+                                   (write-sequence octets stream)
+                                   (finish-output stream)))
+                            (send (concatenate
+                                   '(vector (unsigned-byte 8))
+                                   (sb-ext:string-to-octets
+                                    "{\"jsonrpc\":\"2.0\",\"id\":77,\"method\":\"ping\",\"params\":{\"x\":\""
+                                    :external-format :utf-8)
+                                   #(#xc3 #x28)
+                                   (sb-ext:string-to-octets
+                                    (format nil "\"}}~%") :external-format :utf-8)))
+                            (send (sb-ext:string-to-octets
+                                   (format nil "{\"jsonrpc\":\"2.0\",\"id\":78,~
+                                                \"method\":\"ping\"}~%")
+                                   :external-format :utf-8))
+                            (ignore-errors (usocket:socket-shutdown sock :output))
+                            (let ((first (handler-case (%read-octet-line stream)
+                                           (error () nil)))
+                                  (second (handler-case (%read-octet-line stream)
+                                            (error () nil))))
+                              (ok (and first (search "-32700" first))
+                                  "the undecodable line gets a parse error")
+                              (ok (and second (search "\"id\":78" second)
+                                       (search "\"result\"" second))
+                                  "the next request on the connection is answered")))
+                       (ignore-errors (usocket:socket-close sock))))))))
+          (ok (%thread-ends-within-p thread 5)
+              "the connection ends and the server returns")))))
+
+(deftest tcp-connection-reset-ends-the-connection
+  (testing "a reset from the client ends the read loop instead of stopping the thread"
+    (if (not (socket-available-p))
+        (ok t "socket unavailable")
+        (let ((thread
+                (%call-with-one-shot-server
+                 (lambda (port)
+                   (let* ((sock (usocket:socket-connect "127.0.0.1" port
+                                                        :element-type 'character))
+                          (stream (usocket:socket-stream sock)))
+                     (write-line "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"
+                                 stream)
+                     (finish-output stream)
+                     ;; Wait for the response and leave it unread in the
+                     ;; kernel (wait-for-input polls; LISTEN would pull it into
+                     ;; the stream's buffer): closing a socket with unread data
+                     ;; makes the kernel send a reset instead of a FIN, which
+                     ;; the server meets in its next read.
+                     (ok (usocket:wait-for-input (list sock) :timeout 5
+                                                             :ready-only t)
+                         "the response has arrived")
+                     (usocket:socket-close sock))))))
+          (ok (%thread-ends-within-p thread 5)
+              "the connection ends and the server returns")))))
+
+(deftest tcp-client-thread-survives-a-failing-socket
+  (testing "an error outside the line read still ends the connection and runs its cleanup"
+    (if (not (socket-available-p))
+        (ok t "socket unavailable")
+        (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
+                                                              :element-type 'character))
+               (client (usocket:socket-connect "127.0.0.1"
+                                               (usocket:get-local-port listener)
+                                               :element-type 'character))
+               (server-side (usocket:socket-accept listener :element-type 'character)))
+          (unwind-protect
+               (progn
+                 ;; Close the descriptor under the server's socket object, so
+                 ;; its first WAIT-FOR-INPUT signals instead of reading.
+                 (close (usocket:socket-stream server-side))
+                 (let ((thread (make-thread
+                                (lambda ()
+                                  (funcall 'cl-mcp/src/tcp::%tcp-handle-client
+                                           server-side 9001))
+                                :name "tcp-test-failing-socket")))
+                   (ok (%thread-ends-within-p thread 5)
+                       "the client thread ends instead of stopping in the debugger")))
+            (ignore-errors (usocket:socket-close client))
+            (ignore-errors (usocket:socket-close listener)))))))
