@@ -89,8 +89,8 @@ one cancelled."
 (defun cancel-inline-request (session-id request-id)
   "Cancel request REQUEST-ID of SESSION-ID if it is running a cancellable
 region: interrupt its thread, which then signals INLINE-REQUEST-CANCELLED at
-the region's next cancellation point.  Return T when a region was found, NIL
-otherwise."
+the region's next cancellation point.  Return T when a region was found and its
+thread interrupted, NIL otherwise (no such region, or its thread just ended)."
   (let ((entry (bordeaux-threads:with-lock-held (*regions-lock*)
                  (gethash (%region-key session-id request-id) *regions*))))
     (when (and entry (bordeaux-threads:thread-alive-p (car entry)))

@@ -462,24 +462,28 @@ destroyed on the way out whenever it is still running."
   (testing "a FIFO named like a Lisp file is not opened, so the search cannot block on it"
     (with-runaway-fixture ("tests/tmp/clgrep-fifo/")
       (let ((fifo (merge-pathnames "tests/tmp/clgrep-fifo/pipe.lisp" *project-root*))
-            (root *project-root*))
+            (root *project-root*)
+            (finished nil))
         (uiop:run-program (list "mkfifo" (uiop:native-namestring fifo)))
         (unwind-protect
-             (multiple-value-bind (result finished)
+             (multiple-value-bind (result done)
                  (%call-within 5 (lambda ()
                                    (let ((*project-root* root))
                                      (%call-clgrep "defun" "path" "tests/tmp/clgrep-fifo/"
                                                    "timeout_seconds" 1))))
+               (setf finished done)
                (ok finished "the search answered")
                (when finished
                  (ok (search "runaway.lisp" (first result))
                      (format nil "the regular file is still searched: ~A" (first result)))))
-          ;; A reader blocked in open is released by a writer.
-          (bordeaux-threads:make-thread
-           (lambda ()
-             (ignore-errors
-              (with-open-file (out fifo :direction :output :if-exists :append))))
-           :name "clgrep-test-fifo-writer"))))))
+          ;; Only a search that blocked in open on the FIFO needs a writer to
+          ;; release it; with no reader a writer would block for good.
+          (unless finished
+            (bordeaux-threads:make-thread
+             (lambda ()
+               (ignore-errors
+                (with-open-file (out fifo :direction :output :if-exists :append))))
+             :name "clgrep-test-fifo-writer")))))))
 
 (deftest clgrep-search-tool-stops-when-its-request-is-cancelled
   (testing "notifications/cancelled for a running search ends it"

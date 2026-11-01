@@ -94,6 +94,9 @@
                (cl-mcp/src/inline-cancel::%interrupt-region (car entry) (cdr entry)))
              ;; Region 2 has no cancellation point, so the interruption is
              ;; taken when it ends; the token check there is what is tested.
+             ;; The pause lets the interruption become pending while region 2
+             ;; still holds its token.
+             (sleep 0.1d0)
              (setf go-on t)
              (loop repeat 300
                    while (bordeaux-threads:thread-alive-p thread)
