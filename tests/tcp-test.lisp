@@ -353,8 +353,16 @@ interrupted -- so a failing test leaves no server or client thread behind."
                                            (error () nil)))
                                   (second (handler-case (%read-octet-line stream)
                                             (error () nil))))
-                              (ok (and first (search "-32700" first))
-                                  "the undecodable line gets a parse error")
+                              (let ((parsed (and first (ignore-errors
+                                                        (yason:parse first)))))
+                                (ok (and (hash-table-p parsed)
+                                         (eql -32700 (gethash "code"
+                                                              (gethash "error" parsed)))
+                                         (multiple-value-bind (id present)
+                                             (gethash "id" parsed)
+                                           (and present (null id))))
+                                    (format nil "the undecodable line gets a parse ~
+                                                 error with a null id: ~A" first)))
                               (ok (and second (search "\"id\":78" second)
                                        (search "\"result\"" second))
                                   "the next request on the connection is answered")))

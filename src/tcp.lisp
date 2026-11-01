@@ -18,6 +18,8 @@
                 #:%read-line-limited #:+max-json-line-bytes+
                 #:line-too-long)
   (:import-from #:usocket)
+  (:import-from #:yason)
+  (:import-from #:cl-mcp/src/tools/helpers #:rpc-error)
   (:export
    #:*tcp-server-thread*
    #:*tcp-server-port*
@@ -170,17 +172,19 @@ supplied, uses *enabled-tool-groups*, which comes from MCP_ENABLE_TOOL_GROUPS."
           *tcp-listener* nil)
     :stopped))
 
+(defun %error-response-line (code message)
+  "Return the JSON-RPC error response with CODE and MESSAGE and a null id, as
+one line of JSON encoded by yason: the answer to a line that never became a
+request, so there is no id to echo."
+  (with-output-to-string (out)
+    (yason:encode (rpc-error nil code message) out)))
+
 (defparameter *too-large-response*
-  (concatenate 'string
-               "{\"jsonrpc\":\"2.0\",\"id\":null,"
-               "\"error\":{\"code\":-32600,\"message\":\"Request too large\"}}")
+  (%error-response-line -32600 "Request too large")
   "The response line to a request longer than +MAX-JSON-LINE-BYTES+.")
 
 (defparameter *undecodable-response*
-  (concatenate 'string
-               "{\"jsonrpc\":\"2.0\",\"id\":null,"
-               "\"error\":{\"code\":-32700,"
-               "\"message\":\"Parse error: the request is not valid UTF-8\"}}")
+  (%error-response-line -32700 "Parse error: the request is not valid UTF-8")
   "The response line to a request line that is not UTF-8.")
 
 (defun %read-request-line (stream conn-id)
