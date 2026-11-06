@@ -234,13 +234,13 @@ Unlike SBCL's, it does not walk the object afterwards to replace references
 to the label inside it -- that walk recurses along the object's cdrs, and a
 labelled clause of 200000 symbols exhausted the stack -- so a reference made
 while the object is being read is an error (%HEADER-LABEL-REFERENCE): a
-header form cannot become circular.  Under *READ-SUPPRESS* it reads the
-object and returns NIL, as SBCL's does."
+header form cannot become circular.  Under *READ-SUPPRESS* it returns no
+value and reads nothing, as SBCL's does."
   (declare (ignore sub-char))
   (cond
-    (*read-suppress*
-     (read stream t nil t)
-     nil)
+    ;; SBCL's yields nothing here and leaves the object to the enclosing
+    ;; read, so a suppressed (a #1=) still closes.
+    (*read-suppress* (values))
     ((or (null argument) (null *header-labels*)
          (nth-value 1 (gethash argument *header-labels*)))
      ;; No number, no form being read whole, or a label defined twice.

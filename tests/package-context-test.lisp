@@ -585,4 +585,8 @@ or :TIMEOUT."
     (dolist (text (list "(in-package #1#)" "(in-package #1=a #1=b)"
                         (format nil "(defpackage :p (:use . #1=(:cl . #1#)))~%~
                                      (in-package :p)")))
-      (ok (null (%extract-within 2 text)) (format nil "no header in ~S" text)))))
+      (ok (null (%extract-within 2 text)) (format nil "no header in ~S" text))))
+  (testing "a suppressed #n= yields nothing, as SBCL's does"
+    (let ((name (%extract-within 2 (format nil "(defpackage :p #-sbcl (a #1=) (:use :x))~%~
+                                                (in-package :p)"))))
+      (ok (equal "P" name) (format nil "answered ~S" name)))))
