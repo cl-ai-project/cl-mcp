@@ -552,3 +552,37 @@ or :TIMEOUT."
         (ok (equal '(defpackage :p (:size 32) (:size 5) (:size 15) (:size 5))
                    (first forms))
             (format nil "every radix: ~S" forms))))))
+
+(defun %chain-of (n piece)
+  "Return PIECE written N times."
+  (with-output-to-string (out)
+    (dotimes (i n)
+      (write-string piece out))))
+
+(deftest header-scan-labels-do-not-walk-what-they-label
+  (testing "a long labelled clause is read without recursing along it"
+    ;; SBCL's #n= walks the labelled object along its cdrs, even with no
+    ;; #n# in it: 200000 elements exhausted the stack.
+    (dolist (pair (list (cons (format nil "(defpackage :p #1=(:export ~A))~%(in-package :p)"
+                                      (%chain-of 200000 "a "))
+                              "P")
+                        ;; The reference inside the labelled object would make
+                        ;; the form circular: no header.
+                        (cons (format nil "(defpackage :p #1=(:nicknames ~A#1#))~%~
+                                           (in-package :p)"
+                                      (%chain-of 200000 "a "))
+                              nil)))
+      (let ((name (%extract-within 5 (car pair))))
+        (ok (equal name (cdr pair))
+            (format nil "answered ~S, expected ~S" name (cdr pair))))))
+  (testing "a shared clause still reads, and a bad label is no header"
+    (let ((forms (cl-mcp/src/package-context::%read-header-forms-from-text
+                  (format nil "(defpackage :e (:shadow . #1=(#:a #:b)) (:export . #1#))~%~
+                               (in-package :e)"))))
+      (ok (= 2 (length forms)) (format nil "~S" forms))
+      (ok (eq (cdr (third (first forms))) (cdr (fourth (first forms))))
+          "the two clauses share their tail, as the text says"))
+    (dolist (text (list "(in-package #1#)" "(in-package #1=a #1=b)"
+                        (format nil "(defpackage :p (:use . #1=(:cl . #1#)))~%~
+                                     (in-package :p)")))
+      (ok (null (%extract-within 2 text)) (format nil "no header in ~S" text)))))

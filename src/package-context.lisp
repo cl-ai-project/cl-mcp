@@ -219,7 +219,56 @@ replaced by %HEADER-CONDITIONAL (named, so it may be defined later)."
     (set-dispatch-macro-character #\# #\- '%header-conditional readtable)
     readtable))
 
-(defparameter *header-readtable* (%make-header-readtable "|:\\+-=#BbOoXxRr")
+(defvar *header-labels* nil
+  "While the scan reads one header form whole, a hash table from a label's
+number to the object #n= gave it, or to *LABEL-BEING-READ* until that object
+is read; NIL elsewhere.")
+
+(defvar *label-being-read* (list :label-being-read)
+  "The value *HEADER-LABELS* holds for a label whose object is still being
+read.  A fresh list, so no object read from the text is EQ to it.")
+
+(defun %header-label-define (stream sub-char argument)
+  "The #n= of *HEADER-READTABLE*: read the next object and record it under N.
+Unlike SBCL's, it does not walk the object afterwards to replace references
+to the label inside it -- that walk recurses along the object's cdrs, and a
+labelled clause of 200000 symbols exhausted the stack -- so a reference made
+while the object is being read is an error (%HEADER-LABEL-REFERENCE): a
+header form cannot become circular.  Under *READ-SUPPRESS* it reads the
+object and returns NIL, as SBCL's does."
+  (declare (ignore sub-char))
+  (cond
+    (*read-suppress*
+     (read stream t nil t)
+     nil)
+    ((or (null argument) (null *header-labels*)
+         (nth-value 1 (gethash argument *header-labels*)))
+     ;; No number, no form being read whole, or a label defined twice.
+     (error 'reader-error :stream stream))
+    (t
+     (setf (gethash argument *header-labels*) *label-being-read*)
+     (setf (gethash argument *header-labels*) (read stream t nil t)))))
+
+(defun %header-label-reference (stream sub-char argument)
+  "The #n# of *HEADER-READTABLE*: the object #n= recorded under N.  A label not
+defined, or whose object is still being read -- a reference that would make
+the form circular -- is an error.  NIL under *READ-SUPPRESS*, as SBCL's."
+  (declare (ignore sub-char))
+  (if *read-suppress*
+      nil
+      (multiple-value-bind (object found)
+          (if (and argument *header-labels*)
+              (gethash argument *header-labels*)
+              (values nil nil))
+        (when (or (not found) (eq object *label-being-read*))
+          (error 'reader-error :stream stream))
+        object)))
+
+(defparameter *header-readtable*
+  (let ((readtable (%make-header-readtable "|:\\+-=#BbOoXxRr")))
+    (set-dispatch-macro-character #\# #\= '%header-label-define readtable)
+    (set-dispatch-macro-character #\# #\# '%header-label-reference readtable)
+    readtable)
   "The readtable for a header form the scan reads whole.  Of the # dispatches
 it keeps #|, #:, #\\, #+, #-, the labels #n= and #n# (Eclector's defpackage
 shares a clause through one) and the radix integers #B, #O, #X and #R
@@ -227,10 +276,11 @@ shares a clause through one) and the radix integers #B, #O, #X and #R
 (%REFUSING).  A header form needs none of them -- IN-PACKAGE's and
 DEFPACKAGE's arguments are not evaluated -- and those that walk what they read
 (backquote, #(, #A, #C, #S) ran forever on valid circular text such as
-`(a . #1=(b . #1#)), or asked for a huge vector (#n().  A label can still make
-the form circular; the scan drops such a form.  A radix integer is a token: it
-builds nothing to walk.  A dispatch sub-character is matched in either case,
-so both are listed.")
+`(a . #1=(b . #1#)), or asked for a huge vector (#n().  The labels are the
+scan's own (%HEADER-LABEL-DEFINE): SBCL's #n= walks the object it labels,
+recursing along its cdrs, so a long labelled clause exhausted the stack.  A
+radix integer is a token: it builds nothing to walk.  A dispatch
+sub-character is matched in either case, so both are listed.")
 
 (defparameter *feature-readtable* (%make-header-readtable "|:\\+-")
   "*HEADER-READTABLE* without labels, for a #+/#- feature expression: FEATUREP
@@ -412,7 +462,10 @@ it could be trusted."
                                (file-position stream start)
                                (handler-case
                                    (if header-p
-                                       (let ((*readtable* *header-readtable*))
+                                       ;; Labels belong to one form, as
+                                       ;; to the reader's top-level READ.
+                                       (let ((*readtable* *header-readtable*)
+                                             (*header-labels* (make-hash-table)))
                                          (read stream nil :eof))
                                        (progn (%skip-object stream) :skipped))
                                  (error () :eof))))
@@ -420,10 +473,11 @@ it could be trusted."
                  do (cond
                       ;; A conditional that does not hold is not there.
                       ((eq form :transparent))
-                      ;; A circular header form -- labels are allowed, as
-                      ;; Eclector's defpackage shares a clause through one --
-                      ;; is no header: the spec extraction walks its clauses.
-                      ;; Like any non-header after a header, it ends the scan.
+                      ;; A circular header form is no header: the spec
+                      ;; extraction walks its clauses.  The scan's own labels
+                      ;; refuse to build one (%HEADER-LABEL-REFERENCE); the
+                      ;; check stays as the guarantee.  Like any non-header
+                      ;; after a header, it ends the scan.
                       ((and header-p (%header-form-p form) (not (circular-p form)))
                        (push form forms)
                        (setf saw-header t))
