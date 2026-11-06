@@ -50,6 +50,7 @@
   (:import-from #:cl-mcp/tests/paren-diagnostics-test)
   (:import-from #:cl-mcp/tests/clgrep-utils-test)
   (:import-from #:cl-mcp/tests/clgrep-test)
+  (:import-from #:cl-mcp/tests/inline-cancel-test)
   (:import-from #:cl-mcp/tests/utils-strings-test)
   (:import-from #:cl-mcp/tests/utils-hash-test)
   (:import-from #:cl-mcp/tests/utils-printing-test)

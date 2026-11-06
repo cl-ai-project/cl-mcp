@@ -47,6 +47,11 @@ TCP the server reads one message at a time, so a cancellation is read only
 after the request it names has been answered. Only HTTP can cancel a request
 in flight.
 
+A tool that runs in the parent has no worker to stop. Only `clgrep-search`
+can be cancelled while it runs: its scan is interrupted, and it answers
+`clgrep-search was cancelled before it finished.` as an error. Other parent
+tools run to the end.
+
 An error result the proxy builds, rather than one a tool returned, carries
 `execution_status`. It says whether sending the request again could run it
 twice:
@@ -1029,8 +1034,16 @@ Input:
 - `include_form` (boolean, default `false`): attach each form's full text; a form longer than
   2000 characters is cut to the lines within five of the hit plus its first and last two lines,
   with `...` marking the gaps.
+- `timeout_seconds` (positive number, default `15`): stop the search after this long and
+  return the hits found until then. The search runs in the parent, and over stdio nothing else
+  is answered meanwhile, so a pattern that backtracks without end — a nested repetition such
+  as `(a*)*` against a long run of `a`s — is cut off rather than holding the server. The
+  deadline is taken during a regex match, mid-line included, and only there: reading a file
+  or listing a directory runs to its end, so nothing is cut out of a system call. Hits found
+  before it are kept, those of the file it struck included.
 
-Files searched: `.lisp`, `.asd` and `.ros`. The `.gitignore` of the search root (only that one)
+Files searched: regular files named `.lisp`, `.asd` and `.ros` (a FIFO or a device so named
+is skipped, symbolic links followed). The `.gitignore` of the search root (only that one)
 is honoured as git reads it: `*`, `?`, `**`, `[...]` and `[!...]` classes, `\` escapes, a
 leading or middle `/` anchoring to the root, a trailing `/` for directories only, and `!` lines
 taking a path back in, the last matching line deciding. A pattern matches whole path
@@ -1058,8 +1071,9 @@ Output:
   - `form-start-line`, `form-end-line`, `form-start-byte`, `form-end-byte` (the last two are
     character offsets)
   - `form` (with `include_form`), `unterminated: true` (for a hit inside an unclosed form)
-- `count` (entries), `limited` (the raw hit count reached `limit`), and `notes` (array, when
-  present).
+- `count` (entries), `limited` (the raw hit count reached `limit`), `timed_out` (the search
+  was stopped by `timeout_seconds`; the text then ends with `Search stopped after N seconds`),
+  and `notes` (array, when present).
 
 A file that does not parse is still searched: a form left open to the end of the file
 swallows the rest of it, so each hit inside it gets an entry of its own, attributed to that

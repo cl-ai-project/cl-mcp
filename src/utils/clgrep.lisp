@@ -477,8 +477,18 @@ every entry of the walk, which took seconds over a large project's tree."
     (and type
          (member type '("lisp" "asd" "ros") :test #'string-equal))))
 
+(defun %searchable-file-p (pathname)
+  "True when PATHNAME is a target file (TARGET-FILE-P) that is a regular file,
+symbolic links followed.  A FIFO or a device named like a Lisp file -- pipe.lisp,
+a link to /dev/zero -- would block the read in open, or never end it, and the
+search reads with interrupts disabled, so no deadline could stop it there."
+  (and (target-file-p pathname)
+       (eq :file (ignore-errors
+                  (sb-impl::native-file-kind (sb-ext:native-namestring pathname) t)))))
+
 (defun collect-target-files (root-directory &key (recursive t))
-  "Collect .lisp, .asd, and .ros files from ROOT-DIRECTORY.
+  "Collect .lisp, .asd, and .ros files from ROOT-DIRECTORY -- regular files
+   only (%SEARCHABLE-FILE-P).
    If ROOT-DIRECTORY is a single file, return it in a list (if it's a target file).
    If RECURSIVE is true (default), search subdirectories recursively.
    Respects .gitignore patterns and excludes .git directories.  A directory left
@@ -488,7 +498,7 @@ every entry of the walk, which took seconds over a large project's tree."
     ;; Handle single file case
     (when (uiop:file-pathname-p root-path)
       (return-from collect-target-files
-        (if (target-file-p root-path)
+        (if (%searchable-file-p root-path)
             (list root-path)
             nil)))
     ;; Directory case
@@ -503,7 +513,7 @@ every entry of the walk, which took seconds over a large project's tree."
                        (dolist (entry (uiop:directory*
                                        (merge-pathnames uiop:*wild-file* dir)))
                          (unless (ignored-p entry)
-                           (when (target-file-p entry)
+                           (when (%searchable-file-p entry)
                              (push entry result))))
                        (dolist (subdir (uiop:subdirectories dir))
                          (unless (ignored-p subdir)
@@ -512,7 +522,7 @@ every entry of the walk, which took seconds over a large project's tree."
             (dolist (entry (uiop:directory*
                             (merge-pathnames uiop:*wild-file* root-dir)))
               (unless (ignored-p entry)
-                (when (target-file-p entry)
+                (when (%searchable-file-p entry)
                   (push entry result))))))
       (nreverse result))))
 
@@ -786,7 +796,7 @@ Returns an alist like extract-toplevel-form, or NIL."
   nil)
 
 (defun search-in-file
-       (filepath pattern &key case-insensitive form-types (include-form t))
+       (filepath pattern &key case-insensitive form-types (include-form t) collect)
   "Search for PATTERN in FILEPATH and return a list of match results.
    If CASE-INSENSITIVE is true, perform case-insensitive matching.
    If FORM-TYPES is a list of strings (e.g., '(\"defun\" \"defmethod\")),
@@ -801,6 +811,10 @@ Returns an alist like extract-toplevel-form, or NIL."
    type it would be filtered on is the unclosed form's rather than its own;
    dropping it would lose the match silently, exactly where the caller has
    no way to learn that the file does not parse.
+
+   With COLLECT, a function, each result is handed to it as it is found and
+   NIL is returned: a search stopped mid-file by a deadline keeps the file's
+   results found until then, which a list returned at the end would lose.
 
    Pre-computes toplevel form map and package map once per file for O(n)
    performance instead of O(n*m) where m is the number of matches."
@@ -818,7 +832,10 @@ Returns an alist like extract-toplevel-form, or NIL."
            (loop for line = (read-line stream nil nil)
                  for line-number from 1
                  while line
-                 when (scan scanner line)
+                 ;; The one place a deadline or a cancellation may interrupt:
+                 ;; a match can backtrack for minutes, and it holds no lock and
+                 ;; no foreign resource.
+                 when (sb-sys:with-interrupts (scan scanner line))
                  do (let ((package (%find-package-for-line package-map line-number))
                           (form-info (%find-form-for-line
                                       forms-cache content line-number)))
@@ -871,14 +888,19 @@ Returns an alist like extract-toplevel-form, or NIL."
                                 (setf result
                                         (append result
                                                 (list (cons :unterminated t)))))
-                              (push result results))))))))))
+                              (if collect
+                                  (funcall collect result)
+                                  (push result results)))))))))))
      (error (condition)
             (format *error-output* "Warning: Could not read ~A: ~A~%" filepath
                     condition)))
     (nreverse results)))
 
-(defun semantic-grep (root-directory pattern &key (recursive t) case-insensitive form-types (include-form t) limit)
+(defun semantic-grep (root-directory pattern &key (recursive t) case-insensitive form-types
+                                                  (include-form t) limit timeout-seconds)
   "Search for PATTERN across all Lisp files in ROOT-DIRECTORY.
+   Return two values: the results, and true when TIMEOUT-SECONDS ran out
+   first, in which case the results are those collected until then.
 
    Keyword arguments:
      :recursive        - If true (default), search subdirectories recursively
@@ -888,6 +910,9 @@ Returns an alist like extract-toplevel-form, or NIL."
      :include-form     - If true (default), include full form text in results.
                          Set to NIL to omit :form field (saves tokens).
      :limit            - Maximum number of results to return. If NIL, return all.
+     :timeout-seconds  - Stop the search after this many seconds, wherever it
+                         is (a regex can backtrack for minutes on one line).
+                         If NIL, no deadline.
 
    Returns a list of alists, each containing:
      :file            - The file's PATHNAME, not a namestring. Callers that
@@ -919,25 +944,38 @@ Returns an alist like extract-toplevel-form, or NIL."
   (handler-case (cl-ppcre:create-scanner pattern)
     (cl-ppcre:ppcre-syntax-error (e)
       (error "Invalid regex pattern ~S: ~A" pattern e)))
-  (let ((files (collect-target-files root-directory :recursive recursive))
-        (all-results nil)
-        (count 0))
-    (dolist (file files)
-      (when (and limit (>= count limit))
-        (return))
-      (let ((file-results (search-in-file file pattern
-                                          :case-insensitive case-insensitive
-                                          :form-types form-types
-                                          :include-form include-form)))
-        (if limit
-            ;; With limit: add results up to limit
-            (dolist (result file-results)
-              (when (>= count limit)
-                (return))
-              (push result all-results)
-              (incf count))
-            ;; Without limit: collect via push (O(n) instead of O(n^2) append)
-            (dolist (result file-results)
-              (push result all-results)))))
-    (nreverse all-results)))
+  (let ((all-results nil)
+        (count 0)
+        (timed-out nil))
+    (flet ((search-files ()
+             (dolist (file (collect-target-files root-directory :recursive recursive))
+               (when (and limit (>= count limit))
+                 (return))
+               ;; Each hit is kept as it is found, so one the deadline
+               ;; overtakes mid-file is not lost with the rest of that file.
+               (search-in-file file pattern
+                               :case-insensitive case-insensitive
+                               :form-types form-types
+                               :include-form include-form
+                               :collect (lambda (result)
+                                          (when (or (null limit) (< count limit))
+                                            (push result all-results)
+                                            (incf count)))))))
+      ;; One match of a regex can backtrack for minutes on a single line, so a
+      ;; check between lines would not stop it: the timer interrupts the match
+      ;; itself.  Only the match: the search runs with interrupts disabled and
+      ;; SEARCH-IN-FILE allows them around SCAN alone, so no interruption
+      ;; unwinds out of opendir, read or a lock of the C library, which would
+      ;; hang every thread of the server.  SB-EXT:TIMEOUT is no ERROR, so
+      ;; SEARCH-IN-FILE's per-file handler does not swallow it.  What was
+      ;; collected is kept.
+      (if timeout-seconds
+          (handler-case (sb-ext:with-timeout timeout-seconds
+                          (sb-sys:without-interrupts
+                            (sb-sys:allow-with-interrupts
+                              (search-files))))
+            (sb-ext:timeout ()
+              (setf timed-out t)))
+          (search-files)))
+    (values (nreverse all-results) timed-out)))
 
