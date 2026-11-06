@@ -56,6 +56,14 @@ test would pass without exercising anything."
   "Test macro whose expansion is deliberately long, for truncation tests."
   `(list ,@(loop for i from 0 below 200 collect i)))
 
+(defmacro deep-vector-macro ()
+  "Test macro whose expansion quotes vectors nested 200000 deep: acyclic, and
+deeper than any source text the reader is allowed to take."
+  (let ((datum nil))
+    (dotimes (i 200000)
+      (setf datum (vector datum)))
+    (list 'quote datum)))
+
 (defmacro cyclic-expansion-macro ()
   "Test macro whose expansion is a self-referential list.
 Exercises the circularity check that decides whether to switch
@@ -272,6 +280,17 @@ the tests below see only what this run interns: otherwise, in a reused image,
         (declare (ignore expanded-p steps))
         (ok (stringp printed) "a 60000-element literal is ordinary input")
         (ok truncated-p)))))
+
+(deftest circular-check-survives-a-deeply-nested-expansion
+  (testing "the cycle check before printing does not recurse into the nesting"
+    (let ((entry (first (macroexpand-forms (list (cons "deep" "(deep-vector-macro)"))
+                                           :package *fixture-package*
+                                           :level "once"
+                                           :print-level 2
+                                           :print-length 10))))
+      (ok (null (getf entry :error)) (format nil "no error: ~S" (getf entry :error)))
+      (ok (equal "'#(#(#))" (getf entry :printed))
+          (format nil "printed within the print level: ~S" (getf entry :printed))))))
 
 (deftest macroexpand-full-reports-when-it-hits-the-cap
   (testing "a self-reproducing macro is capped and says so"

@@ -84,38 +84,43 @@ printer writes as #S(...).  A standard object or a hash table prints as
 With CONSES-ONLY, only conses are followed: the question is then whether a
 walk of the list structure, such as MACROEXPAND-ALL's, would loop.
 
-The cdr spine is walked iteratively and only cars and the children of arrays
-and structures recurse, so stack depth is bounded by nesting rather than by
-list length: a long quoted literal such as a generated lookup table is ordinary
-input.  Finished nodes are memoized, so a heavily shared but acyclic object
-costs one visit per distinct node instead of blowing up exponentially."
+The walk is depth-first with its own stack on the heap, not the control
+stack: a long list, or an object nested deep through cars, vectors or
+structures -- which a macro can build, so no check on source text sees it --
+is ordinary input, and asking this before printing it under *PRINT-LEVEL*
+must not exhaust the control stack.  A node is on the path from the time it
+is entered until all its children are finished, and a child found on the path
+is a cycle.  Finished nodes are memoized, so a heavily shared but acyclic
+object costs one visit per distinct node instead of blowing up exponentially."
   (let ((on-path (make-hash-table :test #'eq))
-        (finished (make-hash-table :test #'eq)))
-    (labels ((walk (node)
-               (let ((spine '())
-                     (found nil))
-                 (loop
-                   (cond
-                     ((not (%walked-container-p node conses-only)) (return))
-                     ((gethash node on-path) (setf found t) (return))
-                     ((gethash node finished) (return))
-                     (t
-                      (setf (gethash node on-path) t)
-                      (push node spine)
-                      (cond
-                        ((consp node)
-                         (when (walk (car node))
-                           (setf found t)
-                           (return))
-                         (setf node (cdr node)))
-                        (t
-                         (setf found (some #'walk (%walked-children node)))
-                         (return))))))
-                 (dolist (visited spine)
-                   (remhash visited on-path)
-                   (setf (gethash visited finished) t))
-                 found)))
-      (walk object))))
+        (finished (make-hash-table :test #'eq))
+        ;; Each frame is (NODE . CHILDREN-NOT-YET-ENTERED).
+        (stack '()))
+    (flet ((enter (node)
+             "Push a frame for NODE unless it is a leaf or finished; return T
+when NODE is on the path, which closes a cycle."
+             (cond ((not (%walked-container-p node conses-only)) nil)
+                   ((gethash node on-path) t)
+                   ((gethash node finished) nil)
+                   (t
+                    (setf (gethash node on-path) t)
+                    (push (cons node (if (consp node)
+                                         (list (car node) (cdr node))
+                                         (%walked-children node)))
+                          stack)
+                    nil))))
+      (when (enter object)
+        (return-from circular-p t))
+      (loop while stack
+            do (let ((frame (first stack)))
+                 (if (cdr frame)
+                     (when (enter (pop (cdr frame)))
+                       (return-from circular-p t))
+                     (progn
+                       (pop stack)
+                       (remhash (car frame) on-path)
+                       (setf (gethash (car frame) finished) t)))))
+      nil)))
 
 (defun bounded-princ-to-string (object)
   "Return OBJECT PRINCed for a message -- a condition's report, say -- with

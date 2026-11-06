@@ -207,15 +207,18 @@ replaced by %HEADER-CONDITIONAL (named, so it may be defined later)."
     (set-dispatch-macro-character #\# #\- '%header-conditional readtable)
     readtable))
 
-(defparameter *header-readtable* (%make-header-readtable "|:\\+-=#")
+(defparameter *header-readtable* (%make-header-readtable "|:\\+-=#BbOoXxRr")
   "The readtable for a header form the scan reads whole.  Of the # dispatches
-it keeps #|, #:, #\\, #+, #- and the labels #n= and #n# (Eclector's defpackage
-shares a clause through one); backquote and every other # dispatch are
-refused (%REFUSING).  A header form needs none of them -- IN-PACKAGE's and
+it keeps #|, #:, #\\, #+, #-, the labels #n= and #n# (Eclector's defpackage
+shares a clause through one) and the radix integers #B, #O, #X and #R
+(DEFPACKAGE's (:size #x20)); backquote and every other # dispatch are refused
+(%REFUSING).  A header form needs none of them -- IN-PACKAGE's and
 DEFPACKAGE's arguments are not evaluated -- and those that walk what they read
 (backquote, #(, #A, #C, #S) ran forever on valid circular text such as
 `(a . #1=(b . #1#)), or asked for a huge vector (#n().  A label can still make
-the form circular; the scan drops such a form.")
+the form circular; the scan drops such a form.  A radix integer is a token: it
+builds nothing to walk.  A dispatch sub-character is matched in either case,
+so both are listed.")
 
 (defparameter *feature-readtable* (%make-header-readtable "|:\\+-")
   "*HEADER-READTABLE* without labels, for a #+/#- feature expression: FEATUREP
@@ -223,11 +226,16 @@ walks it, and through labels it could be circular, or a tree of shared nodes
 with 2^n paths that FEATUREP would walk one by one.")
 
 (defun %header-conditional (stream sub-char argument)
-  "The #+ and #- of *HEADER-READTABLE*, with the standard semantics -- the
-feature expression is read and tested even under *READ-SUPPRESS*, and a test
-that fails yields no value -- except that the expression is read with
-*FEATURE-READTABLE*, which has no labels: FEATUREP walks it, and a label could
-make it circular or a shared tree of 2^n paths."
+  "The #+ and #- of *HEADER-READTABLE* and *SKIP-READTABLE*, with the standard
+semantics -- the feature expression is read and tested even under
+*READ-SUPPRESS*, and a test that fails yields no value -- except that the
+expression is read with *FEATURE-READTABLE*, which has no labels: FEATUREP
+walks it, and a label could make it circular or a shared tree of 2^n paths.
+The semantics matter in a place that takes one object: '#-sbcl a (in-package
+:p) quotes the in-package on SBCL, so it is no header.  An expression that
+cannot be read so, or that FEATUREP rejects, is an error, which ends the scan:
+whether the conditional yields an object decides where the enclosing form
+ends, so no boundary after it could be trusted."
   (declare (ignore argument))
   (let ((feature (let ((*package* (find-package "KEYWORD"))
                        (*read-suppress* nil)
@@ -238,100 +246,114 @@ make it circular or a shared tree of 2^n paths."
         (progn (let ((*read-suppress* t)) (read stream t nil t))
                (values)))))
 
-(defun %skip-conditional (stream sub-char argument)
-  "The #+ and #- of *SKIP-READTABLE*: read the feature expression and the form
-it guards, both under *READ-SUPPRESS*, and return NIL.  SBCL's own #+ reads its
-feature expression with *READ-SUPPRESS* off, even inside a form being skipped,
-so a backquote there was read for real.  One value is returned, never none: in
-a place that takes one object ('#+sbcl a #-sbcl b) no value would make the
-reader take the next object too.  A top-level #+ never comes here; %SKIP-FORM
-handles it.  This differs from the reader, which tests the feature even under
-*READ-SUPPRESS* and yields nothing when it fails: in a form being skipped that
-changes nothing but how many objects a chain like #-sbcl #-sbcl a b takes, and
-testing would mean reading the feature expression for real."
-  (declare (ignore sub-char argument))
-  (let ((*read-suppress* t))
-    (read stream t nil t)
-    (read stream t nil t))
-  nil)
-
 (defparameter *skip-readtable*
   (let ((readtable (copy-readtable nil)))
-    (set-dispatch-macro-character #\# #\+ #'%skip-conditional readtable)
-    (set-dispatch-macro-character #\# #\- #'%skip-conditional readtable)
+    (set-dispatch-macro-character #\# #\+ '%header-conditional readtable)
+    (set-dispatch-macro-character #\# #\- '%header-conditional readtable)
     readtable)
-  "The standard readtable with #+ and #- skipping both their parts, for
-%SKIP-FORM's reads under *READ-SUPPRESS*: with it nothing in a skipped form,
-however deeply nested, is read for real.")
+  "The standard readtable with the #+ and #- of *HEADER-READTABLE*, for the
+scan's reads under *READ-SUPPRESS* (%SKIP-OBJECT).  SBCL's own #+ reads its
+feature expression with *READ-SUPPRESS* off, even inside a form being skipped,
+so a backquote there was read for real; %HEADER-CONDITIONAL reads it with
+*FEATURE-READTABLE*, which refuses it, and still yields an object or none as
+the reader does, so a skipped form ends where the reader ends it.")
+
+(defun %judge-feature (stream sign)
+  "Read the feature expression of a #+ (SIGN #\\+) or #- (SIGN #\\-) from
+STREAM with *FEATURE-READTABLE* and judge it: :HOLDS when the conditional's
+object is read, :FAILS when it is not, NIL when the expression cannot be read
+so (end of input, a refused dispatch, a label) or FEATUREP rejects it.  STREAM
+is past the expression unless the verdict is NIL; then where it is is unknown."
+  (handler-case
+      (let ((feature (let ((*package* (find-package "KEYWORD"))
+                           (*readtable* *feature-readtable*)
+                           (*read-suppress* nil)
+                           (*read-eval* nil))
+                       (read-preserving-whitespace stream t))))
+        (if (eq (and (sb-int:featurep feature) t) (char= sign #\+))
+            :holds
+            :fails))
+    (error () nil)))
+
+(defun %skip-object (stream)
+  "Move STREAM past its next object without building it: a read under
+*READ-SUPPRESS* with *SKIP-READTABLE*, whose #+ and #- are judged, so the
+object ends where the reader ends it -- a conditional that does not hold
+yields nothing and the read takes the object after it, as the reader's does.
+Signal an error at the end of STREAM, or at a conditional inside that cannot
+be judged (see %HEADER-CONDITIONAL)."
+  (let ((*readtable* *skip-readtable*)
+        (*read-suppress* t))
+    (read stream t nil)))
+
+(defun %pass-conditionals (stream)
+  "Pass the #+ and #- conditionals in front of the next top-level form on
+STREAM as the reader would, and return what is there:
+
+:FORM -- STREAM is at the first character of the form the reader returns
+next.  Every conditional passed held, or failed in the place of one that held:
+a failing one yields nothing, so the one that held takes the object after it
+(#+sbcl #-sbcl a (in-package :p) is the in-package).
+:TRANSPARENT -- an outermost conditional failed; it and its object were
+passed, and to the reader there is no form here at all.
+:UNJUDGED -- an outermost conditional's feature expression could not be
+judged; it and its object were passed.  The object takes the same text whether
+the conditional holds or not, so the boundary is sound, but whether there is a
+form here is not known.
+NIL -- the end of STREAM.
+
+An error is signalled where no boundary after it could be trusted: a
+conditional that cannot be judged in the place of one that held (which object
+the outer one takes depends on the verdict), or one inside an object or a
+feature expression being passed."
+  (let ((held nil))
+    (loop
+      (let ((first (%skip-to-next-form stream))
+            (start (file-position stream)))
+        (unless first
+          (return nil))
+        (read-char stream)
+        (let ((sign (and (eql first #\#) (peek-char nil stream nil nil))))
+          (unless (member sign '(#\+ #\-))
+            (file-position stream start)
+            (return :form))
+          (read-char stream)
+          ;; LET evaluates in order: the position is taken before the judging.
+          (let ((after-sign (file-position stream))
+                (verdict (%judge-feature stream sign)))
+            (case verdict
+              (:holds (setf held t))
+              (:fails
+               (%skip-object stream)
+               (unless held
+                 (return :transparent)))
+              (t
+               (when held
+                 (error "A conditional that cannot be judged stands in the ~
+                         place of one that holds."))
+               (file-position stream after-sign)
+               (%skip-object stream)
+               (%skip-object stream)
+               (return :unjudged)))))))))
 
 (defun %read-form-whole-p (stream)
-  "Judge the next form on STREAM for the header scan.  Return T when it may be
-a header form and is to be read whole: a list whose first element is written
-as a symbol that names a header form (IN-PACKAGE, DEFPACKAGE and the like, see
-%HEADER-FORM-P), directly or behind a #+/#- that holds.  Return :TRANSPARENT
-for a #+/#- form whose feature expression does not hold: to the reader it is
-not there at all, so it neither counts as a header nor ends the header section.
-Return NIL for any other form, and for a conditional that cannot be judged.
-Only the head symbol and a feature expression are read, never the rest of the
-form, and STREAM is left somewhere inside it: the caller rewinds."
-  (let ((first (%skip-to-next-form stream)))
-    (cond
-      ((eql first #\#)
-       (read-char stream)
-       (let ((sign (peek-char nil stream nil nil)))
-         (when (member sign '(#\+ #\-))
-           (read-char stream)
-           ;; Any failure -- end of input, a read error, an expression
-           ;; FEATUREP rejects -- means no verdict: NIL.
-           (let ((verdict
-                   (handler-case
-                       (let ((feature (let ((*package* (find-package "KEYWORD"))
-                                            (*readtable* *feature-readtable*)
-                                            (*read-eval* nil))
-                                        (read-preserving-whitespace stream t))))
-                         ;; FEATUREP walks it, so a circular one is no header.
-                         (cond ((circular-p feature) nil)
-                               ((eq (and (sb-int:featurep feature) t) (char= sign #\+))
-                                :holds)
-                               (t :transparent)))
-                     (error () nil))))
-             (case verdict
-               (:holds (%read-form-whole-p stream))
-               (:transparent :transparent)
-               (t nil))))))
-      ((eql first #\()
-       (read-char stream)
-       (let ((char (%skip-to-next-form stream)))
-         ;; A symbol token, not a list, a string, a quote or a dispatch --
-         ;; so (#+sbcl in-package ...), a header to the reader, is not one here.
-         (and char
-              (not (find char "()'`,\"#"))
-              (let ((head (handler-case (read-preserving-whitespace stream nil nil)
-                            (error () nil))))
-                (and (%header-form-p (list head)) t)))))
-      (t nil))))
-
-(defun %skip-form (stream)
-  "Move STREAM past exactly one top-level form without building it, and return
-T, or NIL when no form is left.  A top-level #+ or #- form is skipped with the
-form it guards: a read of it under *READ-SUPPRESS* would return no value and go
-on to take the next form as well.  The reads use *SKIP-READTABLE*, so a
-conditional nested in the form is not read for real either."
-  (let ((first (%skip-to-next-form stream))
-        (*readtable* *skip-readtable*)
-        (*read-suppress* t))
-    (cond
-      ((null first) nil)
-      ((and (eql first #\#)
-            (progn (read-char stream)
-                   (or (member (peek-char nil stream nil nil) '(#\+ #\-))
-                       (progn (unread-char first stream) nil))))
-       (read-char stream)
-       (read stream nil nil)
-       (%skip-form stream))
-      (t
-       (read stream nil nil)
-       t))))
+  "Judge the form at STREAM's position, which no conditional precedes
+(%PASS-CONDITIONALS passed them), for the header scan.  Return T when it may
+be a header form and is to be read whole: a list whose first element is
+written as a symbol that names a header form (IN-PACKAGE, DEFPACKAGE and the
+like, see %HEADER-FORM-P).  Return NIL for any other form.  Only the head
+symbol is read, never the rest of the form, and STREAM is left somewhere
+inside it: the caller rewinds."
+  (when (eql (%skip-to-next-form stream) #\()
+    (read-char stream)
+    (let ((char (%skip-to-next-form stream)))
+      ;; A symbol token, not a list, a string, a quote or a dispatch -- so
+      ;; (#+sbcl in-package ...), a header to the reader, is not one here.
+      (and char
+           (not (find char "()'`,\"#"))
+           (let ((head (handler-case (read-preserving-whitespace stream nil nil)
+                         (error () nil))))
+             (and (%header-form-p (list head)) t))))))
 
 (defun %read-header-forms-from-text (text)
   "Read package-related header forms from TEXT using the CL reader.
@@ -342,16 +364,21 @@ custom reader syntax) ends the scan and the forms read so far are returned,
 so callers such as PARSE-TOP-LEVEL-FORMS can report the breakage themselves
 instead of failing here first.  Text nested too deeply to read safely
 (LISP-TOO-DEEP-P) yields no forms.
-Only a form whose head is written as a header symbol, directly or behind a
-#+/#- that holds, is read whole (see %READ-FORM-WHOLE-P), with backquote an
-error (*HEADER-READTABLE*), and kept only if it is not circular; every other
-form is skipped (%SKIP-FORM) with *READ-SUPPRESS*, which builds nothing, and
-with #+/#- that read nothing for real either.  SBCL's reader never
-returns from some valid text -- a backquote template with a circular tail,
-`(a . #1=(b . #1#)), whose last cons it looks for -- and this scan runs on
-every file the Lisp-aware tools open.  Skipping also means a form the reader
-would reject (an unknown package prefix, #. or another dispatch it does not
-know) no longer ends the scan before a header that follows it."
+The #+ and #- in front of each top-level form are passed as the reader would
+(%PASS-CONDITIONALS); a top-level form that a failing conditional removes is
+not there, so it neither counts as a header nor ends the header section.
+Only a form whose head is written as a header symbol is then read whole (see
+%READ-FORM-WHOLE-P), with backquote an error (*HEADER-READTABLE*), and kept
+only if it is not circular; every other form is skipped (%SKIP-OBJECT) with
+*READ-SUPPRESS*, which builds nothing, and with #+/#- whose feature
+expressions are read safely.  SBCL's reader never returns from some valid
+text -- a backquote template with a circular tail, `(a . #1=(b . #1#)), whose
+last cons it looks for -- and this scan runs on every file the Lisp-aware
+tools open.  Skipping also means a form the reader would reject (an unknown
+package prefix, #. or another dispatch it does not know) no longer ends the
+scan before a header that follows it.  A conditional whose verdict decides
+where a form ends, and that cannot be judged, does end it: no boundary after
+it could be trusted."
   (when (lisp-too-deep-p text)
     (return-from %read-header-forms-from-text nil))
   (call-with-lenient-packages
@@ -360,18 +387,22 @@ know) no longer ends the scan before a header that follows it."
        (with-input-from-string (stream text)
          (let ((forms nil)
                (saw-header nil))
-           (loop for start = (file-position stream)
-                 for header-p = (%read-form-whole-p stream)
-                 for form = (progn
-                              (file-position stream start)
-                              (handler-case
-                                  (cond ((eq header-p t)
-                                         (let ((*readtable* *header-readtable*))
-                                           (read stream nil :eof)))
-                                        ((not (%skip-form stream)) :eof)
-                                        ((eq header-p :transparent) :transparent)
-                                        (t :skipped))
-                                (error () :eof)))
+           (loop for kind = (handler-case (%pass-conditionals stream)
+                              (error () nil))
+                 for start = (file-position stream)
+                 for header-p = (and (eq kind :form) (%read-form-whole-p stream))
+                 for form = (case kind
+                              ((nil) :eof)
+                              (:transparent :transparent)
+                              (:unjudged :skipped)
+                              (t
+                               (file-position stream start)
+                               (handler-case
+                                   (if header-p
+                                       (let ((*readtable* *header-readtable*))
+                                         (read stream nil :eof))
+                                       (progn (%skip-object stream) :skipped))
+                                 (error () :eof))))
                  until (eq form :eof)
                  do (cond
                       ;; A conditional that does not hold is not there.
@@ -380,7 +411,7 @@ know) no longer ends the scan before a header that follows it."
                       ;; Eclector's defpackage shares a clause through one --
                       ;; is no header: the spec extraction walks its clauses.
                       ;; Like any non-header after a header, it ends the scan.
-                      ((and (eq header-p t) (%header-form-p form) (not (circular-p form)))
+                      ((and header-p (%header-form-p form) (not (circular-p form)))
                        (push form forms)
                        (setf saw-header t))
                       (saw-header

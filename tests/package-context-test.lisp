@@ -315,9 +315,12 @@ whenever it is still running."
                         (cons (format nil "(in-package :my-app)~%~
                                            #+(version>= 9) (defun g ())")
                               "MY-APP")
+                        ;; Inside a form whether it yields an object decides
+                        ;; where the form ends, so the scan stops there, as
+                        ;; the reader would.
                         (cons (format nil "(defun f () #+(version>= 9) 1)~%~
                                            (in-package :my-app)")
-                              "MY-APP")
+                              nil)
                         (cons "#+(and . sbcl) (in-package :my-app)" nil)
                         (cons "#+" nil)))
       (let ((name (%extract-within 2 (car pair))))
@@ -327,18 +330,26 @@ whenever it is still running."
             (format nil "answered ~S for ~S" name (car pair))))))
   (testing "a backquote template in a feature expression does not hang the scan"
     ;; At top level, and inside a form that is skipped: there SBCL's #+ reads
-    ;; its feature expression with *READ-SUPPRESS* off.
-    (dolist (case (list (format nil "#+`(a . #1=(b . #1#)) (defun f ())~%~
-                                     (in-package :my-app)")
-                        (format nil "#-`(a . #1=(b . #1#)) (in-package :other)~%~
-                                     (in-package :my-app)")
-                        (format nil "(defun f () #+`(a . #1=(b . #1#)) 1)~%~
-                                     (in-package :my-app)")
-                        (format nil "#+sbcl (defun f () #-`(a . #1=(b . #1#)) 1)~%~
-                                     (in-package :my-app)")))
-      (let ((name (%extract-within 2 case)))
-        (ok (and (stringp name) (string-equal name "MY-APP"))
-            (format nil "answered ~S for ~S" name case))))))
+    ;; its feature expression with *READ-SUPPRESS* off.  At top level the
+    ;; conditional and its object end where they end whether it holds or not;
+    ;; inside a form they may not, so the scan stops.
+    (dolist (pair (list (cons (format nil "#+`(a . #1=(b . #1#)) (defun f ())~%~
+                                           (in-package :my-app)")
+                              "MY-APP")
+                        (cons (format nil "#-`(a . #1=(b . #1#)) (in-package :other)~%~
+                                           (in-package :my-app)")
+                              "MY-APP")
+                        (cons (format nil "(defun f () #+`(a . #1=(b . #1#)) 1)~%~
+                                           (in-package :my-app)")
+                              nil)
+                        (cons (format nil "#+sbcl (defun f () #-`(a . #1=(b . #1#)) 1)~%~
+                                           (in-package :my-app)")
+                              nil)))
+      (let ((name (%extract-within 2 (car pair))))
+        (ok (if (cdr pair)
+                (and (stringp name) (string-equal name (cdr pair)))
+                (null name))
+            (format nil "answered ~S for ~S" name (car pair)))))))
 
 (deftest package-specs-in-file-survives-a-feature-expression-featurep-rejects
   (testing "a bad conditional after the header keeps the package's spec"
@@ -361,8 +372,9 @@ whenever it is still running."
     ;; backquote reader nor #+, #( or #C ever meets a cycle.
     (dolist (pair '(("(in-package `(a . #1=(b . #1#)))" . nil)
                     ("(in-package #+(and . #1=(sbcl . #1#)) :p)" . nil)
-                    ;; A conditional that cannot be judged is skipped whole.
-                    ("#+#+(and . #1=(sbcl . #1#)) x y (in-package :p)" . "P")
+                    ;; The feature expression is X or Y as the inner #+
+                    ;; holds or not: no boundary can be trusted after it.
+                    ("#+#+(and . #1=(sbcl . #1#)) x y (in-package :p)" . nil)
                     ("(defpackage :p (:use #+(or . #1=(nope . #1#)) :cl))" . nil)
                     ("(in-package #(a . #1=(b . #1#)))" . nil)
                     ("(in-package #C#1=(1 2 . #1#))" . nil)))
@@ -471,3 +483,69 @@ or :TIMEOUT."
     (let ((forms (cl-mcp/src/package-context::%read-header-forms-from-text
                   "(defpackage :p #-sbcl #-sbcl (:use :a) (:use :b))")))
       (ok (equal forms '((defpackage :p))) (format nil "~S" forms)))))
+
+(deftest header-scan-keeps-the-readers-form-boundaries
+  ;; A #+/#- that does not hold yields no object, so in a place that takes
+  ;; one object -- after a quote, say -- the reader takes the next one.
+  (testing "a skipped form ends where the reader ends it"
+    (dolist (pair (list
+                   ;; The quote takes the in-package: no header in the file.
+                   (cons (format nil "'#-sbcl ignored (in-package #:keyword)~%~
+                                      (defun pr314-foo () 1)")
+                         nil)
+                   (cons (format nil "'#-sbcl #-sbcl a b (in-package #:keyword)~%~
+                                      (defun pr314-foo () 1)")
+                         nil)
+                   (cons (format nil "(defun f () '#-sbcl x (in-package :other))~%~
+                                      (in-package :my-app)")
+                         "MY-APP")
+                   (cons (format nil "'#+sbcl x~%(in-package :my-app)") "MY-APP")))
+      (let ((name (%extract-within 2 (car pair))))
+        (ok (if (cdr pair)
+                (and (stringp name) (string-equal name (cdr pair)))
+                (null name))
+            (format nil "answered ~S for ~S" name (car pair))))))
+  (testing "a chain of top-level conditionals takes what the reader takes"
+    (dolist (pair (list
+                   ;; #+sbcl holds; #-sbcl a yields nothing, so it takes the in-package.
+                   (cons "#+sbcl #-sbcl a (in-package :my-app)" "MY-APP")
+                   ;; The outer #-sbcl takes #-sbcl a (in-package :other).
+                   (cons (format nil "#-sbcl #-sbcl a (in-package :other)~%~
+                                      (in-package :my-app)")
+                         "MY-APP")
+                   (cons (format nil "#+sbcl #+sbcl (in-package :my-app)") "MY-APP")))
+      (let ((name (%extract-within 2 (car pair))))
+        (ok (and (stringp name) (string-equal name (cdr pair)))
+            (format nil "answered ~S for ~S" name (car pair))))))
+  (testing "a conditional inside a skipped form that cannot be judged ends the scan"
+    ;; Whether it yields an object decides where the form ends.
+    (dolist (case (list (format nil "'#+(version>= 9) a (in-package #:keyword)~%~
+                                     (in-package :my-app)")
+                        (format nil "(defun f () '#-(and . #1=(sbcl . #1#)) a)~%~
+                                     (in-package :my-app)")))
+      (let ((name (%extract-within 2 case)))
+        (ok (null name) (format nil "answered ~S for ~S" name case))))))
+
+(deftest header-scan-reads-radix-integers
+  (testing "a defpackage holding #x, #b, #o or #r integers is a header"
+    (let ((text (format nil "(defpackage #:pr314-size~%  ~
+                             (:use #:cl)~%  ~
+                             (:size #x20)~%  ~
+                             (:local-nicknames (#:a #:alexandria)))~%~%~
+                             (in-package #:pr314-size)~%~%~
+                             (defun pr314-ensure (x)~%  (a:ensure-list x))~%"))
+          (radixes (format nil "(defpackage :p (:size #X20) (:size #b101) (:size #O17) ~
+                                (:size #3r12))~%(in-package :p)")))
+      (ok (equal "PR314-SIZE" (%extract-within 2 text))
+          (format nil "the in-package after it is found: ~S" (%extract-within 2 text)))
+      (let ((forms (cl-mcp/src/package-context::%read-header-forms-from-text text)))
+        (ok (find '(:size 32) (first forms) :test #'equal)
+            (format nil "the size is read as an integer: ~S" (first forms)))
+        (ok (equal '(("A" . "ALEXANDRIA"))
+                   (cl-mcp/src/package-context::package-spec-local-nicknames
+                    (cl-mcp/src/package-context::%extract-package-spec (first forms) nil)))
+            "its local nickname is kept"))
+      (let ((forms (cl-mcp/src/package-context::%read-header-forms-from-text radixes)))
+        (ok (equal '(defpackage :p (:size 32) (:size 5) (:size 15) (:size 5))
+                   (first forms))
+            (format nil "every radix: ~S" forms))))))

@@ -93,3 +93,24 @@ lead back to the node."
       (setf (circular-p-node-next node) node)
       (ok (not (circular-p (list 'quote node) :conses-only t))
           "nor is one through a structure"))))
+
+(deftest circular-p-walks-deep-nesting-without-the-stack
+  (testing "nesting through vectors, structures and cars is walked on the heap"
+    ;; A macro can build such an object; no source text depth check sees it.
+    (let ((depth 200000))
+      (flet ((nested (wrap)
+               (let ((datum nil))
+                 (dotimes (i depth datum)
+                   (setf datum (funcall wrap datum))))))
+        (ok (not (circular-p (nested #'vector))) "deep vectors")
+        (ok (not (circular-p (nested #'list))) "deep cars")
+        (ok (not (circular-p (nested (lambda (x) (make-circular-p-node :label x)))))
+            "deep structures")
+        (let* ((top (vector nil))
+               (bottom top))
+          (dotimes (i depth)
+            (let ((next (vector nil)))
+              (setf (svref bottom 0) next
+                    bottom next)))
+          (setf (svref bottom 0) top)
+          (ok (circular-p top) "a cycle at the bottom of deep vectors is found"))))))
