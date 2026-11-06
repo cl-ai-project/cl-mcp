@@ -91,7 +91,8 @@ one cancelled."
 region: interrupt its thread, which then signals INLINE-REQUEST-CANCELLED at
 the region's next cancellation point.  Return T when a region was found and its
 thread interrupted, NIL otherwise (no such region, its thread just ended, or
-the request was cancelled already).
+the request was cancelled already).  T does not mean the region was cancelled:
+an interruption that arrives after the region ended is ignored.
 A region is interrupted at most once: the entry is taken out of *REGIONS* in
 the same critical section that finds it.  Cancels that pile up while the region
 runs with interrupts off would otherwise all be pending when it reaches a

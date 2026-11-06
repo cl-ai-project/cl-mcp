@@ -144,9 +144,11 @@
 (deftest a-repeated-cancellation-interrupts-the-region-once
   (testing "cancels of one request that pile up while interrupts are off do not nest"
     ;; Each interruption pending at the end of the region runs nested in the
-    ;; one before it; past SBCL's nesting limit (8) the process dies.  Only the
-    ;; first cancel of a request may interrupt its thread.
+    ;; one before it; past SBCL's nesting limit (8) the process dies -- 16
+    ;; cancels did.  Six stay below the limit, so a regression fails the
+    ;; count below instead of taking the test run down with it.
     (let* ((started nil)
+           (go-on nil)
            (outcome nil)
            (thread (bordeaux-threads:make-thread
                     (lambda ()
@@ -155,16 +157,19 @@
                                 (call-cancellable "inline-cancel-repeat" 5
                                                   (lambda ()
                                                     (setf started t)
-                                                    ;; No cancellation point.
-                                                    (%busy 0.5)
+                                                    ;; No cancellation point:
+                                                    ;; every cancel is pending
+                                                    ;; when the region ends.
+                                                    (loop until go-on do (sleep 0.01d0))
                                                     :finished))
                               (inline-request-cancelled () :cancelled))))
                     :name "inline-cancel-test-repeat")))
       (unwind-protect
            (let ((answers nil))
              (loop repeat 300 until started do (sleep 0.01d0))
-             (dotimes (i 16)
+             (dotimes (i 6)
                (push (cancel-inline-request "inline-cancel-repeat" 5) answers))
+             (setf go-on t)
              (loop repeat 500
                    while (bordeaux-threads:thread-alive-p thread)
                    do (sleep 0.01d0))
@@ -175,5 +180,6 @@
              (ok (null (gethash (cons "inline-cancel-repeat" 5)
                                 cl-mcp/src/inline-cancel::*regions*))
                  "the region's entry is gone"))
+        (setf go-on t)
         (when (bordeaux-threads:thread-alive-p thread)
           (ignore-errors (bordeaux-threads:destroy-thread thread)))))))
