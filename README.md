@@ -248,6 +248,11 @@ client and then stops unless given `:accept-once nil`.)
 This gives you the same shared-REPL workflow as Claude Code's HTTP mode —
 you keep your SLIME/Sly session while Codex works through the bridge.
 
+A TCP request line that is not valid UTF-8 is answered with a parse error
+(-32700) and the connection goes on. Over stdio the same bytes are decoded with
+U+FFFD in place of each invalid sequence (SBCL reads stdin that way), and the
+request runs.
+
 ## Worker Pool Isolation
 
 Eval-dependent tools (`repl-eval`, `load-system`, `run-tests`, `code-*`,

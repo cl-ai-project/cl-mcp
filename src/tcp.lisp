@@ -18,6 +18,8 @@
                 #:%read-line-limited #:+max-json-line-bytes+
                 #:line-too-long)
   (:import-from #:usocket)
+  (:import-from #:yason)
+  (:import-from #:cl-mcp/src/tools/helpers #:rpc-error)
   (:export
    #:*tcp-server-thread*
    #:*tcp-server-port*
@@ -170,6 +172,78 @@ supplied, uses *enabled-tool-groups*, which comes from MCP_ENABLE_TOOL_GROUPS."
           *tcp-listener* nil)
     :stopped))
 
+(defun %error-response-line (code message)
+  "Return the JSON-RPC error response with CODE and MESSAGE and a null id, as
+one line of JSON encoded by yason: the answer to a line that never became a
+request, so there is no id to echo."
+  (with-output-to-string (out)
+    (yason:encode (rpc-error nil code message) out)))
+
+(defparameter *too-large-response*
+  (%error-response-line -32600 "Request too large")
+  "The response line to a request longer than +MAX-JSON-LINE-BYTES+.")
+
+(defparameter *undecodable-response*
+  (%error-response-line -32700 "Parse error: the request is not valid UTF-8")
+  "The response line to a request line that is not UTF-8.")
+
+(defun %read-request-line (stream conn-id)
+  "Read the next request line from STREAM.
+Return the line as a string, or one of these keywords:
+:EOF when the client closed its side; :TOO-LONG when the line exceeded
++MAX-JSON-LINE-BYTES+ (the rest of it is drained); :UNDECODABLE when the line
+held bytes that are not UTF-8 (the whole line is consumed, so the next read
+starts at the next request); :IO-ERROR when the stream failed, for instance on
+a reset from the client.  No stream condition escapes: this runs on a client
+thread, where an unhandled one would stop the thread in the debugger and leave
+the session and its worker held."
+  (let ((undecodable nil))
+    (handler-case
+        (handler-bind ((sb-int:stream-decoding-error
+                         (lambda (condition)
+                           ;; Skip the bad bytes and read on to the end of the
+                           ;; line, so the line is consumed whole.
+                           (setf undecodable t)
+                           (let ((restart (find-restart 'sb-int:attempt-resync
+                                                        condition)))
+                             (when restart (invoke-restart restart))))))
+          (let ((line (handler-case
+                          (%read-line-limited stream :eof +max-json-line-bytes+)
+                        (line-too-long (e)
+                          (log-event :warn "tcp.read.line-too-long"
+                                     "conn" conn-id
+                                     "error" (princ-to-string e))
+                          ;; Drain remaining bytes on the current line
+                          ;; so the next read starts fresh.
+                          (loop for ch = (read-char stream nil nil)
+                                while (and ch (not (char= ch #\Newline))))
+                          :too-long))))
+            (if (and undecodable (stringp line))
+                (progn
+                  (log-event :warn "tcp.read.undecodable" "conn" conn-id)
+                  :undecodable)
+                line)))
+      (stream-error (e)
+        (log-event :warn "tcp.read.error"
+                   "conn" conn-id
+                   "error" (princ-to-string e))
+        :io-error))))
+
+(defun %write-response-line (line stream conn-id)
+  "Write LINE and a newline to STREAM and flush it.
+Return T, or NIL when the stream failed (the client is gone)."
+  (handler-case
+      (progn
+        (write-line line stream)
+        (finish-output stream)
+        (log-event :debug "tcp.flushed" "conn" conn-id)
+        t)
+    (stream-error (e)
+      (log-event :warn "tcp.write.error"
+                 "conn" conn-id
+                 "error" (princ-to-string e))
+      nil)))
+
 (defun %process-stream (stream socket conn-id remote)
   (let ((state (make-state))
         (log-context (list "conn" conn-id "remote" remote)))
@@ -178,7 +252,16 @@ supplied, uses *enabled-tool-groups*, which comes from MCP_ENABLE_TOOL_GROUPS."
             (format nil "tcp-~A" conn-id)))
       (loop
         ;; Use timeout as a heartbeat to check for the stop flag
-        for ready = (usocket:wait-for-input (list socket) :timeout *tcp-read-timeout*)
+        ;; WAIT-FOR-INPUT calls LISTEN, which reads, so a reset that arrived
+        ;; since the last read is met here as often as in the read itself.
+        for ready = (handler-case
+                        (usocket:wait-for-input (list socket)
+                                                :timeout *tcp-read-timeout*)
+                      (stream-error (e)
+                        (log-event :warn "tcp.read.error"
+                                   "conn" conn-id
+                                   "error" (princ-to-string e))
+                        (return)))
         do (cond
              ((null ready)
               ;; Timeout occurred. Do not close the connection immediately.
@@ -189,34 +272,26 @@ supplied, uses *enabled-tool-groups*, which comes from MCP_ENABLE_TOOL_GROUPS."
                 (return)))
              (t
               ;; Data available, proceed to read
-              (let ((line (handler-case
-                              (%read-line-limited stream :eof +max-json-line-bytes+)
-                            (line-too-long (e)
-                              (log-event :warn "tcp.read.line-too-long"
-                                         "conn" conn-id
-                                         "error" (princ-to-string e))
-                              ;; Drain remaining bytes on the current line
-                              ;; so the next read starts fresh.
-                              (loop for ch = (read-char stream nil nil)
-                                    while (and ch (not (char= ch #\Newline))))
-                              :read-error))))
-                (cond
-                  ((eq line :eof)
+              (let ((line (%read-request-line stream conn-id)))
+                (case line
+                  (:eof
                    (log-event :info "tcp.read.eof" "conn" conn-id)
                    (return))
-                  ((eq line :read-error)
+                  (:io-error
+                   (return))
+                  (:too-long
                    ;; Return JSON-RPC error and continue the connection
-                   (handler-case
-                       (progn
-                         (write-line
-                          "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Request too large\"}}"
-                          stream)
-                         (finish-output stream))
-                     (stream-error (e)
-                       (log-event :warn "tcp.write.error"
-                                  "conn" conn-id
-                                  "error" (princ-to-string e))
-                       (return))))
+                   (unless (%write-response-line *too-large-response*
+                                                 stream conn-id)
+                     (return)))
+                  (:undecodable
+                   ;; JSON text is UTF-8 (RFC 8259), so a line that is not
+                   ;; is not JSON: a parse error, and the connection goes on.
+                   ;; stdio differs: SBCL decodes stdin with a replacement
+                   ;; character, so there the same bytes arrive as U+FFFD.
+                   (unless (%write-response-line *undecodable-response*
+                                                 stream conn-id)
+                     (return)))
                   (t
                    (log-event :debug "tcp.read" "conn" conn-id "line" line)
                    (let ((resp (process-json-line line state)))
@@ -227,16 +302,8 @@ supplied, uses *enabled-tool-groups*, which comes from MCP_ENABLE_TOOL_GROUPS."
                        (log-event :debug "tcp.write"
                                   "conn" conn-id
                                   "resp" resp)
-                       (handler-case
-                           (progn
-                             (write-line resp stream)
-                             (finish-output stream)
-                             (log-event :debug "tcp.flushed" "conn" conn-id))
-                         (stream-error (e)
-                           (log-event :warn "tcp.write.error"
-                                      "conn" conn-id
-                                      "error" (princ-to-string e))
-                           (return))))))))))))))
+                       (unless (%write-response-line resp stream conn-id)
+                         (return)))))))))))))
 
 (defun %tcp-accept-client (listener)
   (handler-case
@@ -253,7 +320,19 @@ supplied, uses *enabled-tool-groups*, which comes from MCP_ENABLE_TOOL_GROUPS."
              (let ((remote (ignore-errors (usocket:get-peer-address client))))
                (log-event :info "tcp.accept" "conn" conn-id "remote" remote)
                (setf stream (usocket:socket-stream client))
-               (%process-stream stream client conn-id remote)))
+               ;; This is a thread of its own: a condition left unhandled
+               ;; here would stop it in the debugger before the cleanup
+               ;; below, holding the session and its worker for good.  So
+               ;; every serious condition (a STORAGE-CONDITION or an
+               ;; SB-EXT:TIMEOUT is not an ERROR) ends the connection, and
+               ;; nothing the report signals can escape the handler.
+               (handler-case (%process-stream stream client conn-id remote)
+                 (serious-condition (e)
+                   (handler-case
+                       (log-event :warn "tcp.conn.error"
+                                  "conn" conn-id
+                                  "error" (princ-to-string e))
+                     (serious-condition () nil))))))
            t)
       (when stream (ignore-errors (close stream)))
       (when client (ignore-errors (usocket:socket-close client)))
