@@ -477,13 +477,14 @@ destroyed on the way out whenever it is still running."
                  (ok (search "runaway.lisp" (first result))
                      (format nil "the regular file is still searched: ~A" (first result)))))
           ;; Only a search that blocked in open on the FIFO needs a writer to
-          ;; release it; with no reader a writer would block for good.
+          ;; release it.  A non-blocking open for writing does, when a reader
+          ;; waits, and fails at once (ENXIO) when none is left: no thread is
+          ;; started, so none can stay blocked after the test.
           (unless finished
-            (bordeaux-threads:make-thread
-             (lambda ()
-               (ignore-errors
-                (with-open-file (out fifo :direction :output :if-exists :append))))
-             :name "clgrep-test-fifo-writer")))))))
+            (ignore-errors
+             (sb-posix:close (sb-posix:open (uiop:native-namestring fifo)
+                                            (logior sb-posix:o-wronly
+                                                    sb-posix:o-nonblock))))))))))
 
 (deftest clgrep-search-tool-stops-when-its-request-is-cancelled
   (testing "notifications/cancelled for a running search ends it"
