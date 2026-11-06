@@ -90,9 +90,17 @@ one cancelled."
   "Cancel request REQUEST-ID of SESSION-ID if it is running a cancellable
 region: interrupt its thread, which then signals INLINE-REQUEST-CANCELLED at
 the region's next cancellation point.  Return T when a region was found and its
-thread interrupted, NIL otherwise (no such region, or its thread just ended)."
+thread interrupted, NIL otherwise (no such region, its thread just ended, or
+the request was cancelled already).
+A region is interrupted at most once: the entry is taken out of *REGIONS* in
+the same critical section that finds it.  Cancels that pile up while the region
+runs with interrupts off would otherwise all be pending when it reaches a
+cancellation point, each run nested in the one before, and past SBCL's nesting
+limit the whole process dies."
   (let ((entry (bordeaux-threads:with-lock-held (*regions-lock*)
-                 (gethash (%region-key session-id request-id) *regions*))))
+                 (let ((key (%region-key session-id request-id)))
+                   (prog1 (gethash key *regions*)
+                     (remhash key *regions*))))))
     (when (and entry (bordeaux-threads:thread-alive-p (car entry)))
       ;; The thread can end between the check and the interruption.
       (handler-case (progn (%interrupt-region (car entry) (cdr entry)) t)
