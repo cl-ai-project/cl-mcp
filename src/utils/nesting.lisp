@@ -60,13 +60,15 @@ still waiting for an object: an open list waits for its ), a prefix such as
 expression, then the form.  Any other dispatch (#C, #S, #P, #A, #n=, one a
 readtable defines ...) is taken to wait for one object too, so an unknown
 macro can only make the count larger.  An atom completes the read on top of
-the stack, and a read that completes completes the one below it.  Strings,
+the stack, and a read that completes completes the one below it -- except a
+#+ or #-, which may yield nothing, so the read below it is left waiting for
+the next object.  Strings,
 |symbols|, comments and #\\x are atoms or skipped, so a ( inside them does
 not count.  The text need not read; custom syntax is counted as standard
 syntax, so the answer is an estimate -- one that errs towards a larger
 depth, which is all a limit this far from real code needs."
   (declare (type string text) (type fixnum limit))
-  (let ((stack '())                     ; :list, or a cons (:need . n)
+  (let ((stack '())          ; :list, or a cons (:need . n) or (:conditional . n)
         (depth 0)
         (i 0)
         (n (length text)))
@@ -83,11 +85,20 @@ depth, which is all a limit this far from real code needs."
              (complete ()
                ;; An object was read: it satisfies the read on top of the
                ;; stack, and a prefix read that is satisfied is itself an
-               ;; object for the read below it.
+               ;; object for the read below it.  A conditional is not: one
+               ;; that fails yields nothing, and the read below it goes on
+               ;; to the next object at the same depth, so #+sbcl #-sbcl a
+               ;; repeated nests one level per pair.  Whether it fails is
+               ;; not known here, so the read below is left waiting -- the
+               ;; deeper of the two answers.
                (loop while (and stack (consp (first stack)))
-                     do (if (zerop (decf (cdr (first stack))))
-                            (pop-frame)
-                            (return))))
+                     do (let ((frame (first stack)))
+                          (if (zerop (decf (cdr frame)))
+                              (progn
+                                (pop-frame)
+                                (when (eq (car frame) :conditional)
+                                  (return)))
+                              (return)))))
              (terminating-p (c)
                (member c '(#\Space #\Tab #\Newline #\Return #\Page
                            #\( #\) #\" #\' #\` #\, #\;)))
@@ -143,7 +154,7 @@ depth, which is all a limit this far from real code needs."
                    ((and (not digits-p) (char= sub #\:))
                     (setf i (1+ j)) (skip-token) (complete))
                    ((member sub '(#\+ #\-))
-                    (setf i (1+ j)) (push-frame (cons :need 2)))
+                    (setf i (1+ j)) (push-frame (cons :conditional 2)))
                    (t
                     ;; #' #. #C #S #P #A #nA #n= #B #X ... and any macro a
                     ;; readtable adds: counted as reading one object.  For #B

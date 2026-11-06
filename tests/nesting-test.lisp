@@ -71,8 +71,14 @@
                       "#C" "#S" "#P" "#0A" "#X" "#.(" "#(" "#+(not " "#+#+a b "
                       ;; SBCL reads #n+ as #+, ignoring the argument; uncounted,
                       ;; 200000 of them killed the process.
-                      "#1+sbcl " "#2-(or a b) "))
+                      "#1+sbcl " "#2-(or a b) "
+                      ;; A #- that fails yields nothing, so the #+ before it
+                      ;; reads on at its depth: each pair nests a level, and
+                      ;; counted as two complete reads they were none.
+                      "#+sbcl #-sbcl a " "#-nope #-sbcl a "))
       (ok (lisp-too-deep-p (%chain 20000 prefix)) prefix))
+    (ok (lisp-too-deep-p (format nil "(progn ~A)" (%chain 20000 "#+sbcl #-sbcl a ")))
+        "the pairs nest inside one list too")
     (ok (lisp-too-deep-p
          (with-output-to-string (out)
            ;; A ) inside #1|...|#, a comment to SBCL, closed counted lists.
