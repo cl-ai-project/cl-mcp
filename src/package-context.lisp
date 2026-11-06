@@ -151,19 +151,31 @@ other callers see a package definition edited between two calls.")
                results)))
     (walk (ensure-directory-pathname root))))
 
+(defun %skip-dispatch-digits (stream)
+  "STREAM is just past a #: read the decimal digits of a dispatch's numeric
+argument, if any, and return the sub-character after them without consuming
+it, or NIL at the end of STREAM."
+  (loop for char = (peek-char nil stream nil nil)
+        while (and char (digit-char-p char))
+        do (read-char stream)
+        finally (return char)))
+
 (defun %skip-to-next-form (stream)
-  "Advance STREAM past whitespace and comments (; and #|...|#, nested) to the
-next form's first character, and return that character, or NIL at the end."
+  "Advance STREAM past whitespace and comments (; and #|...|#, nested, with or
+without a numeric argument, which SBCL ignores) to the next form's first
+character, and return that character, or NIL at the end.  STREAM must accept
+FILE-POSITION, as a string stream does."
   (loop
     (let ((char (peek-char t stream nil nil)))
       (cond
         ((null char) (return nil))
         ((char= char #\;) (read-line stream nil nil))
         ((char= char #\#)
-         (read-char stream)
-         (unless (eql (peek-char nil stream nil nil) #\|)
-           (unread-char char stream)
-           (return char))
+         (let ((start (file-position stream)))
+           (read-char stream)
+           (unless (eql (%skip-dispatch-digits stream) #\|)
+             (file-position stream start)
+             (return char)))
          (read-char stream)
          ;; Stop right after the closing |#: the next character may be the
          ;; form's own first one.
@@ -313,7 +325,8 @@ feature expression being passed."
         (unless first
           (return nil))
         (read-char stream)
-        (let ((sign (and (eql first #\#) (peek-char nil stream nil nil))))
+        ;; #n+ is #+ to SBCL, which ignores the argument.
+        (let ((sign (and (eql first #\#) (%skip-dispatch-digits stream))))
           (unless (member sign '(#\+ #\-))
             (file-position stream start)
             (return :form))

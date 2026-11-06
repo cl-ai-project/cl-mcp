@@ -513,7 +513,10 @@ or :TIMEOUT."
                    (cons (format nil "#-sbcl #-sbcl a (in-package :other)~%~
                                       (in-package :my-app)")
                          "MY-APP")
-                   (cons (format nil "#+sbcl #+sbcl (in-package :my-app)") "MY-APP")))
+                   (cons (format nil "#+sbcl #+sbcl (in-package :my-app)") "MY-APP")
+                   ;; SBCL ignores a numeric argument to #+ and #|.
+                   (cons "#1+sbcl (in-package :my-app) (in-package :other)" "MY-APP")
+                   (cons "#1| c |# (in-package :my-app) (in-package :other)" "MY-APP")))
       (let ((name (%extract-within 2 (car pair))))
         (ok (and (stringp name) (string-equal name (cdr pair)))
             (format nil "answered ~S for ~S" name (car pair))))))

@@ -125,7 +125,12 @@ depth, which is all a limit this far from real code needs."
                       (digits-p (> j (1+ i))))
                  (cond
                    ((null sub) (setf i n) (complete))
-                   ((and (not digits-p) (char= sub #\|)) (skip-block-comment))
+                   ;; SBCL takes #n| and #n+ (warning that the argument is
+                   ;; ignored) as #| and #+, so the digits change nothing.
+                   ((char= sub #\|)
+                    ;; SKIP-BLOCK-COMMENT starts two characters before the
+                    ;; comment's text.
+                    (setf i (1- j)) (skip-block-comment))
                    ((char= sub #\\)
                     ;; #\x, #\Space: the character after \ is data.
                     (setf i (+ j 2)) (skip-token) (complete))
@@ -137,7 +142,7 @@ depth, which is all a limit this far from real code needs."
                     (setf i (1+ j)) (complete))
                    ((and (not digits-p) (char= sub #\:))
                     (setf i (1+ j)) (skip-token) (complete))
-                   ((and (not digits-p) (member sub '(#\+ #\-)))
+                   ((member sub '(#\+ #\-))
                     (setf i (1+ j)) (push-frame (cons :need 2)))
                    (t
                     ;; #' #. #C #S #P #A #nA #n= #B #X ... and any macro a

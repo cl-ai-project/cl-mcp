@@ -79,7 +79,9 @@ merely shared structure are noise -- switch it on when this says so.  The walk
 follows conses, arrays whose elements can be any object (fill pointers
 ignored) and the tagged slots of structure instances, which the default
 printer writes as #S(...).  A standard object or a hash table prints as
-#<...> and is not entered.
+#<...> and is not entered.  A structure with a print method of its own is
+entered all the same -- a package, whose use and used-by lists point at each
+other, answers T -- which only turns on *PRINT-CIRCLE* for nothing.
 
 With CONSES-ONLY, only conses are followed: the question is then whether a
 walk of the list structure, such as MACROEXPAND-ALL's, would loop.
