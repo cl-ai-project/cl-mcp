@@ -68,8 +68,23 @@
                       ;; From the third review: dispatch macros other than the
                       ;; named ones fell through as atoms, and a feature
                       ;; expression's own nesting was skipped uncounted.
-                      "#C" "#S" "#P" "#0A" "#X" "#.(" "#(" "#+(not " "#+#+a b "))
+                      "#C" "#S" "#P" "#0A" "#X" "#.(" "#(" "#+(not " "#+#+a b "
+                      ;; SBCL reads #n+ as #+, ignoring the argument; uncounted,
+                      ;; 200000 of them killed the process.
+                      "#1+sbcl " "#2-(or a b) "
+                      ;; A #- that fails yields nothing, so the #+ before it
+                      ;; reads on at its depth: each pair nests a level, and
+                      ;; counted as two complete reads they were none.
+                      "#+sbcl #-sbcl a " "#-nope #-sbcl a "))
       (ok (lisp-too-deep-p (%chain 20000 prefix)) prefix))
+    (ok (lisp-too-deep-p (format nil "(progn ~A)" (%chain 20000 "#+sbcl #-sbcl a ")))
+        "the pairs nest inside one list too")
+    (ok (lisp-too-deep-p
+         (with-output-to-string (out)
+           ;; A ) inside #1|...|#, a comment to SBCL, closed counted lists.
+           (dotimes (i 100)
+             (format out "~A #1| ~A |#" (%opens 450) (make-string 450 :initial-element #\))))))
+        "#n| is a block comment")
     (ok (not (lisp-too-deep-p (%chain (1- +max-lisp-nesting+) "'")))
         "a chain within the limit is allowed"))
   (testing "prefixes whose object is complete give their level back"

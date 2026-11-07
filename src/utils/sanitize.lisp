@@ -4,6 +4,8 @@
   (:use #:cl)
   (:import-from #:cl-ppcre
                 #:regex-replace-all)
+  (:import-from #:cl-mcp/src/utils/printing
+                #:bounded-princ-to-string)
   (:export #:sanitize-for-json
            #:sanitize-error-message
            #:sanitize-condition-text
@@ -155,10 +157,13 @@ END-OF-FILE (its exact type, not a subtype) is described as \"unexpected end
 of input\": its report names the stream object, which SANITIZE-ERROR-MESSAGE
 would strip down to a dangling \"end of file on\". A subtype with a report
 of its own (cst's UNTERMINATED-SOURCE, which says what is still open) keeps
-that text, and anything else goes through SANITIZE-ERROR-MESSAGE."
+that text, and anything else goes through SANITIZE-ERROR-MESSAGE.
+The report is printed by BOUNDED-PRINC-TO-STRING: a report can print an object
+it was given, and one that is circular -- the reader's fixup node in the report
+of a #S it could not build, say -- would otherwise print forever."
   (if (eq (type-of condition) 'end-of-file)
       "unexpected end of input"
-      (sanitize-error-message (princ-to-string condition))))
+      (sanitize-error-message (bounded-princ-to-string condition))))
 
 (defun replace-lone-surrogates (json)
   "Return JSON, an encoded JSON text, with every UTF-16 surrogate character

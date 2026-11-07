@@ -46,8 +46,8 @@
 (defmacro shared-literal-macro ()
   "Test macro whose expansion shares one CONS in two places.
 Under *PRINT-CIRCLE* the sharing would surface as #1= / #1# markers.  The
-shared object must be a cons, not a string: %CIRCULAR-P only traverses
-conses, so a shared string would never reach its memoization path and the
+shared object must be a cons, not a string: CIRCULAR-P does not walk into
+strings, so a shared string would never reach its memoization path and the
 test would pass without exercising anything."
   (let ((shared (list 'quote (list 1 2))))
     (list 'list shared shared)))
@@ -55,6 +55,14 @@ test would pass without exercising anything."
 (defmacro big-list-macro ()
   "Test macro whose expansion is deliberately long, for truncation tests."
   `(list ,@(loop for i from 0 below 200 collect i)))
+
+(defmacro deep-vector-macro ()
+  "Test macro whose expansion quotes vectors nested 200000 deep: acyclic, and
+deeper than any source text the reader is allowed to take."
+  (let ((datum nil))
+    (dotimes (i 200000)
+      (setf datum (vector datum)))
+    (list 'quote datum)))
 
 (defmacro cyclic-expansion-macro ()
   "Test macro whose expansion is a self-referential list.
@@ -273,6 +281,17 @@ the tests below see only what this run interns: otherwise, in a reused image,
         (ok (stringp printed) "a 60000-element literal is ordinary input")
         (ok truncated-p)))))
 
+(deftest circular-check-survives-a-deeply-nested-expansion
+  (testing "the cycle check before printing does not recurse into the nesting"
+    (let ((entry (first (macroexpand-forms (list (cons "deep" "(deep-vector-macro)"))
+                                           :package *fixture-package*
+                                           :level "once"
+                                           :print-level 2
+                                           :print-length 10))))
+      (ok (null (getf entry :error)) (format nil "no error: ~S" (getf entry :error)))
+      (ok (equal "'#(#(#))" (getf entry :printed))
+          (format nil "printed within the print level: ~S" (getf entry :printed))))))
+
 (deftest macroexpand-full-reports-when-it-hits-the-cap
   (testing "a self-reproducing macro is capped and says so"
     (multiple-value-bind (printed expanded-p steps truncated-p capped-p)
@@ -300,6 +319,14 @@ the tests below see only what this run interns: otherwise, in a reused image,
       (declare (ignore expanded-p))
       (ok (search "#1=" printed)
           "printed with circle notation; nothing hangs or crashes"))))
+
+(deftest macroexpand-all-expands-a-form-holding-a-circular-vector
+  (testing "level all walks only conses, so a cycle through a vector is no refusal"
+    (multiple-value-bind (printed expanded-p)
+        (macroexpand-source "(list 1 '#1=#(a #1#))" :package "CL-USER" :level "all")
+      (declare (ignore expanded-p))
+      (ok (and printed (search "#1=#(" printed))
+          (format nil "expanded and printed with circle notation: ~A" printed)))))
 
 (deftest macroexpand-all-delegates-to-an-existing-macroexpand-hook
   (testing "the level-all guard does not displace a hook the image already had"

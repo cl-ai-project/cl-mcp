@@ -12,6 +12,8 @@
                           #:cst-node-value
                           #:cst-node-start
                           #:cst-node-end)
+  (:import-from #:cl-mcp/src/utils/printing
+                #:circular-p)
   (:import-from #:cl-ppcre
                 #:scan-to-strings)
   (:import-from #:cl-mcp/src/cst
@@ -93,11 +95,15 @@
 
 (defun %normalize-string (thing)
   "Normalize THING to a lowercase string for form matching.
-Uses SYMBOL-NAME for symbols to avoid package prefix in the output."
+Uses SYMBOL-NAME for symbols to avoid package prefix in the output.  Anything
+else is PRINCed, with circle notation when it is circular (#n= is standard
+syntax, so a name such as #1=(a . #1#) reads), where printing would otherwise
+never end."
   (string-downcase
    (if (symbolp thing)
        (symbol-name thing)
-       (princ-to-string thing))))
+       (let ((*print-circle* (circular-p thing)))
+         (princ-to-string thing)))))
 
 (defun %names-only (tree)
   "Return TREE with each symbol outside COMMON-LISP and KEYWORD replaced by an
@@ -133,13 +139,18 @@ The package a form was read in decides how PRIN1 qualifies its symbols, so
 printing them as read made a method's lambda list come out as
 \"((stream cl-mcp/src/utils/bounded-stream:bounded-output-stream) character)\"
 in one process and unqualified in another, and a long lambda list gained line
-breaks.  Neither matched what a caller writes."
-  (let ((*package* (find-package "COMMON-LISP-USER"))
-        (*print-gensym* nil)
-        (*print-pretty* t)
-        (*print-right-margin* most-positive-fixnum)
-        (*print-readably* nil))
-    (string-downcase (prin1-to-string (%names-only object)))))
+breaks.  Neither matched what a caller writes.
+
+A circular OBJECT is printed as read, with circle notation: %NAMES-ONLY would
+copy it forever, and printing it without labels would never end."
+  (let* ((circular (circular-p object))
+         (*package* (find-package "COMMON-LISP-USER"))
+         (*print-gensym* nil)
+         (*print-pretty* t)
+         (*print-right-margin* most-positive-fixnum)
+         (*print-readably* nil)
+         (*print-circle* circular))
+    (string-downcase (prin1-to-string (if circular object (%names-only object))))))
 
 (defun %defmethod-candidates (form)
   "Return candidate signature strings for a DEFMETHOD FORM.
@@ -191,8 +202,12 @@ normalized: PRINC drops |...| escapes, so stripping its package prefixes could
 turn (SETF |foo:bar|) into (setf bar), another function's name."
   (let ((name (second form)))
     (cond
+      ;; Qualifiers and the lambda list are found by walking the spine, which
+      ;; a (defmethod m . #1=(:before . #1#)) never ends: its name alone.
       ((string= form-type "defmethod")
-       (%defmethod-candidates form))
+       (if (ignore-errors (list-length form))
+           (%defmethod-candidates form)
+           (list (%normalize-string name))))
       ((symbolp name)
        (list (%normalize-string name)))
       ;; defstruct: (defstruct (name &rest options) ...) — first element is the name
@@ -569,7 +584,12 @@ provide a non-empty name (e.g. \"my-pkg\" instead of \"#:\" alone)"))
                   when (and (typep node 'cst-node)
                             (eq (cst-node-kind node) :expr))
                     do (let ((value (cst-node-value node)))
+                         ;; A head that is no symbol -- ((lambda (x) x) 1), or
+                         ;; a circular list -- names no form type, and a
+                         ;; dotted (defun . 5) has no name to match.
                          (when (and (consp value)
+                                    (symbolp (car value))
+                                    (consp (cdr value))
                                     (string= (string-downcase (symbol-name (car value))) form-type)
                                     (let ((targets (if (%list-valued-name-p value form-type)
                                                        list-targets

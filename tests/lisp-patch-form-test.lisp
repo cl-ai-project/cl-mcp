@@ -1369,3 +1369,36 @@ direct lost-update regression."
                              :old-text "1)" :new-text "10)" :readtable readtable)
             (ok (string= (format nil "(defun a () 10)~%(defun b () 2)~%")
                          (fs-read-file path)))))))))
+
+(defun %patch-within (seconds &rest arguments)
+  "Return what LISP-PATCH-FORM gives for ARGUMENTS -- its result, or the
+condition it signalled -- or :TIMEOUT when it has not answered within SECONDS.
+The patch runs on a thread of its own, destroyed on the way out whenever it is
+still running, so a hang fails the test and leaves no thread behind."
+  (let* ((result nil)
+         (thread (make-thread
+                  (lambda ()
+                    (setf result (handler-case (apply #'lisp-patch-form arguments)
+                                   (serious-condition (c) c))))
+                  :name "lisp-patch-form-test-patch-within")))
+    (unwind-protect
+         (progn
+           (loop repeat (round (* seconds 100))
+                 while (thread-alive-p thread)
+                 do (sleep 0.01d0))
+           (if (thread-alive-p thread) :timeout result))
+      (when (thread-alive-p thread)
+        (ignore-errors (destroy-thread thread))))))
+
+(deftest lisp-patch-form-reports-a-missing-old-text-in-a-circular-form
+  (testing "old_text not found in a form named by a circular list answers promptly"
+    ;; Issue #285: the message printed the form's name without circle notation.
+    (with-temp-file "tests/tmp/patch-circular-name.lisp"
+        (format nil "(defthing #1=(a . #1#))~%")
+      (lambda (path)
+        (let ((answer (%patch-within 2 :file-path path :form-type "defthing"
+                                       :form-name "#1=(a . #1#)"
+                                       :old-text "zzz" :new-text "yyy")))
+          (ok (typep answer 'error) (format nil "refused: ~A" answer))
+          (when (typep answer 'error)
+            (ok (search "old_text not found" (princ-to-string answer)))))))))

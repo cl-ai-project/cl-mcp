@@ -4264,3 +4264,84 @@ Return the condition it signals, or NIL when it succeeds."
             (ok (typep (%insert-block path "replace" "a" "(defun a () 10)" :guard guard)
                        'edit-guard-conflict-error))
             (ok (string= file (fs-read-file path)))))))))
+
+(defun %edit-within (seconds &rest arguments)
+  "Return what LISP-EDIT-FORM gives for ARGUMENTS -- its result, or the
+condition it signalled -- or :TIMEOUT when it has not answered within SECONDS.
+The edit runs on a thread of its own, destroyed on the way out whenever it is
+still running, so a hang fails the test instead of the suite and leaves no
+thread behind."
+  (let* ((result nil)
+         (thread (bordeaux-threads:make-thread
+                  (lambda ()
+                    (setf result (handler-case (apply #'lisp-edit-form arguments)
+                                   (serious-condition (c) c))))
+                  :name "lisp-edit-form-test-edit-within")))
+    (unwind-protect
+         (progn
+           (loop repeat (round (* seconds 100))
+                 while (bordeaux-threads:thread-alive-p thread)
+                 do (sleep 0.01d0))
+           (if (bordeaux-threads:thread-alive-p thread) :timeout result))
+      (when (bordeaux-threads:thread-alive-p thread)
+        (ignore-errors (bordeaux-threads:destroy-thread thread))))))
+
+(deftest lisp-edit-form-answers-beside-circular-literals
+  ;; Issue #285: names and method signatures were printed without
+  ;; *PRINT-CIRCLE*, and a circular method spine was walked for qualifiers.
+  (with-temp-file "tests/tmp/edit-form-circular.lisp"
+      (format nil "(defthing #1=(a . #1#))~%~%~
+                   (defmethod m #2=(x . #2#) 1)~%~%~
+                   (defmethod spun . #3=(:before . #3#))~%~%~
+                   (defmethod other ((x integer)) 2)~%~%~
+                   (defun target () :old)~%")
+    (lambda (path)
+      (let ((missing (%edit-within 2 :file-path path :form-type "defun"
+                                     :form-name "nope" :operation "delete"
+                                     :dry-run t)))
+        (ok (typep missing 'error) (format nil "not found is an error: ~A" missing))
+        (when (typep missing 'error)
+          (ok (search "target" (princ-to-string missing))
+              "the listing still names the forms")))
+      (let ((method (%edit-within 2 :file-path path :form-type "defmethod"
+                                    :form-name "other ((x integer))"
+                                    :operation "delete" :dry-run t)))
+        (ok (hash-table-p method)
+            (format nil "a method beside circular ones is found: ~A" method)))
+      (let ((function (%edit-within 2 :file-path path :form-type "defun"
+                                      :form-name "target" :operation "replace"
+                                      :content "(defun target () :new)" :dry-run t)))
+        (ok (hash-table-p function)
+            (format nil "a function beside them is found: ~A" function))))))
+
+(deftest lisp-edit-form-answers-beside-a-form-with-a-list-head
+  ;; A top-level form whose head is not a symbol -- a lambda form, or a circular
+  ;; list -- was taken apart with SYMBOL-NAME, and the TYPE-ERROR printed its
+  ;; circular datum forever.
+  (with-temp-file "tests/tmp/edit-form-list-head.lisp"
+      (format nil "((lambda (x) x) 1)~%~%(#1=(a . #1#) foo)~%~%(defun . 5)~%~%~
+                   (defun target () :old)~%")
+    (lambda (path)
+      (let ((function (%edit-within 2 :file-path path :form-type "defun"
+                                      :form-name "target" :operation "replace"
+                                      :content "(defun target () :new)" :dry-run t)))
+        (ok (hash-table-p function)
+            (format nil "the function after them is found: ~A" function)))
+      (let ((missing (%edit-within 2 :file-path path :form-type "defun"
+                                     :form-name "nope" :operation "delete"
+                                     :dry-run t)))
+        (ok (and (typep missing 'error)
+                 (search "Form defun nope not found" (princ-to-string missing)))
+            (format nil "not found is reported as such: ~A" missing))))))
+
+(deftest lisp-edit-form-refuses-a-circular-feature-expression
+  (testing "a #+ with a circular feature expression in content is refused promptly"
+    (with-temp-file "tests/tmp/edit-form-circular-feature.lisp"
+        (format nil "(defun target () :old)~%")
+      (lambda (path)
+        (let ((answer (%edit-within 2 :file-path path :form-type "defun"
+                                      :form-name "target" :operation "replace"
+                                      :content (format nil "#+#1=(and . #1#)~%~
+                                                            (defun target () :new)")
+                                      :dry-run t)))
+          (ok (typep answer 'error) (format nil "refused: ~A" answer)))))))

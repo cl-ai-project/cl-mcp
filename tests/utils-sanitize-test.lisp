@@ -6,7 +6,8 @@
                 #:deftest #:testing #:ok)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json
-                #:sanitize-error-message))
+                #:sanitize-error-message
+                #:sanitize-condition-text))
 
 (in-package #:cl-mcp/tests/utils-sanitize-test)
 
@@ -218,3 +219,36 @@
     (let ((esc (code-char 27)))
       (ok (string= "keep" (sanitize-for-json (format nil "keep~C[31" esc))))
       (ok (string= "keep" (sanitize-for-json (format nil "keep~C[" esc)))))))
+
+(define-condition circular-report-error (error)
+  ((object :initarg :object :reader circular-report-object))
+  (:report (lambda (condition stream)
+             (format stream "cannot use ~S" (circular-report-object condition))))
+  (:documentation "An error whose report prints an object it was given."))
+
+(deftest sanitize-condition-text-bounds-a-circular-report
+  (testing "a report holding a circular object comes back instead of looping"
+    ;; Its car and its cdr are both itself: bounding the level and the length
+    ;; alone still leaves 50^8 elements to print.
+    (let ((object (list 1 2))
+          (result nil)
+          (thread nil))
+      (setf (cddr object) (cons object object))
+      (unwind-protect
+           (progn
+             (setf thread (bordeaux-threads:make-thread
+                           (lambda ()
+                             (setf result
+                                   (sanitize-condition-text
+                                    (make-condition 'circular-report-error
+                                                    :object object))))
+                           :name "sanitize-test-circular-report"))
+             (loop repeat 200
+                   while (bordeaux-threads:thread-alive-p thread)
+                   do (sleep 0.01d0)))
+        ;; A hang must fail the test, not leave a thread looping behind it.
+        (when (and thread (bordeaux-threads:thread-alive-p thread))
+          (ignore-errors (bordeaux-threads:destroy-thread thread))))
+      (ok (stringp result) "answered")
+      (ok (and (stringp result) (search "cannot use #1=(1 2 #1# . #1#)" result))
+          (format nil "the report is kept, cut short: ~A" result)))))

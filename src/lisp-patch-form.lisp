@@ -27,6 +27,9 @@
                 #:sanitize-error-message
                 #:sanitize-condition-text
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/utils/printing
+                #:bounded-princ-to-string
+                #:circular-p)
   (:import-from #:cl-mcp/src/package-context
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/utils/nesting
@@ -140,7 +143,9 @@ Signals PATCH-OPERATION-ERROR if OLD-TEXT is not found or occurs multiple times.
       (let* ((form-value (cst-node-value node))
              (form-id
               (if (consp form-value)
-                  (format nil "~A ~A" (car form-value) (second form-value))
+                  ;; The name can be circular: #1=(a . #1#) reads.
+                  (let ((*print-circle* (circular-p (second form-value))))
+                    (format nil "~A ~A" (car form-value) (second form-value)))
                   "matched")))
         (error 'patch-operation-error
                :reason (format nil "old_text not found in ~A form. ~
@@ -509,7 +514,7 @@ The patch replaces text in place, so comments are kept."))
         (error e))
       (error (e)
         (let ((msg (sanitize-for-json
-                    (sanitize-error-message (format nil "~A" e)))))
+                    (sanitize-error-message (bounded-princ-to-string e)))))
           (if (and (protocol-version state)
                    (string>= (protocol-version state) "2025-11-25"))
               (result id (make-ht "content" (text-content msg) "isError" t))
