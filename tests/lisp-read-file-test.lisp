@@ -1387,8 +1387,10 @@ message it signals, or NIL when it returns normally."
           (ok (search "unclosed (form starting at line 3: \"(defun probe-a (x)\")" message))
           (ok (search "Likely fix, inferred from indentation:" message))
           (ok (search "Next top-level form probably begins at line 10" message))
-          (ok (search "fs-write-file" message)
-              "the recovery path is executable with cl-mcp tools alone")
+          ;; A read-only tool names no write path (#324); lisp-check-parens,
+          ;; which it points at, gives the recovery steps.
+          (ng (search "fs-write-file" message) "no write path from a read")
+          (ok (search "lisp-check-parens path=" message) "the way to the recovery steps")
           (ng (search "use lisp-check-parens)" message) "the old one-line hint is gone")))))
   (testing "a stray ) takes the same path instead of escaping as an internal error"
     (with-temp-lisp-file "tests/tmp/read-file-stray-close.lisp" *stray-close-source*
@@ -1445,10 +1447,50 @@ message it signals, or NIL when it returns normally."
              (let ((message (%unparseable-message (namestring outside))))
                (ok message)
                (ok (search "extra \")\"" message) "the diagnosis is still given")
-               (ok (search "outside the project root" message))
-               (ng (search "fs-write-file (path=" message)
+               (ng (search "fs-write-file" message)
                    "no overwrite instruction for a path fs-write-file would reject")))
         (ignore-errors (delete-file outside))))))
+
+(deftest lisp-read-file-reads-past-a-readtable-the-server-lacks
+  ;; Issue #324: mgl-pax files listed 2 of 246 forms and said so only at the end
+  ;; and in meta; ironclad's #@ had no read path at all.
+  (with-temp-lisp-file "tests/tmp/read-file-unknown-readtable.lisp"
+      (format nil "(in-package #:cl-user)~%~%~
+                   (named-readtables:in-readtable :no-such-readtable-324)~%~%~
+                   (defun uses-macro () #@foo)~%~%(defun after-it (x)~%  (list x #@(a b)))~%~%~
+                   (defvar *last* 1)~%")
+    (lambda (path)
+      (let* ((result (lisp-read-file path))
+             (content (gethash "content" result))
+             (meta (gethash "meta" result)))
+        (testing "the top says the parse stops, and where"
+          (ok (eql 0 (search "NOTE: the parse stops at line 4" content)) content))
+        (testing "the forms after the declaration are still listed, marked as read without it"
+          (ok (search "Read past the in-readtable without it" content))
+          (ok (search "(defun uses-macro ()" content))
+          (ok (search "(defun after-it (x)" content))
+          (ok (search "(defvar *last*" content))
+          (ok (eql 3 (gethash "forms_read_past" meta))))
+        (testing "the reason is given without a write path"
+          (ok (search "no-such-readtable-324" content :test #'char-equal))
+          (ng (search "fs-write-file" content)))
+        (ok (eq t (gethash "unparseable" meta)))
+        (ok (eql 4 (gethash "unparseable_from_line" meta)))))))
+
+(deftest lisp-read-file-lists-a-file-with-an-unknown-dispatch-macro
+  ;; Issue #324: a #@ the reader does not know made the whole file an error.
+  (with-temp-lisp-file "tests/tmp/read-file-unknown-dispatch.lisp"
+      (format nil "(in-package #:cl-user)~%~%(defun first-one () 1)~%~%~
+                   (defconstant +k+ #@(1 2 3))~%~%(defun last-one () 3)~%")
+    (lambda (path)
+      (let* ((result (lisp-read-file path))
+             (content (gethash "content" result)))
+        (ok (eql 0 (search "NOTE: the file does not parse as written" content)) content)
+        (ok (search "Read with recovery" content))
+        (ok (search "(defun first-one ()" content))
+        (ok (search "(defun last-one ()" content) "the forms after the #@ are listed")
+        (ng (search "fs-write-file" content))
+        (ok (eq t (gethash "unparseable" (gethash "meta" result))))))))
 
 (deftest lisp-read-file-truncated-read-is-not-diagnosed
   (testing "a valid file larger than the read cap is reported as too large, not as broken"

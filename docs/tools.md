@@ -610,6 +610,19 @@ Inputs:
 
 A file over the 1 MB read cap cannot be collapsed and is an error.
 
+A file the collapsed view cannot parse whole is still listed as far as it can be (#324),
+and the content then opens with a `NOTE:` line saying where the parse stops, so a partial
+listing never reads as the whole file; the reason follows the listing. Past an
+`(in-readtable ...)` naming a readtable the server lacks, the rest of the file is listed
+too, read without that readtable with Eclector's error recovery (an unknown reader macro
+such as `#@` is skipped) under a `--- Read past the in-readtable without it ... ---`
+line, and a file in standard syntax that fails only on an unknown dispatch macro is
+listed the same way (`--- Read with recovery ... ---`). Those forms may be shown inexactly
+and the editing tools cannot reach them. `meta` then carries `unparseable: true`,
+`unparseable_from_line` and `forms_read_past`. The reason names no write path: this tool
+only reads, and the file may be a dependency's; a parenthesis problem points at
+`lisp-check-parens`, which gives the repair steps.
+
 An **expanded** form is echoed from the file verbatim, so its text — including
 comments inside the form — is exactly what is on disk, and the `NNN:` prefix on
 each line is that line of the file. Text copied out of an expanded form can

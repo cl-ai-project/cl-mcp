@@ -676,6 +676,9 @@ read without it has not been shown to read correctly."))
           (handler-case
               (call-with-lenient-packages
                (lambda ()
+                 (handler-bind
+                     ((error (lambda (condition)
+                               (%recover-reader-error condition))))
                  (loop
                    (multiple-value-bind (result orphan-results)
                        (eclector.parse-result:read client stream nil :eof)
@@ -728,7 +731,7 @@ read without it has not been shown to read correctly."))
                                                   in the cl-mcp server ~
                                                   process, which is where ~
                                                   files are parsed."
-                                             designator)))))))))))))
+                                             designator))))))))))))))
             (reader-error (e)
               (let ((msg (format nil "~A" e)))
                 (cond
@@ -765,7 +768,26 @@ named-readtable designator (e.g., readtable: \"interpol-syntax\")."
 named-readtable designator (e.g., readtable: \"interpol-syntax\")."
                     e))))))))))
 
-(defun parse-top-level-forms (text &key readtable source-path initial-package)
+(defvar *recover-reader-errors* nil
+  "True while PARSE-TOP-LEVEL-FORMS reads with RECOVER: a reader error the
+Eclector pass can recover from (an unknown dispatch macro such as #@, say) is
+recovered from -- the offending syntax skipped -- instead of ending the
+parse.  For display only: a form read that way may not be the form the file
+means, so nothing that edits uses it.")
+
+(defun %recover-reader-error (condition)
+  "Invoke Eclector's RECOVER restart for CONDITION while *RECOVER-READER-ERRORS*
+is true.  A package or symbol the image lacks is left to the lenient handlers
+(Eclector's own recovery would intern the symbol into a real package)."
+  (when (and *recover-reader-errors*
+             (not (typep condition '(or eclector.reader:package-does-not-exist
+                                        eclector.reader:symbol-does-not-exist
+                                        eclector.reader:symbol-is-not-external))))
+    (let ((restart (find-restart 'eclector.reader:recover condition)))
+      (when restart
+        (invoke-restart restart)))))
+
+(defun parse-top-level-forms (text &key readtable source-path initial-package recover)
   "Parse TEXT into CST-NODE values. When READTABLE is provided, use that named readtable.
 Unknown package-qualified symbols are handled leniently by creating ephemeral
 stub packages that are cleaned up after parsing.
@@ -776,10 +798,13 @@ pass early (after an IN-READTABLE switch or when READTABLE is given), or NIL.
 In that mode a malformed later form does not signal; the nodes read so far
 are returned and the error is reported here instead.
 Text nested deeper than +MAX-LISP-NESTING+ is refused with an ERROR before
-any reader sees it (see CHECK-LISP-NESTING)."
+any reader sees it (see CHECK-LISP-NESTING).
+With RECOVER, the Eclector pass recovers from the reader errors it can
+(*RECOVER-READER-ERRORS*), for a listing that must show what follows them."
   (check-lisp-nesting text)
   (let ((*line-table* (%build-line-table text))
-        (*package* *package*))
+        (*package* *package*)
+        (*recover-reader-errors* recover))
     (cond
       (initial-package
        (call-with-package-context

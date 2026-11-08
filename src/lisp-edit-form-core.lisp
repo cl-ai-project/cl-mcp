@@ -1051,6 +1051,33 @@ because %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P opens it for exactly that case."
                            path readtable (file-unparseable-cause condition))
                    (format-delimiter-diagnosis diagnosis :target path))))
     (cond
+      ((file-unparseable-read-only-p condition)
+       ;; Reading a file is no reason to rewrite it (issue #324): what stopped
+       ;; the parse, and the raw view that always works.
+       (format nil "~A~%~A~:[~; The forms before it can still be edited with ~
+                    lisp-edit-form.~] collapsed=false shows the file's text as it ~
+                    is~:[.~;; to repair it, lisp-check-parens path=~S gives the full ~
+                    diagnosis and the steps.~]"
+               (if (file-unparseable-unreadable-dispatch condition)
+                   (format nil "Cannot parse ~A: ~A" path
+                           (apply #'format-unreadable-dispatch
+                                  (file-unparseable-unreadable-dispatch condition)))
+                   head)
+               (cond
+                 ((file-unparseable-unavailable-readtable condition)
+                  (format nil "The parse stops at that declaration: this server process ~
+                               has no such readtable, and nothing an agent can call ~
+                               registers one here."))
+                 (readtable
+                  (format nil "Under a custom readtable a reader macro may consume what ~
+                               looks like a delimiter, so no standard-syntax diagnosis is ~
+                               offered."))
+                 (t ""))
+               (file-unparseable-editable-prefix-p condition)
+               ;; A parenthesis problem has a repair to point at; a missing
+               ;; readtable or reader macro does not.
+               (or (file-unparseable-recoverable-p condition) (not scan-ok))
+               path))
       ((file-unparseable-recoverable-p condition)
        ;; fs-write-file takes only a project-relative path, so that is the
        ;; form the instruction gives; the absolute one stays in the head.
@@ -1164,7 +1191,13 @@ MAKE-FILE-UNPARSEABLE-CONDITION from the file's text.")
                         :documentation
                         "(LINE COLUMN SUB-CHAR) of a # no standard readtable reads
 (UNREADABLE-DISPATCH-POSITION), when the reader failed on something other than
-a delimiter and no readtable was supplied; NIL otherwise."))
+a delimiter and no readtable was supplied; NIL otherwise.")
+   (read-only :initarg :read-only :initform nil
+              :reader file-unparseable-read-only-p
+              :documentation
+              "T when the tool that met the file only reads it (lisp-read-file): the
+message then says what stopped the parse and where, and names no write path --
+the file may well be a dependency's, which reading it is no reason to rewrite."))
   (:report (lambda (c s) (write-string (file-unparseable-message c) s)))
   (:documentation "Signaled when the target file cannot be parsed into top-level forms.
 RECOVERABLE is T when the failure is a delimiter problem (missing or stray
@@ -1184,7 +1217,8 @@ than recommending the readtable argument, and fs-write-file lets it be
 rewritten whole (%FILE-UNPARSEABLE-BY-EDIT-TOOLS-P's :READTABLE-UNAVAILABLE
 verdict)."))
 
-(defun make-file-unparseable-condition (abs text cause &key readtable editable-prefix)
+(defun make-file-unparseable-condition (abs text cause &key readtable editable-prefix
+                                                               read-only)
   "Return a FILE-UNPARSEABLE-ERROR for the file at ABS whose TEXT failed to
 parse with CAUSE, the condition PARSE-TOP-LEVEL-FORMS signalled or returned as
 its second value. Under a caller-supplied READTABLE the standard delimiter scan
@@ -1198,6 +1232,7 @@ the forms it could still show."
   (make-condition 'file-unparseable-error
                   :path (native-path-namestring abs)
                   :readtable readtable
+                  :read-only read-only
                   :editable-prefix editable-prefix
                   :diagnosis (if readtable
                                  (list :ok t)
@@ -1221,12 +1256,13 @@ the forms it could still show."
                          (and line (list line column sub-char))))
                   :cause (sanitize-condition-text cause)))
 
-(defun signal-file-unparseable (abs text cause &key readtable editable-prefix)
+(defun signal-file-unparseable (abs text cause &key readtable editable-prefix read-only)
   "Signal the FILE-UNPARSEABLE-ERROR MAKE-FILE-UNPARSEABLE-CONDITION builds for
 ABS, TEXT and CAUSE. Never returns."
   (error (make-file-unparseable-condition abs text cause
                                          :readtable readtable
-                                         :editable-prefix editable-prefix)))
+                                         :editable-prefix editable-prefix
+                                         :read-only read-only)))
 
 (defconstant +edit-guard-version+ 1
   "The only value GUARD's version field may carry for CHECK-EDIT-GUARD to
