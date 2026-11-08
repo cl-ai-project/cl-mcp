@@ -187,6 +187,7 @@ first: the name is this worker's own, and no sweep could remove it."
                (handler-case (ensure-directories-exist directory)
                  (error (e)
                    (sb-posix:close fd)
+                   (ignore-errors (delete-file lock))
                    (error e)))
                (return-from %claim-new-cache (values directory fd)))))
   (error "could not lock a cache of its own under ~A: the lock was held, could not be ~

@@ -14,7 +14,8 @@
                 #:sweep-dead-worker-caches
                 #:prepare-worker-fasl-cache
                 #:isolate-project-fasls
-                #:ensure-project-fasls-isolated)
+                #:ensure-project-fasls-isolated
+                #:%try-lock)
   (:import-from #:cl-mcp/src/worker-client
                 #:spawn-worker
                 #:worker-rpc
@@ -187,6 +188,52 @@ time.sleep(120)"
                                      #o600))
       (uiop:delete-directory-tree base :validate t :if-does-not-exist :ignore)
       (uiop:delete-directory-tree outside :validate t :if-does-not-exist :ignore))))
+
+(defmacro with-try-lock-wrapped ((wrapper) &body body)
+  "Run BODY with %TRY-LOCK called through WRAPPER, a function of the original
+function and its arguments.  The sb-posix calls inside %TRY-LOCK are inlined,
+so the lock's outcomes are steered at %TRY-LOCK itself."
+  `(progn
+     (sb-int:encapsulate 'cl-mcp/src/worker/fasl-cache::%try-lock 'test-wrapper ,wrapper)
+     (unwind-protect (progn ,@body)
+       (sb-int:unencapsulate 'cl-mcp/src/worker/fasl-cache::%try-lock 'test-wrapper))))
+
+(deftest claiming-a-cache-copes-with-a-lock-it-cannot-take
+  (let ((base (%scratch-directory "fasl-cache-claim")))
+    (unwind-protect
+         (progn
+           (testing "a lock held for a moment by a sweep sends it to a fresh name"
+             (let ((calls 0)
+                   (*worker-fasl-cache* nil)
+                   (*worker-cache-lock-fd* nil))
+               (with-try-lock-wrapped ((lambda (function &rest arguments)
+                                         (if (= 1 (incf calls))
+                                             nil
+                                             (apply function arguments))))
+                 (let ((own (prepare-worker-fasl-cache base)))
+                   (unwind-protect
+                        (progn
+                          (ok (and own (uiop:directory-exists-p own)) "it gets a cache")
+                          (ok (= 2 calls) "on the second name"))
+                     (when *worker-cache-lock-fd*
+                       (sb-posix:close *worker-cache-lock-fd*)))))))
+           (testing "a lock that fails outright leaves no lock file behind"
+             (let ((*worker-fasl-cache* nil)
+                   (*worker-cache-lock-fd* nil)
+                   (before (uiop:directory-files base "*.lock")))
+               ;; The lock file is made, then the lock fails, as with ENOLCK.
+               (with-try-lock-wrapped ((lambda (function &rest arguments)
+                                         (let ((fd (apply function arguments)))
+                                           (when fd (sb-posix:close fd))
+                                           (error "No locks available"))))
+                 (ok (null (prepare-worker-fasl-cache base)) "the worker falls back")
+                 (ok (= (length before) (length (uiop:directory-files base "*.lock")))
+                     "and its own lock file is gone"))))
+           (testing "a sweep's open never recreates a lock file that vanished"
+             (let ((missing (merge-pathnames "999-gone.lock" base)))
+               (ok (null (%try-lock missing :create nil)) "not taken")
+               (ok (not (probe-file missing)) "and not made"))))
+      (uiop:delete-directory-tree base :validate t :if-does-not-exist :ignore))))
 
 (defun %eval-in (worker code)
   "Evaluate CODE in WORKER's CL-USER and return the response's text."
