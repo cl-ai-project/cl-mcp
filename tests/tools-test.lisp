@@ -911,6 +911,8 @@
                             "\"form_type\":\"defvar\",\"form_name\":\"*b*\","
                             "\"operation\":\"replace\","
                             "\"content\":\"(defvar *b* 20)\","
+                            ;; Opt-in since #326.
+                            "\"normalize_blank_lines\":true,"
                             "\"dry_run\":" dry-run "}}}"))
                       (result (gethash "result" (parse (%pjl req))))
                       (text (gethash "text" (elt (gethash "content" result) 0))))
@@ -920,8 +922,9 @@
                      (format nil "and the text names the way out (dry_run ~A)" dry-run))))
           (ignore-errors (delete-file abs)))))))
 
-(deftest tools-call-lisp-edit-form-default-normalizes-blank-lines
-  (testing "tools/call lisp-edit-form normalizes blank lines when option is omitted"
+(deftest tools-call-lisp-edit-form-default-leaves-blank-lines-alone
+  ;; Issue #326: normalizing is opt-in; by default only the form changes.
+  (testing "tools/call lisp-edit-form changes only the form when the option is omitted"
     (with-test-project-root
       (let ((tmp-path "tests/tmp/lisp-edit-form-normalize-default.lisp")
              (initial-content (format nil
@@ -946,16 +949,10 @@
                  (let ((file-content
                          (uiop:read-file-string
                           (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))))
-                   (ok (search
-                        (format nil "(defun alpha () :a)~%~%(defun target () :new)")
-                        file-content))
-                   (ok (search
-                        (format nil "(defun target () :new)~%~%(defun omega () :z)")
-                        file-content))
-                   (ok (null
-                        (search
-                         (format nil "(defun target () :new)~%~%~%(defun omega () :z)")
-                         file-content))))))
+                   (ok (equal (format nil "(defun alpha () :a)~%(defun target () :new)~%~%~%~
+                                           (defun omega () :z)~%")
+                              file-content)
+                       "the blank lines around the form are as they were"))))
           (ignore-errors
             (delete-file (merge-pathnames tmp-path cl-mcp/src/project-root:*project-root*))))))))
 

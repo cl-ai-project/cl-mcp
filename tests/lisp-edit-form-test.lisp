@@ -322,12 +322,12 @@ text and LISP-EDIT-FORM's ninth value, the feature expressions it kept."
   (testing "a real edit inside a run of adjacent forms says the spacing changed too"
     (with-temp-file "tests/tmp/edit-form-noop.lisp" *adjacent-forms-source*
       (lambda (path)
-        (let ((preview (lisp-edit-form :file-path path :form-type "define-unit"
+        (let ((preview (lisp-edit-form :file-path path :normalize-blank-lines t :form-type "define-unit"
                                        :form-name "km" :operation "replace"
                                        :content "(define-unit :km :length 1000.0)"
                                        :dry-run t)))
           (ok (eq t (gethash "blank_lines_normalized" preview))))
-        (ok (eq t (nth-value 9 (lisp-edit-form :file-path path :form-type "define-unit"
+        (ok (eq t (nth-value 9 (lisp-edit-form :file-path path :normalize-blank-lines t :form-type "define-unit"
                                                :form-name "km" :operation "replace"
                                                :content "(define-unit :km :length 1000.0)"))))
         (ok (search (format nil "1)~%~%(define-unit :km :length 1000.0)~%~%(define-unit :cm")
@@ -945,7 +945,7 @@ and the file's text afterwards."
     (with-temp-file "tests/tmp/edit-form-insert-before-normalize-blank-lines.lisp"
         (format nil "(defun alpha () :a)~%(defun target () :t)~%")
       (lambda (path)
-        (lisp-edit-form :file-path path
+        (lisp-edit-form :file-path path :normalize-blank-lines t
                         :form-type "defun"
                         :form-name "target"
                         :operation "insert_before"
@@ -1049,7 +1049,7 @@ and the file's text afterwards."
         (format nil
                 "(defun alpha () :a)~%~%~%(defun target () :old)~%(defun omega () :z)~%")
       (lambda (path)
-        (lisp-edit-form :file-path path
+        (lisp-edit-form :file-path path :normalize-blank-lines t
                         :form-type "defun"
                         :form-name "target"
                         :operation "replace"
@@ -1090,7 +1090,7 @@ and the file's text afterwards."
     (with-temp-file "tests/tmp/edit-form-insert-after-following-boundary.lisp"
         (format nil "(defun alpha () :a)~%(defun omega () :z)~%")
       (lambda (path)
-        (lisp-edit-form :file-path path
+        (lisp-edit-form :file-path path :normalize-blank-lines t
                         :form-type "defun"
                         :form-name "alpha"
                         :operation "insert_after"
@@ -1101,6 +1101,130 @@ and the file's text afterwards."
           (ok (null (search
                      (format nil "(defun beta () :b)~%(defun omega () :z)")
                      text))))))))
+
+(defparameter *compact-forms-source*
+  (format nil "~%(in-package :cl-user)~%(defcfun a :int)~%(defcfun b :int)~%~
+               #-sbcl~%(defun impl () :other)~%#+sbcl~%(defun impl () :sbcl)~%~%~%~
+               (defun last-one () 1)~%")
+  "Forms written the way real libraries write them: a leading blank line, a run of
+one-line definitions, a #-/#+ pair with no blank line between, and two blank
+lines before the last form.")
+
+(defun %default-edit (source &rest arguments)
+  "Run LISP-EDIT-FORM with ARGUMENTS on SOURCE with its default blank-line
+handling and return the file's text afterwards."
+  (with-temp-file "tests/tmp/edit-form-default-spacing.lisp" source
+    (lambda (path)
+      (apply #'lisp-edit-form :file-path path arguments)
+      (fs-read-file path))))
+
+(deftest lisp-edit-form-by-default-changes-only-the-form
+  ;; Issue #326: the default normalization moved blank lines outside the edited
+  ;; form in 70 of 221 real replaces, so a replace and its undo did not restore
+  ;; the file.
+  (testing "a replace changes the form's text and nothing else"
+    (ok (equal (%default-edit *compact-forms-source* :form-type "defcfun" :form-name "a"
+                              :operation "replace" :content "(defcfun a :long)")
+               (format nil "~%(in-package :cl-user)~%(defcfun a :long)~%(defcfun b :int)~%~
+                            #-sbcl~%(defun impl () :other)~%#+sbcl~%(defun impl () :sbcl)~%~%~%~
+                            (defun last-one () 1)~%"))))
+  (testing "a replace by the form's own text restores the file byte for byte"
+    (dolist (case '(("defcfun" "b" "(defcfun b :int)")
+                    ("defun" "impl" "(defun impl () :sbcl)")
+                    ("defun" "last-one" "(defun last-one () 1)")))
+      (destructuring-bind (type name original) case
+        (let ((once (%default-edit *compact-forms-source* :form-type type :form-name name
+                                   :operation "replace" :content "(defun changed ())")))
+          (with-temp-file "tests/tmp/edit-form-default-spacing-undo.lisp" once
+            (lambda (path)
+              (lisp-edit-form :file-path path :form-type "defun" :form-name "changed"
+                              :operation "replace" :content original)
+              (ok (equal *compact-forms-source* (fs-read-file path))
+                  (format nil "~A restored" name))))))))
+  (testing "an insert takes the gap the file already has beside the target"
+    (ok (search (format nil "(defcfun a :int)~%(defcfun new :int)~%(defcfun b :int)")
+                (%default-edit *compact-forms-source* :form-type "defcfun" :form-name "a"
+                               :operation "insert_after" :content "(defcfun new :int)"))
+        "insert_after in a compact run stays compact")
+    (ok (search (format nil "(defcfun a :int)~%(defcfun new :int)~%(defcfun b :int)")
+                (%default-edit *compact-forms-source* :form-type "defcfun" :form-name "b"
+                               :operation "insert_before" :content "(defcfun new :int)"))
+        "insert_before likewise")
+    (ok (search (format nil "(defun last-one () 1)~%~%~%(defun after-last () 2)~%")
+                (%default-edit *compact-forms-source* :form-type "defun" :form-name "last-one"
+                               :operation "insert_after" :content "(defun after-last () 2)"))
+        "after the last form, the gap before it is mirrored"))
+  (testing "a delete removes the form and the gap after it"
+    (ok (equal (%default-edit *compact-forms-source* :form-type "defcfun" :form-name "a"
+                              :operation "delete")
+               (format nil "~%(in-package :cl-user)~%(defcfun b :int)~%~
+                            #-sbcl~%(defun impl () :other)~%#+sbcl~%(defun impl () :sbcl)~%~%~%~
+                            (defun last-one () 1)~%")))
+    (ok (equal (%default-edit *compact-forms-source* :form-type "defun" :form-name "last-one"
+                              :operation "delete")
+               (format nil "~%(in-package :cl-user)~%(defcfun a :int)~%(defcfun b :int)~%~
+                            #-sbcl~%(defun impl () :other)~%#+sbcl~%(defun impl () :sbcl)~%"))
+        "the last form takes the gap before it, and the file keeps one final newline")))
+
+(deftest lisp-edit-form-by-default-keeps-comments-line-ends-and-one-line-forms
+  ;; Review of PR #339.
+  (testing "a comment on the rest of the target's line goes with it"
+    (let ((source (format nil "(defun a () 1) ; about a~%(defun b () 2)~%")))
+      (ok (equal (%default-edit source :form-type "defun" :form-name "a"
+                                :operation "insert_after" :content "(defun n () 0)")
+                 (format nil "(defun a () 1) ; about a~%(defun n () 0)~%(defun b () 2)~%")))
+      (ok (equal (%default-edit source :form-type "defun" :form-name "a" :operation "delete")
+                 (format nil "(defun b () 2)~%")))))
+  (testing "after the last form, the gap before its comment block is the file's spacing"
+    (ok (equal (%default-edit (format nil "(defun a () 1)~%~%;; about b~%(defun b () 2)~%")
+                              :form-type "defun" :form-name "b"
+                              :operation "insert_after" :content "(defun n () 0)")
+               (format nil "(defun a () 1)~%~%;; about b~%(defun b () 2)~%~%(defun n () 0)~%"))))
+  (testing "a CRLF file gets CRLF line breaks"
+    (let ((crlf (coerce '(#\Return #\Newline) 'string)))
+      (flet ((lines (&rest parts) (format nil "~{~A~}" parts)))
+        (ok (equal (%default-edit (lines "(defun a () 1)" crlf crlf "(defun b () 2)" crlf)
+                                  :form-type "defun" :form-name "b"
+                                  :operation "insert_after" :content "(defun n () 0)")
+                   (lines "(defun a () 1)" crlf crlf "(defun b () 2)" crlf crlf
+                          "(defun n () 0)" crlf)))
+        (ok (equal (%default-edit (lines "(defun a () 1)" crlf crlf "(defun b () 2)" crlf)
+                                  :form-type "defun" :form-name "b" :operation "delete")
+                   (lines "(defun a () 1)" crlf))))))
+  (testing "forms on one line: insert_before is set apart as insert_after is"
+    (ok (equal (%default-edit (format nil "(defun a () 1) (defun b () 2)~%")
+                              :form-type "defun" :form-name "b"
+                              :operation "insert_before" :content "(defun n () 0)")
+               (format nil "(defun a () 1)~%~%(defun n () 0)~%~%(defun b () 2)~%")))))
+
+(deftest lisp-edit-form-replace-keeps-a-trailing-comment-from-swallowing-the-line
+  ;; Codex on PR #339: content ending in a ; comment, trimmed, commented out a
+  ;; form that followed the target on its line.
+  (let ((after (%default-edit (format nil "(defun a () 1) (defun b () 2)~%")
+                              :form-type "defun" :form-name "a" :operation "replace"
+                              :content (format nil "(defun a () 3) ; explanation~%"))))
+    (ok (search (format nil "(defun a () 3) ; explanation~%") after) after)
+    (ok (search "(defun b () 2)" after))
+    (ok (= 2 (count :expr (cl-mcp/src/cst:parse-top-level-forms after)
+                    :key #'cl-mcp/src/cst:cst-node-kind))
+        "both forms still read")))
+
+(deftest lisp-edit-form-setf-name-matches-without-its-package-prefix
+  ;; Issue #326: (setf c::top-level-lambda-max) was reported unmatched by
+  ;; "(setf top-level-lambda-max)"; a package prefix inside a (setf ...) name is
+  ;; ignored as it is in a method's name.
+  (with-temp-file "tests/tmp/edit-form-setf-prefix.lisp"
+      (format nil "(in-package :cl-user)~%~%(defun (setf sb-c::top-level-lambda-max) (v o)~%  v)~%~%~
+                   (defun (setf no-such-pkg-326::other-326) (v o)~%  o)~%")
+    (lambda (path)
+      (dolist (name '("(setf top-level-lambda-max)" "(setf sb-c::top-level-lambda-max)"))
+        (ok (lisp-edit-form :file-path path :form-type "defun" :form-name name
+                            :operation "replace" :dry-run t
+                            :content "(defun (setf sb-c::top-level-lambda-max) (v o) o)")
+            name))
+      (ok (lisp-edit-form :file-path path :form-type "defun" :form-name "(setf other-326)"
+                          :operation "replace" :dry-run t
+                          :content "(defun (setf no-such-pkg-326::other-326) (v o) v)")))))
 
 (deftest lisp-edit-form-missing-form-errors
   (testing "missing form signals an error and leaves file unchanged"
@@ -4303,8 +4427,11 @@ loser's text disappearing with no conflict reported anywhere."
   "Call lisp-edit-form's OPERATION with CONTENT at the defun ANCHOR in PATH.
 Return the condition it signals, or NIL when it succeeds."
   (handler-case
+      ;; Normalizing unless OPTIONS say otherwise: these tests are about how a
+      ;; block's gaps are normalized (issue #326 made it opt-in).
       (progn (apply #'lisp-edit-form :file-path path :form-type "defun"
-                    :form-name anchor :operation operation :content content options)
+                    :form-name anchor :operation operation :content content
+                    (append options '(:normalize-blank-lines t)))
              nil)
     (error (e) e)))
 
@@ -4507,7 +4634,7 @@ Return the condition it signals, or NIL when it succeeds."
   (testing "dry_run shows every form of the block and writes nothing"
     (with-temp-file "tests/tmp/multi-insert-dry-run.lisp" +block-anchor-file+
       (lambda (path)
-        (let ((result (lisp-edit-form :file-path path :form-type "defun" :form-name "a"
+        (let ((result (lisp-edit-form :file-path path :normalize-blank-lines t :form-type "defun" :form-name "a"
                                       :operation "insert_after" :dry-run t
                                       :content (format nil "(defun b () 2)~%(defun c () 3)"))))
           (ok (string= (format nil "(defun b () 2)~%~%(defun c () 3)")

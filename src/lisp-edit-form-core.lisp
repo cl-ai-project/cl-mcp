@@ -58,6 +58,7 @@
   (:export #:%skip-blank-and-comments
            #:%feature-prefix-end
            #:%skipped-feature-node-p
+           #:locate-form-in-text
            #:feature-key
            #:feature-verdict
            #:inactive-form-nodes
@@ -1641,6 +1642,50 @@ order visible at the call site that decides whether the edit proceeds."
         (%check-edit-guard-post-match guard snapshot node)
         (values nil conflict))))
 
+(defun locate-form-in-text (abs text form-type form-name readtable)
+  "Parse TEXT, the contents of the file ABS, and find the form FORM-TYPE
+FORM-NAME in it, as %LOCATE-TARGET-FORM does once it has read the file.
+Returns (values NODES TARGET TYPE INACTIVE-P): the parsed top-level nodes, the
+matched node, the lower-cased head name FORM-TYPE matched as (%FIND-TARGET), and
+whether TARGET is a form the reader skips here for its feature expression
+(NODES then holds TARGET in the skipped node's place).
+Signals FILE-UNPARSEABLE-ERROR when TEXT does not parse, or when the form is
+not found and the lenient CL-reader pass stopped early; otherwise a form that
+is not found is an error naming the forms that are there.  Callers that edit
+text not yet written -- lisp-patch-form's later patches -- locate with this."
+  (multiple-value-bind (nodes swallowed)
+      (handler-case
+          (parse-top-level-forms text :readtable readtable :source-path abs)
+        (error (e)
+          (signal-file-unparseable abs text e :readtable readtable)))
+    (multiple-value-bind (target matched-type skipped)
+        (%find-target nodes form-type form-name
+                      :text text
+                      :readtable readtable
+                      :package-name (extract-in-package-name-from-text text))
+      ;; A form under a feature expression false here (issue #321): the
+      ;; callers see it read, in the skipped node's place, so the forms around
+      ;; it, its comment and its twins are found as for any form.
+      (when skipped
+        (setf nodes (substitute target skipped nodes :test #'eq)))
+      (unless target
+        (when swallowed
+          ;; The lenient pass returned the forms before the breakage, which
+          ;; lisp-edit-form can still address.
+          (signal-file-unparseable abs text swallowed
+                                  :readtable readtable
+                                  :editable-prefix (and nodes t)))
+        ;; Named as the summaries of these tools name a file: relative to the
+        ;; project root when it lies under it.
+        (error "Form ~A ~A not found in ~A.~%~A" form-type form-name
+               (or (%project-relative-path abs) (native-path-namestring abs))
+               (%forms-listing nodes matched-type
+                               (inactive-form-nodes
+                                nodes text readtable
+                                (extract-in-package-name-from-text text))
+                               text)))
+      (values nodes target matched-type (and skipped t)))))
+
 (defun %locate-target-form (file-path form-type form-name readtable &optional guard)
   "Shared prologue: resolve paths, read file, parse, find target, extract snippet.
 Signals FILE-UNPARSEABLE-ERROR (through SIGNAL-FILE-UNPARSEABLE, which owns the
@@ -1753,53 +1798,22 @@ Returns nine values:
                         outside cl-mcp."
                        (native-path-namestring abs) file-length (length text)))
               (setf original text)))
-        (multiple-value-bind (nodes swallowed)
-            (handler-case
-                (parse-top-level-forms original
-                                       :readtable readtable
-                                       :source-path abs)
-              (error (e)
-                (signal-file-unparseable abs original e :readtable readtable)))
-          (multiple-value-bind (target matched-type skipped)
-              (%find-target nodes form-type form-name
-                            :text original
-                            :readtable readtable
-                            :package-name (extract-in-package-name-from-text original))
-            ;; The reading of FORM-TYPE that matched (or was tried last),
-            ;; which callers compare with "defmethod" and the like.
-            (setf form-type-str matched-type)
-            ;; A form under a feature expression false here (issue #321): the
-            ;; callers see it read, in the skipped node's place, so the forms
-            ;; around it, its comment and its twins are found as for any form.
-            (when skipped
-              (setf nodes (substitute target skipped nodes :test #'eq)))
-            (unless target
-              (when swallowed
-                ;; The lenient pass returned the forms before the breakage,
-                ;; which lisp-edit-form can still address.
-                (signal-file-unparseable abs original swallowed
-                                        :readtable readtable
-                                        :editable-prefix (and nodes t)))
-              ;; Named as the summaries of these tools name a file: relative to
-              ;; the project root when it lies under it.
-              (error "Form ~A ~A not found in ~A.~%~A" form-type form-name
-                     (or (%project-relative-path abs) (native-path-namestring abs))
-                     (%forms-listing nodes form-type-str
-                                     (inactive-form-nodes
-                                      nodes original readtable
-                                      (extract-in-package-name-from-text original))
-                                     original)))
-            (when guard
-              (multiple-value-bind (ok-p conflict)
-                  (check-edit-guard guard (native-path-namestring abs) snapshot target)
-                (unless ok-p
-                  (error 'edit-guard-conflict-error :conflict conflict))))
-            (let ((target-snippet (subseq original
-                                          (cst-node-start target)
-                                          (cst-node-end target))))
-              (values abs rel original nodes target target-snippet form-type-str
-                      (extract-in-package-name-from-text original)
-                      (and skipped t)))))))))
+        (multiple-value-bind (nodes target matched-type inactive-p)
+            (locate-form-in-text abs original form-type form-name readtable)
+          ;; The reading of FORM-TYPE that matched, which callers compare
+          ;; with "defmethod" and the like.
+          (setf form-type-str matched-type)
+          (when guard
+            (multiple-value-bind (ok-p conflict)
+                (check-edit-guard guard (native-path-namestring abs) snapshot target)
+              (unless ok-p
+                (error 'edit-guard-conflict-error :conflict conflict))))
+          (let ((target-snippet (subseq original
+                                        (cst-node-start target)
+                                        (cst-node-end target))))
+            (values abs rel original nodes target target-snippet form-type-str
+                    (extract-in-package-name-from-text original)
+                    inactive-p)))))))
 
 (defun %file-unparseable-by-edit-tools-p (pn &optional text)
   "Return T when the file at PN is broken in a way no readtable can fix:
