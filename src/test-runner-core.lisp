@@ -979,82 +979,131 @@ Never FIND-SYSTEM; see %TRANSITIVE-DEPENDENCY-NAMES."
       (system-left-by-root-change name)))
 
 (defun %planned-loads (system-name)
-  "Return (values SYSTEMS FILES): the names of the systems and the pathnames of
-the Lisp source files that ASDF:LOAD-SYSTEM of SYSTEM-NAME would load now, read
-from the plan ASDF makes for it.  A system or file whose load ASDF counts as
-done and current is in neither list.  Signals what FIND-SYSTEM or MAKE-PLAN
-signals, a missing dependency for one."
-  (let ((systems '())
-        (files '()))
+  "Return the Lisp source file components that ASDF:LOAD-SYSTEM of SYSTEM-NAME
+would load now, read from the plan ASDF makes for it.  A file whose load ASDF
+counts as done and current is not among them.  Signals what FIND-SYSTEM or
+MAKE-PLAN signals, a missing dependency for one."
+  (let ((files '()))
     (asdf/session:with-asdf-session ()
       (let ((plan (asdf:make-plan nil 'asdf:load-op (asdf:find-system system-name))))
         (dolist (action (asdf/plan:plan-actions plan))
           (destructuring-bind (operation . component) action
-            (when (typep operation 'asdf:load-op)
-              (typecase component
-                (asdf:system
-                 (push (asdf:component-name component) systems))
-                (asdf:cl-source-file
-                 (let ((path (asdf:component-pathname component)))
-                   (when path (push path files))))))))))
-    (values (nreverse systems) (nreverse files))))
+            (when (and (typep operation 'asdf:load-op)
+                       (typep component 'asdf:cl-source-file))
+              (push component files))))))
+    (nreverse files)))
+
+(defun %function-file (function)
+  "Return the namestring of the file FUNCTION was compiled in, as SBCL names a
+function compiled there -- (LAMBDA () :IN \"<file>\") -- or NIL when its name
+tells none.  A file compiled under repl-eval is named \"repl-eval\"."
+  (let* ((name (and (functionp function)
+                    (ignore-errors (sb-kernel:%fun-name function))))
+         (in (and (consp name) (member :in name))))
+    (and in (stringp (second in)) (second in))))
+
+(defun %reloaded-file-names (components)
+  "Return (values FILES PACKAGES) for COMPONENTS, the source files a load is
+about to load again: FILES, the namestrings each may be known by -- its source,
+its fasl, and the truenames of both -- and PACKAGES, those the sources define
+with DEFPACKAGE that exist in this image."
+  (let ((files '())
+        (packages '())
+        (scan-package (make-package (gensym "CL-MCP-DEFPACKAGE-SCAN") :use '(:cl))))
+    (flet ((note (path)
+             (when path
+               (pushnew (namestring path) files :test #'string=)
+               (let ((true (ignore-errors (probe-file path))))
+                 (when true (pushnew (namestring true) files :test #'string=))))))
+      (unwind-protect
+           (dolist (component components)
+             (let ((source (ignore-errors (asdf:component-pathname component))))
+               (note source)
+               (mapc #'note (ignore-errors (asdf:output-files 'asdf:compile-op component)))
+               (when (and source (probe-file source))
+                 (dolist (name (%extract-defpackage-names-from-file source scan-package))
+                   (let ((package (find-package name)))
+                     (when package (pushnew package packages)))))))
+        (ignore-errors (delete-package scan-package))))
+    (values files packages)))
+
+(defun %rove-forget-made-by (suites rove reloaded defined)
+  "Remove from every suite in SUITES, Rove's *PACKAGE-SUITES*, the tests and the
+setup, teardown and defhook functions made by a file named in RELOADED -- or,
+when the file that made one is not told or is repl-eval, by its suite's
+package being in DEFINED.  ROVE is the package ROVE/CORE/SUITE/PACKAGE."
+  (let ((get-test (find-symbol "GET-TEST" rove))
+        (tests-slot (find-symbol "%TESTS" rove))
+        (hook-slots (mapcar (lambda (name) (find-symbol name rove))
+                            '("BEFORE-HOOKS" "AFTER-HOOKS")))
+        (function-slots (mapcar (lambda (name) (find-symbol name rove))
+                                '("SETUP" "TEARDOWN"))))
+    (maphash
+     (lambda (package suite)
+       (flet ((made-here-p (function)
+                (let ((file (%function-file function)))
+                  (if (and file (string/= file "repl-eval"))
+                      (member file reloaded :test #'string=)
+                      (member package defined)))))
+         (when (and tests-slot (slot-exists-p suite tests-slot))
+           (setf (slot-value suite tests-slot)
+                 (remove-if (lambda (name)
+                              (made-here-p (and get-test (funcall get-test name))))
+                            (slot-value suite tests-slot))))
+         (dolist (slot function-slots)
+           (when (and slot (slot-exists-p suite slot) (slot-boundp suite slot)
+                      (slot-value suite slot)
+                      (made-here-p (slot-value suite slot)))
+             (setf (slot-value suite slot) nil)))
+         (dolist (slot hook-slots)
+           (when (and slot (slot-exists-p suite slot) (slot-boundp suite slot))
+             (setf (slot-value suite slot)
+                   (remove-if (lambda (entry) (made-here-p (cdr entry)))
+                              (slot-value suite slot)))))))
+     suites)))
 
 (defun %rove-purge-ghost-suites (system-name)
-  "Remove the Rove suites of the packages a load of SYSTEM-NAME is about to
-load again, so a deftest deleted from its file since the last load does not
-stay behind as a `ghost test' and keep running (and failing).
+  "Remove from Rove's suites the tests and hooks that the files a load of
+SYSTEM-NAME is about to load again made, so a deftest deleted from its file
+since the last load does not stay behind as a `ghost test' and keep running
+(and failing): the load makes again what the files still hold.
 
-Rove keeps one suite per package in ROVE/CORE/SUITE/PACKAGE::*PACKAGE-SUITES*,
-keyed by the package object, and adds every deftest it loads to it; it never
-drops one.  Clearing the entry makes the next load of the package's files build
-the suite again from what they hold now.
+Rove keeps one suite per package in ROVE/CORE/SUITE/PACKAGE::*PACKAGE-SUITES*
+and adds every deftest it loads to it, and every setup, teardown and defhook to
+its hooks; it never drops one.
 
 Which files load again is ASDF's decision, so it is asked rather than guessed:
 the plan ASDF:LOAD-SYSTEM would follow for SYSTEM-NAME (%PLANNED-LOADS) names
-every system and source file it will load -- the ones RUN-TESTS just cleared,
-the ones a re-read .asd redefined, and any dependency whose source changed.
-Cleared are the packages named after those systems (a package-inferred file's
-package is its system's name) and those the files define with DEFPACKAGE.  A
-dependency the load leaves alone keeps its suite: clearing it would empty the
-suite of a test file another system shares, and nothing would refill it, so a
-later run of that file's own system ran none of its tests and called it a pass
-(issue #328).  A package whose tests sit in several files keeps none of them
-when a reloaded file defines it; only the reloaded files' tests come back.
+every source file it will load -- those of the systems RUN-TESTS just cleared,
+of the ones a re-read .asd redefined, and of any dependency whose source
+changed.  Which file made a test or a hook, SBCL's name for its function says
+(%FUNCTION-FILE), as for FiveAM's tests (%FIVEAM-TEST-FILE).  One whose file is
+not told, or was compiled under repl-eval, goes when a reloaded file defines its
+package, the file it most likely came from.  Everything else stays, whatever
+its package: a test of a file the load leaves alone would not come back, so a
+later run of that file's own system ran none of it and called it a pass (issue
+#328), and a file sharing its package with a reloaded one keeps its tests.
 
 Call it after the clearing and the .asd re-read RUN-TESTS does, and before the
 load.  Making the plan finds every system the load reaches, loading a .asd not
 yet read exactly as the load right after it would, inside one ASDF session so
 the source registry is searched once.  Nothing is planned when Rove's registry
-is empty, and nothing is cleared when the plan cannot be made: the load that
+is empty, and nothing is removed when the plan cannot be made: the load that
 follows fails the same way.  The DEFPACKAGE scan interns into one throwaway
 package, deleted afterwards, rather than into CL-USER."
-  (let ((pkgs-var (find-symbol "*PACKAGE-SUITES*" :rove/core/suite/package)))
+  (let* ((rove (find-package :rove/core/suite/package))
+         (pkgs-var (and rove (find-symbol "*PACKAGE-SUITES*" rove))))
     (when (and pkgs-var (boundp pkgs-var)
                (hash-table-p (symbol-value pkgs-var))
                (plusp (hash-table-count (symbol-value pkgs-var))))
-      (multiple-value-bind (systems files)
-          (handler-case (%planned-loads system-name)
-            (error (c)
-              (log-event :debug "test.runner.rove-purge.no-plan"
-                         "system" system-name "error" (princ-to-string c))
-              (values nil nil)))
-        (let ((suites (symbol-value pkgs-var))
-              (scan-package (make-package (gensym "CL-MCP-DEFPACKAGE-SCAN")
-                                          :use '(:cl))))
-          (flet ((clear-pkg (pkg-name)
-                   (let ((pkg (and (stringp pkg-name) (find-package pkg-name))))
-                     (when pkg (remhash pkg suites)))))
-            (unwind-protect
-                 (progn
-                   ;; A package-inferred file's package is its system's
-                   ;; name read by the reader, so upper case.
-                   (dolist (name systems)
-                     (clear-pkg (string-upcase name)))
-                   (dolist (file files)
-                     (when (probe-file file)
-                       (mapc #'clear-pkg
-                             (%extract-defpackage-names-from-file file scan-package)))))
-              (ignore-errors (delete-package scan-package)))))))))
+      (let ((components (handler-case (%planned-loads system-name)
+                          (error (c)
+                            (log-event :debug "test.runner.rove-purge.no-plan"
+                                       "system" system-name "error" (princ-to-string c))
+                            nil))))
+        (when components
+          (multiple-value-bind (reloaded defined) (%reloaded-file-names components)
+            (%rove-forget-made-by (symbol-value pkgs-var) rove reloaded defined)))))))
 
 (defun %ensure-rove-test-name-method ()
   "Add a TEST-NAME method for FAILED-ASSERTION if Rove is loaded and the

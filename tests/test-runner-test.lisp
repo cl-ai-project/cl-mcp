@@ -810,6 +810,17 @@ strings, or :NO-SUITE when Rove holds no suite for it."
                          suite))
         :no-suite)))
 
+(defun %rove-suite-slot (package-name slot-name)
+  "Return the slot SLOT-NAME (SETUP, TEARDOWN, BEFORE-HOOKS, AFTER-HOOKS) of
+Rove's suite for PACKAGE-NAME, or :NO-SUITE when Rove holds no suite for it."
+  (let* ((suites (symbol-value (uiop:find-symbol* '#:*package-suites*
+                                                  :rove/core/suite/package)))
+         (package (find-package package-name))
+         (suite (and package (gethash package suites))))
+    (if suite
+        (slot-value suite (uiop:find-symbol* slot-name :rove/core/suite/package))
+        :no-suite)))
+
 (deftest rove-reload-keeps-the-suite-of-a-shared-file-it-does-not-reload
   ;; Issue #328: the purge cleared the suite of every package the test system
   ;; reached, and the load reloaded only the systems run-tests cleared.  A test
@@ -882,6 +893,83 @@ strings, or :NO-SUITE when Rove holds no suite for it."
          "the purge returns normally when the plan cannot be made")
      (ok (equal '("KEPT" "DOOMED") (%rove-suite-test-names "CLMCP-SIB/TESTS/A"))
          "and clears no suite"))))
+
+(deftest rove-reload-forgets-only-the-tests-of-a-reloaded-file-sharing-a-package
+  ;; A classic dependency: package.lisp defines the package, one.lisp and
+  ;; two.lisp both hold its tests.  Only one.lisp changed, so only it loads
+  ;; again: a test deleted from it must go -- though the file defines no
+  ;; package -- and two.lisp's test must stay.  Each test is judged by the
+  ;; file that made it, not by its package.
+  (let ((dir (uiop:ensure-directory-pathname
+              (uiop:merge-pathnames*
+               (format nil "cl-mcp-rove-shared-~A-~A/" (get-universal-time)
+                       (random 100000))
+               (uiop:temporary-directory))))
+        (past (- (get-universal-time) 10 (encode-universal-time 0 0 0 1 1 1970 0))))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist dir)
+           (%write-fixture-file dir "clmcp-shared.asd"
+                                "(asdf:defsystem \"clmcp-shared\" :depends-on (\"rove\")
+  :components ((:file \"package\")
+               (:file \"one\" :depends-on (\"package\"))
+               (:file \"two\" :depends-on (\"package\"))))
+")
+           (%write-fixture-file dir "clmcp-shared-user.asd"
+                                "(asdf:defsystem \"clmcp-shared-user\" :depends-on (\"clmcp-shared\"))
+")
+           (%write-fixture-file dir "package.lisp"
+                                "(defpackage #:clmcp-shared-cases (:use #:cl #:rove))
+")
+           (%write-fixture-file dir "one.lisp"
+                                "(in-package #:clmcp-shared-cases)
+(setup (values))
+(deftest one-kept (ok t))
+(deftest one-doomed (ok t))
+")
+           (%write-fixture-file dir "two.lisp"
+                                "(in-package #:clmcp-shared-cases)
+(defhook :before (values))
+(deftest two-kept (ok t))
+")
+           (dolist (name '("clmcp-shared.asd" "clmcp-shared-user.asd"
+                           "package.lisp" "one.lisp" "two.lisp"))
+             (uiop:symbol-call :sb-posix :utimes
+                               (namestring (uiop:merge-pathnames* name dir)) past past))
+           (let ((asdf:*central-registry* (cons dir asdf:*central-registry*)))
+             (asdf:load-system "clmcp-shared-user")
+             (ok (equal '("ONE-KEPT" "ONE-DOOMED" "TWO-KEPT")
+                        (%rove-suite-test-names "CLMCP-SHARED-CASES"))
+                 "the package's suite holds the tests of both files")
+             (ok (and (%rove-suite-slot "CLMCP-SHARED-CASES" "SETUP")
+                      (= 1 (length (%rove-suite-slot "CLMCP-SHARED-CASES" "BEFORE-HOOKS"))))
+                 "and one.lisp's setup and two.lisp's hook")
+             (let ((fasls (asdf:output-files
+                           'asdf:compile-op
+                           (asdf:find-component (asdf:find-system "clmcp-shared") "one"))))
+               (%write-fixture-file dir "one.lisp"
+                                    "(in-package #:clmcp-shared-cases)
+(deftest one-kept (ok t))
+")
+               (mapc #'uiop:delete-file-if-exists fasls))
+             ;; Outside any ASDF session, as run-tests runs in a worker.
+             (let ((asdf/session:*asdf-session* nil))
+               (cl-mcp/src/test-runner-core::%ensure-system-loaded "clmcp-shared-user"))
+             (ok (equal '("TWO-KEPT" "ONE-KEPT") (%rove-suite-test-names "CLMCP-SHARED-CASES"))
+                 "the test deleted from the reloaded file is gone, the other file's stays")
+             (ok (null (%rove-suite-slot "CLMCP-SHARED-CASES" "SETUP"))
+                 "so is the setup deleted from it")
+             (ok (= 1 (length (%rove-suite-slot "CLMCP-SHARED-CASES" "BEFORE-HOOKS")))
+                 "and the other file's hook stays")))
+      (dolist (name '("clmcp-shared-user" "clmcp-shared"))
+        (ignore-errors (asdf:clear-system name)))
+      (let ((package (find-package "CLMCP-SHARED-CASES"))
+            (suites (uiop:find-symbol* '#:*package-suites* :rove/core/suite/package nil)))
+        (when package
+          (when (and suites (boundp suites))
+            (remhash package (symbol-value suites)))
+          (ignore-errors (delete-package package))))
+      (ignore-errors (uiop:delete-directory-tree dir :validate t)))))
 
 (deftest extract-defpackage-names-does-not-intern-into-cl-user
   (testing "%extract-defpackage-names-from-file leaves CL-USER untouched"
@@ -2036,15 +2124,15 @@ in ASDF and as left by a root change --, their packages and the directory."
 "
    (lambda (dir)
      (asdf:load-system "rove-root-probe")
-     (let ((suites (symbol-value (find-symbol "*PACKAGE-SUITES*" :rove/core/suite/package)))
-           (package (find-package "ROVE-ROOT-PROBE/TESTS/A")))
-       (ok (gethash package suites) "Rove holds the test file's suite")
+     (progn
+       (ok (equal '("KEPT") (%rove-suite-test-names "ROVE-ROOT-PROBE/TESTS/A"))
+           "Rove holds the test file's suite")
        (cl-mcp/src/project-root::%clear-systems-under (truename dir))
        (ok (null (asdf:registered-system "rove-root-probe/tests/a"))
            "the root change unregistered the test file's system")
        (cl-mcp/src/test-runner-core::%rove-purge-ghost-suites "rove-root-probe")
-       (ok (null (gethash package suites))
-           "the purge clears the suite of a system the root change unregistered")))))
+       (ok (null (%rove-suite-test-names "ROVE-ROOT-PROBE/TESTS/A"))
+           "the purge empties the suite of a system the root change unregistered")))))
 
 (deftest run-tests-forgets-a-fiveam-test-deleted-before-a-root-change
   ;; The FiveAM side of the same root change: the purge could not tell which
