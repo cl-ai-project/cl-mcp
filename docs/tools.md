@@ -770,11 +770,13 @@ Input:
   expression grammar (`#+(not a b)`, `#+(bogus a)`), is refused and nothing is written.
   A form under an expression false in the server (`#+ecl` on SBCL) is never read. A plain
   `form_name` reaches its active twin; write the skipped form's expressions in front of its
-  name, as the file writes them (`"#+ecl impl"`, compared case-insensitively with whitespace
-  runs collapsed), to edit that form instead -- `lisp-patch-form` takes the same name, and a
+  name, as the file writes them (`"#+ecl impl"`; compared case-insensitively, so copy the
+  spelling a "not found" listing shows), to edit that form instead -- `lisp-patch-form` and
+  `lisp-macroexpand` take the same name (the latter refuses to expand such a form), and a
   plain name reaches a skipped form when no form read here has that name. Its expressions are
-  kept by a `replace` as for any form. A `replace` whose content opens with
-  expressions false in the server is refused, and nothing is written, when the file holds a
+  kept by a `replace` as for any form, and the summary says the server does not read the form
+  (`inactive_form` in the result). A `replace` of a form the server reads whose content opens
+  with expressions false in the server is refused, and nothing is written, when the file holds a
   skipped form that is the same definition (head and whole signature, a method's
   specializers included) as the form replaced or as the content, however its expression is
   spelled (`#-sbcl` and `#+(not sbcl)` alike), or one that cannot be read but starts with

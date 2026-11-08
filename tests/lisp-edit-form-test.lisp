@@ -611,6 +611,69 @@ and the file's text afterwards."
       (ok (and message (search "#+ccl (defun other)" message)))
       (ok (and message (search "form_name \"#+ecl impl\"" message))))))
 
+(defparameter *three-branch-source*
+  (format nil "(in-package :cl-user)~%~%#+sbcl~%(defun impl () :sbcl)~%~%~
+               #+ccl~%(defun impl () :ccl)~%~%#-(or sbcl ccl)~%(defun impl () :other)~%")
+  "Portability code with three branches of one definition: on SBCL two are skipped.")
+
+(deftest lisp-edit-form-inactive-target-is-no-twin-of-the-active-form
+  ;; Review of PR #338: the #316 refusal took the other skipped branch for a
+  ;; twin of the target and refused, though the active form is untouched.
+  (flet ((replace-outcome (form-name content)
+           (with-temp-file "tests/tmp/edit-form-three-branches.lisp" *three-branch-source*
+             (lambda (path)
+               (let ((message (handler-case
+                                  (progn (lisp-edit-form :file-path path :form-type "defun"
+                                                         :form-name form-name
+                                                         :operation "replace" :content content)
+                                         nil)
+                                (error (e) (princ-to-string e)))))
+                 (values message (fs-read-file path)))))))
+    (testing "content restating the target's expression is a replace of that form"
+      (multiple-value-bind (message text)
+          (replace-outcome "#+ccl impl" (format nil "#+ccl~%(defun impl () :ccl-v2)"))
+        (ok (null message) message)
+        (ok (search (format nil "#+ccl~%(defun impl () :ccl-v2)") text))
+        (ok (search "(defun impl () :sbcl)" text) "the active form is untouched")
+        (ok (search "(defun impl () :other)" text))))
+    (testing "content changing the expression is too"
+      (multiple-value-bind (message text)
+          (replace-outcome "#+ccl impl" (format nil "#+(or ccl clasp)~%(defun impl () :ccl)"))
+        (ok (null message) message)
+        (ok (search (format nil "#+(or ccl clasp)~%(defun impl () :ccl)") text)))))
+  (testing "the result says the edited form is not read here"
+    (with-temp-file "tests/tmp/edit-form-three-branches.lisp" *three-branch-source*
+      (lambda (path)
+        (ok (equal "#+ccl"
+                   (nth-value 11 (lisp-edit-form :file-path path :form-type "defun"
+                                                 :form-name "#+ccl impl" :operation "replace"
+                                                 :content "(defun impl () :ccl-v3)"))))
+        (ok (null (nth-value 11 (lisp-edit-form :file-path path :form-type "defun"
+                                                :form-name "impl" :operation "replace"
+                                                :content "(defun impl () :sbcl-v2)")))
+            "nothing is said for the form the server reads")))))
+
+(deftest lisp-patch-form-checks-the-expressions-of-an-inactive-form
+  ;; Review of PR #338: the expressions were cut off before the check, so a
+  ;; malformed one was written and the file no longer parsed.
+  (dolist (case '(("#+ecl" "#+(bogus ecl)" "malformed")
+                  ;; The defun is then taken for the expression.
+                  ("#+ecl" "#+" "malformed")))
+    (destructuring-bind (old new expected) case
+      (multiple-value-bind (message text)
+          (%edit-feature-twins :patch :form-type "defun" :form-name "#+ecl impl"
+                               :old-text old :new-text new)
+        (ok (and message (search expected message)) (format nil "~A: ~A" new message))
+        (ok (equal *feature-twins-source* text) "nothing is written")))))
+
+(deftest feature-verdict-names-each-feature-as-the-reader-judged-it
+  (let ((verdict 'cl-mcp/src/lisp-edit-form-core::feature-verdict))
+    (ok (equal "lack :ecl" (funcall verdict '(:sharpsign-plus . :ecl))))
+    (ok (equal "lack :ecl, have :sbcl"
+               (funcall verdict '(:sharpsign-plus . (:and :ecl (:not :sbcl))))))
+    (ok (search "lack common-lisp-user::sbcl" (funcall verdict '(:sharpsign-plus . cl-user::sbcl)))
+        "a feature written in another package is not the keyword :sbcl")))
+
 (deftest lisp-edit-form-replace-feature-expressions-need-a-form-and-not-a-true-reading
   ;; Review of #216: a comment-only replace kept #+sbcl with no form after it,
   ;; so it applied to the next definition in the file or broke the read at

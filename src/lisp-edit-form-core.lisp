@@ -324,10 +324,12 @@ which reading it never does.  NIL when REASON names no feature."
     (when features
       (format nil "~{~A~^, ~}"
               (mapcar (lambda (feature)
-                        (format nil "~:[lack~;have~] :~(~A~)"
-                                (member (symbol-name feature) *features*
-                                        :key #'symbol-name :test #'string=)
-                                (symbol-name feature)))
+                        ;; By identity, as the reader judged it: a feature
+                        ;; written in another package is not the keyword.
+                        (format nil "~:[lack~;have~] ~(~A~)"
+                                (member feature *features* :test #'eq)
+                                (let ((*package* (find-package "KEYWORD")))
+                                  (prin1-to-string feature))))
                       (nreverse features))))))
 
 (defun feature-key (text start)
