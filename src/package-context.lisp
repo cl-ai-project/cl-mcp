@@ -100,8 +100,8 @@ Guarded by *PACKAGE-SPECS-BY-FILE-LOCK*.")
 
 (defparameter *package-specs-by-file-limit* 50000
   "Entries *PACKAGE-SPECS-BY-FILE* or *DIRECTORY-LISTINGS* holds before it is
-emptied and starts over: a file deleted, or under a root no longer in use, is never looked up again, and
-this bounds what such entries keep.")
+emptied and starts over: a file deleted, or under a root no longer in use, is
+never looked up again, and this bounds what such entries keep.")
 
 (defstruct package-spec
   "Minimal package metadata needed to reconstruct reader context."
@@ -178,7 +178,8 @@ differently."
 
 (defun %unix-now ()
   "Return the current time in seconds since 1970, as stat(2) counts them."
-  (- (get-universal-time) (encode-universal-time 0 0 0 1 1 1970 0)))
+  ;; 2208988800 = (encode-universal-time 0 0 0 1 1 1970 0)
+  (- (get-universal-time) 2208988800))
 
 (defun %trusted-entry (table key stamp)
   "Return REST from TABLE's entry for KEY, (STAMP READ-AT . REST), when STAMP
