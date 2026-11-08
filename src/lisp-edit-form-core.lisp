@@ -19,6 +19,7 @@
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms
                 #:cst-node-start-line
+                #:cst-node-children
                 #:stray-right-parenthesis
                 #:readtable-unavailable
                 #:readtable-unavailable-designator
@@ -58,6 +59,8 @@
   (:export #:%skip-blank-and-comments
            #:%feature-prefix-end
            #:%skipped-feature-node-p
+           #:%wrapper-head-p
+           #:wrapped-definition-nodes
            #:feature-key
            #:feature-verdict
            #:inactive-form-nodes
@@ -232,8 +235,17 @@ turn (SETF |foo:bar|) into (setf bar), another function's name."
               ;; %SIGNATURE-TEXT's pretty printer can still break a
               ;; code-shaped name over lines; the listed name must be one
               ;; line to round-trip.
-              (list (%collapse-whitespace princ-text)
-                    (%collapse-whitespace (%signature-text name)))
+              (append
+               ;; An FFI definer's ("c_name" lisp-name): its Lisp name, as
+               ;; code-find knows it (issue #322).
+               (let ((symbol (and (consp (cdr name)) (null (cddr name))
+                                  (some #'stringp name)
+                                  (find-if (lambda (part)
+                                             (and part (symbolp part) (not (keywordp part))))
+                                           name))))
+                 (and symbol (list (%normalize-string symbol))))
+               (list (%collapse-whitespace princ-text)
+                     (%collapse-whitespace (%signature-text name))))
               :test #'string=))))
       (t (list (%normalize-string name))))))
 
@@ -289,6 +301,19 @@ lisp-read-file, which shows it in the collapsed view."
                (push (cons pos after) spans)
                (setf pos (%skip-blank-and-comments text after))))
     (values pos (nreverse spans))))
+
+(defparameter *wrapper-heads*
+  '("EVAL-WHEN" "PROGN" "MACROLET" "SYMBOL-MACROLET" "LET" "LET*" "LOCALLY"
+    "FLET" "LABELS" "WITH-UPGRADABILITY" "COMPILER-LET")
+  "Names of the forms a top-level definition is often wrapped in.  The collapsed
+view lists the definitions directly inside one, one level deep (issue #322).")
+
+(defun %wrapper-head-p (head)
+  "True when HEAD, a form's head, names a wrapper of *WRAPPER-HEADS* (by name,
+so ASDF's uiop:with-upgradability and a project's own copy both count)."
+  (and (symbolp head)
+       (member (symbol-name head) *wrapper-heads* :test #'string=)
+       t))
 
 (defun %skipped-feature-node-p (node)
   "True when NODE is a form the reader skipped for its #+ or #- feature
@@ -817,6 +842,24 @@ the second."
                 (other-found (values other other-reason unqualified))
                 (t (values nil nil unqualified)))))))))
 
+(defun wrapped-definition-nodes (nodes)
+  "Return the definitions directly inside the wrapper forms among NODES
+(%WRAPPER-HEAD-P: eval-when, progn, with-upgradability ...), one level deep, as
+their own CST nodes.  A wrapper read by the CL-reader pass carries no children,
+so it contributes none."
+  (loop for node in nodes
+        for value = (and (typep node 'cst-node) (eq (cst-node-kind node) :expr)
+                         (cst-node-value node))
+        when (and (consp value) (%wrapper-head-p (car value)))
+          append (loop for child in (cst-node-children node)
+                       for child-value = (and (typep child 'cst-node)
+                                              (eq (cst-node-kind child) :expr)
+                                              (cst-node-value child))
+                       when (and (consp child-value) (symbolp (car child-value))
+                                 (consp (cdr child-value))
+                                 (not (%wrapper-head-p (car child-value))))
+                         collect child)))
+
 (defun %find-target (nodes form-type form-name &key text readtable package-name)
   "Find a target node matching FORM-TYPE and FORM-NAME (LOCATE-FORM-IN-NODES
 documents the matching rules in full).  Returns (values NODE TYPE SKIPPED): the
@@ -836,7 +879,10 @@ in PACKAGE-NAME:
   - a plain FORM-NAME matches the forms the reader read, as it always has, and
     only when none matches, the skipped ones.
 So a definition and its skipped twin never make each other ambiguous: the one
-this process reads is the plain name's, the other its expressions'."
+this process reads is the plain name's, the other its expressions'.
+Last, a plain FORM-NAME reaches a definition directly inside a wrapper
+(WRAPPED-DEFINITION-NODES) when no top-level form has it: NODE is then that
+nested node, which is not one of NODES."
   (flet ((locate (candidates)
            (multiple-value-bind (node reason type)
                (locate-form-in-nodes candidates form-type form-name)
@@ -864,9 +910,18 @@ this process reads is the plain name's, the other its expressions'."
                (let ((inactive (inactive-form-nodes nodes text readtable package-name)))
                  (multiple-value-bind (skipped-node skipped-type)
                      (locate (mapcar #'cdr inactive))
-                   (if skipped-node
-                       (values skipped-node skipped-type (car (rassoc skipped-node inactive)))
-                       (values nil type nil)))))))))))
+                   (cond
+                     (skipped-node
+                      (values skipped-node skipped-type (car (rassoc skipped-node inactive))))
+                     (t
+                      ;; Last, the definitions directly inside a wrapper
+                      ;; (eval-when, progn, with-upgradability ...), which the
+                      ;; collapsed view lists under it (issue #322).
+                      (multiple-value-bind (nested nested-type)
+                          (locate (wrapped-definition-nodes nodes))
+                        (if nested
+                            (values nested nested-type nil)
+                            (values nil type nil))))))))))))))
 
 (defparameter *not-found-forms-listed* 30
   "Most top-level forms a \"not found\" error lists to choose from.")

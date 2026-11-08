@@ -569,6 +569,47 @@ search reads with interrupts disabled, so no deadline could stop it there."
         (subseq head (1+ colon))
         head)))
 
+(defparameter *wrapper-form-types*
+  '("eval-when" "progn" "macrolet" "symbol-macrolet" "let" "let*" "locally" "flet"
+    "labels" "with-upgradability" "compiler-let")
+  "Heads of the forms a top-level definition is often wrapped in.  A match inside
+one is attributed to the definition directly inside it that holds the match,
+one level deep (issue #322).")
+
+(defun %nested-definition (content form-info line-number)
+  "Return the form-info of the definition directly inside the wrapper FORM-INFO
+describes (a top-level form of CONTENT) that holds LINE-NUMBER, in the shape
+%FIND-FORM-FOR-LINE returns, or NIL when the form is no wrapper or the line is
+in none of its definitions."
+  (let* ((start (cdr (assoc :start-byte form-info)))
+         (end (cdr (assoc :end-byte form-info)))
+         (text (subseq content start end))
+         (type-info (extract-form-type-and-name text)))
+    (when (and (cdr (assoc :wrapper type-info))
+               (> (length text) 2))
+      ;; Its children are the top-level forms of the text inside its parens,
+      ;; whose line 1 is the wrapper's first line.
+      (let* ((inner (subseq text 1 (1- (length text))))
+             (start-line (cdr (assoc :start-line form-info)))
+             (target (1+ (- line-number start-line))))
+        (dolist (child (scan-toplevel-forms inner))
+          (when (<= (toplevel-form-start-line child) target (toplevel-form-end-line child))
+            (let* ((child-text (subseq inner (toplevel-form-start-pos child)
+                                       (toplevel-form-end-pos child)))
+                   (child-info (extract-form-type-and-name child-text)))
+              (return
+                (when (and child-info
+                           (not (cdr (assoc :wrapper child-info)))
+                           (not (cdr (assoc :untyped child-info))))
+                  (let ((child-start-line (+ start-line (toplevel-form-start-line child) -1)))
+                    (list (cons :text (truncate-form child-text line-number
+                                                     child-start-line 5))
+                          (cons :start-line child-start-line)
+                          (cons :end-line (+ start-line (toplevel-form-end-line child) -1))
+                          (cons :start-byte (+ start 1 (toplevel-form-start-pos child)))
+                          (cons :end-byte (+ start 1 (toplevel-form-end-pos child)))
+                          (cons :unterminated nil))))))))))))
+
 (defun extract-form-type-and-name (form-text)
   "Extract the form type and name from FORM-TEXT.
    Returns an alist with :type and :name, or NIL if not a recognized form.
@@ -594,7 +635,7 @@ search reads with interrupts disabled, so no deadline could stop it there."
       ;; repository is slash-delimited, so both sides of the colon accept them.
       (multiple-value-bind (match groups)
           (cl-ppcre:scan-to-strings
-           "^\\(\\s*([a-zA-Z][a-zA-Z0-9*_+./-]*(?::{1,2}[a-zA-Z*][a-zA-Z0-9*_+./-]*)?)\\s+([^\\s()]+|\\([^)]+\\))"
+           "^\\(\\s*([a-zA-Z*+<>=/-][a-zA-Z0-9*_+./<>=-]*(?::{1,2}[a-zA-Z*][a-zA-Z0-9*_+./-]*)?)\\s+(\"(?:[^\"\\\\]|\\\\.)*\"|[^\\s()\"]+|\\([^)]+\\))"
            trimmed)
         (when match
           (let ((form-type (%strip-package-qualifier
@@ -602,10 +643,26 @@ search reads with interrupts disabled, so no deadline could stop it there."
                 (form-name (aref groups 1)))
             ;; *KNOWN-FORM-TYPES* still matters for heads no prefix rule can
             ;; catch, such as IN-PACKAGE.
-            (when (or (member form-type *known-form-types* :test #'string=)
-                      (%definition-prefix-p form-type))
-              (list (cons :type form-type)
-                    (cons :name form-name)))))))))
+            (cond
+              ((or (member form-type *known-form-types* :test #'string=)
+                   (%definition-prefix-p form-type))
+               (list (cons :type form-type)
+                     (cons :name form-name)))
+              ;; Any other head whose second element is a symbol is named by
+              ;; it, untyped -- FiveAM's (test name ...), (in-suite name),
+              ;; serapeum's (-> name ...) -- so form_types can ask for it and
+              ;; the listing shows a name instead of NIL (issue #322).
+              ((and (not (member form-type *wrapper-form-types* :test #'string=))
+                    (not (char= (char form-name 0) #\())
+                    (not (char= (char form-name 0) #\"))
+                    (not (char= (char form-name 0) #\:)))
+               (list (cons :type form-type)
+                     (cons :name form-name)
+                     (cons :untyped t)))
+              ((member form-type *wrapper-form-types* :test #'string=)
+               (list (cons :type form-type)
+                     (cons :name nil)
+                     (cons :wrapper t))))))))))
 
 (defun extract-balanced-sexp (text start)
   "Extract a balanced S-expression starting at position START in TEXT.
@@ -667,7 +724,9 @@ search reads with interrupts disabled, so no deadline could stop it there."
   (let* ((type-info (extract-form-type-and-name form-text))
          (form-type (cdr (assoc :type type-info)))
          (form-name (cdr (assoc :name type-info))))
-    (when (and form-type form-name)
+    ;; An untyped form (test, in-suite, ->) has a name but no signature: what
+    ;; follows its name is no lambda list.
+    (when (and form-type form-name (not (cdr (assoc :untyped type-info))))
       (cond
         ;; Forms with lambda-list: defun, defmacro, defgeneric, defmethod.
         ;; Not deftest: neither Rove's nor Prove's takes one, so what follows
@@ -837,8 +896,15 @@ Returns an alist like extract-toplevel-form, or NIL."
                  ;; no foreign resource.
                  when (sb-sys:with-interrupts (scan scanner line))
                  do (let ((package (%find-package-for-line package-map line-number))
-                          (form-info (%find-form-for-line
-                                      forms-cache content line-number)))
+                          (form-info (let ((top (%find-form-for-line
+                                                 forms-cache content line-number)))
+                                       ;; Inside a wrapper, the definition
+                                       ;; holding the line (issue #322).
+                                       (or (and top
+                                                (not (cdr (assoc :unterminated top)))
+                                                (%nested-definition content top
+                                                                    line-number))
+                                           top))))
                       (when form-info
                         (let* ((full-form-text
                                 (subseq content

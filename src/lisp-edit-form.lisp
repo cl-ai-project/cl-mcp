@@ -1224,7 +1224,12 @@ replaced form, and the line the matched form starts on. A dry run carries the re
                 ;; A form under a feature expression false here (issue #321):
                 ;; the edit lands on a form this server does not read, which
                 ;; the result says, since load-system will show no change.
-                (and inactive-p (feature-key original (cst-node-start target)))))
+                (and inactive-p (feature-key original (cst-node-start target))))
+              ;; A definition inside a wrapper (issue #322) is not one of NODES:
+              ;; blank lines inside the wrapper are its own, never normalized.
+              (normalize-blank-lines (and normalize-blank-lines
+                                          (member target nodes :test #'eq)
+                                          t)))
         (if (eq op-key :delete)
             ;; Delete path: no content validation needed
             (let* ((updated

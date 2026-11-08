@@ -403,6 +403,37 @@ tests/tmp/NAME.lisp."
                            (format nil "(defmethod sig-doc-m :around ((x t)) \"Doc.\" x)~%")))
         "a method's docstring comes after its qualifiers and lambda list")))
 
+(defparameter *wrapped-and-untyped-source*
+  (format nil "(in-package :cl-user)~%~%~
+               (eval-when (:compile-toplevel :load-toplevel :execute)~%~
+               ~2@T(defclass curve-point () ())~%~
+               ~2@T(defun curve-helper (x) x))~%~%~
+               (test my-five-am-test~%~2@T(is (= 1 1)))~%~%~
+               (defcfun (\"strlen\" c-strlen) :int (s :string))~%")
+  "A definition inside an eval-when, a FiveAM test and a CFFI definition: the
+shapes issue #322 found invisible to name-based reading.")
+
+(deftest lisp-read-file-sees-wrapped-untyped-and-ffi-definitions
+  (with-temp-lisp-file "tests/tmp/read-file-wrapped.lisp" *wrapped-and-untyped-source*
+    (lambda (path)
+      (testing "the collapsed view lists the definitions inside a wrapper, and names a test"
+        (let ((content (gethash "content" (lisp-read-file path))))
+          (ok (search "(eval-when ...)" content))
+          (ok (search "4:   (defclass curve-point () ...)" content) content)
+          (ok (search "5:   (defun curve-helper (x) ...)" content))
+          (ok (search "(test my-five-am-test ...)" content))))
+      (testing "name_pattern finds a wrapped definition, a test and an FFI Lisp name"
+        (dolist (case '(("^curve-helper$" "(defun curve-helper (x) x)")
+                        ("^my-five-am-test$" "(is (= 1 1))")
+                        ("^c-strlen$" "(defcfun (\"strlen\" c-strlen) :int (s :string))")))
+          (destructuring-bind (pattern expanded) case
+            (let ((result (lisp-read-file path :name-pattern pattern)))
+              (ok (search expanded (gethash "content" result)) pattern)
+              (ok (eql 1 (gethash "name_matches" (gethash "meta" result))))))))
+      (testing "a name_pattern that matches nothing says so"
+        (let ((content (gethash "content" (lisp-read-file path :name-pattern "^nothing$"))))
+          (ok (eql 0 (search "NOTE: no definition's name matches name_pattern" content))))))))
+
 (deftest lisp-read-file-collapsed-view-keeps-feature-expressions
   ;; The collapsed view printed the form as read, which carries no #+/#-, on
   ;; the line of its #: a conditional definition read as unconditional, and its

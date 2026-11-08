@@ -838,6 +838,27 @@ and the file's text afterwards."
           (ok (and message (search "defvar *gamma*" message))
               "with none of that type, every form is listed"))))))
 
+(deftest lisp-edit-form-reaches-a-definition-inside-a-wrapper
+  ;; Issue #322: (eval-when (...) (defclass ...)) could not be named at all.
+  (with-temp-file "tests/tmp/edit-form-wrapped.lisp"
+      (format nil "(in-package :cl-user)~%~%(eval-when (:compile-toplevel :load-toplevel :execute)~%~
+                   ~2@T(defclass wrapped-322 () ())~%~2@T(defun wrapped-helper (x) x))~%~%~
+                   (defcfun (\"strlen\" c-strlen-322) :int (s :string))~%")
+    (lambda (path)
+      (testing "a plain name reaches the definition inside the wrapper"
+        (lisp-edit-form :file-path path :form-type "defun" :form-name "wrapped-helper"
+                        :operation "replace" :content "(defun wrapped-helper (x) (list x))")
+        (ok (search (format nil "~2@T(defclass wrapped-322 () ())~%~
+                                 ~2@T(defun wrapped-helper (x) (list x)))")
+                    (fs-read-file path))
+            "replaced in place, the wrapper and its indentation kept"))
+      (testing "an FFI definition is reached by its Lisp name"
+        (lisp-edit-form :file-path path :form-type "defcfun" :form-name "c-strlen-322"
+                        :operation "replace"
+                        :content "(defcfun (\"strlen\" c-strlen-322) :long (s :string))")
+        (ok (search "(defcfun (\"strlen\" c-strlen-322) :long (s :string))"
+                    (fs-read-file path)))))))
+
 (deftest lisp-edit-form-replace-defun
   (testing "replace updates function body"
     (with-temp-file "tests/tmp/edit-form-replace.lisp"
