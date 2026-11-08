@@ -195,9 +195,9 @@ time.sleep(120)"
 function and its arguments.  The sb-posix calls inside %TRY-LOCK are inlined,
 so the lock's outcomes are steered at %TRY-LOCK itself."
   `(progn
-     (sb-int:encapsulate 'cl-mcp/src/worker/fasl-cache::%try-lock 'test-wrapper ,wrapper)
+     (sb-int:encapsulate '%try-lock 'test-wrapper ,wrapper)
      (unwind-protect (progn ,@body)
-       (sb-int:unencapsulate 'cl-mcp/src/worker/fasl-cache::%try-lock 'test-wrapper))))
+       (sb-int:unencapsulate '%try-lock 'test-wrapper))))
 
 (deftest claiming-a-cache-copes-with-a-lock-it-cannot-take
   (let ((base (%scratch-directory "fasl-cache-claim")))

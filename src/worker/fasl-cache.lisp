@@ -23,7 +23,12 @@ root -- the libraries it depends on -- keep the shared cache.")
            #:sweep-dead-worker-caches
            #:prepare-worker-fasl-cache
            #:isolate-project-fasls
-           #:ensure-project-fasls-isolated))
+           #:ensure-project-fasls-isolated
+           ;; Exported for tests/worker-fasl-cache-test, which binds the
+           ;; worker's state and steers the lock's outcomes.
+           #:*worker-cache-lock-fd*
+           #:*isolated-roots*
+           #:%try-lock))
 
 (in-package #:cl-mcp/src/worker/fasl-cache)
 
