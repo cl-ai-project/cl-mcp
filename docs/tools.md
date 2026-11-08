@@ -818,7 +818,10 @@ Input:
   carries `blank_lines_normalized: true`. A comment written
   directly above the form (`;` lines with no blank line between them and the form, a `;;;`
   header among them) is the form's in either mode: `replace` keeps it attached, and
-  `insert_before` puts the new form above it; `delete` leaves it. A comment in the content of a
+  `insert_before` puts the new form above it; `delete` leaves it. A `;` comment on the rest of
+  the form's last line is the form's too: by default `insert_after` goes below it and `delete`
+  removes it with the form. New line breaks follow the file's (CRLF in a CRLF file). A comment
+  in the content of a
   `replace` is put after the file's, which stays. Every summary names the line the matched form
   starts on, its `#+` line when it has one (`Applied replace to defun beta (line 4) in …`, also
   the result's `line`), and a "Multiple matches" error lists each candidate with its line
@@ -1000,7 +1003,9 @@ patch may target a form an earlier one renamed or changed), and the file is writ
 The first patch that cannot be applied -- its form not found, its `old_text` not found
 exactly once, a form that no longer reads -- fails the call with `Patch N of M (type name):
 …`, and nothing is written: a rename across a function and its callers is never left half
-done. `dry_run` previews the whole file. The result carries `patches` (dry run) and
+done. `dry_run` writes nothing and its content text shows each patched form under
+`--- patch N (type name) ---` (the whole file is the `preview` field). The result carries
+`patches` (dry run) and
 `bracket_warnings` (`[{patch, warning}]`) instead of the single-patch fields.
 
 When the patched form no longer reads, the error explains the breakage: if
