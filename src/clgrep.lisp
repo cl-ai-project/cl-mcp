@@ -258,9 +258,8 @@ to that form, and a NOTE names the file and the line where it opens.
 
 Each match's 'file' is relative to the project root -- not to 'path' -- so a
 file under the root can be passed straight to lisp-read-file however the search
-was rooted. A file outside the root can come back relative to the server's
-working directory or cl-mcp's own source directory rather than absolute; give
-lisp-read-file an absolute path for such a file.
+was rooted. A file outside the root is printed absolute, which lisp-read-file
+takes as it is.
 
 Only .lisp, .asd and .ros files are searched, honouring the .gitignore of the
 search root alone. A line outside every top-level form is never reported.

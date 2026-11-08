@@ -57,6 +57,9 @@
            #:%feature-prefix-end
            #:%skipped-feature-node-p
            #:locate-form-in-text
+           #:feature-key
+           #:feature-verdict
+           #:inactive-form-nodes
            #:%normalize-string
            #:%defmethod-candidates
            #:%definition-candidates
@@ -297,6 +300,94 @@ replace that would overwrite the active twin of one."
        (let ((reason (cst-node-value node)))
          (and (consp reason)
               (member (car reason) '(:sharpsign-plus :sharpsign-minus))))))
+
+(defun feature-verdict (reason)
+  "Return why a form was skipped, REASON being a skipped node's value
+((:SHARPSIGN-PLUS . EXPRESSION) or (:SHARPSIGN-MINUS . EXPRESSION)): the
+features EXPRESSION names, each said to be had or lacked by this process's
+*FEATURES* (\"lack :ecl, have :sbcl\"), which is what the reader judged it by -- not the session
+worker's, and not features the file or its system pushes when it is loaded,
+which reading it never does.  NIL when REASON names no feature."
+  (let ((features '()))
+    (labels ((walk (expression operator-position-p)
+               (cond
+                 ((consp expression)
+                  (walk (first expression) t)
+                  (dolist (argument (rest expression))
+                    (walk argument nil)))
+                 ((and (symbolp expression) expression
+                       (not (and operator-position-p
+                                 (member (symbol-name expression) '("AND" "OR" "NOT")
+                                         :test #'string=))))
+                  (pushnew expression features)))))
+      (when (consp reason)
+        (walk (cdr reason) nil)))
+    (when features
+      (format nil "~{~A~^, ~}"
+              (mapcar (lambda (feature)
+                        ;; By identity, as the reader judged it: a feature
+                        ;; written in another package is not the keyword.
+                        (format nil "~:[lack~;have~] ~(~A~)"
+                                (member feature *features* :test #'eq)
+                                (let ((*package* (find-package "KEYWORD")))
+                                  (prin1-to-string feature))))
+                      (nreverse features))))))
+
+(defun feature-key (text start)
+  "Return the #+/#- feature expressions in front of the form at START in TEXT
+as one lower-cased string -- each expression as written, its whitespace runs
+made single spaces, joined by a space -- or NIL when there are none.  This is
+how the expressions a form_name opens with are compared with a form's own:
+\"#+ecl impl\" names the IMPL written under #+ecl (or #+ECL), not the one under
+#+(or ecl) or #-sbcl."
+  (multiple-value-bind (form-start spans) (%feature-prefix-end text start)
+    (declare (ignore form-start))
+    (and spans
+         (string-downcase
+          (format nil "~{~A~^ ~}"
+                  (mapcar (lambda (span)
+                            (%collapse-whitespace (subseq text (car span) (cdr span))))
+                          spans))))))
+
+(defun %split-feature-qualified-name (form-name)
+  "Return FORM-NAME without the #+/#- feature expressions it opens with, and
+those expressions as FEATURE-KEY writes them, or FORM-NAME and NIL when it
+opens with none."
+  (let ((key (feature-key form-name 0)))
+    (if key
+        (values (subseq form-name (%feature-prefix-end form-name 0)) key)
+        (values form-name nil))))
+
+(defun inactive-form-nodes (nodes text readtable package-name)
+  "Return the forms of NODES, parsed from TEXT, that the reader skipped for a
+feature expression false in this process (%SKIPPED-FEATURE-NODE-P), each read
+with its expressions set aside, as (SKIPPED . NODE) pairs in file order.  NODE
+is an :EXPR node holding the form as read and spanning exactly what SKIPPED
+spans, its expressions included, so an edit of it keeps or replaces them as an
+edit of an active form does.  The form is read under READTABLE (or the
+IN-READTABLE in effect before it) in PACKAGE-NAME, as the file's other forms
+are; one that cannot be read is left out."
+  (loop for node in nodes
+        when (%skipped-feature-node-p node)
+          append (let* ((form-start (%feature-prefix-end text (cst-node-start node)))
+                        (form-text (subseq text (min form-start (cst-node-end node))
+                                           (cst-node-end node)))
+                        (form-readtable (or readtable
+                                            (%detect-readtable-before-node nodes node)))
+                        (read (ignore-errors
+                               (find :expr
+                                     (if package-name
+                                         (parse-top-level-forms form-text
+                                                                :readtable form-readtable
+                                                                :initial-package package-name)
+                                         (parse-top-level-forms form-text
+                                                                :readtable form-readtable))
+                                     :key #'cst-node-kind))))
+                   (when read
+                     (let ((active (copy-structure node)))
+                       (setf (cst-node-kind active) :expr
+                             (cst-node-value active) (cst-node-value read))
+                       (list (cons node active)))))))
 
 (defun %normalize-paths (file-path)
   "Return two values: absolute path (pathname) and relative namestring for FS tools.
@@ -558,7 +649,11 @@ string is also reported this way, before any node is searched."
         (if match
             (values (aref match 0) (parse-integer (aref match 1)))
             (values form-name nil)))
-    (let* ((stripped (%strip-hash-colon (string-downcase (%strip-name-prefix base-name))))
+    (let* ((stripped (%strip-hash-colon
+                      (string-downcase
+                       ;; Feature expressions in front of the name choose
+                       ;; among NODES (%FIND-TARGET); the name is what is left.
+                       (%strip-name-prefix (%split-feature-qualified-name base-name)))))
            ;; A method's signature and a list-valued name are compared as
            ;; %DEFINITION-CANDIDATES writes them: whitespace collapsed, no
            ;; package prefixes; the text with only its whitespace collapsed
@@ -744,48 +839,108 @@ the second."
                 (other-found (values other other-reason unqualified))
                 (t (values nil nil unqualified)))))))))
 
-(defun %find-target (nodes form-type form-name)
+(defun %find-target (nodes form-type form-name &key text readtable package-name)
   "Find a target node matching FORM-TYPE and FORM-NAME (LOCATE-FORM-IN-NODES
-documents the matching rules in full).  Returns (values NODE TYPE): the node,
-or NIL when nothing matches, and the lower-cased head name that matched (the
-one a \"not found\" message should list forms of when nothing did).  Signals a
-Lisp error when LOCATE-FORM-IN-NODES reports one instead (an out-of-range [N]
-index, ambiguous matches or form_type, or an empty FORM-NAME) -- the contract
-lisp-edit-form and lisp-patch-form already rely on."
-  (multiple-value-bind (node reason type) (locate-form-in-nodes nodes form-type form-name)
-    (if reason (error "~A" reason) (values node type))))
+documents the matching rules in full).  Returns (values NODE TYPE SKIPPED): the
+node, or NIL when nothing matches, the lower-cased head name that matched (the
+one a \"not found\" message should list forms of when nothing did), and, when
+NODE is a form the reader skipped for its feature expression, that skipped node
+of NODES (NODE then being INACTIVE-FORM-NODES' reading of it).  Signals a Lisp
+error when LOCATE-FORM-IN-NODES reports one instead (an out-of-range [N] index,
+ambiguous matches or form_type, or an empty FORM-NAME) -- the contract
+lisp-edit-form and lisp-patch-form already rely on.
+
+With TEXT, the file NODES were parsed from, a form under a feature expression
+false in this process can be the target too (issue #321), read under READTABLE
+in PACKAGE-NAME:
+  - FORM-NAME opening with feature expressions (\"#+ecl impl\") chooses among
+    the forms, read or skipped, written under those expressions (FEATURE-KEY);
+  - a plain FORM-NAME matches the forms the reader read, as it always has, and
+    only when none matches, the skipped ones.
+So a definition and its skipped twin never make each other ambiguous: the one
+this process reads is the plain name's, the other its expressions'."
+  (flet ((locate (candidates)
+           (multiple-value-bind (node reason type)
+               (locate-form-in-nodes candidates form-type form-name)
+             (when reason (error "~A" reason))
+             (values node type))))
+    (let ((feature-key (and text (nth-value 1 (%split-feature-qualified-name form-name)))))
+      (cond
+        ((null text) (locate nodes))
+        (feature-key
+         (let* ((inactive (inactive-form-nodes nodes text readtable package-name))
+                (candidates
+                  (sort (remove feature-key
+                                (append (remove :expr nodes :key #'cst-node-kind
+                                                            :test-not #'eq)
+                                        (mapcar #'cdr inactive))
+                                :key (lambda (node) (feature-key text (cst-node-start node)))
+                                :test-not #'equal)
+                        #'< :key #'cst-node-start)))
+           (multiple-value-bind (node type) (locate candidates)
+             (values node type (car (rassoc node inactive))))))
+        (t
+         (multiple-value-bind (node type) (locate nodes)
+           (if node
+               (values node type nil)
+               (let ((inactive (inactive-form-nodes nodes text readtable package-name)))
+                 (multiple-value-bind (skipped-node skipped-type)
+                     (locate (mapcar #'cdr inactive))
+                   (if skipped-node
+                       (values skipped-node skipped-type (car (rassoc skipped-node inactive)))
+                       (values nil type nil)))))))))))
 
 (defparameter *not-found-forms-listed* 30
   "Most top-level forms a \"not found\" error lists to choose from.")
 
-(defun %forms-listing (nodes form-type)
+(defun %forms-listing (nodes form-type &optional inactive text)
   "Return the sentence a \"not found\" error ends with: the top-level forms of
 FORM-TYPE among NODES, each written as \"(type name)\" -- or, when there is none
 of that type, every top-level form -- so the caller can pick the right
-form_type and form_name instead of guessing again."
-  (let* ((forms (loop for node in nodes
-                      for value = (and (typep node 'cst-node)
-                                       (eq (cst-node-kind node) :expr)
-                                       (cst-node-value node))
+form_type and form_name instead of guessing again.  INACTIVE, the forms
+INACTIVE-FORM-NODES read from TEXT, are listed in their place in the file with
+their feature expressions in front, \"#+ecl (defun impl)\", and the sentence
+then says how to name one."
+  (let* ((inactive-nodes (mapcar #'cdr inactive))
+         ;; Each entry is (TYPE DISPLAY PREFIX NAME); PREFIX only for a form the
+         ;; reader skipped.
+         (forms (loop for node in (merge 'list
+                                         (remove :expr nodes :key #'cst-node-kind
+                                                             :test-not #'eq)
+                                         (copy-list inactive-nodes)
+                                         #'< :key #'cst-node-start)
+                      for value = (cst-node-value node)
                       when (and (consp value) (symbolp (car value)))
                         collect (let* ((type (%normalize-string (car value)))
                                        (name (and (consp (cdr value))
                                                   (car (last (ignore-errors
                                                               (%definition-candidates
-                                                               value type)))))))
-                                  (cons type (format nil "(~A~@[ ~A~])" type name)))))
-         (same-type (remove form-type forms :key #'car :test-not #'string=))
-         (shown (mapcar #'cdr (or same-type forms)))
-         (extra (max 0 (- (length shown) *not-found-forms-listed*))))
+                                                               value type))))))
+                                       (prefix (and (member node inactive-nodes :test #'eq)
+                                                    (feature-key text (cst-node-start node)))))
+                                  (list type
+                                        (format nil "~@[~A ~](~A~@[ ~A~])" prefix type name)
+                                        prefix
+                                        name))))
+         (same-type (remove form-type forms :key #'first :test-not #'string=))
+         (shown (let ((all (or same-type forms)))
+                  (subseq all 0 (min (length all) *not-found-forms-listed*))))
+         (extra (max 0 (- (length (or same-type forms)) *not-found-forms-listed*)))
+         (example (find-if (lambda (entry) (and (third entry) (fourth entry))) shown)))
     (if (null forms)
         "The file holds no top-level forms."
-        (format nil "~A: ~{~A~^, ~}~:[~;, … ~D more~]."
+        (format nil "~A: ~{~A~^, ~}~:[~*~;, … ~D more~].~@[ ~A~]"
                 (if same-type
                     (format nil "Its ~A forms are" form-type)
                     (format nil "There is no ~A form here; its top-level forms are" form-type))
-                (subseq shown 0 (min (length shown) *not-found-forms-listed*))
+                (mapcar #'second shown)
                 (plusp extra)
-                extra))))
+                extra
+                (and example
+                     (format nil "A form shown after #+/#- is not read in this server (its ~
+                                  feature expression is false here); name it with its ~
+                                  expressions in front, as in form_name ~S."
+                             (format nil "~A ~A" (third example) (fourth example))))))))
 
 (defun %detect-readtable-before-node (nodes target)
   "Return the readtable designator active before TARGET, or NIL.
@@ -1431,8 +1586,10 @@ order visible at the call site that decides whether the edit proceeds."
 (defun locate-form-in-text (abs text form-type form-name readtable)
   "Parse TEXT, the contents of the file ABS, and find the form FORM-TYPE
 FORM-NAME in it, as %LOCATE-TARGET-FORM does once it has read the file.
-Returns (values NODES TARGET TYPE): the parsed top-level nodes, the matched
-node and the lower-cased head name FORM-TYPE matched as (%FIND-TARGET).
+Returns (values NODES TARGET TYPE INACTIVE-P): the parsed top-level nodes, the
+matched node, the lower-cased head name FORM-TYPE matched as (%FIND-TARGET), and
+whether TARGET is a form the reader skips here for its feature expression
+(NODES then holds TARGET in the skipped node's place).
 Signals FILE-UNPARSEABLE-ERROR when TEXT does not parse, or when the form is
 not found and the lenient CL-reader pass stopped early; otherwise a form that
 is not found is an error naming the forms that are there.  Callers that edit
@@ -1442,8 +1599,16 @@ text not yet written -- lisp-patch-form's later patches -- locate with this."
           (parse-top-level-forms text :readtable readtable :source-path abs)
         (error (e)
           (signal-file-unparseable abs text e :readtable readtable)))
-    (multiple-value-bind (target matched-type)
-        (%find-target nodes form-type form-name)
+    (multiple-value-bind (target matched-type skipped)
+        (%find-target nodes form-type form-name
+                      :text text
+                      :readtable readtable
+                      :package-name (extract-in-package-name-from-text text))
+      ;; A form under a feature expression false here (issue #321): the
+      ;; callers see it read, in the skipped node's place, so the forms around
+      ;; it, its comment and its twins are found as for any form.
+      (when skipped
+        (setf nodes (substitute target skipped nodes :test #'eq)))
       (unless target
         (when swallowed
           ;; The lenient pass returned the forms before the breakage, which
@@ -1455,8 +1620,12 @@ text not yet written -- lisp-patch-form's later patches -- locate with this."
         ;; project root when it lies under it.
         (error "Form ~A ~A not found in ~A.~%~A" form-type form-name
                (or (%project-relative-path abs) (native-path-namestring abs))
-               (%forms-listing nodes matched-type)))
-      (values nodes target matched-type))))
+               (%forms-listing nodes matched-type
+                               (inactive-form-nodes
+                                nodes text readtable
+                                (extract-in-package-name-from-text text))
+                               text)))
+      (values nodes target matched-type (and skipped t)))))
 
 (defun %locate-target-form (file-path form-type form-name readtable &optional guard)
   "Shared prologue: resolve paths, read file, parse, find target, extract snippet.
@@ -1501,7 +1670,7 @@ file's invalid bytes with #\\?, so writing it back would destroy them, and
 the unguarded path's FS-READ-FILE refuses the same file with a decoding
 error. Without GUARD, behavior is unchanged.
 
-Returns eight values:
+Returns nine values:
   ABS — absolute pathname
   REL — relative namestring for FS write
   ORIGINAL — full file text
@@ -1509,7 +1678,9 @@ Returns eight values:
   TARGET — matched CST node
   TARGET-SNIPPET — text of the matched form
   FORM-TYPE-STR — the lower-cased head name FORM-TYPE matched (%FORM-TYPE-READINGS)
-  FILE-PACKAGE-NAME — package named by the file's first IN-PACKAGE form"
+  FILE-PACKAGE-NAME — package named by the file's first IN-PACKAGE form
+  INACTIVE-P — true when TARGET is a form the reader skips here for its
+    feature expression (%FIND-TARGET); NODES then holds TARGET in its place"
   (let ((form-type-str (string-downcase form-type))
         (guard (normalize-edit-guard guard)))
     (multiple-value-bind (abs rel)
@@ -1568,7 +1739,7 @@ Returns eight values:
                         outside cl-mcp."
                        (native-path-namestring abs) file-length (length text)))
               (setf original text)))
-        (multiple-value-bind (nodes target matched-type)
+        (multiple-value-bind (nodes target matched-type inactive-p)
             (locate-form-in-text abs original form-type form-name readtable)
           ;; The reading of FORM-TYPE that matched, which callers compare
           ;; with "defmethod" and the like.
@@ -1582,7 +1753,8 @@ Returns eight values:
                                         (cst-node-start target)
                                         (cst-node-end target))))
             (values abs rel original nodes target target-snippet form-type-str
-                    (extract-in-package-name-from-text original))))))))
+                    (extract-in-package-name-from-text original)
+                    inactive-p)))))))
 
 (defun %file-unparseable-by-edit-tools-p (pn &optional text)
   "Return T when the file at PN is broken in a way no readtable can fix:

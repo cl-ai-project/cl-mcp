@@ -200,7 +200,12 @@
         (ok (> (length results) 0)
             "should find defun forms in the dependency's sources")
         (dolist (r results)
-          (ok (string-equal "defun" (cdr (assoc :form-type r)))))))))
+          (ok (string-equal "defun" (cdr (assoc :form-type r))))
+          ;; Issue #325: a file outside the root is printed absolute, the path
+          ;; lisp-read-file can be given back.
+          (ok (uiop:absolute-pathname-p
+               (uiop:parse-native-namestring (cdr (assoc :file r))))
+              (format nil "~A is absolute" (cdr (assoc :file r)))))))))
 
 (deftest clgrep-search-rejects-path-outside-every-allowed-root
   (testing "a path in neither the project root nor a registered system still signals"
