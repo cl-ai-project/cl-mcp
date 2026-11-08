@@ -1570,20 +1570,19 @@ Returns eight values:
               (setf original text)))
         (multiple-value-bind (nodes target matched-type)
             (locate-form-in-text abs original form-type form-name readtable)
-          (progn
-            ;; The reading of FORM-TYPE that matched, which callers compare
-            ;; with "defmethod" and the like.
-            (setf form-type-str matched-type)
-            (when guard
-              (multiple-value-bind (ok-p conflict)
-                  (check-edit-guard guard (native-path-namestring abs) snapshot target)
-                (unless ok-p
-                  (error 'edit-guard-conflict-error :conflict conflict))))
-            (let ((target-snippet (subseq original
-                                          (cst-node-start target)
-                                          (cst-node-end target))))
-              (values abs rel original nodes target target-snippet form-type-str
-                      (extract-in-package-name-from-text original)))))))))
+          ;; The reading of FORM-TYPE that matched, which callers compare
+          ;; with "defmethod" and the like.
+          (setf form-type-str matched-type)
+          (when guard
+            (multiple-value-bind (ok-p conflict)
+                (check-edit-guard guard (native-path-namestring abs) snapshot target)
+              (unless ok-p
+                (error 'edit-guard-conflict-error :conflict conflict))))
+          (let ((target-snippet (subseq original
+                                        (cst-node-start target)
+                                        (cst-node-end target))))
+            (values abs rel original nodes target target-snippet form-type-str
+                    (extract-in-package-name-from-text original))))))))
 
 (defun %file-unparseable-by-edit-tools-p (pn &optional text)
   "Return T when the file at PN is broken in a way no readtable can fix:

@@ -12,6 +12,7 @@
                           #:cst-node-start
                           #:cst-node-end)
   (:import-from #:cl-mcp/src/fs
+                #:fs-read-file
                 #:fs-write-file
                 #:with-file-lock)
   (:import-from #:cl-mcp/src/log
@@ -31,7 +32,8 @@
                 #:bounded-princ-to-string
                 #:circular-p)
   (:import-from #:cl-mcp/src/package-context
-                #:call-with-package-context)
+                #:call-with-package-context
+                #:extract-in-package-name-from-text)
   (:import-from #:cl-mcp/src/utils/nesting
                 #:lisp-too-deep-p
                 #:+max-lisp-nesting+)
@@ -434,9 +436,19 @@ returned instead: would_change, preview (the whole file), file_path, operation
                (error 'arg-validation-error :arg-name "patches"
                       :message (format nil "patch ~D: old_text must not be empty" number)))))
   (with-file-lock ((%normalize-paths file-path))
-    (let ((total (length patches))
-          (warnings '())
-          abs rel original text file-package-name)
+    (multiple-value-bind (abs rel) (%normalize-paths file-path)
+     ;; Read once, before any patch: a file that cannot be read is about the
+     ;; file, not about patch 1, and is reported as it is.
+     (multiple-value-bind (original truncated file-length) (fs-read-file abs)
+      (when truncated
+        (error "~A exceeds the read limit (~@[~D bytes, ~]only ~D characters read); ~
+                lisp-patch-form cannot edit files this large."
+               (namestring abs) file-length (length original)))
+      (let ((total (length patches))
+            (warnings '())
+            (previews '())
+            (text original)
+            (file-package-name (extract-in-package-name-from-text original)))
       (loop for patch in patches
             for number from 1
             do (destructuring-bind (&key form-type form-name old-text new-text) patch
@@ -448,26 +460,22 @@ returned instead: would_change, preview (the whole file), file_path, operation
                                                  number total form-type form-name message))))
                    (handler-case
                        (multiple-value-bind (nodes target)
-                           (if (= number 1)
-                               (multiple-value-bind (a r o n tg snippet type package)
-                                   (%locate-target-form file-path form-type form-name readtable)
-                                 (declare (ignore snippet type))
-                                 (setf abs a rel r original o text o
-                                       file-package-name package)
-                                 (values n tg))
-                               (locate-form-in-text abs text form-type form-name readtable))
-                         (multiple-value-bind (updated would-change bracket-warning)
+                           (locate-form-in-text abs text form-type form-name readtable)
+                         (multiple-value-bind (updated would-change bracket-warning
+                                               modified-form)
                              (%patch-located abs text nodes target old-text new-text readtable
                                              file-package-name)
                            (declare (ignore would-change))
                            (when bracket-warning
                              (push (cons number bracket-warning) warnings))
+                           (push (list number form-type form-name modified-form) previews)
                            (setf text updated)))
                      ;; The file itself does not parse: about the file, not
                      ;; about this patch, so it is reported as it is.
                      (file-unparseable-error (e) (error e))
                      (patch-operation-error (e) (fail (patch-operation-reason e)))
-                     (error (e) (fail (princ-to-string e)))))))
+                     (error (e)
+                       (fail (sanitize-error-message (bounded-princ-to-string e))))))))
       (let ((would-change (not (string= original text)))
             (warnings (nreverse warnings)))
         (log-event :debug "lisp.patch.form"
@@ -480,6 +488,9 @@ returned instead: would_change, preview (the whole file), file_path, operation
            (let ((result (make-hash-table :test #'equal)))
              (setf (gethash "would_change" result) would-change
                    (gethash "preview" result) text
+                   ;; Each patched form as it would be: what a client that
+                   ;; renders only the content text gets to see.
+                   (gethash "preview_forms" result) (reverse previews)
                    (gethash "file_path" result) (namestring abs)
                    (gethash "operation" result) "patch"
                    (gethash "patches" result) total)
@@ -489,7 +500,7 @@ returned instead: would_change, preview (the whole file), file_path, operation
           (would-change
            (fs-write-file rel text)
            (values text t warnings))
-          (t (values text nil warnings)))))))
+          (t (values text nil warnings)))))))))
 
 (defun %patch-plists (patches)
   "Return PATCHES, the tool's patches argument (a JSON array of objects), as the
@@ -522,10 +533,15 @@ values, for COUNT patches on FILE-PATH."
                        "preview" (gethash "preview" preview)
                        "content" (text-content
                                   (format nil "Dry-run of ~D patches on ~A (~:[no change~;would ~
-                                               change~])~{~%WARNING (patch ~D): ~A~}"
+                                               change~])~{~%WARNING (patch ~D): ~A~}~
+                                               ~{~%~%--- patch ~D (~A ~A) ---~%~A~}"
                                           count file-path would-change
                                           (loop for (number . warning) in warnings
-                                                collect number collect warning)))
+                                                collect number collect warning)
+                                          (loop for (number type name form)
+                                                  in (gethash "preview_forms" preview)
+                                                collect number collect type collect name
+                                                collect (%bound-snippet form))))
                        (when warnings
                          (list "bracket_warnings"
                                (map 'vector (lambda (entry)

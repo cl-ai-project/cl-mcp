@@ -1034,6 +1034,37 @@ handling and return the file's text afterwards."
                             #-sbcl~%(defun impl () :other)~%#+sbcl~%(defun impl () :sbcl)~%"))
         "the last form takes the gap before it, and the file keeps one final newline")))
 
+(deftest lisp-edit-form-by-default-keeps-comments-line-ends-and-one-line-forms
+  ;; Review of PR #339.
+  (testing "a comment on the rest of the target's line goes with it"
+    (let ((source (format nil "(defun a () 1) ; about a~%(defun b () 2)~%")))
+      (ok (equal (%default-edit source :form-type "defun" :form-name "a"
+                                :operation "insert_after" :content "(defun n () 0)")
+                 (format nil "(defun a () 1) ; about a~%(defun n () 0)~%(defun b () 2)~%")))
+      (ok (equal (%default-edit source :form-type "defun" :form-name "a" :operation "delete")
+                 (format nil "(defun b () 2)~%")))))
+  (testing "after the last form, the gap before its comment block is the file's spacing"
+    (ok (equal (%default-edit (format nil "(defun a () 1)~%~%;; about b~%(defun b () 2)~%")
+                              :form-type "defun" :form-name "b"
+                              :operation "insert_after" :content "(defun n () 0)")
+               (format nil "(defun a () 1)~%~%;; about b~%(defun b () 2)~%~%(defun n () 0)~%"))))
+  (testing "a CRLF file gets CRLF line breaks"
+    (let ((crlf (coerce '(#\Return #\Newline) 'string)))
+      (flet ((lines (&rest parts) (format nil "~{~A~}" parts)))
+        (ok (equal (%default-edit (lines "(defun a () 1)" crlf crlf "(defun b () 2)" crlf)
+                                  :form-type "defun" :form-name "b"
+                                  :operation "insert_after" :content "(defun n () 0)")
+                   (lines "(defun a () 1)" crlf crlf "(defun b () 2)" crlf crlf
+                          "(defun n () 0)" crlf)))
+        (ok (equal (%default-edit (lines "(defun a () 1)" crlf crlf "(defun b () 2)" crlf)
+                                  :form-type "defun" :form-name "b" :operation "delete")
+                   (lines "(defun a () 1)" crlf))))))
+  (testing "forms on one line: insert_before is set apart as insert_after is"
+    (ok (equal (%default-edit (format nil "(defun a () 1) (defun b () 2)~%")
+                              :form-type "defun" :form-name "b"
+                              :operation "insert_before" :content "(defun n () 0)")
+               (format nil "(defun a () 1)~%~%(defun n () 0)~%~%(defun b () 2)~%")))))
+
 (deftest lisp-edit-form-setf-name-matches-without-its-package-prefix
   ;; Issue #326: (setf c::top-level-lambda-max) was reported unmatched by
   ;; "(setf top-level-lambda-max)"; a package prefix inside a (setf ...) name is

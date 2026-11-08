@@ -926,11 +926,32 @@ of a #| |# comment can start with ; too -- and is never taken."
                                           &optional (comment-floor 0))
   "Apply OPERATION to NODE within TEXT changing nothing but the form's own text
 (issue #326): a replace swaps the form's span for CONTENT, a delete removes the
-span and the gap after it, and an insert puts CONTENT beside the target with
+form and the gap after it, and an insert puts CONTENT beside the target with
 the same gap the file already has there -- the one after the target, or before
-it when nothing follows -- so no blank line elsewhere in the file moves."
+it when nothing follows -- so no blank line elsewhere in the file moves.  A
+comment on the rest of the target's last line is the target's: an insert after
+it and a delete of it take the line end as the form's end, so the comment
+neither moves onto the next form nor is left behind.  New line breaks are the
+file's own (CRLF in a CRLF file)."
   (let* ((start (cst-node-start node))
-         (end (cst-node-end node))
+         (newline (if (search (coerce '(#\Return #\Newline) 'string) text)
+                      (coerce '(#\Return #\Newline) 'string)
+                      (string #\Newline)))
+         ;; The form's end, or the end of its line when only a ; comment
+         ;; follows it there.
+         (end (let* ((form-end (cst-node-end node))
+                     (after (or (position-if-not (lambda (ch) (member ch '(#\Space #\Tab)))
+                                                 text :start form-end)
+                                (length text))))
+                (if (and (< after (length text)) (char= (char text after) #\;))
+                    (let ((line-end (or (position #\Newline text :start after)
+                                        (length text))))
+                      ;; Not the CR of a CRLF: it belongs to the line break.
+                      (if (and (> line-end after)
+                               (char= (char text (1- line-end)) #\Return))
+                          (1- line-end)
+                          line-end))
+                    form-end)))
          (snippet (%trim-outer-whitespace content))
          (suffix (subseq text end))
          (ws-end (or (position-if-not (lambda (ch)
@@ -941,47 +962,54 @@ it when nothing follows -- so no blank line elsewhere in the file moves."
          (following (subseq suffix ws-end)))
     (flet ((line-gap (gap)
              ;; A gap that does not end a line (forms on one line) cannot hold
-             ;; a form of its own: give it a line break.
-             (if (find #\Newline gap) gap (format nil "~%~%"))))
+             ;; a form of its own: give it a blank line.
+             (if (find #\Newline gap) gap (concatenate 'string newline newline)))
+           (gap-before (from)
+             ;; The whitespace in front of FROM, back to the text before it.
+             (let ((core (string-right-trim '(#\Space #\Tab #\Newline #\Return)
+                                            (subseq text 0 from))))
+               (values core (subseq text (length core) from)))))
       (ecase operation
         ((:replace)
-         (concatenate 'string (subseq text 0 start) snippet suffix))
+         (concatenate 'string (subseq text 0 start) snippet (subseq text (cst-node-end node))))
         ((:insert-before)
          ;; Above the comment written directly over the target, so the comment
-         ;; still reads as the target's.
-         (let* ((comment-start (%attached-comment-start text start comment-floor))
-                (before (subseq text 0 comment-start))
-                (before-core (string-right-trim '(#\Space #\Tab #\Newline #\Return)
-                                                before))
-                (gap-before (subseq before (length before-core))))
-           (concatenate 'string before
-                        snippet
-                        (line-gap (if (plusp (length before-core))
-                                      gap-before
-                                      (if (plusp (length following)) gap-after "")))
-                        (subseq text comment-start))))
+         ;; still reads as the target's, with the gap the file has there on
+         ;; both sides.
+         (let ((comment-start (%attached-comment-start text start comment-floor)))
+           (multiple-value-bind (before-core before-gap) (gap-before comment-start)
+             (let ((gap (line-gap (if (plusp (length before-core))
+                                      before-gap
+                                      (if (plusp (length following)) gap-after "")))))
+               (concatenate 'string
+                            before-core
+                            (if (plusp (length before-core)) gap before-gap)
+                            snippet
+                            gap
+                            (subseq text comment-start))))))
         ((:insert-after)
-         (let* ((before-core (string-right-trim '(#\Space #\Tab #\Newline #\Return)
-                                                (subseq text 0 start)))
-                (gap (cond ((plusp (length following)) gap-after)
-                           ((plusp (length before-core))
-                            (subseq text (length before-core) start))
-                           (t ""))))
+         (let ((gap (cond ((plusp (length following)) gap-after)
+                          (t
+                           ;; The last form: the gap in front of it (its comment
+                           ;; block included) is the file's spacing.
+                           (multiple-value-bind (before-core before-gap)
+                               (gap-before (%attached-comment-start text start
+                                                                    comment-floor))
+                             (if (plusp (length before-core)) before-gap ""))))))
            (concatenate 'string (subseq text 0 end)
                         (line-gap gap)
                         snippet
                         (if (plusp (length following))
                             (concatenate 'string (line-gap gap-after) following)
-                            (string #\Newline)))))
+                            newline))))
         ((:delete)
          (if (plusp (length following))
              (concatenate 'string (subseq text 0 start) following)
              ;; The last form: the gap before it goes too, and the file keeps
-             ;; one final newline.
-             (let ((before-core (string-right-trim '(#\Space #\Tab #\Newline #\Return)
-                                                   (subseq text 0 start))))
+             ;; one final line break.
+             (let ((before-core (gap-before start)))
                (if (plusp (length before-core))
-                   (concatenate 'string before-core (string #\Newline))
+                   (concatenate 'string before-core newline)
                    ""))))))))
 
 (defun %apply-operation-normalized (text node operation content

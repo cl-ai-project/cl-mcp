@@ -1430,7 +1430,7 @@ old_text of the last one."
           (ok changed)
           (ok (equal text (fs-read-file path)))
           (ok (null (search "old-name" text)) "every occurrence renamed")
-          (ok (= 3 (count-matches "new-name" text)))))))
+          (ok (= 3 (%count-matches "new-name" text)))))))
   (testing "one patch that cannot be applied leaves the file as it was"
     (with-temp-file "tests/tmp/patch-many.lisp" *rename-source*
       (lambda (path)
@@ -1439,7 +1439,7 @@ old_text of the last one."
                                    :file-path path :patches (%rename-patches "(old-name 3)"))
                                   nil)
                          (error (e) (princ-to-string e)))))
-          (ok (and message (search "Patch 3 of 3 (defun caller-b)" message)) message)
+          (ok (and message (search "Patch 3 of 3 (defun caller-b)" message)) (or message "no error"))
           (ok (and message (search "Nothing was written" message)))
           (ok (equal *rename-source* (fs-read-file path)) "the first two were not written")))))
   (testing "a later patch sees what an earlier one wrote"
@@ -1464,7 +1464,7 @@ old_text of the last one."
                                                         :new-text "(new-name 1)")))
                                   nil)
                          (error (e) (princ-to-string e)))))
-          (ok (and message (search "Patch 2 of 2" message)) message)
+          (ok (and message (search "Patch 2 of 2" message)) (or message "no error"))
           (ok (equal *rename-source* (fs-read-file path)))))))
   (testing "a dry run previews the whole file and writes nothing"
     (with-temp-file "tests/tmp/patch-many.lisp" *rename-source*
@@ -1476,7 +1476,7 @@ old_text of the last one."
           (ok (null (search "old-name" (gethash "preview" preview))))
           (ok (equal *rename-source* (fs-read-file path))))))))
 
-(defun count-matches (needle haystack)
+(defun %count-matches (needle haystack)
   "Return how many times NEEDLE occurs in HAYSTACK."
   (loop with start = 0
         for position = (search needle haystack :start2 start)
@@ -1503,7 +1503,7 @@ answers with: the content text of a result, or the message of an error."
                                      "form_type" "defun" "form_name" "x"
                                      "old_text" "a" "new_text" "b"))))
            (text (%handler-text args)))
-      (ok (search "not both" text) text)))
+      (ok (search "not both" text) (or text "no text"))))
   (testing "patches through the tool apply together"
     (with-temp-file "tests/tmp/patch-many.lisp" *rename-source*
       (lambda (path)
@@ -1519,5 +1519,31 @@ answers with: the content text of a result, or the message of an error."
                                           "old_text" old-text "new_text" new-text)))
                                      (%rename-patches))))
                (text (%handler-text args)))
-          (ok (search "Applied 3 patches" text) text)
+          (ok (search "Applied 3 patches" text) (or text "no text"))
           (ok (null (search "old-name" (fs-read-file path)))))))))
+
+(deftest lisp-patch-form-patches-report-the-file-and-the-forms
+  ;; Review of PR #339.
+  (testing "a file that cannot be read is no patch's failure"
+    (let ((message (handler-case
+                       (progn (cl-mcp/src/lisp-patch-form::lisp-patch-form-many
+                               :file-path "tests/tmp/no-such-file-339.lisp"
+                               :patches (%rename-patches))
+                              nil)
+                     (error (e) (princ-to-string e)))))
+      (ok message "refused")
+      (ok (and message (null (search "Patch 1 of" message)))
+          (or message "no error"))))
+  (testing "a dry run shows each patched form in the text"
+    (with-temp-file "tests/tmp/patch-many.lisp" *rename-source*
+      (lambda (path)
+        (let ((text (%handler-text
+                     (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "dry_run" t
+                      "patches" (vector (cl-mcp/src/tools/helpers:make-ht
+                                         "form_type" "defun" "form_name" "old-name"
+                                         "old_text" "(* x 2)" "new_text" "(* x 5)"))))))
+          (ok (search "--- patch 1 (defun old-name) ---" text) (or text "no text"))
+          (ok (search "(* x 5)" text))
+          (ok (equal *rename-source* (fs-read-file path))))))))
