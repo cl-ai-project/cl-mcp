@@ -744,7 +744,11 @@ in-readtable, a reader error recovery cannot pass), DISPLAY ends saying where."
     (multiple-value-bind (nodes again)
         (handler-case
             (if package-name
-                (parse-top-level-forms padded :initial-package package-name :recover t)
+                ;; SOURCE-PATH too: the file's own defpackage is found through
+                ;; it, which the walk under the project root does not reach for
+                ;; a file outside it.
+                (parse-top-level-forms padded :initial-package package-name
+                                              :source-path source-path :recover t)
                 (parse-top-level-forms padded :source-path source-path :recover t))
           (error (e) (values nil e)))
       (let* ((count 0)

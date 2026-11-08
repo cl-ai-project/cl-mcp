@@ -1501,7 +1501,23 @@ message it signals, or NIL when it returns normally."
                (ok (search "(defun read-past-only-symbol-324 ()"
                            (gethash "content" (lisp-read-file path)))))
              (ok (null (find-symbol "READ-PAST-ONLY-SYMBOL-324" probe))
-                 "nothing interned into the caller's package")))
+                 "nothing interned into the caller's package")
+             ;; A dependency's file: outside the (narrowed) project root, its
+             ;; own defpackage found only through the file itself.
+             (let ((narrow (merge-pathnames "tests/tmp/narrow-root-324/"
+                                            (system-source-directory :cl-mcp))))
+               (ensure-directories-exist narrow)
+               (let ((*package* probe)
+                     (cl-mcp/src/project-root:*project-root* narrow))
+                 (ok (search "(defun read-past-only-symbol-324 ()"
+                             (gethash "content"
+                                      (lisp-read-file
+                                       (namestring
+                                        (merge-pathnames path
+                                                         (system-source-directory :cl-mcp))))))
+                     "the lambda list is read in the file's package"))
+               (ok (null (find-symbol "READ-PAST-ONLY-SYMBOL-324" probe))
+                   "nothing interned outside the project root either"))))
       (delete-package probe))))
 
 (deftest lisp-read-file-lists-a-file-with-an-unknown-dispatch-macro
