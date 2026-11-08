@@ -636,7 +636,7 @@ so arrays are lists and false is NIL."
                      :cl-mcp "tests/tmp/clos-unparseable.lisp")))
           (ensure-directories-exist file)
           (with-open-file (out file :direction :output :if-exists :supersede)
-            (format out "(defparameter *x* #.(+ 1 2))~%"))
+            (format out "(defparameter *x* #?x)~%"))
           (unwind-protect
                (let* ((entry (annotated (namestring (truename file)) 1))
                       (reason (gethash "source_match_reason" entry)))

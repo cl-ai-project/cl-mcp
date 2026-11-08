@@ -68,6 +68,22 @@
       (ok (search "Tests: a-test" text))
       (ok (= 2 (gethash "count" r))))))
 
+(deftest build-code-find-references-response-counts-unparsed-files-in-the-headline
+  (testing "a count that left files out says so where the count is"
+    (let ((found (first-text (build-code-find-references-response
+                              (%report (list (%ref :form-type "defun" :form-name "a"))
+                                       :files-unparsed 2))))
+          (none (first-text (build-code-find-references-response
+                             (%report '() :files-unparsed 1))))
+          (all-read (first-text (build-code-find-references-response
+                                 (%report (list (%ref :form-type "defun" :form-name "a")))))))
+      (ok (search "P::FOO (function) — 1 form in 1 file, 2 files not scanned (could not be parsed)"
+                  found))
+      (ok (search "P::FOO (function) — no references, 1 file not scanned (could not be parsed)."
+                  none))
+      (ok (null (search "not scanned" all-read))
+          "nothing is said when every file was read"))))
+
 (deftest build-code-find-references-response-notes-and-caps
   (testing "notes follow the form line; call sites beyond five are counted"
     (let ((text (first-text

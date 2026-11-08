@@ -30,6 +30,10 @@
                 #:define-tool)
   (:import-from #:cl-mcp/src/utils/paths
                 #:native-path-namestring)
+  (:import-from #:cl-mcp/src/source-reader
+                #:source-read)
+  (:import-from #:cl-mcp/src/utils/lenient-read
+                #:call-with-lenient-packages)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-error-message)
   (:import-from #:cl-mcp/src/utils/nesting
@@ -53,7 +57,7 @@ step is the overwrite path: lisp-read-file (raw mode) to confirm the line,
 fs-read-file for the exact full text, apply the fix, fs-write-file with
 allow_unparseable_overwrite. Keying this on the parser rather than on the
 scan keeps the three tools' verdicts consistent: a file that parses (a
-symbol such as a[b), fails for a reader-level reason (#., #?), or was only
+symbol such as a[b), fails for a reader-level reason (#?), or was only
 read in part never receives an instruction the guard would then refuse.
 When FALSE-POSITIVE -- that parser accepts the input -- only next_tool is
 set (lisp-edit-form can still edit the file); no fix_code or required_args,
@@ -146,7 +150,8 @@ then the text is truncated to 200 characters."
         msg)))
 
 (defun %try-reader-check (text base-offset)
-  "Attempt to fully read TEXT using the standard CL reader with *READ-EVAL* nil.
+  "Attempt to fully read TEXT as the editing tools read a file (SOURCE-READ:
+standard syntax, #. read but never evaluated, missing packages stubbed).
 Returns a plist with reader error info if a genuine syntax error is detected,
 or NIL if the text is clean (or if checking is skipped for known safe reasons).
 
@@ -175,7 +180,13 @@ syntax error in the file itself."
   (with-input-from-string (stream text)
     (handler-case
         (let ((*read-eval* nil))
-          (loop (when (eq :eof (read stream nil :eof)) (return nil))))
+          ;; The editing tools' reader: #., #S and SBCL's character names
+          ;; read as they do, so this verdict and theirs agree.
+          ;; Stubs for missing packages, as the editing tools read, so the
+          ;; check goes on past them.
+          (call-with-lenient-packages
+           (lambda ()
+             (loop (when (eq :eof (source-read stream nil :eof)) (return nil))))))
       (reader-error (e)
         ;; SB-INT:SIMPLE-READER-PACKAGE-ERROR is a subtype of both
         ;; reader-error and package-error in SBCL, so it arrives here
@@ -281,8 +292,8 @@ does, so only there the characters before the window are added."
 
 (defun lisp-check-parens (&key path code offset limit)
   "Check balanced parentheses/brackets in CODE or PATH slice.
-Also checks for reader errors (e.g. unknown dispatch characters, #. with
-*read-eval* nil) even when parentheses are balanced.
+Also checks for reader errors (e.g. unknown dispatch characters) even when
+parentheses are balanced, reading as the editing tools do (#. unevaluated).
 Returns a hash table with key \"ok\" and, when not ok, \"kind\", and
 either \"expected\"/\"found\" (delimiter mismatch) or \"message\" (reader error),
 plus a \"position\" hash with \"line\", \"column\", \"offset\" (absent for
@@ -463,7 +474,7 @@ it is flagged in \"diagnosis_text\" as a likely artifact of the window."
                                        lisp-edit-form can still edit the file~].~%~]~
                                        ~:[~;The editing tools' reader also fails on ~
                                        this file, but not on a delimiter (a reader ~
-                                       macro or #.), so the overwrite path does not ~
+                                       macro), so the overwrite path does not ~
                                        apply and the fix below alone will not make ~
                                        it parse; lisp-edit-form will report the ~
                                        reader's complaint.~%~]~A"
@@ -567,8 +578,8 @@ before/after editing. Returns the first mismatch position if unbalanced, or
 success if balanced. Unbalanced delimiter results name the next step (see the
 last paragraph).
 
-Also detects reader errors (e.g. unknown dispatch characters, #. read-time eval
-when *read-eval* is nil) even when parentheses are balanced. In that case the
+Also detects reader errors (e.g. unknown dispatch characters) even when
+parentheses are balanced; #. is read as the editing tools read it, unevaluated. In that case the
 result has kind: \"reader-error\" and a message field describing the error,
 instead of expected/found fields. The reader check is skipped for any text that
 contains in-readtable (a named-readtables file, but also a mention in a comment

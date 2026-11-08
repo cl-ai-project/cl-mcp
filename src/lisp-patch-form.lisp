@@ -33,6 +33,9 @@
   (:import-from #:cl-mcp/src/utils/printing
                 #:bounded-princ-to-string
                 #:circular-p)
+  (:import-from #:cl-mcp/src/source-reader
+                #:*read-with-cl-reader*
+                #:source-read-from-string)
   (:import-from #:cl-mcp/src/package-context
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/utils/nesting
@@ -231,7 +234,10 @@ deep, which is deeper than cl-mcp will read"
          (*readtable*
            (if custom-rt
                custom-rt
-               (copy-readtable nil))))
+               (copy-readtable nil)))
+         ;; The file is read with CL:READ under any named readtable, so the
+         ;; patched form is too (SOURCE-READ-FROM-STRING).
+         (*read-with-cl-reader* (and custom-rt t)))
     (flet ((diagnosed (fallback &optional reader-text)
              ;; A readtable that is standard in all but name keeps the
              ;; standard diagnosis; only a syntax change withholds it.
@@ -245,7 +251,7 @@ deep, which is deeper than cl-mcp will read"
            package-name
            (lambda ()
              (multiple-value-bind (form pos)
-                 (read-from-string form-text nil :eof)
+                 (source-read-from-string form-text :eof-error-p nil :eof-value :eof)
                (when (eq form :eof)
                  (error 'patch-operation-error
                         :reason "patch produced an empty form"))
@@ -302,8 +308,11 @@ writes a prefix that would make the file unreadable."
                               (*readtable* *standard-readtable*)
                               (*read-eval* nil)
                               (*read-suppress* nil))
-                          (read-from-string modified-form t nil
-                                            :start (+ (car span) 2) :end (cdr span)))
+                          ;; As the file's parser reads it: a #. is read,
+                          ;; never evaluated (#319).
+                          (source-read-from-string modified-form
+                                                   :start (+ (car span) 2)
+                                                   :end (cdr span)))
                       (error (e)
                         (error 'patch-operation-error
                                :reason (format nil "the patched feature expression ~A cannot ~

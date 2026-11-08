@@ -1093,6 +1093,10 @@ CL-MCP/SRC/CODE-REFS-CORE:BUILD-REFERENCES-REPORT."
                          :project-only project-only
                          :limit limit
                          :files-scanned (or (and scan (gethash "files_scanned" scan)) 0)
+                         :files-unparsed (if scan
+                                             (length (sequence->list
+                                                      (gethash "parse_failures" scan)))
+                                             0)
                          :name-matches (loop for form in scan-forms
                                              sum (length (sequence->list
                                                           (gethash "sites" form))))
