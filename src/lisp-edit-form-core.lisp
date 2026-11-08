@@ -55,6 +55,7 @@
                 #:subpathp)
   (:export #:%skip-blank-and-comments
            #:%feature-prefix-end
+           #:%skipped-feature-node-p
            #:%normalize-string
            #:%defmethod-candidates
            #:%definition-candidates
@@ -283,6 +284,18 @@ lisp-read-file, which shows it in the collapsed view."
                (push (cons pos after) spans)
                (setf pos (%skip-blank-and-comments text after))))
     (values pos (nreverse spans))))
+
+(defun %skipped-feature-node-p (node)
+  "True when NODE is a form the reader skipped for its #+ or #- feature
+expression: a definition for another implementation or configuration.  Its
+span starts at the expression's #, as an active form's does.  Shared by
+lisp-read-file, which lists it as unread, and lisp-edit-form, which refuses a
+replace that would overwrite the active twin of one."
+  (and (typep node 'cst-node)
+       (eq (cst-node-kind node) :skipped)
+       (let ((reason (cst-node-value node)))
+         (and (consp reason)
+              (member (car reason) '(:sharpsign-plus :sharpsign-minus))))))
 
 (defun %normalize-paths (file-path)
   "Return two values: absolute path (pathname) and relative namestring for FS tools.

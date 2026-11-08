@@ -29,6 +29,79 @@
       (ok (<= (cst-node-end-line expr) 4))
       (ok (string= "sample" (string-downcase (second (cst-node-value expr))))))))
 
+(deftest cl-reader-pass-records-a-form-behind-a-false-feature-expression
+  ;; Issue #316 review: READ consumed a false #+ and its form without a trace,
+  ;; so the CL-reader pass returned no node for it and started the next form's
+  ;; span at its #; a replace of the next form overwrote both.
+  (let* ((text (format nil "(in-package :cl-user)~%#+cl-mcp-no-such-feature~%~
+                            (defun twin () 1)~%#-cl-mcp-no-such-feature~%~
+                            (defun twin () 2)~%(defun plain () 3)~%"))
+         (nodes (parse-top-level-forms text :readtable :standard))
+         (described (mapcar (lambda (node)
+                              (list (cst-node-kind node) (cst-node-start-line node)
+                                    (subseq text (cst-node-start node) (cst-node-end node))))
+                            nodes)))
+    (testing "the skipped form is a node of its own, with its reason"
+      (let ((skipped (find :skipped nodes :key #'cst-node-kind)))
+        (ok (and skipped (= 2 (cst-node-start-line skipped))) (format nil "~S" described))
+        (ok (and skipped (eq :sharpsign-plus (car (cst-node-value skipped))))
+            "recorded as the Eclector pass records it")))
+    (testing "the form that is read starts at its own expression"
+      (ok (member (list :expr 4 (format nil "#-cl-mcp-no-such-feature~%(defun twin () 2)"))
+                  described :test #'equal)
+          (format nil "~S" described))
+      (ok (member (list :expr 6 "(defun plain () 3)") described :test #'equal)
+          "and a plain form after it as before"))
+    (testing "a malformed expression is a read error, as it is to SBCL"
+      (ok (nth-value 1 (parse-top-level-forms (format nil "(a)~%#+(not) (b)~%")
+                                              :readtable :standard))
+          "reported as the second value"))
+    (testing "an operator UIOP does not evaluate is a read error, not a signal"
+      (ok (nth-value 1 (parse-top-level-forms (format nil "#+(cl:and sbcl) (defun a () 1)~%")
+                                              :readtable :standard))
+          "reported as the second value"))
+    (testing "stacked expressions with no form for the outer one are a read error"
+      (let ((err (nth-value 1 (parse-top-level-forms
+                               (format nil "(a)~%#+sbcl #+cl-mcp-no-such-feature ~
+                                            (defun impl (x) 2)~%")
+                               :readtable :standard))))
+        (ok (typep err 'cl-mcp/src/cst:unterminated-source)
+            "an unterminated source, as the Eclector pass refuses it")))
+    (testing "an unterminated block comment there is reported as one"
+      (let ((err (nth-value 1 (parse-top-level-forms
+                               (format nil "(a)~%#+sbcl #+cl-mcp-no-such-feature (b) #| open")
+                               :readtable :standard))))
+        (ok (and err (search "block comment" (princ-to-string err)))
+            (format nil "~A" err))))
+    (testing "the skipped form ends where its form does, a comment after it notwithstanding"
+      (let* ((source (format nil "(a)~%#+sbcl #+cl-mcp-no-such-feature (b) ; c~%(d)~%"))
+             (skipped (find :skipped (parse-top-level-forms source :readtable :standard)
+                            :key #'cst-node-kind)))
+        (ok (and skipped (string= "#+sbcl #+cl-mcp-no-such-feature (b)"
+                                  (subseq source (cst-node-start skipped)
+                                          (cst-node-end skipped))))
+            "its span stops after (b)")))
+    (testing "an expression with no form after it is a read error"
+      (ok (nth-value 1 (parse-top-level-forms (format nil "(a)~%#+sbcl~%")
+                                              :readtable :standard))
+          "reported as the second value"))))
+
+(deftest both-passes-split-a-twin-off-stacked-expressions
+  ;; Second review of #331: behind #+sbcl #+cl-mcp-no-such-feature the reader
+  ;; skips the guarded form and the outer #+sbcl takes the next one, which the
+  ;; Eclector pass returned as one node starting at the skipped form's #.
+  (let ((text (format nil "(in-package :cl-user)~%~%#+sbcl #+cl-mcp-no-such-feature~%~
+                           (defun impl (x) 2)~%~%#+sbcl #-cl-mcp-no-such-feature~%~
+                           (defun impl (x) 1)~%~%(defun z () 3)~%")))
+    (dolist (readtable '(nil :standard))
+      (let ((described (mapcar (lambda (node)
+                                 (list (cst-node-kind node) (cst-node-start-line node)))
+                               (if readtable
+                                   (parse-top-level-forms text :readtable readtable)
+                                   (parse-top-level-forms text)))))
+        (ok (equal '((:expr 1) (:skipped 3) (:expr 6) (:expr 9)) described)
+            (format nil "readtable ~S: ~S" readtable described))))))
+
 (deftest parse-top-level-forms-error-suggests-readtable
   (testing "reader error message suggests using readtable parameter"
     (let ((error-message

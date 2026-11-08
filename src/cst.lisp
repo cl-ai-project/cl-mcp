@@ -45,7 +45,10 @@
            ;; Exported for cl-mcp/src/lisp-macroexpand, which has to answer
            ;; the same question this file answers while parsing: which
            ;; IN-PACKAGE is in effect at a given point in the file.
-           #:%in-package-form-p))
+           #:%in-package-form-p
+           ;; Exported for lisp-edit-form, which checks a content's own
+           ;; feature expressions by the grammar the parse holds a file to.
+           #:%feature-expression-problem))
 
 (in-package #:cl-mcp/src/cst)
 
@@ -247,6 +250,190 @@ alone: they already classify as delimiter failures."
 Remove the extra \")\" (lisp-check-parens reports its line and column)."))
           condition))))
 
+(defun %feature-expression-problem (expression &optional (depth 0))
+  "Return why EXPRESSION, a feature expression as read, breaks the grammar of
+CLHS 24.1.2.1 -- a symbol, or a proper list headed by AND, OR or NOT, NOT with
+exactly one argument, whose arguments are feature expressions in turn -- or NIL
+when it keeps it.  Operators are compared by name, so :NOT and a NOT read in
+another package both count, as readers accept both.  Nothing is evaluated: a
+condition false in this process is as valid as a true one.  Shared by the
+CL-reader pass (%PASS-FEATURE-CONDITIONALS), which reports a file's malformed
+expression as SBCL's reader does, and lisp-edit-form, which refuses content
+carrying one."
+  (cond
+    ((> depth 64) "it is nested too deeply")
+    ((symbolp expression) nil)
+    ((not (and (consp expression) (ignore-errors (list-length expression))))
+     ;; Not a proper list: it may be circular, as #+#1=(and . #1#) reads.
+     (let ((*print-circle* t))
+       (format nil "~S is neither a symbol nor a proper list" expression)))
+    ((not (and (symbolp (first expression))
+               (member (symbol-name (first expression)) '("AND" "OR" "NOT")
+                       :test #'string=)))
+     ;; By name: its package may be a reader's scratch one, deleted by now.
+     (format nil "~A is not AND, OR or NOT"
+             (let ((operator (first expression)))
+               (if (symbolp operator)
+                   (symbol-name operator)
+                   (let ((*print-circle* t)) (prin1-to-string operator))))))
+    ((and (string= (symbol-name (first expression)) "NOT")
+          (/= 1 (length (rest expression))))
+     "NOT takes exactly one feature expression")
+    (t (some (lambda (argument) (%feature-expression-problem argument (1+ depth)))
+             (rest expression)))))
+
+(defun %standard-feature-dispatch-p (readtable)
+  "True when READTABLE reads #+ and #- as the standard readtable does."
+  (flet ((same-p (sub-char)
+           (eq (ignore-errors (get-dispatch-macro-character #\# sub-char readtable))
+               (get-dispatch-macro-character #\# sub-char *standard-readtable*))))
+    (and (same-p #\+) (same-p #\-))))
+
+(defun %pass-feature-conditionals (stream readtable)
+  "Read the #+/#- feature expressions STREAM is at, as the standard reader does
+-- in the KEYWORD package, held to the grammar of CLHS 24.1.2.1 and evaluated
+against this process's *FEATURES* -- and return how the form they guard reads:
+
+  NIL                      STREAM is at no #+ or #-; nothing was read.
+  :ACTIVE                  every expression holds; STREAM is left at the form.
+  (values :SKIPPED REASON) one does not: the form it guards was read with
+                           *READ-SUPPRESS* on, as the reader skips it, and
+                           REASON is (:SHARPSIGN-PLUS . EXPRESSION) or
+                           (:SHARPSIGN-MINUS . EXPRESSION), as the Eclector
+                           pass records a skipped form.
+  (values :ERROR CONDITION) the text could not be read that way: a malformed
+                           expression, or the input ended before a form.
+
+READ itself consumes a false #+ and its form without a trace, so without this
+the CL-reader pass (a READTABLE argument, or after an IN-READTABLE) returned no
+node for the skipped form and started the next form's span at its #: a replace
+of that form overwrote both.  READTABLE must read #+ and #- the standard way
+(%STANDARD-FEATURE-DISPATCH-P)."
+  (flet ((no-form ()
+           (values :error
+                   (make-condition 'unterminated-source
+                                   :stream stream
+                                   :message (concatenate
+                                             'string
+                                             "Reader error: end of input after a #+ or #- "
+                                             "feature expression, with no form after it.")))))
+    (let ((passed nil))
+      (loop
+        (unless (eql (peek-char nil stream nil :eof) #\#)
+          (return))
+        (read-char stream)
+        (let ((sign (peek-char nil stream nil :eof)))
+          (unless (member sign '(#\+ #\-))
+            (unread-char #\# stream)
+            (return))
+          (read-char stream)
+          (let* ((expression (handler-case (let ((*package* (find-package "KEYWORD"))
+                                                 (*read-suppress* nil))
+                                             (read-preserving-whitespace stream t nil nil))
+                               (error (e) (return-from %pass-feature-conditionals
+                                            (values :error e)))))
+                 (problem (%feature-expression-problem expression)))
+            (when problem
+              (return-from %pass-feature-conditionals
+                (values :error (make-condition 'simple-error
+                                               :format-control "Reader error: malformed ~
+                                                                feature expression after #~A: ~A"
+                                               :format-arguments (list sign problem)))))
+            (let ((holds (handler-case (uiop:featurep expression)
+                           ;; An operator UIOP does not take: CL:AND rather than
+                           ;; the keyword, which Eclector refuses as well.
+                           (error ()
+                             (return-from %pass-feature-conditionals
+                               (values :error
+                                       (make-condition
+                                        'simple-error
+                                        :format-control "Reader error: the feature expression ~
+                                                         after #~A uses an operator that is ~
+                                                         not the keyword :AND, :OR or :NOT: ~A"
+                                        :format-arguments
+                                        (list sign
+                                              ;; Package-qualified and on one line, so
+                                              ;; COMMON-LISP:AND shows what is wrong.
+                                              (let ((*package* (find-package "KEYWORD"))
+                                                    (*print-pretty* nil))
+                                                (prin1-to-string expression))))))))))
+              (when (char= sign #\-)
+                (setf holds (not holds)))
+              (unless holds
+                (handler-case (let ((*read-suppress* t))
+                                (read-preserving-whitespace stream t nil nil))
+                  (end-of-file () (return-from %pass-feature-conditionals (no-form)))
+                  (error (e) (return-from %pass-feature-conditionals (values :error e))))
+                ;; Behind expressions that held, the outer one still takes the
+                ;; next form, so input that ends here is as short of a form as
+                ;; after a single expression that holds.
+                (when passed
+                  (let ((end (file-position stream))
+                        (comment-error (%skip-whitespace-and-comments stream readtable)))
+                    (when comment-error
+                      (return-from %pass-feature-conditionals (values :error comment-error)))
+                    (when (eq (peek-char nil stream nil :eof) :eof)
+                      (return-from %pass-feature-conditionals (no-form)))
+                    (file-position stream end)))
+                (return-from %pass-feature-conditionals
+                  (values :skipped (cons (if (char= sign #\+) :sharpsign-plus :sharpsign-minus)
+                                         expression))))
+              (setf passed t)
+              (let ((comment-error (%skip-whitespace-and-comments stream readtable)))
+                (when comment-error
+                  (return-from %pass-feature-conditionals (values :error comment-error))))))))
+      (cond
+        ((not passed) nil)
+        ((eq (peek-char nil stream nil :eof) :eof) (no-form))
+        (t :active)))))
+
+(defun %split-swallowed-twins (node text)
+  "Return a list of NODE, an :EXPR node the Eclector pass returned from TEXT,
+preceded by a :SKIPPED node for each form it swallowed.  Behind stacked
+expressions whose first holds and a later one does not -- #+sbcl #+ecl (defun
+impl ...) on SBCL -- the reader skips the guarded form and the outer expression
+takes the next form instead, so the next definition came back as one node
+starting at the skipped one's #, with the skipped form only as a child: a
+replace of it overwrote both, and nothing listed the skipped form.  Each such
+form becomes a :SKIPPED node of its own, as the CL-reader pass makes it
+(%PASS-FEATURE-CONDITIONALS), and NODE then starts at its own expressions.
+NODE is returned alone, unchanged, when it starts at no #+ or #-, swallowed
+nothing, or its expressions cannot be read again."
+  (let ((start (cst-node-start node)))
+    (if (not (and (< (1+ start) (length text))
+                  (char= (char text start) #\#)
+                  (member (char text (1+ start)) '(#\+ #\-))))
+        (list node)
+        (with-input-from-string (stream text :start start :end (cst-node-end node))
+          (let ((skipped '())
+                (form-start start))
+            (loop
+              (let ((pos (+ start (file-position stream))))
+                (multiple-value-bind (state reason)
+                    (%pass-feature-conditionals stream *readtable*)
+                  (case state
+                    (:skipped
+                     (let ((end (+ start (file-position stream))))
+                       (push (make-cst-node :kind :skipped
+                                            :value reason
+                                            :children nil
+                                            :start pos
+                                            :end end
+                                            :start-line (%pos->line pos)
+                                            :end-line (%pos->line end))
+                             skipped))
+                     (when (%skip-whitespace-and-comments stream *readtable*)
+                       (return-from %split-swallowed-twins (list node))))
+                    (:error (return-from %split-swallowed-twins (list node)))
+                    (t (setf form-start pos)
+                       (return))))))
+            (if (null skipped)
+                (list node)
+                (progn
+                  (setf (cst-node-start node) form-start
+                        (cst-node-start-line node) (%pos->line form-start))
+                  (append (nreverse skipped) (list node)))))))))
+
 (defun %read-remaining-with-cl-reader (stream nodes custom-readtable text)
   "Read remaining forms from STREAM (a string stream over TEXT) using the
 standard CL reader with CUSTOM-READTABLE.
@@ -257,6 +444,9 @@ STRAY-RIGHT-PARENTHESIS without consulting the implementation's reader, so the
 classification does not depend on any implementation's error wording; a
 \")\" that READ itself trips over (behind a whitespace-like macro) is
 recognised structurally by %CLASSIFY-CL-READ-ERROR.
+A form behind a #+ or #- whose expression is false here is returned as a
+:SKIPPED node, as the Eclector pass returns it (%PASS-FEATURE-CONDITIONALS),
+and a form behind expressions that hold starts its span at their first #.
 Reading stays lenient so a partially broken file can still be displayed, but
 callers that need to know the file is unparseable (lisp-edit-form, the
 fs-write-file overwrite guard) inspect the second value."
@@ -266,7 +456,9 @@ fs-write-file overwrite guard) inspect the second value."
         ;; lists. A readtable that redefines ")" (constituent, or another
         ;; macro) must interpret it itself, so the check is skipped for it.
         (standard-close-p (eq (get-macro-character #\) custom-readtable)
-                              (get-macro-character #\) *standard-readtable*))))
+                              (get-macro-character #\) *standard-readtable*)))
+        ;; A readtable that redefines #+ or #- reads them itself.
+        (feature-dispatch-p (%standard-feature-dispatch-p custom-readtable)))
     (loop
       (let ((start-pos (file-position stream)))
         ;; Skip whitespace and comments, so a stray ")" behind a comment is
@@ -284,36 +476,58 @@ fs-write-file overwrite guard) inspect the second value."
                            :stream stream
                            :message (format nil "Unmatched closing parenthesis ~
 character ). Remove the extra \")\" (lisp-check-parens reports its line and column).")))))
-        ;; READ-PRESERVING-WHITESPACE, not READ: READ consumes the whitespace
-        ;; character after a top-level object, which put END one past the
-        ;; form (issue #191).  The Eclector pass ends a node right after it.
-        (let ((form (handler-case (read-preserving-whitespace stream nil :eof)
-                      (error (e)
-                        ;; On read error, return what we have so far and
-                        ;; report the error as the second value, normalised
-                        ;; to STRAY-RIGHT-PARENTHESIS when READ tripped over
-                        ;; a ")" that the structural check could not see.
-                        (return (values (nreverse nodes)
-                                        (%classify-cl-read-error
-                                         e stream text start-pos
-                                         standard-close-p)))))))
-          (when (eq form :eof)
-            (return (values (nreverse nodes) nil)))
-          (let* ((end-pos (file-position stream))
-                 (node (make-cst-node :kind :expr
-                                      :value form
-                                      :children nil
-                                      :start start-pos
-                                      :end end-pos
-                                      :start-line (%pos->line start-pos)
-                                      :end-line (%pos->line end-pos))))
-            ;; Track in-package to activate local-nicknames
-            (let ((pkg-name (%in-package-form-p form)))
-              (when pkg-name
-                (let ((pkg (find-package pkg-name)))
-                  (when pkg
-                    (setf *package* pkg)))))
-            (push node nodes)))))))
+        (multiple-value-bind (state detail)
+            (and feature-dispatch-p (%pass-feature-conditionals stream custom-readtable))
+          (case state
+            (:error
+             (return (values (nreverse nodes)
+                             (%classify-cl-read-error detail stream text start-pos
+                                                      standard-close-p))))
+            ;; READ would have consumed the form without a trace, and the
+            ;; next form's span would have started at this one's #.
+            (:skipped
+             (let ((end-pos (file-position stream)))
+               (push (make-cst-node :kind :skipped
+                                    :value detail
+                                    :children nil
+                                    :start start-pos
+                                    :end end-pos
+                                    :start-line (%pos->line start-pos)
+                                    :end-line (%pos->line end-pos))
+                     nodes)))
+            (t
+             ;; READ-PRESERVING-WHITESPACE, not READ: READ consumes the
+             ;; whitespace character after a top-level object, which put END
+             ;; one past the form (issue #191).  The Eclector pass ends a node
+             ;; right after it.
+             (let ((form (handler-case (read-preserving-whitespace stream nil :eof)
+                           (error (e)
+                             ;; On read error, return what we have so far and
+                             ;; report the error as the second value,
+                             ;; normalised to STRAY-RIGHT-PARENTHESIS when READ
+                             ;; tripped over a ")" that the structural check
+                             ;; could not see.
+                             (return (values (nreverse nodes)
+                                             (%classify-cl-read-error
+                                              e stream text start-pos
+                                              standard-close-p)))))))
+               (when (eq form :eof)
+                 (return (values (nreverse nodes) nil)))
+               (let* ((end-pos (file-position stream))
+                      (node (make-cst-node :kind :expr
+                                           :value form
+                                           :children nil
+                                           :start start-pos
+                                           :end end-pos
+                                           :start-line (%pos->line start-pos)
+                                           :end-line (%pos->line end-pos))))
+                 ;; Track in-package to activate local-nicknames
+                 (let ((pkg-name (%in-package-form-p form)))
+                   (when pkg-name
+                     (let ((pkg (find-package pkg-name)))
+                       (when pkg
+                         (setf *package* pkg)))))
+                 (push node nodes))))))))))
 
 ;; Eclector's MAKE-SKIPPED-INPUT-RESULT generic function changed shape
 ;; between releases:
@@ -469,7 +683,11 @@ read without it has not been shown to read correctly."))
                        (push orphan nodes))
                      (when (eq result :eof)
                        (return (nreverse nodes)))
-                     (push result nodes)
+                     (if (and (typep result 'cst-node)
+                              (eq (cst-node-kind result) :expr))
+                         (dolist (node (%split-swallowed-twins result text))
+                           (push node nodes))
+                         (push result nodes))
                      (when (and (typep result 'cst-node)
                                 (eq (cst-node-kind result) :expr))
                        (let ((pkg-name (%in-package-form-p

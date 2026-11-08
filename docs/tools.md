@@ -579,9 +579,9 @@ Inputs:
   its signature (`49: #+sbcl (defun float-epsilon () ...)`), and one the reader skipped
   because its expression is false in the server -- the other implementation's twin -- is
   listed by the start of its text and `[not read: its feature expression is false in this
-  server]` (never expanded; read it with `collapsed=false`). A file read by the CL reader --
-  with `readtable`, or after an `in-readtable` -- lists no such twin, since that reader
-  returns nothing for it.
+  server]` (never expanded; read it with `collapsed=false`), whether the file is read by
+  Eclector or by the CL reader (with `readtable`, or after an `in-readtable`), as long as its
+  readtable reads `#+` and `#-` the standard way.
 - `name_pattern` (string, optional): CL-PPCRE regex; matching definition names are
   expanded even in collapsed mode.
 - `content_pattern` (string, optional): CL-PPCRE regex applied to form bodies; if
@@ -755,10 +755,22 @@ Input:
   and the result carries `kept_feature_expression`, the expressions alone. Start `content`
   with the expression it should have to change the condition; to drop it, `delete` the form
   and insert the bare definition with `insert_before`/`insert_after` on a neighbouring form.
-  The form after a content's own expression is validated (and repaired)
+  The form after a `replace` content's own expression is validated (and repaired)
   whether or not that condition holds in the server, so `#-sbcl (defun ...)` on SBCL is
   accepted, while an expression with no form after it, or one that breaks the feature
   expression grammar (`#+(not a b)`, `#+(bogus a)`), is refused and nothing is written.
+  A form under an expression false in the server (`#+ecl` on SBCL) is never read, so
+  `form_type`/`form_name` reach only its active twin. A `replace` whose content opens with
+  expressions false in the server is refused, and nothing is written, when the file holds a
+  skipped form that is the same definition (head and whole signature, a method's
+  specializers included) as the form replaced or as the content, however its expression is
+  spelled (`#-sbcl` and `#+(not sbcl)` alike), or one that cannot be read but starts with
+  the same head and name: applying it would take away the definition the server uses and
+  leave two forms under the false condition (#316). The refusal names both lines. Such forms
+  cannot be addressed yet (#321). `insert_before`/`insert_after` read their content in the
+  server: content that is only a form under an expression false there reads as empty and is
+  refused, and so is one that directly follows content's single readable form (as trailing
+  text); next to two or more forms, or after a comment, it is written as it is, uncounted.
   Comment-only content keeps no expression, which would otherwise fall onto the next form in
   the file. `delete` removes the expressions with the form
 - `dry_run` (boolean, default `false`): preview changes without writing to disk

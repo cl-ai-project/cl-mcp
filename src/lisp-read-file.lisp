@@ -32,6 +32,7 @@
                 #:ensure-trailing-newline)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%feature-prefix-end
+                #:%skipped-feature-node-p
                 #:%skip-blank-and-comments
                 #:%parse-readtable-designator
                 #:file-unparseable-error
@@ -572,10 +573,12 @@ TEXT, each as written (its whitespace made single spaces) and separated by a
 space, or NIL when there are none.  A form read under them carries no trace of
 them, so a collapsed signature printed from it would read as unconditional.
 With END, the end of the node the form is read as, they are the expressions of
-the form that ends there: a node can start at the # of a form the reader
-skipped -- an inner #- under an outer #+ that holds, or a false twin the CL
-reader returned no value for -- and the forms after it are walked to the one
-that is the node's, whose own expressions they are (NIL when it has none)."
+the form that ends there.  Both parse passes split a skipped form off the node
+after it (%SPLIT-SWALLOWED-TWINS, %PASS-FEATURE-CONDITIONALS), but not where
+they cannot -- under a readtable that reads #+ its own way, or behind an
+expression that does not read again -- so a node can still start at the # of a
+skipped form; the forms after it are then walked to the one that is the node's,
+whose own expressions they are (NIL when it has none)."
   (flet ((suppressed-end (from)
            (ignore-errors
             (let ((*read-suppress* t)
@@ -599,15 +602,6 @@ that is the node's, whose own expressions they are (NIL when it has none)."
 
 (defparameter *skipped-form-max-chars* 80
   "Characters of a form the reader skipped shown in its collapsed line.")
-
-(defun %skipped-feature-node-p (node)
-  "True when NODE is a form the reader skipped for its #+ or #- feature
-expression: a definition for another implementation or configuration."
-  (and (typep node 'cst-node)
-       (eq (cst-node-kind node) :skipped)
-       (let ((reason (cst-node-value node)))
-         (and (consp reason)
-              (member (car reason) '(:sharpsign-plus :sharpsign-minus))))))
 
 (defun %format-skipped-feature-form (node source-text line-width)
   "Return the collapsed line for NODE, a form skipped for its feature expression
@@ -1005,9 +999,9 @@ expressions written in front of its form, a variable's value is cut at 80
 characters, and a form the reader skipped because its feature expression is
 false in the server (the other implementation's twin) is listed by the start of
 its text, marked [not read ...]; it is never expanded and not counted in
-total_forms.  Read it with collapsed=false.  A file read by the CL reader (with
-readtable, or after an in-readtable) lists no such twin: that reader returns
-nothing for it.
+total_forms.  Read it with collapsed=false.  This holds for a file read by the
+CL reader too (with readtable, or after an in-readtable), as long as its
+readtable reads #+ and #- the standard way.
 When reading in raw mode (collapsed=false) and output is truncated, a
 '[Showing lines A-B of N. Use offset=B to read more.]' footer is appended
 to guide pagination. Use the suggested offset value in a follow-up call.
