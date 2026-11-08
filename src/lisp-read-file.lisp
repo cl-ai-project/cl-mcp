@@ -997,9 +997,9 @@ expressions written in front of its form, a variable's value is cut at 80
 characters, and a form the reader skipped because its feature expression is
 false in the server (the other implementation's twin) is listed by the start of
 its text, marked [not read ...]; it is never expanded and not counted in
-total_forms.  Read it with collapsed=false.  A file read by the CL reader (with
-readtable, or after an in-readtable) lists no such twin: that reader returns
-nothing for it.
+total_forms.  Read it with collapsed=false.  This holds for a file read by the
+CL reader too (with readtable, or after an in-readtable), as long as its
+readtable reads #+ and #- the standard way.
 When reading in raw mode (collapsed=false) and output is truncated, a
 '[Showing lines A-B of N. Use offset=B to read more.]' footer is appended
 to guide pagination. Use the suggested offset value in a follow-up call.

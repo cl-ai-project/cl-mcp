@@ -458,7 +458,13 @@ tests/tmp/NAME.lisp."
                             "(defun sig-rt-twin () 1)"
                             "(defun sig-rt-plain () 2)")))))
       (ok (notany (lambda (line) (search "#-sbcl (defun sig-rt-plain" line)) lines)
-          (format nil "the next definition carries no prefix: ~S" lines)))))
+          (format nil "the next definition carries no prefix: ~S" lines))
+      (ok (some (lambda (line)
+                  (and (scan "^ *3: #-sbcl \\(defun sig-rt-twin " line)
+                       (search "not read" line)))
+                lines)
+          (format nil "and the skipped twin is listed as not read, as without a readtable: ~S"
+                  lines)))))
 
 (deftest lisp-read-file-collapsed-view-keeps-the-prefix-after-a-skipped-twin
   ;; The false half of a twin pair first: the node starts at its #, and the

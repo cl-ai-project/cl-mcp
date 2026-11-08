@@ -579,9 +579,9 @@ Inputs:
   its signature (`49: #+sbcl (defun float-epsilon () ...)`), and one the reader skipped
   because its expression is false in the server -- the other implementation's twin -- is
   listed by the start of its text and `[not read: its feature expression is false in this
-  server]` (never expanded; read it with `collapsed=false`). A file read by the CL reader --
-  with `readtable`, or after an `in-readtable` -- lists no such twin, since that reader
-  returns nothing for it.
+  server]` (never expanded; read it with `collapsed=false`), whether the file is read by
+  Eclector or by the CL reader (with `readtable`, or after an `in-readtable`), as long as its
+  readtable reads `#+` and `#-` the standard way.
 - `name_pattern` (string, optional): CL-PPCRE regex; matching definition names are
   expanded even in collapsed mode.
 - `content_pattern` (string, optional): CL-PPCRE regex applied to form bodies; if
@@ -760,11 +760,15 @@ Input:
   accepted, while an expression with no form after it, or one that breaks the feature
   expression grammar (`#+(not a b)`, `#+(bogus a)`), is refused and nothing is written.
   A form under an expression false in the server (`#+ecl` on SBCL) is never read, so
-  `form_type`/`form_name` reach only its active twin; a `replace` whose content opens with an
-  expression a skipped twin is written under -- compared as read, so `#+:ecl` is `#+ecl` --
-  while the target's differs, is refused when that twin is what `form_type`/`form_name` name
-  or the same definition as the content: applying it would overwrite the definition the
-  server uses with a second copy of the other one (#316). The refusal names both lines.
+  `form_type`/`form_name` reach only its active twin. A `replace` whose content opens with
+  expressions false in the server is refused, and nothing is written, when the file holds a
+  skipped form that is the same definition (head and whole signature, a method's
+  specializers included) as the form replaced or as the content, however its expression is
+  spelled (`#-sbcl` and `#+(not sbcl)` alike), or one that cannot be read but starts with
+  the same head and name: applying it would take away the definition the server uses and
+  leave two forms under the false condition (#316). The refusal names both lines. To drop a
+  definition from the server on purpose, `delete` it and insert the new form with
+  `insert_before`/`insert_after` on a neighbouring form.
   Comment-only content keeps no expression, which would otherwise fall onto the next form in
   the file. `delete` removes the expressions with the form
 - `dry_run` (boolean, default `false`): preview changes without writing to disk

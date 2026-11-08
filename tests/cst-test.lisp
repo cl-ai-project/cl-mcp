@@ -29,6 +29,34 @@
       (ok (<= (cst-node-end-line expr) 4))
       (ok (string= "sample" (string-downcase (second (cst-node-value expr))))))))
 
+(deftest cl-reader-pass-records-a-form-behind-a-false-feature-expression
+  ;; Issue #316 review: READ consumed a false #+ and its form without a trace,
+  ;; so the CL-reader pass returned no node for it and started the next form's
+  ;; span at its #; a replace of the next form overwrote both.
+  (let* ((text (format nil "(in-package :cl-user)~%#+cl-mcp-no-such-feature~%~
+                            (defun twin () 1)~%#-cl-mcp-no-such-feature~%~
+                            (defun twin () 2)~%(defun plain () 3)~%"))
+         (nodes (parse-top-level-forms text :readtable :standard))
+         (described (mapcar (lambda (node)
+                              (list (cst-node-kind node) (cst-node-start-line node)
+                                    (subseq text (cst-node-start node) (cst-node-end node))))
+                            nodes)))
+    (testing "the skipped form is a node of its own, with its reason"
+      (let ((skipped (find :skipped nodes :key #'cst-node-kind)))
+        (ok (and skipped (= 2 (cst-node-start-line skipped))) (format nil "~S" described))
+        (ok (and skipped (eq :sharpsign-plus (car (cst-node-value skipped))))
+            "recorded as the Eclector pass records it")))
+    (testing "the form that is read starts at its own expression"
+      (ok (member (list :expr 4 (format nil "#-cl-mcp-no-such-feature~%(defun twin () 2)"))
+                  described :test #'equal)
+          (format nil "~S" described))
+      (ok (member (list :expr 6 "(defun plain () 3)") described :test #'equal)
+          "and a plain form after it as before"))
+    (testing "an expression with no form after it is a read error"
+      (ok (nth-value 1 (parse-top-level-forms (format nil "(a)~%#+sbcl~%")
+                                              :readtable :standard))
+          "reported as the second value"))))
+
 (deftest parse-top-level-forms-error-suggests-readtable
   (testing "reader error message suggests using readtable parameter"
     (let ((error-message
