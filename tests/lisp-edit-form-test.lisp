@@ -860,6 +860,43 @@ and the file's text afterwards."
         (ok (search "(defcfun (\"strlen\" c-strlen-322) :long (s :string))"
                     (fs-read-file path)))))))
 
+(defparameter *wrapper-children-source*
+  (format nil "(in-package :cl-user)~%~%(eval-when (:compile-toplevel :load-toplevel :execute)~%~
+               ~2@T;; Point class.~%~2@T(defclass pt () ())~%~2@T(defun pt-helper (x) x))~%")
+  "A wrapper whose last definition closes it on the same line, with a comment
+above its first definition.")
+
+(deftest lisp-edit-form-inserts-and-deletes-inside-a-wrapper
+  ;; Review of PR #341.
+  (testing "insert_after the last definition stays inside the wrapper, indented"
+    (ok (equal (%default-edit *wrapper-children-source* :form-type "defun"
+                              :form-name "pt-helper" :operation "insert_after"
+                              :content "(defun pt-added (z) z)")
+               (format nil "(in-package :cl-user)~%~%~
+                            (eval-when (:compile-toplevel :load-toplevel :execute)~%~
+                            ~2@T;; Point class.~%~2@T(defclass pt () ())~%~
+                            ~2@T(defun pt-helper (x) x)~%~2@T(defun pt-added (z) z))~%"))))
+  (testing "delete of the last definition closes the wrapper after the one before"
+    (ok (equal (%default-edit *wrapper-children-source* :form-type "defun"
+                              :form-name "pt-helper" :operation "delete")
+               (format nil "(in-package :cl-user)~%~%~
+                            (eval-when (:compile-toplevel :load-toplevel :execute)~%~
+                            ~2@T;; Point class.~%~2@T(defclass pt () ()))~%"))))
+  (testing "insert_before the first definition goes above its comment"
+    (ok (search (format nil "(eval-when (:compile-toplevel :load-toplevel :execute)~%~
+                             ~2@T(defclass first-one () ())~%~2@T;; Point class.~%~
+                             ~2@T(defclass pt () ())")
+                (%default-edit *wrapper-children-source* :form-type "defclass"
+                               :form-name "pt" :operation "insert_before"
+                               :content "(defclass first-one () ())"))))
+  (testing "a not-found listing shows the definitions inside the wrapper"
+    (let ((message (handler-case
+                       (progn (%default-edit *wrapper-children-source* :form-type "defclass"
+                                             :form-name "nope" :operation "delete")
+                              nil)
+                     (error (e) (princ-to-string e)))))
+      (ok (and message (search "(defclass pt)" message)) (or message "no error")))))
+
 (deftest lisp-edit-form-replace-defun
   (testing "replace updates function body"
     (with-temp-file "tests/tmp/edit-form-replace.lisp"

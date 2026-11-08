@@ -60,6 +60,7 @@
            #:%feature-prefix-end
            #:%skipped-feature-node-p
            #:%wrapper-head-p
+           #:%ffi-definer-head-p
            #:wrapped-definition-nodes
            #:locate-form-in-text
            #:feature-key
@@ -87,6 +88,7 @@
            #:file-unparseable-cause
            #:file-unparseable-readtable
            #:file-unparseable-recoverable-p
+           #:file-unparseable-unreadable-dispatch
            #:file-unparseable-editable-prefix-p
            #:file-unparseable-unavailable-readtable
            #:file-unparseable-message
@@ -201,6 +203,14 @@ write it with %SIGNATURE-TEXT, whose pretty printer is slow on large input.
 A real name -- a declaration, (SETF NAME) -- is far shorter; a longer one is a
 data form (a quoted list, vector or array), given only its PRINC text.")
 
+(defun %ffi-definer-head-p (head)
+  "True when HEAD names an FFI definer: CFUN, CVAR or FOREIGN in its name, as
+CFFI's defcfun, defcvar and define-foreign-type have."
+  (and (symbolp head)
+       (let ((name (symbol-name head)))
+         (some (lambda (part) (search part name)) '("CFUN" "CVAR" "FOREIGN")))
+       t))
+
 (defun %definition-candidates (form form-type)
   "Return candidate strings that identify FORM with FORM-TYPE.
 The last one is the name a \"not found\" listing shows.  A list-valued name --
@@ -218,6 +228,10 @@ turn (SETF |foo:bar|) into (setf bar), another function's name."
        (if (ignore-errors (list-length form))
            (%defmethod-candidates form)
            (list (%normalize-string name))))
+      ;; An empty list prints as NIL; the () written in the source is
+      ;; accepted too (issue #322).
+      ((null name)
+       (list "()" (%normalize-string name)))
       ((symbolp name)
        (list (%normalize-string name)))
       ;; defstruct: (defstruct (name &rest options) ...) — first element is the name
@@ -241,6 +255,7 @@ turn (SETF |foo:bar|) into (setf bar), another function's name."
                ;; code-find knows it (issue #322).
                (let ((symbol (and (consp (cdr name)) (null (cddr name))
                                   (some #'stringp name)
+                                  (%ffi-definer-head-p (car form))
                                   (find-if (lambda (part)
                                              (and part (symbolp part) (not (keywordp part))))
                                            name))))
@@ -1101,6 +1116,39 @@ because %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P opens it for exactly that case."
                            path readtable (file-unparseable-cause condition))
                    (format-delimiter-diagnosis diagnosis :target path))))
     (cond
+      ((file-unparseable-read-only-p condition)
+       ;; Reading a file is no reason to rewrite it (issue #324): what stopped
+       ;; the parse, and the raw view that always works.
+       (let ((why (cond
+                    ((and readtable (file-unparseable-unavailable-readtable condition))
+                     (format nil "Retry without the readtable argument: if the file needs ~
+                                  none it will simply parse."))
+                    ((file-unparseable-unavailable-readtable condition)
+                     (format nil "The parse stops at that declaration: this server process ~
+                                  has no such readtable, and nothing an agent can call ~
+                                  registers one here."))
+                    ((file-unparseable-missing-symbol-p condition)
+                     (format nil "The server's package lacks that symbol, and under a named ~
+                                  readtable SBCL's reader cannot read past it."))
+                    (readtable
+                     (format nil "Under a custom readtable a reader macro may consume what ~
+                                  looks like a delimiter, so no standard-syntax diagnosis is ~
+                                  offered.")))))
+         (format nil "~A~@[~%~A~]~:[~;~%The forms before it can still be edited with ~
+                      lisp-edit-form.~]~%collapsed=false shows the file's text as it is~
+                      ~:[.~;; to repair it, lisp-check-parens path=~S gives the full ~
+                      diagnosis and the steps.~]"
+                 (if (file-unparseable-unreadable-dispatch condition)
+                     (format nil "Cannot parse ~A: ~A" path
+                             (apply #'format-unreadable-dispatch
+                                    (file-unparseable-unreadable-dispatch condition)))
+                     head)
+                 why
+                 (file-unparseable-editable-prefix-p condition)
+                 ;; A parenthesis problem has a repair to point at; a missing
+                 ;; readtable or reader macro does not.
+                 (or (file-unparseable-recoverable-p condition) (not scan-ok))
+                 path)))
       ((file-unparseable-recoverable-p condition)
        ;; fs-write-file takes only a project-relative path, so that is the
        ;; form the instruction gives; the absolute one stays in the head.
@@ -1226,6 +1274,12 @@ MAKE-FILE-UNPARSEABLE-CONDITION from the file's text.")
                         "(LINE COLUMN SUB-CHAR) of a # no standard readtable reads
 (UNREADABLE-DISPATCH-POSITION), when the reader failed on something other than
 a delimiter and no readtable was supplied; NIL otherwise.")
+   (read-only :initarg :read-only :initform nil
+              :reader file-unparseable-read-only-p
+              :documentation
+              "T when the tool that met the file only reads it (lisp-read-file): the
+message then says what stopped the parse and where, and names no write path --
+the file may well be a dependency's, which reading it is no reason to rewrite.")
    (missing-symbol :initarg :missing-symbol :initform nil
                    :reader file-unparseable-missing-symbol-p
                    :documentation
@@ -1251,7 +1305,8 @@ than recommending the readtable argument, and fs-write-file lets it be
 rewritten whole (%FILE-UNPARSEABLE-BY-EDIT-TOOLS-P's :READTABLE-UNAVAILABLE
 verdict)."))
 
-(defun make-file-unparseable-condition (abs text cause &key readtable editable-prefix)
+(defun make-file-unparseable-condition (abs text cause &key readtable editable-prefix
+                                                               read-only)
   "Return a FILE-UNPARSEABLE-ERROR for the file at ABS whose TEXT failed to
 parse with CAUSE, the condition PARSE-TOP-LEVEL-FORMS signalled or returned as
 its second value. Under a caller-supplied READTABLE the standard delimiter scan
@@ -1265,8 +1320,12 @@ the forms it could still show."
   (make-condition 'file-unparseable-error
                   :path (native-path-namestring abs)
                   :readtable readtable
+                  :read-only read-only
                   :editable-prefix editable-prefix
-                  :diagnosis (if readtable
+                  ;; Under a readtable -- the caller's, or one the file declares
+                  ;; and this process lacks -- the standard delimiter scan is no
+                  ;; evidence: the syntax it would judge is not the file's.
+                  :diagnosis (if (or readtable (typep cause 'readtable-unavailable))
                                  (list :ok t)
                                  (diagnose-delimiters text))
                   :recoverable (and (null readtable)
@@ -1290,12 +1349,13 @@ the forms it could still show."
                                        (%missing-symbol-failure-p cause))
                   :cause (sanitize-condition-text cause)))
 
-(defun signal-file-unparseable (abs text cause &key readtable editable-prefix)
+(defun signal-file-unparseable (abs text cause &key readtable editable-prefix read-only)
   "Signal the FILE-UNPARSEABLE-ERROR MAKE-FILE-UNPARSEABLE-CONDITION builds for
 ABS, TEXT and CAUSE. Never returns."
   (error (make-file-unparseable-condition abs text cause
                                          :readtable readtable
-                                         :editable-prefix editable-prefix)))
+                                         :editable-prefix editable-prefix
+                                         :read-only read-only)))
 
 (defconstant +edit-guard-version+ 1
   "The only value GUARD's version field may carry for CHECK-EDIT-GUARD to
@@ -1688,7 +1748,10 @@ text not yet written -- lisp-patch-form's later patches -- locate with this."
         ;; project root when it lies under it.
         (error "Form ~A ~A not found in ~A.~%~A" form-type form-name
                (or (%project-relative-path abs) (native-path-namestring abs))
-               (%forms-listing nodes matched-type
+               ;; The definitions inside wrappers are reachable too (#322).
+               (%forms-listing (sort (append nodes (wrapped-definition-nodes nodes))
+                                     #'< :key #'cst-node-start)
+                               matched-type
                                (inactive-form-nodes
                                 nodes text readtable
                                 (extract-in-package-name-from-text text))

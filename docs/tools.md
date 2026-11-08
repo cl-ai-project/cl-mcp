@@ -578,8 +578,12 @@ Inputs:
   string with its quotes (`(defsystem "mylib" ...)` for `"MyLib"`), and a list such as
   `(define-controller (show :require-token t) ...)`. A name over 80 characters is cut at
   the last space before the limit, or at 80 when it has none. A top-level call whose head
-  merely starts with `def` (`(default-handler x)`) is shown the same way. Any other form
-  shows its head, `(progn ...)`. A definition's docstring follows as `;; first line`, taken
+  merely starts with `def` (`(default-handler x)`) is shown the same way, and so is a form
+  whose head is not a COMMON-LISP operator and whose second element is a symbol -- FiveAM's
+  `(test my-test ...)`, `(in-suite all)` (#322). Any other form shows its head,
+  `(progn ...)`; a wrapper (`eval-when`, `progn`, `let`, `with-upgradability` …) is followed by
+  the definitions directly inside it, indented under it (a definition under a `#+`/`#-` false
+  here inside a wrapper is not listed). A definition's docstring follows as `;; first line`, taken
   from where its definer puts one: after a variable's value, a `defstruct`'s name, or a function's
   lambda list (never a function's only form, which is its value), so a variable whose
   value is a string does not show that value as its documentation. A variable's value is cut
@@ -627,6 +631,23 @@ Inputs:
   preserved.
 
 A file over the 1 MB read cap cannot be collapsed and is an error.
+
+A file the collapsed view cannot parse whole is still listed as far as it can be (#324),
+and the content then opens with a `NOTE:` line saying where the parse stops, so a partial
+listing never reads as the whole file; the reason follows the listing. Past an
+`(in-readtable ...)` naming a readtable the server lacks, the rest of the file is listed
+too, read without that readtable with Eclector's error recovery (an unknown reader macro
+such as `#@` is skipped) under a `--- Read past the in-readtable without it ... ---`
+line, and a file in standard syntax that fails only on an unknown dispatch macro is
+listed the same way (`--- Read with recovery ... ---`). Those forms may be shown inexactly
+and the editing tools cannot reach them; comments among them are not shown, and a form at
+the very end of the file that recovery had to complete may show as `nil`. When the read past
+stops again (a second readtable the server lacks, say), the listing says where. `meta` then
+carries `unparseable: true`, `forms_read_past`, and `unparseable_from_line` when the line is
+known. Under a readtable the server lacks no standard-syntax delimiter diagnosis is given: the
+syntax it would judge is not the file's. The reason names no write path: this tool
+only reads, and the file may be a dependency's; a parenthesis problem points at
+`lisp-check-parens`, which gives the repair steps.
 
 An **expanded** form is echoed from the file verbatim, so its text — including
 comments inside the form — is exactly what is on disk, and the `NNN:` prefix on
@@ -773,7 +794,7 @@ Input:
   the name itself still matches as written (`def:thing`, or `|def:thing|`, for `(|DEF:THING| ...)`), and
   when those two readings name different forms the call is refused as ambiguous. When nothing
   matches, the error lists the file's forms of that type (or all its top-level forms when it has none)
-- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`. A leading `#:` or `:` is stripped (`"#:my-pkg"` matches `(defpackage #:my-pkg ...)`), and a `defstruct` with options, `(defstruct (name opts...) ...)`, is matched by its bare name. A form under a `#+`/`#-` expression false in the server is named with its expressions in front, `"#+ecl impl"` (see `content` below). When no top-level form has the name, a definition directly inside a wrapper (`eval-when`, `progn`, `with-upgradability` …) is reached, and edited in place without touching the wrapper's spacing; an FFI definition such as `(defcfun ("strlen" c-strlen) …)` is also reached by its Lisp name `c-strlen` (#322)
+- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`. A leading `#:` or `:` is stripped (`"#:my-pkg"` matches `(defpackage #:my-pkg ...)`), and a `defstruct` with options, `(defstruct (name opts...) ...)`, is matched by its bare name. A form under a `#+`/`#-` expression false in the server is named with its expressions in front, `"#+ecl impl"` (see `content` below). When no top-level form has the name, a definition directly inside a wrapper (`eval-when`, `progn`, `with-upgradability` …) is reached, and edited in place without touching the wrapper's spacing -- an insert after its last definition goes on its own line at that definition's indentation, so give multi-line `content` the indentation it should have; when a top-level form has the same name, the top-level one is meant, and the nested one cannot be named; an FFI definition such as `(defcfun ("strlen" c-strlen) …)` is also reached by its Lisp name `c-strlen` (#322)
 - `operation` (string, required): one of `replace`, `insert_before`, `insert_after`, `delete`
 - `content` (string): the form text to insert or replace with; required for every operation but
   `delete`, where it is ignored. `replace` takes exactly one top-level form (several are an error

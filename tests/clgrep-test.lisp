@@ -70,7 +70,10 @@
                    ~2@T(defclass wrapped-322 () ())~%~
                    ~2@T(defun wrapped-322-helper (x) x))~%~%~
                    (test untyped-322~%~2@T(is (= 1 1)))~%~%~
-                   (defcfun \"int size_of(int type)\" :int)~%"))
+                   (defcfun \"int size_of(int type)\" :int)~%~%~
+                   (with-upgradability ()~%~2@T(defun wu-fn-322 (x) x))~%~%~
+                   (progn (test nested-test-322 (is t)))~%~%~
+                   (eval-when (:compile-toplevel) (defclass one-line-322 () ()))~%"))
     (unwind-protect
          (let ((*project-root* root))
            (testing "form_types finds a definition inside a wrapper"
@@ -88,6 +91,14 @@
                (ok (equal "test" (cdr (assoc :form-type result))))
                (ok (equal "untyped-322" (cdr (assoc :form-name result))))
                (ok (null (cdr (assoc :signature result))))))
+           (testing "a wrapper with () after its head, an untyped child, a one-line wrapper"
+             (flet ((type-of-hit (pattern)
+                      (cdr (assoc :form-type
+                                  (first (clgrep-search pattern
+                                                        :path "tests/tmp/clgrep-wrapped.lisp"))))))
+               (ok (equal "defun" (type-of-hit "wu-fn-322")) "with-upgradability ()")
+               (ok (equal "test" (type-of-hit "nested-test-322")) "a test inside progn")
+               (ok (equal "defclass" (type-of-hit "one-line-322")) "one line")))
            (testing "a string name is read whole"
              (let ((result (first (clgrep-search "size_of" :path "tests/tmp/clgrep-wrapped.lisp"))))
                (ok (equal "\"int size_of(int type)\"" (cdr (assoc :form-name result)))))))

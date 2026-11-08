@@ -576,11 +576,13 @@ search reads with interrupts disabled, so no deadline could stop it there."
 one is attributed to the definition directly inside it that holds the match,
 one level deep (issue #322).")
 
-(defun %nested-definition (content form-info line-number)
+(defun %nested-definition (content form-info line-number &optional cache)
   "Return the form-info of the definition directly inside the wrapper FORM-INFO
 describes (a top-level form of CONTENT) that holds LINE-NUMBER, in the shape
 %FIND-FORM-FOR-LINE returns, or NIL when the form is no wrapper or the line is
-in none of its definitions."
+in none of its definitions.  CACHE, an EQL hash table kept for one file, holds
+each wrapper's children by its start byte, so a wrapper with many hits is
+scanned once."
   (let* ((start (cdr (assoc :start-byte form-info)))
          (end (cdr (assoc :end-byte form-info)))
          (text (subseq content start end))
@@ -592,15 +594,18 @@ in none of its definitions."
       (let* ((inner (subseq text 1 (1- (length text))))
              (start-line (cdr (assoc :start-line form-info)))
              (target (1+ (- line-number start-line))))
-        (dolist (child (scan-toplevel-forms inner))
+        (dolist (child (if cache
+                           (or (gethash start cache)
+                               (setf (gethash start cache) (scan-toplevel-forms inner)))
+                           (scan-toplevel-forms inner)))
+          ;; Every child on the line is tried: on a one-line wrapper the
+          ;; situation list shares the line with the definition.
           (when (<= (toplevel-form-start-line child) target (toplevel-form-end-line child))
             (let* ((child-text (subseq inner (toplevel-form-start-pos child)
                                        (toplevel-form-end-pos child)))
                    (child-info (extract-form-type-and-name child-text)))
-              (return
-                (when (and child-info
-                           (not (cdr (assoc :wrapper child-info)))
-                           (not (cdr (assoc :untyped child-info))))
+              (when (and child-info (not (cdr (assoc :wrapper child-info))))
+                (return
                   (let ((child-start-line (+ start-line (toplevel-form-start-line child) -1)))
                     (list (cons :text (truncate-form child-text line-number
                                                      child-start-line 5))
@@ -641,7 +646,7 @@ in none of its definitions."
             "^\\(\\s*([a-zA-Z*+<>=/-][a-zA-Z0-9*_+./<>=-]*"
             "(?::{1,2}[a-zA-Z*][a-zA-Z0-9*_+./-]*)?)"
             ;; The name: a string read whole, a token, or a short list.
-            "\\s+(\"(?:[^\"\\\\]|\\\\.)*\"|[^\\s()\"]+|\\([^)]+\\))")
+            "\\s+(\"(?:[^\"\\\\]|\\\\.)*\"|[^\\s()\"]+|\\([^)]*\\))")
            trimmed)
         (when match
           (let ((form-type (%strip-package-qualifier
@@ -659,9 +664,11 @@ in none of its definitions."
               ;; serapeum's (-> name ...) -- so form_types can ask for it and
               ;; the listing shows a name instead of NIL (issue #322).
               ((and (not (member form-type *wrapper-form-types* :test #'string=))
-                    (not (char= (char form-name 0) #\())
-                    (not (char= (char form-name 0) #\"))
-                    (not (char= (char form-name 0) #\:)))
+                    ;; A symbol: not a list, string, keyword, quote or number.
+                    (let ((first (char form-name 0)))
+                      (or (alpha-char-p first) (find first "*+%-<>=/&!?$")))
+                    (not (every (lambda (ch) (or (digit-char-p ch) (find ch "+-./")))
+                                form-name)))
                (list (cons :type form-type)
                      (cons :name form-name)
                      (cons :untyped t)))
@@ -892,6 +899,7 @@ Returns an alist like extract-toplevel-form, or NIL."
                 pattern)))
        ;; Pre-compute caches once per file (avoids O(n*m) re-scanning)
        (let ((forms-cache (scan-toplevel-forms content))
+             (wrapper-cache (make-hash-table))
              (package-map (%build-package-map content)))
          (with-input-from-string (stream content)
            (loop for line = (read-line stream nil nil)
@@ -909,7 +917,8 @@ Returns an alist like extract-toplevel-form, or NIL."
                                        (or (and top
                                                 (not (cdr (assoc :unterminated top)))
                                                 (%nested-definition content top
-                                                                    line-number))
+                                                                    line-number
+                                                                    wrapper-cache))
                                            top))))
                       (when form-info
                         (let* ((full-form-text
