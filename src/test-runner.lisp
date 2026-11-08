@@ -38,8 +38,9 @@ stays in effect for the run (load-system on its file's system or with
 clear_fasls=true, or pool-kill-worker, drops it).  A
 file of the system's tree written in the same second as its fasl is recompiled
 too: ASDF's one-second timestamps would otherwise keep the code from before
-the edit.  Rove's tests are forgotten for exactly the files that load loads
-again, so a deftest deleted from one stops running, and a test file it leaves
+the edit.  Rove keeps its tests per package; the packages that the files this
+load loads again define are emptied first, so a deftest deleted from a file
+that defines its own package stops running, and a test file the load leaves
 alone, one another system shares, keeps its tests.
 
 Supports multiple test frameworks with automatic detection:

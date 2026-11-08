@@ -1033,7 +1033,11 @@ package, deleted afterwards, rather than into CL-USER."
                (hash-table-p (symbol-value pkgs-var))
                (plusp (hash-table-count (symbol-value pkgs-var))))
       (multiple-value-bind (systems files)
-          (ignore-errors (%planned-loads system-name))
+          (handler-case (%planned-loads system-name)
+            (error (c)
+              (log-event :debug "test.runner.rove-purge.no-plan"
+                         "system" system-name "error" (princ-to-string c))
+              (values nil nil)))
         (let ((suites (symbol-value pkgs-var))
               (scan-package (make-package (gensym "CL-MCP-DEFPACKAGE-SCAN")
                                           :use '(:cl))))
@@ -1042,7 +1046,10 @@ package, deleted afterwards, rather than into CL-USER."
                      (when pkg (remhash pkg suites)))))
             (unwind-protect
                  (progn
-                   (mapc #'clear-pkg systems)
+                   ;; A package-inferred file's package is its system's
+                   ;; name read by the reader, so upper case.
+                   (dolist (name systems)
+                     (clear-pkg (string-upcase name)))
                    (dolist (file files)
                      (when (probe-file file)
                        (mapc #'clear-pkg

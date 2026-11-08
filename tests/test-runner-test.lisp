@@ -860,6 +860,29 @@ strings, or :NO-SUITE when Rove holds no suite for it."
      (ok (equal '("KEPT") (%rove-suite-test-names "CLMCP-SIB/TESTS/A"))
          "the test deleted from the reloaded dependency is gone from its suite"))))
 
+(deftest rove-purge-clears-nothing-when-asdf-cannot-plan-the-load
+  ;; The load after it fails the same way; the purge must neither signal nor
+  ;; clear what that failed load would not refill.
+  (%call-with-sibling-rove-fixture
+   (lambda (dir shared)
+     (declare (ignore shared))
+     (asdf:load-system "clmcp-sib")
+     (%write-fixture-file
+      dir "clmcp-sib-other.asd"
+      "(asdf:defsystem \"clmcp-sib-other\"
+  :depends-on (\"clmcp-sib/tests/a\" \"clmcp-sib-no-such-dependency\")
+  :components ((:file \"other\")))
+")
+     (asdf:load-asd (uiop:merge-pathnames* "clmcp-sib-other.asd" dir))
+     (ok (handler-case
+             (let ((asdf/session:*asdf-session* nil))
+               (cl-mcp/src/test-runner-core::%rove-purge-ghost-suites "clmcp-sib-other")
+               t)
+           (error () nil))
+         "the purge returns normally when the plan cannot be made")
+     (ok (equal '("KEPT" "DOOMED") (%rove-suite-test-names "CLMCP-SIB/TESTS/A"))
+         "and clears no suite"))))
+
 (deftest extract-defpackage-names-does-not-intern-into-cl-user
   (testing "%extract-defpackage-names-from-file leaves CL-USER untouched"
     ;; READ interns every unqualified symbol it reads into *PACKAGE*.  A purge
