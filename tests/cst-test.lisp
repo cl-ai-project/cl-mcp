@@ -61,10 +61,26 @@
                                               :readtable :standard))
           "reported as the second value"))
     (testing "stacked expressions with no form for the outer one are a read error"
-      (ok (nth-value 1 (parse-top-level-forms
-                        (format nil "(a)~%#+sbcl #+cl-mcp-no-such-feature (defun impl (x) 2)~%")
-                        :readtable :standard))
-          "reported as the second value, as the Eclector pass reports it"))
+      (let ((err (nth-value 1 (parse-top-level-forms
+                               (format nil "(a)~%#+sbcl #+cl-mcp-no-such-feature ~
+                                            (defun impl (x) 2)~%")
+                               :readtable :standard))))
+        (ok (typep err 'cl-mcp/src/cst:unterminated-source)
+            "an unterminated source, as the Eclector pass refuses it")))
+    (testing "an unterminated block comment there is reported as one"
+      (let ((err (nth-value 1 (parse-top-level-forms
+                               (format nil "(a)~%#+sbcl #+cl-mcp-no-such-feature (b) #| open")
+                               :readtable :standard))))
+        (ok (and err (search "block comment" (princ-to-string err)))
+            (format nil "~A" err))))
+    (testing "the skipped form ends where its form does, a comment after it notwithstanding"
+      (let* ((source (format nil "(a)~%#+sbcl #+cl-mcp-no-such-feature (b) ; c~%(d)~%"))
+             (skipped (find :skipped (parse-top-level-forms source :readtable :standard)
+                            :key #'cst-node-kind)))
+        (ok (and skipped (string= "#+sbcl #+cl-mcp-no-such-feature (b)"
+                                  (subseq source (cst-node-start skipped)
+                                          (cst-node-end skipped))))
+            "its span stops after (b)")))
     (testing "an expression with no form after it is a read error"
       (ok (nth-value 1 (parse-top-level-forms (format nil "(a)~%#+sbcl~%")
                                               :readtable :standard))

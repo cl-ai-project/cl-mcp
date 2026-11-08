@@ -340,9 +340,17 @@ of that form overwrote both.  READTABLE must read #+ and #- the standard way
                                                                 feature expression after #~A: ~A"
                                                :format-arguments (list sign problem)))))
             (let ((holds (handler-case (uiop:featurep expression)
-                           ;; An operator UIOP does not take, such as CL:AND.
-                           (error (e) (return-from %pass-feature-conditionals
-                                        (values :error e))))))
+                           ;; An operator UIOP does not take: CL:AND rather than
+                           ;; the keyword, which Eclector refuses as well.
+                           (error ()
+                             (return-from %pass-feature-conditionals
+                               (values :error
+                                       (make-condition
+                                        'simple-error
+                                        :format-control "Reader error: the feature expression ~
+                                                         after #~A uses an operator that is ~
+                                                         not the keyword :AND, :OR or :NOT: ~S"
+                                        :format-arguments (list sign expression))))))))
               (when (char= sign #\-)
                 (setf holds (not holds)))
               (unless holds
@@ -354,9 +362,11 @@ of that form overwrote both.  READTABLE must read #+ and #- the standard way
                 ;; next form, so input that ends here is as short of a form as
                 ;; after a single expression that holds.
                 (when passed
-                  (let ((end (file-position stream)))
-                    (when (or (%skip-whitespace-and-comments stream readtable)
-                              (eq (peek-char nil stream nil :eof) :eof))
+                  (let ((end (file-position stream))
+                        (comment-error (%skip-whitespace-and-comments stream readtable)))
+                    (when comment-error
+                      (return-from %pass-feature-conditionals (values :error comment-error)))
+                    (when (eq (peek-char nil stream nil :eof) :eof)
                       (return-from %pass-feature-conditionals (no-form)))
                     (file-position stream end)))
                 (return-from %pass-feature-conditionals

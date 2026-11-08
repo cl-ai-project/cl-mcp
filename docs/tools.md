@@ -755,7 +755,7 @@ Input:
   and the result carries `kept_feature_expression`, the expressions alone. Start `content`
   with the expression it should have to change the condition; to drop it, `delete` the form
   and insert the bare definition with `insert_before`/`insert_after` on a neighbouring form.
-  The form after a content's own expression is validated (and repaired)
+  The form after a `replace` content's own expression is validated (and repaired)
   whether or not that condition holds in the server, so `#-sbcl (defun ...)` on SBCL is
   accepted, while an expression with no form after it, or one that breaks the feature
   expression grammar (`#+(not a b)`, `#+(bogus a)`), is refused and nothing is written.
@@ -766,10 +766,10 @@ Input:
   specializers included) as the form replaced or as the content, however its expression is
   spelled (`#-sbcl` and `#+(not sbcl)` alike), or one that cannot be read but starts with
   the same head and name: applying it would take away the definition the server uses and
-  leave two forms under the false condition (#316). The refusal names both lines. To drop a
-  definition from the server on purpose, first insert the new form with `insert_after` on
-  it, then `delete` it: deleted first, it could leave a feature expression with no form
-  after it.
+  leave two forms under the false condition (#316). The refusal names both lines. Until such
+  forms can be addressed (#321), `lisp-edit-form` cannot make that trade at all:
+  `insert_before`/`insert_after` read their content in the server, which skips a form under
+  an expression false there.
   Comment-only content keeps no expression, which would otherwise fall onto the next form in
   the file. `delete` removes the expressions with the form
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
