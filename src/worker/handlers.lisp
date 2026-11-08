@@ -36,6 +36,9 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*
                 #:register-project-root-source-registry)
+  (:import-from #:cl-mcp/src/worker/fasl-cache
+                #:isolate-project-fasls
+                #:ensure-project-fasls-isolated)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/utils/paths
@@ -447,6 +450,8 @@ Returns a success payload."
       ;; pool workers: without it a same-named system already reachable via the
       ;; inherited registry keeps winning after a root change.
       (register-project-root-source-registry dir-path)
+      ;; Its files compile into this worker's own cache (issue #317).
+      (isolate-project-fasls dir-path)
       (log-event :info "worker.project-root.set"
                  "path" (native-path-namestring dir-path))
       (make-ht "content" (text-content
@@ -487,6 +492,15 @@ Returns a success payload."
   "Run cl-spec properties and return structured results."
   (spec-check-response params))
 
+(defun %with-project-fasls-isolated (handler)
+  "Return HANDLER behind a call to ENSURE-PROJECT-FASLS-ISOLATED, so whatever a
+request compiles goes to this worker's own FASL cache even after an earlier
+request cleared ASDF's configuration (issue #317).  Outside a worker process the
+call does nothing."
+  (lambda (params)
+    (ensure-project-fasls-isolated)
+    (funcall handler params)))
+
 (defun register-all-handlers (server)
   "Register all worker method handlers on SERVER.
 
@@ -512,7 +526,8 @@ hand-maintained count is wrong again the next time a method is added."
                    (cons "worker/set-project-root" #'%handle-set-project-root)
                    (cons "worker/init-start" #'handle-init-start)
                    (cons "worker/init-status" #'handle-init-status))
-        count (register-method server method handler) into registered
+        count (register-method server method (%with-project-fasls-isolated handler))
+          into registered
         finally (log-event :info "worker.handlers.registered"
                            "count" registered))
   server)

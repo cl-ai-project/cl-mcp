@@ -94,7 +94,8 @@
     "cl-mcp/tests/clos-describe-integration-test"
     "cl-mcp/tests/tcp-test"
     "cl-mcp/tests/cancel-test"
-    "cl-mcp/tests/test-runner-deadline-test")
+    "cl-mcp/tests/test-runner-deadline-test"
+    "cl-mcp/tests/worker-fasl-cache-test")
   "Suites that start worker processes or network servers, or wait out real
 deadlines.  Together they take most of a full run (about twelve of fourteen
 minutes, measured 2026-10-03), so the quick tier leaves them out.
