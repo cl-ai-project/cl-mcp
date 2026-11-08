@@ -774,7 +774,9 @@ whitespace."
                                 ;; text can be copied into a patch's old_text;
                                 ;; only a collapsed line is indented under the
                                 ;; wrapper.
-                                (if expanded line (%indent-numbered-lines line))))))
+                                (if expanded
+                                    (string-right-trim '(#\Newline) line)
+                                    (%indent-numbered-lines line))))))
         (when lines
           (setf display (format nil "~A~{~%~A~}" display lines)))))
     (values display (or expand? child-expanded) (or name-match child-matched))))
