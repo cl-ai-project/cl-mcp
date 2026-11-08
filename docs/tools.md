@@ -779,11 +779,16 @@ Input:
   Comment-only content keeps no expression, which would otherwise fall onto the next form in
   the file. `delete` removes the expressions with the form
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
-- `normalize_blank_lines` (boolean, default `true`): normalize blank lines around edited forms.
+- `normalize_blank_lines` (boolean, default `false`): by default an edit changes the form's own
+  text and nothing else (#326): `replace` swaps the form for the content (its outer whitespace
+  trimmed), `delete` removes the form and the gap after it (the gap before it when it is the
+  last form), and an insert puts its forms beside the target with the gap the file already has
+  there, so replacing a form and then restoring its text restores the file. Pass `true` to also
+  normalize the blank lines around the edited form to one blank line between top-level forms.
   A `replace` whose content is the form already there changes nothing, spacing included (`No
-  change …`). When a real `replace` also moves the blank lines around the form -- forms written
-  with no blank line between them are set apart -- the summary says so and the result carries
-  `blank_lines_normalized: true`; pass `false` to leave them as they were. A comment written
+  change …`). When a normalizing `replace` also moves the blank lines around the form -- forms
+  written with no blank line between them are set apart -- the summary says so and the result
+  carries `blank_lines_normalized: true`. A comment written
   directly above the form (`;` lines with no blank line between them and the form, a `;;;`
   header among them) is the form's in either mode: `replace` keeps it attached, and
   `insert_before` puts the new form above it; `delete` leaves it. A comment in the content of a
@@ -960,6 +965,16 @@ token-efficient way to make small changes to large forms.
 Does NOT auto-repair parentheses — if the patch breaks form structure, it fails
 immediately and no changes are written to disk. Use `lisp-edit-form` instead when
 replacing or inserting entire forms.
+
+Several patches to one file go in one call with `patches` (#326): an array of
+`{form_type, form_name, old_text, new_text}` objects, passed instead of those four
+arguments. They are applied in order, each to the text the ones before it left (so a later
+patch may target a form an earlier one renamed or changed), and the file is written once.
+The first patch that cannot be applied -- its form not found, its `old_text` not found
+exactly once, a form that no longer reads -- fails the call with `Patch N of M (type name):
+…`, and nothing is written: a rename across a function and its callers is never left half
+done. `dry_run` previews the whole file. The result carries `patches` (dry run) and
+`bracket_warnings` (`[{patch, warning}]`) instead of the single-patch fields.
 
 When the patched form no longer reads, the error explains the breakage: if
 `new_text` opens and closes a different net number of `)` than `old_text`

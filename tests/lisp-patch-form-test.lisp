@@ -469,14 +469,14 @@ running as root), THUNK is skipped instead."
       (let ((required (gethash "required" schema)))
         (ok (find "file_path" required :test #'string=)
             "file_path should be required")
-        (ok (find "form_type" required :test #'string=)
-            "form_type should be required")
-        (ok (find "form_name" required :test #'string=)
-            "form_name should be required")
-        (ok (find "old_text" required :test #'string=)
-            "old_text should be required")
-        (ok (find "new_text" required :test #'string=)
-            "new_text should be required"))
+        ;; Issue #326: either these four or patches, so the handler checks
+        ;; them rather than the schema.
+        (dolist (name '("form_type" "form_name" "old_text" "new_text"))
+          (ok (null (find name required :test #'string=))
+              (format nil "~A is not schema-required (patches may replace it)" name)))
+        (let ((patches (gethash "patches" (gethash "properties" schema))))
+          (ok (equal "array" (gethash "type" patches)))
+          (ok (equal "object" (gethash "type" (gethash "items" patches))))))
       ;; Should NOT have structural operation params
       (let ((properties (gethash "properties" schema)))
         (ok (null (gethash "content" properties))
@@ -1402,3 +1402,122 @@ still running, so a hang fails the test and leaves no thread behind."
           (ok (typep answer 'error) (format nil "refused: ~A" answer))
           (when (typep answer 'error)
             (ok (search "old_text not found" (princ-to-string answer)))))))))
+
+(defparameter *rename-source*
+  (format nil "(in-package :cl-user)~%~%(defun old-name (x)~%  (* x 2))~%~%~
+               (defun caller-a ()~%  (old-name 1))~%~%(defun caller-b ()~%  (old-name 2))~%")
+  "A function and its two callers, for a rename across them.")
+
+(defun %rename-patches (&optional (last-old "(old-name 2)"))
+  "The patches renaming OLD-NAME to NEW-NAME in *RENAME-SOURCE*; LAST-OLD is the
+old_text of the last one."
+  (list (list :form-type "defun" :form-name "old-name"
+              :old-text "(defun old-name" :new-text "(defun new-name")
+        (list :form-type "defun" :form-name "caller-a"
+              :old-text "(old-name 1)" :new-text "(new-name 1)")
+        (list :form-type "defun" :form-name "caller-b"
+              :old-text last-old :new-text "(new-name 2)")))
+
+(deftest lisp-patch-form-applies-several-patches-together
+  ;; Issue #326: a rename took several patches, and one failing midway left the
+  ;; function renamed and its callers not.
+  (testing "all patches are applied and the file is written once"
+    (with-temp-file "tests/tmp/patch-many.lisp" *rename-source*
+      (lambda (path)
+        (multiple-value-bind (text changed)
+            (cl-mcp/src/lisp-patch-form::lisp-patch-form-many
+             :file-path path :patches (%rename-patches))
+          (ok changed)
+          (ok (equal text (fs-read-file path)))
+          (ok (null (search "old-name" text)) "every occurrence renamed")
+          (ok (= 3 (count-matches "new-name" text)))))))
+  (testing "one patch that cannot be applied leaves the file as it was"
+    (with-temp-file "tests/tmp/patch-many.lisp" *rename-source*
+      (lambda (path)
+        (let ((message (handler-case
+                           (progn (cl-mcp/src/lisp-patch-form::lisp-patch-form-many
+                                   :file-path path :patches (%rename-patches "(old-name 3)"))
+                                  nil)
+                         (error (e) (princ-to-string e)))))
+          (ok (and message (search "Patch 3 of 3 (defun caller-b)" message)) message)
+          (ok (and message (search "Nothing was written" message)))
+          (ok (equal *rename-source* (fs-read-file path)) "the first two were not written")))))
+  (testing "a later patch sees what an earlier one wrote"
+    (with-temp-file "tests/tmp/patch-many.lisp" *rename-source*
+      (lambda (path)
+        (let ((text (cl-mcp/src/lisp-patch-form::lisp-patch-form-many
+                     :file-path path
+                     :patches (list (list :form-type "defun" :form-name "old-name"
+                                          :old-text "(defun old-name" :new-text "(defun mid-name")
+                                    (list :form-type "defun" :form-name "mid-name"
+                                          :old-text "(* x 2)" :new-text "(* x 3)")))))
+          (ok (search (format nil "(defun mid-name (x)~%  (* x 3))") text))))))
+  (testing "a patch that breaks its form refuses the whole set"
+    (with-temp-file "tests/tmp/patch-many.lisp" *rename-source*
+      (lambda (path)
+        (let ((message (handler-case
+                           (progn (cl-mcp/src/lisp-patch-form::lisp-patch-form-many
+                                   :file-path path
+                                   :patches (list (first (%rename-patches))
+                                                  (list :form-type "defun" :form-name "caller-a"
+                                                        :old-text "(old-name 1))"
+                                                        :new-text "(new-name 1)")))
+                                  nil)
+                         (error (e) (princ-to-string e)))))
+          (ok (and message (search "Patch 2 of 2" message)) message)
+          (ok (equal *rename-source* (fs-read-file path)))))))
+  (testing "a dry run previews the whole file and writes nothing"
+    (with-temp-file "tests/tmp/patch-many.lisp" *rename-source*
+      (lambda (path)
+        (let ((preview (cl-mcp/src/lisp-patch-form::lisp-patch-form-many
+                        :file-path path :patches (%rename-patches) :dry-run t)))
+          (ok (eq t (gethash "would_change" preview)))
+          (ok (= 3 (gethash "patches" preview)))
+          (ok (null (search "old-name" (gethash "preview" preview))))
+          (ok (equal *rename-source* (fs-read-file path))))))))
+
+(defun count-matches (needle haystack)
+  "Return how many times NEEDLE occurs in HAYSTACK."
+  (loop with start = 0
+        for position = (search needle haystack :start2 start)
+        while position
+        count t
+        do (setf start (1+ position))))
+
+(defun %handler-text (args)
+  "Call the lisp-patch-form tool handler with ARGS and return the text it
+answers with: the content text of a result, or the message of an error."
+  (let* ((response (cl-mcp/src/lisp-patch-form::lisp-patch-form-handler
+                    (cl-mcp/src/state:make-state) 1 args))
+         (result (gethash "result" response)))
+    (if result
+        (gethash "text" (aref (gethash "content" result) 0))
+        (gethash "message" (gethash "error" response)))))
+
+(deftest lisp-patch-form-tool-takes-patches-or-a-single-patch
+  (testing "the tool refuses patches beside the single-patch arguments"
+    (let* ((args (cl-mcp/src/tools/helpers:make-ht
+                  "file_path" "tests/tmp/patch-many.lisp"
+                  "form_type" "defun" "form_name" "x" "old_text" "a" "new_text" "b"
+                  "patches" (vector (cl-mcp/src/tools/helpers:make-ht
+                                     "form_type" "defun" "form_name" "x"
+                                     "old_text" "a" "new_text" "b"))))
+           (text (%handler-text args)))
+      (ok (search "not both" text) text)))
+  (testing "patches through the tool apply together"
+    (with-temp-file "tests/tmp/patch-many.lisp" *rename-source*
+      (lambda (path)
+        (let* ((args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path
+                      "patches" (map 'vector
+                                     (lambda (patch)
+                                       (destructuring-bind (&key form-type form-name
+                                                              old-text new-text)
+                                           patch
+                                         (cl-mcp/src/tools/helpers:make-ht
+                                          "form_type" form-type "form_name" form-name
+                                          "old_text" old-text "new_text" new-text)))
+                                     (%rename-patches))))
+               (text (%handler-text args)))
+          (ok (search "Applied 3 patches" text) text)
+          (ok (null (search "old-name" (fs-read-file path)))))))))

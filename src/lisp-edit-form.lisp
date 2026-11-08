@@ -47,8 +47,6 @@
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/utils/printing
                 #:bounded-princ-to-string)
-  (:import-from #:cl-mcp/src/utils/strings
-                #:ensure-trailing-newline)
   (:import-from #:cl-mcp/src/utils/nesting
                 #:check-lisp-nesting)
   (:import-from #:cl-mcp/src/package-context
@@ -926,48 +924,65 @@ of a #| |# comment can start with ; too -- and is never taken."
 
 (defun %apply-operation-preserve-spacing (text node operation content
                                           &optional (comment-floor 0))
-  (let ((start (cst-node-start node))
-        (end (cst-node-end node)))
-    (ecase operation
-      ((:replace)
-       (concatenate 'string (subseq text 0 start) content (subseq text end)))
-      ((:insert-before)
-       ;; Above the comment written directly over the target, and a blank line
-       ;; apart from it, so the comment still reads as the target's.
-       (let* ((comment-start (%attached-comment-start text start comment-floor))
-              (snippet (concatenate 'string (ensure-trailing-newline content)
-                                    (if (< comment-start start) (string #\Newline) "")))
-              (prefix (subseq text 0 comment-start))
-              (sep
-               (if (zerop comment-start)
-                   ""
-                   (%ensure-blank-separation prefix ""))))
-         (concatenate 'string prefix sep snippet (subseq text comment-start))))
-      ((:insert-after)
-       (let* ((snippet (ensure-trailing-newline content))
-              (suffix (subseq text end))
-              (ws-end
-               (or
-                (position-if-not
-                 (lambda (ch) (member ch '(#\Space #\Tab #\Newline #\Return)))
-                 suffix)
-                (length suffix)))
-              (between
-               (%ensure-blank-separation (subseq text 0 end)
-                                         (subseq suffix 0 ws-end)))
-              (rest (subseq suffix ws-end))
-              (prefix (subseq text 0 end)))
-         (concatenate 'string prefix between snippet rest)))
-      ((:delete)
-       (let* ((suffix (subseq text end))
-              (ws-end
-               (or
-                (position-if-not
-                 (lambda (ch) (member ch '(#\Space #\Tab #\Newline #\Return)))
-                 suffix)
-                (length suffix))))
-         (concatenate 'string (subseq text 0 start)
-                      (subseq suffix ws-end)))))))
+  "Apply OPERATION to NODE within TEXT changing nothing but the form's own text
+(issue #326): a replace swaps the form's span for CONTENT, a delete removes the
+span and the gap after it, and an insert puts CONTENT beside the target with
+the same gap the file already has there -- the one after the target, or before
+it when nothing follows -- so no blank line elsewhere in the file moves."
+  (let* ((start (cst-node-start node))
+         (end (cst-node-end node))
+         (snippet (%trim-outer-whitespace content))
+         (suffix (subseq text end))
+         (ws-end (or (position-if-not (lambda (ch)
+                                        (member ch '(#\Space #\Tab #\Newline #\Return)))
+                                      suffix)
+                     (length suffix)))
+         (gap-after (subseq suffix 0 ws-end))
+         (following (subseq suffix ws-end)))
+    (flet ((line-gap (gap)
+             ;; A gap that does not end a line (forms on one line) cannot hold
+             ;; a form of its own: give it a line break.
+             (if (find #\Newline gap) gap (format nil "~%~%"))))
+      (ecase operation
+        ((:replace)
+         (concatenate 'string (subseq text 0 start) snippet suffix))
+        ((:insert-before)
+         ;; Above the comment written directly over the target, so the comment
+         ;; still reads as the target's.
+         (let* ((comment-start (%attached-comment-start text start comment-floor))
+                (before (subseq text 0 comment-start))
+                (before-core (string-right-trim '(#\Space #\Tab #\Newline #\Return)
+                                                before))
+                (gap-before (subseq before (length before-core))))
+           (concatenate 'string before
+                        snippet
+                        (line-gap (if (plusp (length before-core))
+                                      gap-before
+                                      (if (plusp (length following)) gap-after "")))
+                        (subseq text comment-start))))
+        ((:insert-after)
+         (let* ((before-core (string-right-trim '(#\Space #\Tab #\Newline #\Return)
+                                                (subseq text 0 start)))
+                (gap (cond ((plusp (length following)) gap-after)
+                           ((plusp (length before-core))
+                            (subseq text (length before-core) start))
+                           (t ""))))
+           (concatenate 'string (subseq text 0 end)
+                        (line-gap gap)
+                        snippet
+                        (if (plusp (length following))
+                            (concatenate 'string (line-gap gap-after) following)
+                            (string #\Newline)))))
+        ((:delete)
+         (if (plusp (length following))
+             (concatenate 'string (subseq text 0 start) following)
+             ;; The last form: the gap before it goes too, and the file keeps
+             ;; one final newline.
+             (let ((before-core (string-right-trim '(#\Space #\Tab #\Newline #\Return)
+                                                   (subseq text 0 start))))
+               (if (plusp (length before-core))
+                   (concatenate 'string before-core (string #\Newline))
+                   ""))))))))
 
 (defun %apply-operation-normalized (text node operation content
                                     &optional (comment-floor 0))
@@ -1055,22 +1070,17 @@ Non-string input (a missing key) is returned unchanged."
                            (- (length text) +dry-run-snippet-limit+)))
       text))
 
-(defun %preview-form-text (operation content normalize-blank-lines)
+(defun %preview-form-text (operation content)
   "Return the form text OPERATION splices into the file, for dry-run previews.
 CONTENT is the validated (possibly parinfer-repaired) replacement text, so the
-result is exactly what %APPLY-OPERATION writes at the edit site. This lets a
-dry-run summary show the edited form instead of the whole updated file.
-:DELETE writes no form, so a short marker is returned instead."
+result is exactly what %APPLY-OPERATION writes at the edit site, which is the
+content without its outer whitespace whether or not the blank lines around it
+are normalized. This lets a dry-run summary show the edited form instead of the
+whole updated file. :DELETE writes no form, so a short marker is returned
+instead."
   (ecase operation
     ((:delete) "(form removed)")
-    ((:replace)
-     (if normalize-blank-lines
-         (%trim-outer-whitespace content)
-         content))
-    ((:insert-before :insert-after)
-     (if normalize-blank-lines
-         (%trim-outer-whitespace content)
-         (ensure-trailing-newline content)))))
+    ((:replace :insert-before :insert-after) (%trim-outer-whitespace content))))
 
 (defun %repair-summary (warning fixes repaired-form &key include-form moved)
   "Return the text appended to a success summary when parinfer repaired the
@@ -1100,7 +1110,7 @@ same words. The bracket-opener reminder is part of WARNING, built by
 
 (defun lisp-edit-form
        (&key file-path form-type form-name operation content dry-run
-        (normalize-blank-lines t) readtable guard)
+        (normalize-blank-lines nil) readtable guard)
   "Structured edit of a top-level Lisp form.
 FILE-PATH may be absolute or relative to the project root. FORM-TYPE,
 FORM-NAME, and OPERATION are always required. CONTENT is required for
@@ -1202,7 +1212,7 @@ replaced form, and the line the matched form starts on. A dry run carries the re
                         (gethash "original" result) target-snippet
                         (gethash "preview" result) updated
                         (gethash "preview_form" result)
-                        (%preview-form-text op-key nil normalize-blank-lines)
+                        (%preview-form-text op-key nil)
                         (gethash "file_path" result) (namestring abs)
                         (gethash "operation" result) op-normalized
                         (gethash "line" result) (cst-node-start-line target))
@@ -1306,7 +1316,7 @@ replaced form, and the line the matched form starts on. A dry run carries the re
                             (gethash "original" result) target-snippet
                             (gethash "preview" result) updated
                             (gethash "preview_form" result)
-                            (%preview-form-text op-key spliced normalize-blank-lines)
+                            (%preview-form-text op-key spliced)
                             ;; The untrimmed content the repair line numbers
                             ;; refer to, for the relocation note in the summary.
                             (gethash "validated_content" result) validated-content
@@ -1427,9 +1437,12 @@ written.")
          (dry_run :type :boolean
                   :description "When true, return a preview without writing to disk")
          (normalize_blank_lines :type :boolean
-                                :default t
-                                :description "When true (default), normalize blank lines around edited top-level forms.
-Applies to replace, insert_before, insert_after, and delete operations.")
+                                :default nil
+                                :description "When false (default), an edit changes the form's own text and
+nothing else: a replace swaps the form, a delete removes it and the gap after it, and
+an insert takes the gap the file already has beside the target. When true, the blank
+lines around the edited form are normalized too (one blank line between top-level
+forms), which can move lines outside the form.")
          (readtable :type :string
                     :description "Named-readtable designator for files using custom reader macros.
 Supports both keyword style ('interpol-syntax') and package-qualified style

@@ -56,6 +56,7 @@
   (:export #:%skip-blank-and-comments
            #:%feature-prefix-end
            #:%skipped-feature-node-p
+           #:locate-form-in-text
            #:%normalize-string
            #:%defmethod-candidates
            #:%definition-candidates
@@ -1427,6 +1428,36 @@ order visible at the call site that decides whether the edit proceeds."
         (%check-edit-guard-post-match guard snapshot node)
         (values nil conflict))))
 
+(defun locate-form-in-text (abs text form-type form-name readtable)
+  "Parse TEXT, the contents of the file ABS, and find the form FORM-TYPE
+FORM-NAME in it, as %LOCATE-TARGET-FORM does once it has read the file.
+Returns (values NODES TARGET TYPE): the parsed top-level nodes, the matched
+node and the lower-cased head name FORM-TYPE matched as (%FIND-TARGET).
+Signals FILE-UNPARSEABLE-ERROR when TEXT does not parse, or when the form is
+not found and the lenient CL-reader pass stopped early; otherwise a form that
+is not found is an error naming the forms that are there.  Callers that edit
+text not yet written -- lisp-patch-form's later patches -- locate with this."
+  (multiple-value-bind (nodes swallowed)
+      (handler-case
+          (parse-top-level-forms text :readtable readtable :source-path abs)
+        (error (e)
+          (signal-file-unparseable abs text e :readtable readtable)))
+    (multiple-value-bind (target matched-type)
+        (%find-target nodes form-type form-name)
+      (unless target
+        (when swallowed
+          ;; The lenient pass returned the forms before the breakage, which
+          ;; lisp-edit-form can still address.
+          (signal-file-unparseable abs text swallowed
+                                  :readtable readtable
+                                  :editable-prefix (and nodes t)))
+        ;; Named as the summaries of these tools name a file: relative to the
+        ;; project root when it lies under it.
+        (error "Form ~A ~A not found in ~A.~%~A" form-type form-name
+               (or (%project-relative-path abs) (native-path-namestring abs))
+               (%forms-listing nodes matched-type)))
+      (values nodes target matched-type))))
+
 (defun %locate-target-form (file-path form-type form-name readtable &optional guard)
   "Shared prologue: resolve paths, read file, parse, find target, extract snippet.
 Signals FILE-UNPARSEABLE-ERROR (through SIGNAL-FILE-UNPARSEABLE, which owns the
@@ -1537,30 +1568,12 @@ Returns eight values:
                         outside cl-mcp."
                        (native-path-namestring abs) file-length (length text)))
               (setf original text)))
-        (multiple-value-bind (nodes swallowed)
-            (handler-case
-                (parse-top-level-forms original
-                                       :readtable readtable
-                                       :source-path abs)
-              (error (e)
-                (signal-file-unparseable abs original e :readtable readtable)))
-          (multiple-value-bind (target matched-type)
-              (%find-target nodes form-type form-name)
-            ;; The reading of FORM-TYPE that matched (or was tried last),
-            ;; which callers compare with "defmethod" and the like.
+        (multiple-value-bind (nodes target matched-type)
+            (locate-form-in-text abs original form-type form-name readtable)
+          (progn
+            ;; The reading of FORM-TYPE that matched, which callers compare
+            ;; with "defmethod" and the like.
             (setf form-type-str matched-type)
-            (unless target
-              (when swallowed
-                ;; The lenient pass returned the forms before the breakage,
-                ;; which lisp-edit-form can still address.
-                (signal-file-unparseable abs original swallowed
-                                        :readtable readtable
-                                        :editable-prefix (and nodes t)))
-              ;; Named as the summaries of these tools name a file: relative to
-              ;; the project root when it lies under it.
-              (error "Form ~A ~A not found in ~A.~%~A" form-type form-name
-                     (or (%project-relative-path abs) (native-path-namestring abs))
-                     (%forms-listing nodes form-type-str)))
             (when guard
               (multiple-value-bind (ok-p conflict)
                   (check-edit-guard guard (native-path-namestring abs) snapshot target)
