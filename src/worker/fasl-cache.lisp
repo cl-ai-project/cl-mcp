@@ -69,12 +69,14 @@ so the lock exists before the directory does and outlives a half-deleted one."
                  :version nil
                  :defaults (uiop:pathname-parent-directory-pathname directory)))
 
-(defun %try-lock (path &optional (attempts 3))
-  "Open PATH, creating it, and take an exclusive lock on it without waiting.
-Return the open file descriptor when the lock was taken -- no live process holds
-it -- or NIL when another process does, or PATH cannot be opened (a sweep then
-leaves it alone and goes on).  Any other failure of the lock itself, such as a
-filesystem without record locks, is signalled rather than taken for a holder.
+(defun %try-lock (path &key (create t) (attempts 3))
+  "Open PATH -- creating it when CREATE -- and take an exclusive lock on it
+without waiting.  Return the open file descriptor when the lock was taken -- no
+live process holds it -- or NIL when another process does, or PATH cannot be
+opened (a sweep then leaves it alone and goes on).  Any other failure of the
+lock itself, such as a filesystem without record locks, is signalled rather
+than taken for a holder.  A sweep passes CREATE NIL: a lock file that vanished
+was deleted by another sweep, and recreating it would leave it behind.
 
 A sweep may unlink PATH between this open and the lock, leaving the lock on a
 file no one else can find; the lock is kept only when PATH still names the
@@ -82,21 +84,30 @@ locked file, and taken again on a fresh file otherwise, up to ATTEMPTS times.
 POSIX record locks belong to the process: one that already holds PATH's lock
 would take it again, and closing any descriptor of PATH drops its lock, so a
 worker never calls this on its own lock file twice."
-  (let ((name (uiop:native-namestring path)))
-    (let ((fd (handler-case (sb-posix:open name (logior sb-posix:o-rdwr sb-posix:o-creat) #o600)
-                (sb-posix:syscall-error () (return-from %try-lock nil)))))
-      (handler-case (sb-posix:lockf fd sb-posix:f-tlock 0)
-        (sb-posix:syscall-error (e)
-          (sb-posix:close fd)
-          (if (member (sb-posix:syscall-errno e) (list sb-posix:eagain sb-posix:eacces))
-              (return-from %try-lock nil)
-              (error e))))
-      (if (eql (ignore-errors (sb-posix:stat-ino (sb-posix:stat name)))
-               (sb-posix:stat-ino (sb-posix:fstat fd)))
-          fd
-          (progn
-            (sb-posix:close fd)
-            (and (> attempts 1) (%try-lock path (1- attempts))))))))
+  (let* ((name (uiop:native-namestring path))
+         (fd (handler-case (sb-posix:open name (if create
+                                                   (logior sb-posix:o-rdwr sb-posix:o-creat)
+                                                   sb-posix:o-rdwr)
+                                          #o600)
+               (sb-posix:syscall-error () (return-from %try-lock nil))))
+         (kept nil))
+    (unwind-protect
+         (progn
+           (handler-case (sb-posix:lockf fd sb-posix:f-tlock 0)
+             (sb-posix:syscall-error (e)
+               (if (member (sb-posix:syscall-errno e) (list sb-posix:eagain sb-posix:eacces))
+                   (return-from %try-lock nil)
+                   (error e))))
+           (when (eql (ignore-errors (sb-posix:stat-ino (sb-posix:stat name)))
+                      (sb-posix:stat-ino (sb-posix:fstat fd)))
+             (setf kept t)
+             fd))
+      (unless kept
+        (sb-posix:close fd)))
+    (cond (kept fd)
+          ((and create (> attempts 1))
+           (%try-lock path :create create :attempts (1- attempts)))
+          (t nil))))
 
 (defun %delete-cache-directory (directory base)
   "Delete DIRECTORY, a worker's cache directly under BASE, with everything in
@@ -133,7 +144,9 @@ file or directory not named like a cache, are kept."
           (let* ((lock (%lock-path directory))
                  ;; A lock that cannot be judged counts as held: one odd entry
                  ;; must not stop the sweep of the rest.
-                 (fd (if (probe-file lock) (ignore-errors (%try-lock lock)) :no-lock)))
+                 (fd (if (probe-file lock)
+                         (ignore-errors (%try-lock lock :create nil))
+                         :no-lock)))
             (when fd
               (unwind-protect
                    (when (%delete-cache-directory directory base)
@@ -148,35 +161,52 @@ file or directory not named like a cache, are kept."
         (when (and (%cache-name-p name) (not (equal name own))
                    (not (uiop:directory-exists-p
                          (merge-pathnames (format nil "~A/" name) base))))
-          (let ((fd (ignore-errors (%try-lock lock))))
+          (let ((fd (ignore-errors (%try-lock lock :create nil))))
             (when fd
               (unwind-protect (ignore-errors (delete-file lock))
                 (sb-posix:close fd)))))))
     deleted))
+
+(defun %claim-new-cache (base &optional (attempts 3))
+  "Mint a cache name, BASE/<pid>-<token>/, take its lock and make its directory;
+return (values DIRECTORY FD).  A NIL from %TRY-LOCK for a name just minted is no
+live owner but a sweep holding the new lock for a moment, so a fresh name is
+tried, up to ATTEMPTS times, before giving up with an error.  A lock that fails
+outright (a filesystem without record locks) is signalled, its file deleted
+first: the name is this worker's own, and no sweep could remove it."
+  (loop repeat attempts
+        do (let* ((name (format nil "~D-~36R" (sb-posix:getpid)
+                                (random (expt 36 10) (make-random-state t))))
+                  (directory (merge-pathnames (format nil "~A/" name) base))
+                  (lock (%lock-path directory))
+                  (fd (handler-case (%try-lock lock)
+                        (error (e)
+                          (ignore-errors (delete-file lock))
+                          (error e)))))
+             (when fd
+               (handler-case (ensure-directories-exist directory)
+                 (error (e)
+                   (sb-posix:close fd)
+                   (error e)))
+               (return-from %claim-new-cache (values directory fd)))))
+  (error "could not lock a cache of its own under ~A: the lock was held, could not be ~
+          opened, or kept being replaced"
+         (uiop:native-namestring base)))
 
 (defun prepare-worker-fasl-cache (&optional (base (worker-fasl-cache-base)))
   "Make this worker's own, empty FASL cache directory, BASE/<pid>-<token>/, claim
 it with its lock (*WORKER-CACHE-LOCK-FD*), record it in *WORKER-FASL-CACHE*, and
 then sweep up the caches of ended workers (SWEEP-DEAD-WORKER-CACHES).  The token
 is random, so no two workers share a directory, even with the same PID in two
-PID namespaces.  Returns the directory, or NIL when it cannot be made: the
-worker then compiles into the shared cache, as every worker did before, and the
-log says so.  A sweep that fails is logged and changes nothing about this
-worker's own cache."
+PID namespaces (%CLAIM-NEW-CACHE).  Returns the directory, or NIL when it cannot
+be made: the worker then compiles into the shared cache, as every worker did
+before, and the log says so.  A sweep that fails is logged and changes nothing
+about this worker's own cache."
   (let ((directory
           (handler-case
-              (let* ((name (format nil "~D-~36R" (sb-posix:getpid)
-                                   (random (expt 36 10) (make-random-state t))))
-                     (directory (merge-pathnames (format nil "~A/" name) base)))
+              (progn
                 (ensure-directories-exist base)
-                (let ((fd (%try-lock (%lock-path directory))))
-                  (unless fd
-                    (error "another process holds the lock of ~A, or it cannot be opened"
-                           name))
-                  (handler-case (ensure-directories-exist directory)
-                    (error (e)
-                      (sb-posix:close fd)
-                      (error e)))
+                (multiple-value-bind (directory fd) (%claim-new-cache base)
                   (setf *worker-cache-lock-fd* fd
                         *worker-fasl-cache* directory)))
             (error (e)

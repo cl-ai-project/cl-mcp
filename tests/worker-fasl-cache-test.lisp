@@ -162,8 +162,10 @@ time.sleep(120)"
              (testing "a lock left without its directory is deleted"
                (ok (not (probe-file orphan-lock)) "gone"))
              (testing "only caches are counted"
-               ;; Root opens the unopenable lock too, and deletes that cache.
-               (ok (= (if (zerop (sb-posix:geteuid)) 3 2) deleted) (format nil "~D" deleted)))
+               ;; Root opens the unopenable lock too, and deletes that cache; with
+               ;; no process holding 333-ccc's lock, that one goes as well.
+               (ok (= (+ 2 (if (zerop (sb-posix:geteuid)) 1 0) (if holder 0 1)) deleted)
+                   (format nil "~D" deleted)))
              (testing "the rest is kept"
                (if holder
                    (ok (uiop:directory-exists-p live) "a cache whose lock a process holds")
