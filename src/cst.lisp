@@ -349,8 +349,14 @@ of that form overwrote both.  READTABLE must read #+ and #- the standard way
                                         'simple-error
                                         :format-control "Reader error: the feature expression ~
                                                          after #~A uses an operator that is ~
-                                                         not the keyword :AND, :OR or :NOT: ~S"
-                                        :format-arguments (list sign expression))))))))
+                                                         not the keyword :AND, :OR or :NOT: ~A"
+                                        :format-arguments
+                                        (list sign
+                                              ;; Package-qualified and on one line, so
+                                              ;; COMMON-LISP:AND shows what is wrong.
+                                              (let ((*package* (find-package "KEYWORD"))
+                                                    (*print-pretty* nil))
+                                                (prin1-to-string expression))))))))))
               (when (char= sign #\-)
                 (setf holds (not holds)))
               (unless holds

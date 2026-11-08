@@ -766,10 +766,10 @@ Input:
   specializers included) as the form replaced or as the content, however its expression is
   spelled (`#-sbcl` and `#+(not sbcl)` alike), or one that cannot be read but starts with
   the same head and name: applying it would take away the definition the server uses and
-  leave two forms under the false condition (#316). The refusal names both lines. Until such
-  forms can be addressed (#321), `lisp-edit-form` cannot make that trade at all:
-  `insert_before`/`insert_after` read their content in the server, which skips a form under
-  an expression false there.
+  leave two forms under the false condition (#316). The refusal names both lines. Such forms
+  cannot be addressed yet (#321). `insert_before`/`insert_after` read their content in the
+  server: content that is only a form under an expression false there reads as empty and is
+  refused, while beside a comment line or another form it is written as it is.
   Comment-only content keeps no expression, which would otherwise fall onto the next form in
   the file. `delete` removes the expressions with the form
 - `dry_run` (boolean, default `false`): preview changes without writing to disk

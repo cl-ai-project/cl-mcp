@@ -858,10 +858,7 @@ would cost this server its definition (%FEATURE-TWIN)."
             reach only line ~D, and this replace would take away the definition this ~
             server uses and leave the file with two ~A forms where it had one for each ~
             condition. Nothing was written. Forms under a false feature expression cannot ~
-            be addressed yet (issue #321), and until they can, lisp-edit-form cannot ~
-            trade line ~D's definition for one under ~A either: insert_before and ~
-            insert_after read their content in this server, which skips a form under ~
-            a false expression."
+            be addressed yet (issue #321)."
            form-type form-name (cst-node-start-line target)
            (and target-prefix (%feature-expressions-text target-prefix))
            (%feature-expressions-text own-prefix)
@@ -872,8 +869,6 @@ would cost this server its definition (%FEATURE-TWIN)."
              (:target "the same definition as the one being replaced")
              (:content "the same definition as the content")
              (:unreadable "a form that could not be read to compare but starts like one of them"))
-           (cst-node-start-line target)
-           (%feature-expressions-text own-prefix)
            (cst-node-start-line target)
            (%feature-expressions-text own-prefix))))
 
