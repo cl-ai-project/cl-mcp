@@ -57,6 +57,7 @@
                 #:%skip-blank-and-comments
                 #:%feature-prefix-end
                 #:%skipped-feature-node-p
+                #:feature-key
                 #:%definition-candidates
                 #:%resolve-named-readtable
                 #:%nonstandard-readtable-p
@@ -785,9 +786,11 @@ itself a list is cut at its first space."
 this server -- that replacing TARGET by CONTENT would destroy the server's
 definition for, and why, as (values NODE WHY); NIL when there is none.
 
-A form under a false expression is never read, so FORM-TYPE/FORM-NAME can only
-reach its active twin, and content written for the skipped one lands on the
-active one (issue #316).  That is only a loss when the content's own
+A form under a false expression is never read, so a plain FORM-NAME reaches its
+active twin, and content written for the skipped one lands on the active one
+(issue #316).  Only a replace of a form the server reads is checked: one of a
+skipped form, named with its expressions (issue #321), takes nothing away.
+That is only a loss when the content's own
 expressions, OWN-EXPRESSIONS (as %CHECK-FEATURE-PREFIX returns them), are false
 here too: the server then keeps no definition where it had one.  A skipped form
 counts when it is the same definition (%DEFINITION-IDENTITY: head and whole
@@ -848,29 +851,45 @@ MAX-CHARS with \" ...\" when longer."
 (defun %refuse-feature-twin (original target twin why form-type form-name own-prefix)
   "Signal the error refusing a replace of TARGET by content opening with
 OWN-PREFIX, because TWIN, a form the reader skips here, is WHY the replace
-would cost this server its definition (%FEATURE-TWIN)."
+would cost this server its definition (%FEATURE-TWIN).  The form_name it gives
+for the twin is the twin's own: its expressions and its name as written, with
+FORM-NAME (stripped of any expressions of its own) only when the twin's name
+cannot be read off its text."
   (let* ((target-prefix (%target-feature-prefix original target))
          (twin-start (cst-node-start twin))
-         (twin-form-start (%feature-prefix-end original twin-start)))
+         (twin-form-start (%feature-prefix-end original twin-start))
+         (twin-text (subseq original twin-form-start (cst-node-end twin)))
+         (twin-name (or (second (%head-and-name-text twin-text))
+                        (subseq form-name (%feature-prefix-end form-name 0)))))
     (error "Refusing to replace ~A ~A at line ~D, ~:[which is unconditional~;~:*under ~A~]: ~
             the content opens with ~A, which is false in this server, and line ~D holds ~
-            ~A under ~A -- ~A. The reader skips that form here, so form_type/form_name ~
-            reach only line ~D, and this replace would take away the definition this ~
-            server uses and leave the file with two ~A forms where it had one for each ~
-            condition. Nothing was written. Forms under a false feature expression cannot ~
-            be addressed yet (issue #321)."
+            ~A under ~A -- ~A. The reader skips that form here, and this replace would ~
+            take away the definition this server uses and leave the file with two ~A ~
+            forms where it had one for each condition. Nothing was written. To edit the ~
+            skipped form itself, name it with its expressions in front: form_name ~S."
            form-type form-name (cst-node-start-line target)
            (and target-prefix (%feature-expressions-text target-prefix))
            (%feature-expressions-text own-prefix)
            (cst-node-start-line twin)
-           (%one-line-start (subseq original twin-form-start (cst-node-end twin)))
+           (%one-line-start twin-text)
            (%feature-expressions-text (subseq original twin-start twin-form-start))
            (ecase why
              (:target "the same definition as the one being replaced")
              (:content "the same definition as the content")
              (:unreadable "a form that could not be read to compare but starts like one of them"))
-           (cst-node-start-line target)
-           (%feature-expressions-text own-prefix))))
+           (%feature-expressions-text own-prefix)
+           (format nil "~A ~A" (feature-key original twin-start) twin-name))))
+
+(defun %inactive-form-note (expressions)
+  "Return the summary line saying the edited form is under EXPRESSIONS, a
+feature expression false in this server (issue #321), or NIL when it is a form
+the server reads.  The server never loads such a form, so load-system and the
+code-* tools will show no change -- which the caller should not mistake for an
+edit that did not land."
+  (when expressions
+    (format nil "~%The form is under ~A, which is false in this server, so the server ~
+                 does not read it: load-system and repl-eval will not see the change."
+            expressions)))
 
 (defun %blank-lines-note (normalized)
   "Return the summary line saying a replace also moved the blank lines around the
@@ -1181,9 +1200,14 @@ replaced form, and the line the matched form starts on. A dry run carries the re
       (check-lisp-nesting content))
     (with-file-lock ((%normalize-paths file-path))
       (multiple-value-bind
-          (abs rel original nodes target target-snippet _ file-package-name)
+          (abs rel original nodes target target-snippet _ file-package-name inactive-p)
           (%locate-target-form file-path form-type form-name readtable guard)
         (declare (ignore _))
+        (let ((inactive-feature
+                ;; A form under a feature expression false here (issue #321):
+                ;; the edit lands on a form this server does not read, which
+                ;; the result says, since load-system will show no change.
+                (and inactive-p (feature-key original (cst-node-start target)))))
         (if (eq op-key :delete)
             ;; Delete path: no content validation needed
             (let* ((updated
@@ -1206,12 +1230,14 @@ replaced form, and the line the matched form starts on. A dry run carries the re
                         (gethash "file_path" result) (namestring abs)
                         (gethash "operation" result) op-normalized
                         (gethash "line" result) (cst-node-start-line target))
+                  (when inactive-feature
+                    (setf (gethash "inactive_form" result) inactive-feature))
                   result))
                (would-change (fs-write-file rel updated)
                 (values updated nil t nil nil nil nil nil nil nil
-                        (cst-node-start-line target)))
+                        (cst-node-start-line target) inactive-feature))
                (t (values updated nil nil nil nil nil nil nil nil nil
-                          (cst-node-start-line target)))))
+                          (cst-node-start-line target) inactive-feature))))
             ;; Non-delete path: validate and repair content
             ;; Content is validated under the readtable in effect at the target:
             ;; the caller's argument, or an (in-readtable ...) earlier in the
@@ -1241,13 +1267,16 @@ replaced form, and the line the matched form starts on. A dry run carries the re
                       (%validate-and-repair-content form-content content-readtable
                                                     file-package-name abs))
                 ;; Content written for a twin the reader skips here would
-                ;; overwrite the one form this server reads (issue #316).
-                (multiple-value-bind (twin why)
-                    (%feature-twin original nodes target own-expressions validated-content
-                                   content-readtable file-package-name)
-                  (when twin
-                    (%refuse-feature-twin original target twin why form-type form-name
-                                          own-prefix)))
+                ;; overwrite the one form this server reads (issue #316).  A
+                ;; target the server does not read is no such form: replacing
+                ;; it cannot take a definition away (issue #321).
+                (unless inactive-p
+                  (multiple-value-bind (twin why)
+                      (%feature-twin original nodes target own-expressions validated-content
+                                     content-readtable file-package-name)
+                    (when twin
+                      (%refuse-feature-twin original target twin why form-type form-name
+                                            own-prefix))))
                 (let* ((block-spliced
                          ;; Normalise only the gaps between a block's forms, and
                          ;; only where the gaps read the standard way.
@@ -1327,15 +1356,18 @@ replaced form, and the line the matched form starts on. A dry run carries the re
                         (setf (gethash "kept_feature_expression" result) kept-feature))
                       (when blank-lines-normalized
                         (setf (gethash "blank_lines_normalized" result) t))
+                      (when inactive-feature
+                        (setf (gethash "inactive_form" result) inactive-feature))
                       result))
                    (would-change (fs-write-file rel updated)
                     (values updated parinfer-warning t repair-fixes validated-content
                             bracket-warning reparented several-forms kept-feature
-                            blank-lines-normalized (cst-node-start-line target)))
+                            blank-lines-normalized (cst-node-start-line target)
+                            inactive-feature))
                    (t (values updated parinfer-warning nil repair-fixes
                               validated-content bracket-warning reparented
                               several-forms kept-feature nil
-                              (cst-node-start-line target))))))))))))
+                              (cst-node-start-line target) inactive-feature))))))))))))
 
 (defun %resolve-guard-argument (args guard guard-token)
   "Return the guard LISP-EDIT-FORM should run with, or NIL for an unguarded
@@ -1403,7 +1435,11 @@ e.g., \"print-object ((obj my-class) stream)\" (a method whose name is unique ma
 by name alone). A name[N] suffix, 0-based, picks the Nth of several matches. For defstruct with
 options \"(defstruct (name opts...) ...)\", use just the bare struct name.
 Reader macro prefixes #: and : are stripped automatically, so
-\"#:my-pkg\" and \"my-pkg\" both match \"(defpackage #:my-pkg ...).\"")
+\"#:my-pkg\" and \"my-pkg\" both match \"(defpackage #:my-pkg ...).\"
+A form under a #+/#- expression false in this server (another implementation's
+branch) is named by its expressions in front of the name, as the file writes them:
+\"#+ecl impl\". A plain name means the form this server reads, and reaches a
+skipped one only when no read form has that name.")
          (operation :type :string :required t
                     :enum ("replace" "insert_before" "insert_after" "delete")
                     :description "Operation to perform")
@@ -1417,10 +1453,11 @@ replace keeps the #+/#- feature expressions written in front of the target form
 when content starts with none of its own, and says so (kept_feature_expression);
 start content with the expression it should have to change or drop the condition
 (its form is checked whether or not that condition holds here). Comment-only
-content keeps none. A form under an expression false here is not read, so only
-its active twin can be targeted; content opening with expressions false here is
-refused when such a skipped form is the same definition as the target or the
-content, since it would take away the definition this server uses.
+content keeps none. A form under an expression false here is not read: a plain
+form_name targets its active twin, \"#+ecl name\" the skipped form; content
+opening with expressions false here is refused, for a target this server reads,
+when such a skipped form is the same definition as the target or the content,
+since it would take away the definition this server uses.
 Missing closing parentheses are automatically repaired using parinfer; a block
 is repaired as a whole and must then read as complete forms, or nothing is
 written.")
@@ -1462,7 +1499,8 @@ without a guard."))
     (handler-case
         (multiple-value-bind (updated parinfer-warning changed-p repair-fixes
                               repaired-form bracket-warning reparented forms
-                              kept-feature blank-lines-normalized target-line)
+                              kept-feature blank-lines-normalized target-line
+                              inactive-feature)
             (lisp-edit-form :file-path file_path
                             :form-type form_type
                             :form-name form_name
@@ -1487,15 +1525,17 @@ without a guard."))
                      (block-forms (gethash "forms" updated))
                      (dry-kept (gethash "kept_feature_expression" updated))
                      (dry-blank-lines (gethash "blank_lines_normalized" updated))
+                     (dry-inactive (gethash "inactive_form" updated))
                      (summary
                       (format nil "Dry-run ~A~@[ of ~D forms~] on ~A ~A~@[ (line ~D)~] in ~A ~
                                    (~:[no change~;would change~])~
-                                   ~@[~A~]~@[~A~]~@[~A~]~@[~%WARNING: ~A~]~
+                                   ~@[~A~]~@[~A~]~@[~A~]~@[~A~]~@[~%WARNING: ~A~]~
                                    ~@[~%~%--- original ---~%~A~]~
                                    ~@[~%~%--- preview ---~%~A~]"
                               operation block-forms form_type form_name
                               (gethash "line" updated) file_path
                               would-change
+                              (%inactive-form-note dry-inactive)
                               (%kept-feature-note dry-kept)
                               (%blank-lines-note dry-blank-lines)
                               (%repair-summary pw (gethash "repair_fixes" updated)
@@ -1528,7 +1568,9 @@ without a guard."))
                                 (when dry-kept
                                   (list "kept_feature_expression" dry-kept))
                                 (when dry-blank-lines
-                                  (list "blank_lines_normalized" t))))))
+                                  (list "blank_lines_normalized" t))
+                                (when dry-inactive
+                                  (list "inactive_form" dry-inactive))))))
               (let ((summary
                      (cond
                        ((not changed-p)
@@ -1542,9 +1584,10 @@ without a guard."))
                                 bracket-warning))
                        (t
                         (format nil "Applied ~A~@[ of ~D forms~] to ~A ~A~@[ (line ~D)~] in ~A ~
-                                     (~D chars)~@[~A~]~@[~A~]~@[~A~]~@[~%WARNING: ~A~]"
+                                     (~D chars)~@[~A~]~@[~A~]~@[~A~]~@[~A~]~@[~%WARNING: ~A~]"
                                 operation forms form_type form_name target-line file_path
                                 (length updated)
+                                (%inactive-form-note inactive-feature)
                                 (%kept-feature-note kept-feature)
                                 (%blank-lines-note blank-lines-normalized)
                                 (%repair-summary parinfer-warning repair-fixes
@@ -1570,7 +1613,9 @@ without a guard."))
                                 (when kept-feature
                                   (list "kept_feature_expression" kept-feature))
                                 (when blank-lines-normalized
-                                  (list "blank_lines_normalized" t))))))))
+                                  (list "blank_lines_normalized" t))
+                                (when inactive-feature
+                                  (list "inactive_form" inactive-feature))))))))
       (content-unrepairable-error (e)
         (tool-error id (sanitize-for-json (princ-to-string e))
                     :protocol-version (protocol-version state)))

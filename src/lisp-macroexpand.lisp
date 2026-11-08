@@ -337,9 +337,16 @@ a custom readtable forces the standard CL reader, which does not record ~
 sub-form positions. Drop one of the two arguments.")))
   (let ((designator (%parse-readtable-designator readtable)))
     (multiple-value-bind (absolute relative original nodes target snippet
-                          form-type-string file-package-name)
+                          form-type-string file-package-name inactive-p)
         (%locate-target-form path form-type form-name designator)
       (declare (ignore relative))
+      ;; A form under a feature expression false here (issue #321) is not
+      ;; read by the server, and its macros may well be another
+      ;; implementation's: there is nothing to expand it against.
+      (when inactive-p
+        (error "~A ~A in ~A is under a feature expression false in this server, so it is ~
+                not read here and cannot be expanded."
+               form-type form-name path))
       ;; FILE-PACKAGE-NAME is the file's FIRST in-package, which is the
       ;; right package only for a file without a prologue.  It stays as the
       ;; fallback for a target that precedes every in-package form -- the

@@ -11,6 +11,9 @@
                           #:cst-node-value
                           #:cst-node-start
                           #:cst-node-end)
+  (:import-from #:cl-mcp/src/cst
+                #:*standard-readtable*
+                #:%feature-expression-problem)
   (:import-from #:cl-mcp/src/fs
                 #:fs-write-file
                 #:with-file-lock)
@@ -51,6 +54,7 @@
                 #:%whitespace-char-p
                 #:%normalize-paths
                 #:%locate-target-form
+                #:%feature-prefix-end
                 #:file-unparseable-error)
   (:documentation "Scoped text replacement within a matched top-level Lisp form.")
   (:export #:lisp-patch-form))
@@ -273,6 +277,52 @@ deep, which is deeper than cl-mcp will read"
                                         reader-text)
                                 reader-text)))))))))
 
+(defun %inactive-form-text (modified-form)
+  "Return MODIFIED-FORM, the patched text of a form under a feature expression
+false here (issue #321), past its expressions, for the reader to check -- read
+whole, the expressions would skip it again.  The expressions themselves are
+checked first, as lisp-edit-form checks a replace's own: each must read and
+keep the feature expression grammar (%FEATURE-EXPRESSION-PROBLEM), and a form
+must follow them.  Signals PATCH-OPERATION-ERROR otherwise, so a patch never
+writes a prefix that would make the file unreadable."
+  (multiple-value-bind (form-start spans) (%feature-prefix-end modified-form 0)
+    (when (and (null spans)
+               (< 1 (length modified-form))
+               (char= (char modified-form 0) #\#)
+               (member (char modified-form 1) '(#\+ #\-)))
+      (error 'patch-operation-error
+             :reason (format nil "the patched feature expression cannot be read. No ~
+                                  changes were written to disk.")))
+    (dolist (span spans)
+      (let* ((package (make-package (symbol-name (gensym "CL-MCP-PATCH-FEATURE-")) :use '()))
+             (expression
+               (unwind-protect
+                    (handler-case
+                        (let ((*package* package)
+                              (*readtable* *standard-readtable*)
+                              (*read-eval* nil)
+                              (*read-suppress* nil))
+                          (read-from-string modified-form t nil
+                                            :start (+ (car span) 2) :end (cdr span)))
+                      (error (e)
+                        (error 'patch-operation-error
+                               :reason (format nil "the patched feature expression ~A cannot ~
+                                                    be read: ~A. No changes were written to disk."
+                                               (subseq modified-form (car span) (cdr span))
+                                               (sanitize-condition-text e)))))
+                 (delete-package package)))
+             (problem (%feature-expression-problem expression)))
+        (when problem
+          (error 'patch-operation-error
+                 :reason (format nil "the patched feature expression ~A is malformed: ~A. ~
+                                      No changes were written to disk."
+                                 (subseq modified-form (car span) (cdr span)) problem)))))
+    (when (>= form-start (length modified-form))
+      (error 'patch-operation-error
+             :reason (format nil "the patched text has feature expressions and no form ~
+                                  after them. No changes were written to disk.")))
+    (subseq modified-form form-start)))
+
 (defun lisp-patch-form (&key file-path form-type form-name old-text new-text
                               dry-run readtable)
   "Scoped text replacement within a matched top-level Lisp form.
@@ -315,7 +365,7 @@ silently accepts as part of a symbol), so the caller can check it."
            :message "old_text must not be empty"))
   (with-file-lock ((%normalize-paths file-path))
     (multiple-value-bind (abs rel original nodes target target-snippet _
-                          file-package-name)
+                          file-package-name inactive-p)
         (%locate-target-form file-path form-type form-name readtable)
       (declare (ignore _))
       (multiple-value-bind (updated modified-form form-text match-pos)
@@ -345,7 +395,11 @@ silently accepts as part of a symbol), so the caller can check it."
                                               match-pos old-text new-text)))))
           (when would-change
             (%validate-form-parseable
-             modified-form
+             ;; A form under a feature expression false here (issue #321) is
+             ;; read past its expressions, which would skip it again.
+             (if inactive-p
+                 (%inactive-form-text modified-form)
+                 modified-form)
              :readtable-designator readtable-designator
              :package-name file-package-name
              :source-path abs
@@ -409,7 +463,11 @@ e.g., \"print-object ((obj my-class) stream)\" (a method whose name is unique ma
 by name alone). A name[N] suffix, 0-based, picks the Nth of several matches. For defstruct with
 options \"(defstruct (name opts...) ...)\", use just the bare struct name.
 Reader macro prefixes #: and : are stripped automatically, so
-\"#:my-pkg\" and \"my-pkg\" both match \"(defpackage #:my-pkg ...).\"")
+\"#:my-pkg\" and \"my-pkg\" both match \"(defpackage #:my-pkg ...).\"
+A form under a #+/#- expression false in this server (another implementation's
+branch) is named by its expressions in front of the name, as the file writes them:
+\"#+ecl impl\". A plain name means the form this server reads, and reaches a
+skipped one only when no read form has that name.")
          (old_text :type :string :required t
                    :description "Text to find within the matched form.
 Performs exact raw text matching (whitespace-sensitive). Must occur exactly once in the form.")

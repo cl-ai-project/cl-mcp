@@ -587,7 +587,11 @@ Inputs:
   its signature (`49: #+sbcl (defun float-epsilon () ...)`), and one the reader skipped
   because its expression is false in the server -- the other implementation's twin -- is
   listed by the start of its text and `[not read: its feature expression is false in this
-  server]` (never expanded; read it with `collapsed=false`), whether the file is read by
+  server, whose *features* lack :ecl]` -- the features named, each said to be had or lacked
+  by the server process's `*features*`, which is what the reader judged by (not the session
+  worker's, and not features the file or its system pushes when loaded) -- (never expanded;
+  read it with `collapsed=false`; edit it with `form_name` `"#+ecl name"`), whether the file
+  is read by
   Eclector or by the CL reader (with `readtable`, or after an `in-readtable`), as long as its
   readtable reads `#+` and `#-` the standard way.
 - `name_pattern` (string, optional): CL-PPCRE regex; matching definition names are
@@ -751,7 +755,7 @@ Input:
   the name itself still matches as written (`def:thing`, or `|def:thing|`, for `(|DEF:THING| ...)`), and
   when those two readings name different forms the call is refused as ambiguous. When nothing
   matches, the error lists the file's forms of that type (or all its top-level forms when it has none)
-- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`. A leading `#:` or `:` is stripped (`"#:my-pkg"` matches `(defpackage #:my-pkg ...)`), and a `defstruct` with options, `(defstruct (name opts...) ...)`, is matched by its bare name
+- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`. A leading `#:` or `:` is stripped (`"#:my-pkg"` matches `(defpackage #:my-pkg ...)`), and a `defstruct` with options, `(defstruct (name opts...) ...)`, is matched by its bare name. A form under a `#+`/`#-` expression false in the server is named with its expressions in front, `"#+ecl impl"` (see `content` below)
 - `operation` (string, required): one of `replace`, `insert_before`, `insert_after`, `delete`
 - `content` (string): the form text to insert or replace with; required for every operation but
   `delete`, where it is ignored. `replace` takes exactly one top-level form (several are an error
@@ -767,15 +771,23 @@ Input:
   whether or not that condition holds in the server, so `#-sbcl (defun ...)` on SBCL is
   accepted, while an expression with no form after it, or one that breaks the feature
   expression grammar (`#+(not a b)`, `#+(bogus a)`), is refused and nothing is written.
-  A form under an expression false in the server (`#+ecl` on SBCL) is never read, so
-  `form_type`/`form_name` reach only its active twin. A `replace` whose content opens with
-  expressions false in the server is refused, and nothing is written, when the file holds a
+  A form under an expression false in the server (`#+ecl` on SBCL) is never read. A plain
+  `form_name` reaches its active twin; write the skipped form's expressions in front of its
+  name, as the file writes them (`"#+ecl impl"`; compared case-insensitively, so copy the
+  spelling a "not found" listing shows), to edit that form instead -- `lisp-patch-form` and
+  `lisp-macroexpand` take the same name (the latter refuses to expand such a form), and a
+  plain name reaches a skipped form when no form read here has that name. Its expressions are
+  kept by a `replace` as for any form, and the summary says the server does not read the form
+  (`inactive_form` in the result). A `replace` of a form the server reads whose content opens
+  with expressions false in the server is refused, and nothing is written, when the file holds a
   skipped form that is the same definition (head and whole signature, a method's
   specializers included) as the form replaced or as the content, however its expression is
   spelled (`#-sbcl` and `#+(not sbcl)` alike), or one that cannot be read but starts with
   the same head and name: applying it would take away the definition the server uses and
-  leave two forms under the false condition (#316). The refusal names both lines. Such forms
-  cannot be addressed yet (#321). `insert_before`/`insert_after` read their content in the
+  leave two forms under the false condition (#316). The refusal names both lines and the
+  `form_name` that reaches the skipped form. A "not found" listing shows skipped forms with
+  their expressions in front (`#+ecl (defun impl)`). `insert_before`/`insert_after` read their
+  content in the
   server: content that is only a form under an expression false there reads as empty and is
   refused, and so is one that directly follows content's single readable form (as trailing
   text); next to two or more forms, or after a comment, it is written as it is, uncounted.
@@ -983,7 +995,7 @@ Input:
   the name itself still matches as written (`def:thing`, or `|def:thing|`, for `(|DEF:THING| ...)`), and
   when those two readings name different forms the call is refused as ambiguous. When nothing
   matches, the error lists the file's forms of that type (or all its top-level forms when it has none)
-- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`
+- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`; `"#+ecl impl"` names a form under a feature expression false in the server, as in `lisp-edit-form`
 - `old_text` (string, required): exact text to find within the matched form (whitespace-sensitive, must match exactly once)
 - `new_text` (string, required): replacement text
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
