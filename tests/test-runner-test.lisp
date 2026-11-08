@@ -710,7 +710,11 @@
            ;; race the timestamp check on CI runners — both have caused
            ;; spurious cross-suite failures.  This formulation still
            ;; exercises %rove-purge-ghost-suites, which is what the test name
-           ;; asserts.
+           ;; asserts.  The system is cleared and its .asd read again first,
+           ;; as run-tests does: the purge clears what the load is about to
+           ;; load again, and a loaded system it was not told to reload is not.
+           (asdf/system-registry:clear-system system-name)
+           (asdf/find-system:load-asd asd-path)
            (cl-mcp/src/test-runner-core::%rove-purge-ghost-suites system-name)
            (let ((fasl (compile-file src-path :verbose nil :print nil)))
              (when fasl (load fasl :verbose nil :print nil)))
@@ -730,56 +734,131 @@
       (ignore-errors
        (uiop/filesystem:delete-directory-tree tmp-dir :validate t))))))
 
-(deftest rove-purge-ghost-suites-resolves-names-from-the-registry-only
-  (testing "%rove-purge-ghost-suites must not load a dependency's .asd"
-    ;; Resolving dependency names with ASDF:FIND-SYSTEM loads the .asd of any
-    ;; name that is merely discoverable, which both builds systems as a side
-    ;; effect (:defsystem-depends-on) and, outside an ASDF session, re-runs the
-    ;; source-registry search on every call -- 103 seconds on a project whose
-    ;; graph reaches 905 systems.  Pin the registry-only lookup by leaving a
-    ;; discoverable-but-unregistered dependency in the graph and asserting the
-    ;; purge never registers it.
-    (let* ((tmp-dir
-             (uiop:ensure-directory-pathname
-              (uiop:merge-pathnames*
-               (format nil "cl-mcp-purge-registry-~A-~A/"
-                       (get-universal-time) (random 100000))
-               (uiop:temporary-directory))))
-           (root-name "cl-mcp-purge-registry-root")
-           (leaf-name "cl-mcp-purge-registry-leaf")
-           (root-asd (uiop:merge-pathnames*
-                      (format nil "~A.asd" root-name) tmp-dir))
-           (leaf-asd (uiop:merge-pathnames*
-                      (format nil "~A.asd" leaf-name) tmp-dir))
-           (asdf:*central-registry* (cons tmp-dir asdf:*central-registry*)))
-      (unwind-protect
-           (progn
-             (ensure-directories-exist tmp-dir)
-             (with-open-file (s root-asd :direction :output :if-exists :supersede)
-               (format s "(asdf:defsystem ~S~%  :depends-on (~S))~%"
-                       root-name leaf-name))
-             (with-open-file (s leaf-asd :direction :output :if-exists :supersede)
-               (format s "(asdf:defsystem ~S)~%" leaf-name))
-             (asdf/find-system:load-asd root-asd)
-             (ok (asdf:registered-system root-name)
-                 "root system is registered before the purge")
-             (ok (null (asdf:registered-system leaf-name))
-                 "leaf system is discoverable but unregistered before the purge")
-             ;; Guard against a false pass: the purge returns immediately when
-             ;; Rove's registry is empty, which would satisfy the assertion
-             ;; below without the walk ever running.
-             (ok (plusp (hash-table-count
-                         (symbol-value
-                          (find-symbol "*PACKAGE-SUITES*"
-                                       :rove/core/suite/package))))
-                 "Rove holds at least one suite, so the purge really walks")
-             (cl-mcp/src/test-runner-core::%rove-purge-ghost-suites root-name)
-             (ok (null (asdf:registered-system leaf-name))
-                 "purge must not load a dependency's .asd to resolve its name"))
-        (ignore-errors (asdf/system-registry:clear-system root-name))
-        (ignore-errors (asdf/system-registry:clear-system leaf-name))
-        (ignore-errors
-         (uiop:delete-directory-tree tmp-dir :validate t))))))
+(defun %call-with-sibling-rove-fixture (thunk)
+  "Write two Rove systems sharing one test file to a fresh directory on ASDF's
+central registry, each in its own .asd: the package-inferred primary
+clmcp-sib, which reaches clmcp-sib/tests/a, and clmcp-sib-other, a classic
+system with its own file other.lisp that depends on clmcp-sib/tests/a too.
+tests/a.lisp holds the deftests KEPT and DOOMED.  Call THUNK with the directory
+and the pathname of tests/a.lisp, then forget the systems, their packages and
+suites, and the directory."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (uiop:merge-pathnames*
+                (format nil "cl-mcp-rove-sibling-~A-~A/" (get-universal-time)
+                        (random 100000))
+                (uiop:temporary-directory))))
+         (shared (uiop:merge-pathnames* "tests/a.lisp" dir))
+         (systems '("clmcp-sib-other" "clmcp-sib/tests/a" "clmcp-sib"))
+         (packages '("CLMCP-SIB/TESTS/A" "CLMCP-SIB-OTHER")))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist shared)
+           (%write-fixture-file
+            dir "clmcp-sib.asd"
+            "(asdf:defsystem \"clmcp-sib\" :class :package-inferred-system
+  :depends-on (\"rove\" \"clmcp-sib/tests/a\"))
+")
+           (%write-fixture-file
+            dir "clmcp-sib-other.asd"
+            "(asdf:defsystem \"clmcp-sib-other\"
+  :depends-on (\"rove\" \"clmcp-sib/tests/a\")
+  :components ((:file \"other\")))
+")
+           (%write-fixture-file
+            dir "tests/a.lisp"
+            "(defpackage #:clmcp-sib/tests/a (:use #:cl #:rove))
+(in-package #:clmcp-sib/tests/a)
+(deftest kept (ok t))
+(deftest doomed (ok t))
+")
+           (%write-fixture-file
+            dir "other.lisp"
+            "(defpackage #:clmcp-sib-other (:use #:cl #:rove))
+(in-package #:clmcp-sib-other)
+(deftest its-own (ok t))
+")
+           ;; Ten seconds in the past: a file written in the second its FASL
+           ;; is compiled has the FASL deleted by run-tests, and the file is
+           ;; then loaded again whatever the purge decided.
+           (let ((past (- (get-universal-time) 10 (encode-universal-time 0 0 0 1 1 1970 0))))
+             (dolist (name '("clmcp-sib.asd" "clmcp-sib-other.asd" "tests/a.lisp" "other.lisp"))
+               (uiop:symbol-call :sb-posix :utimes
+                                 (namestring (uiop:merge-pathnames* name dir)) past past)))
+           (let ((asdf:*central-registry* (cons dir asdf:*central-registry*)))
+             (funcall thunk dir shared)))
+      (dolist (name systems)
+        (ignore-errors (asdf:clear-system name)))
+      (let ((suites (uiop:find-symbol* '#:*package-suites* :rove/core/suite/package nil)))
+        (dolist (name packages)
+          (let ((package (find-package name)))
+            (when package
+              (when (and suites (boundp suites))
+                (remhash package (symbol-value suites)))
+              (ignore-errors (delete-package package))))))
+      (ignore-errors (uiop:delete-directory-tree dir :validate t)))))
+
+(defun %rove-suite-test-names (package-name)
+  "Return the names of the tests Rove's suite for PACKAGE-NAME holds, as
+strings, or :NO-SUITE when Rove holds no suite for it."
+  (let* ((suites (symbol-value (uiop:find-symbol* '#:*package-suites*
+                                                  :rove/core/suite/package)))
+         (package (find-package package-name))
+         (suite (and package (gethash package suites))))
+    (if suite
+        (mapcar #'symbol-name
+                (funcall (uiop:find-symbol* '#:suite-tests :rove/core/suite/package)
+                         suite))
+        :no-suite)))
+
+(deftest rove-reload-keeps-the-suite-of-a-shared-file-it-does-not-reload
+  ;; Issue #328: the purge cleared the suite of every package the test system
+  ;; reached, and the load reloaded only the systems run-tests cleared.  A test
+  ;; file shared with another system, its FASL current, lost its suite to a run
+  ;; of that other system, so the next run of its own system ran none of its
+  ;; tests.  %ensure-system-loaded is run rather than run-tests: that would
+  ;; nest a rove:run inside the Rove run of this suite.
+  (%call-with-sibling-rove-fixture
+   (lambda (dir shared)
+     (declare (ignore dir shared))
+     (asdf:load-system "clmcp-sib")
+     (ok (equal '("KEPT" "DOOMED") (%rove-suite-test-names "CLMCP-SIB/TESTS/A"))
+         "the shared file's suite holds both of its tests")
+     ;; Outside any ASDF session, as run-tests runs in a worker (see below).
+     (let ((asdf/session:*asdf-session* nil))
+       (cl-mcp/src/test-runner-core::%ensure-system-loaded "clmcp-sib-other"))
+     (ok (equal '("KEPT" "DOOMED") (%rove-suite-test-names "CLMCP-SIB/TESTS/A"))
+         "a run of the other system leaves the suite of a file it does not reload")
+     (ok (equal '("ITS-OWN") (%rove-suite-test-names "CLMCP-SIB-OTHER"))
+         "and the system it ran has its own suite"))))
+
+(deftest rove-reload-forgets-a-test-deleted-from-a-dependency-it-reloads
+  ;; The other half of #328's rule: a dependency whose file changed is loaded
+  ;; again by the run, so its suite is cleared and a deftest deleted from that
+  ;; file does not stay behind.  The file's FASL is deleted rather than waited
+  ;; out, so the change does not hang on ASDF's one-second timestamps.
+  (%call-with-sibling-rove-fixture
+   (lambda (dir shared)
+     (declare (ignore dir))
+     (asdf:load-system "clmcp-sib")
+     (let ((fasls (asdf:output-files
+                   'asdf:compile-op
+                   (first (asdf:component-children
+                           (asdf:find-system "clmcp-sib/tests/a"))))))
+       (%write-fixture-file
+        (uiop:pathname-directory-pathname shared) "a.lisp"
+        "(defpackage #:clmcp-sib/tests/a (:use #:cl #:rove))
+(in-package #:clmcp-sib/tests/a)
+(deftest kept (ok t))
+")
+       (mapc #'uiop:delete-file-if-exists fasls))
+     ;; Outside any ASDF session, as run-tests runs in a worker.  Under
+     ;; rove cl-mcp.asd this suite runs inside test-op's session, which keeps
+     ;; the file stamps it read before the edit, so neither the plan nor the
+     ;; load would see the file change.
+     (let ((asdf/session:*asdf-session* nil))
+       (cl-mcp/src/test-runner-core::%ensure-system-loaded "clmcp-sib-other"))
+     (ok (equal '("KEPT") (%rove-suite-test-names "CLMCP-SIB/TESTS/A"))
+         "the test deleted from the reloaded dependency is gone from its suite"))))
 
 (deftest extract-defpackage-names-does-not-intern-into-cl-user
   (testing "%extract-defpackage-names-from-file leaves CL-USER untouched"

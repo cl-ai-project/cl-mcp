@@ -978,94 +978,76 @@ Never FIND-SYSTEM; see %TRANSITIVE-DEPENDENCY-NAMES."
   (or (ignore-errors (asdf:registered-system name))
       (system-left-by-root-change name)))
 
+(defun %planned-loads (system-name)
+  "Return (values SYSTEMS FILES): the names of the systems and the pathnames of
+the Lisp source files that ASDF:LOAD-SYSTEM of SYSTEM-NAME would load now, read
+from the plan ASDF makes for it.  A system or file whose load ASDF counts as
+done and current is in neither list.  Signals what FIND-SYSTEM or MAKE-PLAN
+signals, a missing dependency for one."
+  (let ((systems '())
+        (files '()))
+    (asdf/session:with-asdf-session ()
+      (let ((plan (asdf:make-plan nil 'asdf:load-op (asdf:find-system system-name))))
+        (dolist (action (asdf/plan:plan-actions plan))
+          (destructuring-bind (operation . component) action
+            (when (typep operation 'asdf:load-op)
+              (typecase component
+                (asdf:system
+                 (push (asdf:component-name component) systems))
+                (asdf:cl-source-file
+                 (let ((path (asdf:component-pathname component)))
+                   (when path (push path files))))))))))
+    (values (nreverse systems) (nreverse files))))
+
 (defun %rove-purge-ghost-suites (system-name)
-  "Remove Rove suite entries for every test package associated with
-SYSTEM-NAME. This prevents `ghost deftests' — tests that were deleted
-from source on disk but are still remembered by Rove's in-image
-registry and therefore keep running (and possibly failing) after a
-reload.
+  "Remove the Rove suites of the packages a load of SYSTEM-NAME is about to
+load again, so a deftest deleted from its file since the last load does not
+stay behind as a `ghost test' and keep running (and failing).
 
-Rove stores its per-package suite in a hash-table keyed by package
-object: ROVE/CORE/SUITE/PACKAGE::*PACKAGE-SUITES*. Clearing the entry
-for a package makes Rove rebuild the suite from scratch on the next
-deftest load, so forms that no longer exist in source disappear.
+Rove keeps one suite per package in ROVE/CORE/SUITE/PACKAGE::*PACKAGE-SUITES*,
+keyed by the package object, and adds every deftest it loads to it; it never
+drops one.  Clearing the entry makes the next load of the package's files build
+the suite again from what they hold now.
 
-Two discovery strategies are combined to cover both
-package-inferred-system and classic ASDF layouts:
+Which files load again is ASDF's decision, so it is asked rather than guessed:
+the plan ASDF:LOAD-SYSTEM would follow for SYSTEM-NAME (%PLANNED-LOADS) names
+every system and source file it will load -- the ones RUN-TESTS just cleared,
+the ones a re-read .asd redefined, and any dependency whose source changed.
+Cleared are the packages named after those systems (a package-inferred file's
+package is its system's name) and those the files define with DEFPACKAGE.  A
+dependency the load leaves alone keeps its suite: clearing it would empty the
+suite of a test file another system shares, and nothing would refill it, so a
+later run of that file's own system ran none of its tests and called it a pass
+(issue #328).  A package whose tests sit in several files keeps none of them
+when a reloaded file defines it; only the reloaded files' tests come back.
 
-  1. **Dependency names**: for package-inferred systems, every
-     sub-system name like `foo/tests/bar-test' is also the package
-     name it defines. Walk SYSTEM-NAME's transitive dependency list
-     and clear packages matching each string name.
-  2. **Component source files**: recursively walk the ASDF component
-     tree under SYSTEM-NAME, read each source file, and clear
-     packages named in its `(defpackage ...)' forms. Catches classic
-     defsystems where the package name does not match any ASDF
-     sub-system name.
-
-Names resolve through ASDF:REGISTERED-SYSTEM, never FIND-SYSTEM -- the
-rule %TRANSITIVE-DEPENDENCY-NAMES follows, for the same two reasons.
-FIND-SYSTEM resolves a name by *loading the .asd*, which may carry
-:DEFSYSTEM-DEPENDS-ON and build whole systems as a side effect, here in
-the middle of RUN-TESTS.  It is also ruinous for latency: outside an ASDF
-session every call re-runs the source-registry search, measured at 114 ms,
-and a large package-inferred project reaches 905 systems -- 103 seconds of
-purging before a single test runs.  REGISTERED-SYSTEM makes the same
-traversal cost 0.3 seconds and loses nothing, because a system that is not
-registered has never been loaded -- its packages do not exist, so Rove holds
-no suite for them and there is no ghost to purge -- unless a root change
-unregistered it, and that system is still known (%LOADED-SYSTEM-BY-NAME).
-
-Nothing is walked when Rove's registry is empty, and the source scan
-interns into one throwaway package, deleted afterwards, rather than into
-CL-USER."
+Call it after the clearing and the .asd re-read RUN-TESTS does, and before the
+load.  Making the plan finds every system the load reaches, loading a .asd not
+yet read exactly as the load right after it would, inside one ASDF session so
+the source registry is searched once.  Nothing is planned when Rove's registry
+is empty, and nothing is cleared when the plan cannot be made: the load that
+follows fails the same way.  The DEFPACKAGE scan interns into one throwaway
+package, deleted afterwards, rather than into CL-USER."
   (let ((pkgs-var (find-symbol "*PACKAGE-SUITES*" :rove/core/suite/package)))
     (when (and pkgs-var (boundp pkgs-var)
                (hash-table-p (symbol-value pkgs-var))
                (plusp (hash-table-count (symbol-value pkgs-var))))
-      (let ((suites (symbol-value pkgs-var))
-            (visited-systems (make-hash-table :test #'equal))
-            (visited-files (make-hash-table :test #'equal))
-            (scan-package (make-package (gensym "CL-MCP-DEFPACKAGE-SCAN")
-                                        :use '(:cl))))
-        (unwind-protect
-            (labels ((clear-pkg (pkg-name)
-                       (let ((pkg (and (stringp pkg-name) (find-package pkg-name))))
-                         (when pkg (remhash pkg suites))))
-                     (walk-components (component)
-                       (when component
-                         (cond
-                           ((typep component 'asdf:cl-source-file)
-                            (let ((path (ignore-errors
-                                          (asdf:component-pathname component))))
-                              (when (and path
-                                         (not (gethash (namestring path)
-                                                       visited-files))
-                                         (probe-file path))
-                                (setf (gethash (namestring path) visited-files) t)
-                                (dolist (pkg-name
-                                         (%extract-defpackage-names-from-file
-                                          path scan-package))
-                                  (clear-pkg pkg-name)))))
-                           ((ignore-errors (asdf:component-children component))
-                            (dolist (child (asdf:component-children component))
-                              (walk-components child))))))
-                     (walk-system (name)
-                       (when (and (stringp name)
-                                  (not (gethash name visited-systems)))
-                         (setf (gethash name visited-systems) t)
-                         (clear-pkg name)
-                         (let ((sys (%loaded-system-by-name name)))
-                           (when sys
-                             (walk-components sys)
-                             (dolist (dep (ignore-errors
-                                            (asdf:system-depends-on sys)))
-                               (cond
-                                 ((stringp dep) (walk-system dep))
-                                 ((and (consp dep) (stringp (second dep)))
-                                  (walk-system (second dep))))))))))
-              (walk-system system-name))
-          (ignore-errors (delete-package scan-package)))))))
+      (multiple-value-bind (systems files)
+          (ignore-errors (%planned-loads system-name))
+        (let ((suites (symbol-value pkgs-var))
+              (scan-package (make-package (gensym "CL-MCP-DEFPACKAGE-SCAN")
+                                          :use '(:cl))))
+          (flet ((clear-pkg (pkg-name)
+                   (let ((pkg (and (stringp pkg-name) (find-package pkg-name))))
+                     (when pkg (remhash pkg suites)))))
+            (unwind-protect
+                 (progn
+                   (mapc #'clear-pkg systems)
+                   (dolist (file files)
+                     (when (probe-file file)
+                       (mapc #'clear-pkg
+                             (%extract-defpackage-names-from-file file scan-package)))))
+              (ignore-errors (delete-package scan-package)))))))))
 
 (defun %ensure-rove-test-name-method ()
   "Add a TEST-NAME method for FAILED-ASSERTION if Rove is loaded and the
@@ -1182,11 +1164,8 @@ COMPILE-FILE-ERROR."
                     ;; %find-rove-test-sub-systems already wraps its
                     ;; ASDF lookups in IGNORE-ERRORS internally.
                     (sub-systems (%find-rove-test-sub-systems system-name)))
-                ;; Purge Rove suite registry BEFORE clearing the system,
-                ;; so any deftest forms deleted from source since the
-                ;; previous load do not linger as ghost tests.
-                (ignore-errors (%rove-purge-ghost-suites system-name))
-                ;; FiveAM's, for the files the clearing below reloads.
+                ;; FiveAM's, for the files the clearing below reloads, read
+                ;; while those systems are still registered.
                 (ignore-errors
                   (%fiveam-purge-ghost-tests (cons system-name sub-systems)))
                 (asdf:clear-system system-name)
@@ -1199,7 +1178,11 @@ COMPILE-FILE-ERROR."
                 ;; Always re-read the .asd so edits to :depends-on
                 ;; and other system metadata are picked up.
                 (when asd-src
-                  (ignore-errors (asdf:load-asd asd-src)))))
+                  (ignore-errors (asdf:load-asd asd-src)))
+                ;; Rove's, for exactly the packages the load below loads
+                ;; again, which only ASDF's plan, made after the clearing and
+                ;; the re-read, can tell (#328).
+                (ignore-errors (%rove-purge-ghost-suites system-name))))
             (setf loading t)
             (let ((*error-output* captured-stderr))
               (call-with-own-compilation-unit
