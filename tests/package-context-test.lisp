@@ -154,6 +154,106 @@ The source form is left out: it holds uninterned symbols, fresh on every read."
          (ok (discover-package-spec "CL-MCP-TEST-MISSING-PKG" :source-path user-b)
              "without the cache the walk sees the added definition"))))))
 
+(defun %set-write-date (path universal-time)
+  "Set PATH's access and modification times to UNIVERSAL-TIME."
+  (let ((unix (- universal-time (encode-universal-time 0 0 0 1 1 1970 0))))
+    (uiop:symbol-call :sb-posix :utimes (namestring path) unix unix)))
+
+(defun %counting-header-reads (thunk)
+  "Call THUNK and return (values ITS-VALUE READS), READS being how many times
+it read a file's package definitions (%PACKAGE-SPECS-IN-FILE)."
+  (let ((reads 0)
+        (name 'cl-mcp/src/package-context::%package-specs-in-file))
+    (sb-int:encapsulate name 'count-header-reads
+                        (lambda (function &rest arguments)
+                          (incf reads)
+                          (apply function arguments)))
+    (unwind-protect (values (funcall thunk) reads)
+      (sb-int:unencapsulate name 'count-header-reads))))
+
+(deftest discover-package-spec-reads-only-files-that-changed
+  ;; Issue #323: every lookup for a package defined in another file read the
+  ;; header forms of the whole project, 2.5 to 5.4 seconds per lisp-read-file
+  ;; on a real tree.  A file is now read again only when its write date moved,
+  ;; or when that date is not yet in the past -- a second edit within the same
+  ;; second would not move it.
+  (call-with-temp-project
+   (lambda (root)
+     (let ((past (- (get-universal-time) 10))
+           (defining (write-source root "src/package.lisp"
+                                   "(defpackage #:cl-mcp-test-reread-pkg (:use #:cl))"))
+           (user (write-source root "src/a.lisp"
+                               "(in-package #:cl-mcp-test-reread-pkg)"))
+           (other (write-source root "src/other.lisp" "(defun other () 1)")))
+       ;; The directories too: a listing is likewise trusted only once its
+       ;; directory's date is in the past, and moves when an entry is added.
+       (dolist (path (list defining user other (merge-pathnames "src/" root) root))
+         (%set-write-date path past))
+       (flet ((lookup (name)
+                (%counting-header-reads
+                 (lambda () (discover-package-spec name :source-path user)))))
+         (multiple-value-bind (spec reads) (lookup "CL-MCP-TEST-MISSING-PKG")
+           (ok (null spec) "a package defined nowhere is not found")
+           (ok (= 3 reads) "the first walk reads the looked-up file and the other two"))
+         (multiple-value-bind (spec reads) (lookup "CL-MCP-TEST-MISSING-PKG")
+           (ok (null spec) "nor the second time")
+           (ok (= 1 reads) "the second walk reads only the looked-up file itself"))
+         (multiple-value-bind (spec reads) (lookup "CL-MCP-TEST-REREAD-PKG")
+           (ok (and spec (null (package-spec-nicknames spec))) "the defining file is found")
+           (ok (= 1 reads) "from what the first walk read"))
+         (write-source root "src/package.lisp"
+                       "(defpackage #:cl-mcp-test-reread-pkg (:use #:cl)
+  (:nicknames #:cl-mcp-test-reread-nick))")
+         (%set-write-date defining (- (get-universal-time) 5))
+         (multiple-value-bind (spec reads) (lookup "CL-MCP-TEST-REREAD-NICK")
+           (ok (and spec (equal "CL-MCP-TEST-REREAD-PKG" (package-spec-name spec)))
+               "an edited file is read again: its new nickname is found")
+           (ok (= 2 reads) "it and the looked-up file are all that is read"))
+         ;; A write date not before the second of the read: the file could be
+         ;; written again without the date moving, so it is never trusted.
+         (%set-write-date defining (+ (get-universal-time) 5))
+         (multiple-value-bind (spec reads) (lookup "CL-MCP-TEST-REREAD-PKG")
+           (declare (ignore spec))
+           (ok (= 2 reads) "a file dated in the second of its read is read"))
+         (multiple-value-bind (spec reads) (lookup "CL-MCP-TEST-REREAD-PKG")
+           (declare (ignore spec))
+           (ok (= 2 reads) "and read again on the next lookup"))
+         (write-source root "src/late.lisp" "(defpackage #:cl-mcp-test-missing-pkg)")
+         (ok (lookup "CL-MCP-TEST-MISSING-PKG") "a file added since is read and found")
+         (delete-file defining)
+         (ok (null (lookup "CL-MCP-TEST-REREAD-PKG"))
+             "a defining file deleted since is no longer found"))))))
+
+(deftest discover-package-spec-lists-only-directories-that-changed
+  ;; The walk's other cost: listing every directory of the tree, which on a
+  ;; thousand files took longer than the cached reads.
+  (call-with-temp-project
+   (lambda (root)
+     (let ((past (- (get-universal-time) 10))
+           (src (merge-pathnames "src/" root))
+           (user (write-source root "src/a.lisp" "(in-package #:cl-mcp-test-listed-pkg)")))
+       (write-source root "src/deep/b.lisp" "(defun b () 2)")
+       (dolist (path (list user (merge-pathnames "deep/b.lisp" src)
+                           (merge-pathnames "deep/" src) src root))
+         (%set-write-date path past))
+       (flet ((listings ()
+                (let ((count 0))
+                  (sb-int:encapsulate 'uiop:directory-files 'count-listings
+                                      (lambda (function &rest arguments)
+                                        (incf count)
+                                        (apply function arguments)))
+                  (unwind-protect
+                       (discover-package-spec "CL-MCP-TEST-LISTED-PKG" :source-path user)
+                    (sb-int:unencapsulate 'uiop:directory-files 'count-listings))
+                  count)))
+         (ok (= 3 (listings)) "the first walk lists the root, src/ and src/deep/")
+         (ok (= 0 (listings)) "the second lists none of them")
+         (write-source root "src/deep/c.lisp" "(defpackage #:cl-mcp-test-listed-pkg)")
+         (%set-write-date (merge-pathnames "deep/" src) (- (get-universal-time) 5))
+         (ok (= 1 (listings)) "a directory an entry was added to is listed again, alone")
+         (ok (discover-package-spec "CL-MCP-TEST-LISTED-PKG" :source-path user)
+             "and the file added there is found"))))))
+
 (deftest call-with-package-context-existing-package
  (testing "binds *package* when target package already exists"
   (let ((seen-package nil))

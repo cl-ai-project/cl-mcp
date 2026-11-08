@@ -19,6 +19,9 @@
                 #:lisp-too-deep-p)
   (:import-from #:cl-mcp/src/utils/printing
                 #:circular-p)
+  (:import-from #:bordeaux-threads
+                #:make-lock
+                #:with-lock-held)
   (:import-from #:uiop
                 #:directory-files
                 #:ensure-directory-pathname
@@ -72,8 +75,31 @@ around its file loop.  Entries are keyed on the package name and the walk's
 root directory, so one table never answers for a different root, and the
 looked-up file's own definitions are still read on every call.
 
-The default NIL disables memoizing, so lisp-read-file, lisp-edit-form and the
-other callers see a package definition edited between two calls.")
+The default NIL disables memoizing the walk, so lisp-read-file, lisp-edit-form
+and the other callers see a package definition added, edited or deleted between
+two calls.  The walk still lists a directory, and reads a file, only when it
+changed since it was last listed or read (%DIRECTORY-LISTING,
+%CACHED-PACKAGE-SPECS-IN-FILE), so an unchanged tree costs a write date per
+directory and per file.")
+
+(defvar *package-specs-by-file* (make-hash-table :test #'equal)
+  "The package definitions found in each source file read so far, for
+%CACHED-PACKAGE-SPECS-IN-FILE: namestring -> (WRITE-DATE READ-AT SPECS).
+Shared by every session of the server, guarded by *PACKAGE-SPECS-BY-FILE-LOCK*.")
+
+(defvar *directory-listings* (make-hash-table :test #'equal)
+  "The source files and subdirectories of each directory the walk listed, for
+%DIRECTORY-LISTING: namestring -> (WRITE-DATE READ-AT FILES SUBDIRECTORIES).
+Guarded by *PACKAGE-SPECS-BY-FILE-LOCK*.")
+
+(defvar *package-specs-by-file-lock* (make-lock "cl-mcp-package-specs-by-file")
+  "Guards *PACKAGE-SPECS-BY-FILE* and *DIRECTORY-LISTINGS*.")
+
+(defparameter *package-specs-by-file-limit* 50000
+  "Entries *PACKAGE-SPECS-BY-FILE* or *DIRECTORY-LISTINGS* holds before it is
+emptied and starts over:
+a file deleted, or under a root no longer in use, is never looked up again, and
+this bounds what such entries keep.")
 
 (defstruct package-spec
   "Minimal package metadata needed to reconstruct reader context."
@@ -136,19 +162,58 @@ other callers see a package definition edited between two calls.")
     (and base
          (member base *package-context-skip-directories* :test #'string=))))
 
+(defun %trusted-entry (table key date)
+  "Return the rest of TABLE's entry for KEY, (WRITE-DATE READ-AT . REST), when
+DATE is its write date and earlier than the second its read began; else NIL.
+A file or directory written in the second it was read could change again
+within that second without its one-second write date moving, so such an entry
+is never trusted."
+  (let ((entry (and date
+                    (with-lock-held (*package-specs-by-file-lock*)
+                      (gethash key table)))))
+    (and entry
+         (eql (first entry) date)
+         (< date (second entry))
+         (cddr entry))))
+
+(defun %remember-entry (table key date read-at &rest values)
+  "Store VALUES in TABLE under KEY with DATE, the write date read before them,
+and READ-AT, the second their read began.  Nothing is stored without a DATE.
+TABLE is emptied first once it holds *PACKAGE-SPECS-BY-FILE-LIMIT* entries."
+  (when date
+    (with-lock-held (*package-specs-by-file-lock*)
+      (when (>= (hash-table-count table) *package-specs-by-file-limit*)
+        (clrhash table))
+      (setf (gethash key table) (list* date read-at values)))))
+
+(defun %directory-listing (dir)
+  "Return (values SOURCE-FILES SUBDIRECTORIES) of the directory DIR, listing it
+again only when its write date moved -- an entry added, removed or renamed --
+or is not yet in the past (%TRUSTED-ENTRY)."
+  (let* ((key (namestring dir))
+         (date (ignore-errors (file-write-date dir)))
+         (cached (%trusted-entry *directory-listings* key date)))
+    (if cached
+        (values (first cached) (second cached))
+        ;; LET evaluates in order: READ-AT is taken before the listing.
+        (let ((read-at (get-universal-time))
+              (files (remove-if-not #'%source-file-p (directory-files dir)))
+              (subdirs (subdirectories dir)))
+          (%remember-entry *directory-listings* key date read-at files subdirs)
+          (values files subdirs)))))
+
 (defun %collect-source-files (root)
-  "Return a list of source files under ROOT, recursively."
+  "Return a list of source files under ROOT, recursively.  Each directory is
+listed again only when it changed (%DIRECTORY-LISTING)."
   (labels ((walk (dir)
-             (let ((results nil))
-               (dolist (entry (directory-files dir))
-                 (when (%source-file-p entry)
-                   (push entry results)))
-               (dolist (subdir (subdirectories dir))
-                 (unless (%skip-directory-p subdir)
-                   (setf results
-                         (nconc results
-                                (walk (ensure-directory-pathname subdir))))))
-               results)))
+             (multiple-value-bind (files subdirs) (%directory-listing dir)
+               (let ((results (reverse files)))
+                 (dolist (subdir subdirs)
+                   (unless (%skip-directory-p subdir)
+                     (setf results
+                           (nconc results
+                                  (walk (ensure-directory-pathname subdir))))))
+                 results))))
     (walk (ensure-directory-pathname root))))
 
 (defun %skip-dispatch-digits (stream)
@@ -572,19 +637,42 @@ it could be trusted."
     (error ()
       nil)))
 
+(defun %cached-package-specs-in-file (pathname)
+  "Return %PACKAGE-SPECS-IN-FILE of PATHNAME, reading the file only when its
+write date moved since it was last read, or is not yet in the past
+(%TRUSTED-ENTRY; issue #323).  A file whose write date cannot be read is read
+every time.  The specs returned are shared with later callers and must not be
+modified."
+  (let* ((key (namestring pathname))
+         (date (ignore-errors (file-write-date pathname)))
+         (cached (%trusted-entry *package-specs-by-file* key date)))
+    (if cached
+        (first cached)
+        ;; LET evaluates in order: READ-AT is taken before the read.
+        (let ((read-at (get-universal-time))
+              (specs (%package-specs-in-file pathname)))
+          (%remember-entry *package-specs-by-file* key date read-at specs)
+          specs))))
+
 (defun %find-package-spec-under (root target source-path)
   "Return the first PACKAGE-SPEC for TARGET among the source files under ROOT, or NIL.
-SOURCE-PATH, when given, is skipped: DISCOVER-PACKAGE-SPEC reads it first."
-  (dolist (file (%collect-source-files root) nil)
-    (unless (and source-path
-                 (equal (probe-file file)
-                        (probe-file (ensure-pathname source-path :want-pathname t))))
-      (let ((match
-              (find-if (lambda (spec)
-                         (%package-spec-matches-p spec target))
-                       (%package-specs-in-file file))))
-        (when match
-          (return match))))))
+SOURCE-PATH, when given, is skipped: DISCOVER-PACKAGE-SPEC reads it first.
+A file is read only when it changed since it was last read
+(%CACHED-PACKAGE-SPECS-IN-FILE)."
+  (let ((skipped (and source-path
+                      (probe-file (ensure-pathname source-path :want-pathname t)))))
+    (dolist (file (%collect-source-files root) nil)
+      ;; The name first: a PROBE-FILE per file would cost the walk more than
+      ;; the cached reads do.
+      (unless (and skipped
+                   (equal (pathname-name file) (pathname-name skipped))
+                   (equal (probe-file file) skipped))
+        (let ((match
+                (find-if (lambda (spec)
+                           (%package-spec-matches-p spec target))
+                         (%cached-package-specs-in-file file))))
+          (when match
+            (return match)))))))
 
 (defun discover-package-spec (package-name &key source-path)
   "Discover a PACKAGE-SPEC for PACKAGE-NAME from project source files.
