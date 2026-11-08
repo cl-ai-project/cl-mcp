@@ -1007,7 +1007,20 @@ file's own (CRLF in a CRLF file)."
                (values core (subseq text (length core) from)))))
       (ecase operation
         ((:replace)
-         (concatenate 'string (subseq text 0 start) snippet (subseq text (cst-node-end node))))
+         (let ((rest (subseq text (cst-node-end node))))
+           (concatenate 'string (subseq text 0 start) snippet
+                        ;; Content whose last line holds a ; comment keeps the
+                        ;; line break that ends it, when more text follows on
+                        ;; the target's line: trimmed, the comment would swallow
+                        ;; that text -- a form on the same line included.
+                        (if (and (find #\; (subseq snippet (1+ (or (position #\Newline snippet
+                                                                             :from-end t)
+                                                                   -1))))
+                                 (plusp (length rest))
+                                 (not (member (char rest 0) '(#\Newline #\Return))))
+                            newline
+                            "")
+                        rest)))
         ((:insert-before)
          ;; Above the comment written directly over the target, so the comment
          ;; still reads as the target's, with the gap the file has there on

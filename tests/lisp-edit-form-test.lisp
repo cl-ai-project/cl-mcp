@@ -1197,6 +1197,18 @@ handling and return the file's text afterwards."
                               :operation "insert_before" :content "(defun n () 0)")
                (format nil "(defun a () 1)~%~%(defun n () 0)~%~%(defun b () 2)~%")))))
 
+(deftest lisp-edit-form-replace-keeps-a-trailing-comment-from-swallowing-the-line
+  ;; Codex on PR #339: content ending in a ; comment, trimmed, commented out a
+  ;; form that followed the target on its line.
+  (let ((after (%default-edit (format nil "(defun a () 1) (defun b () 2)~%")
+                              :form-type "defun" :form-name "a" :operation "replace"
+                              :content (format nil "(defun a () 3) ; explanation~%"))))
+    (ok (search (format nil "(defun a () 3) ; explanation~%") after) after)
+    (ok (search "(defun b () 2)" after))
+    (ok (= 2 (count :expr (cl-mcp/src/cst:parse-top-level-forms after)
+                    :key #'cl-mcp/src/cst:cst-node-kind))
+        "both forms still read")))
+
 (deftest lisp-edit-form-setf-name-matches-without-its-package-prefix
   ;; Issue #326: (setf c::top-level-lambda-max) was reported unmatched by
   ;; "(setf top-level-lambda-max)"; a package prefix inside a (setf ...) name is

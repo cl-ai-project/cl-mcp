@@ -566,6 +566,22 @@ returned instead: would_change, preview (the whole file), file_path, operation
            (values text t warnings))
           (t (values text nil warnings)))))))))
 
+(defun %check-patch-arguments (patches form-type form-name old-text new-text)
+  "Signal ARG-VALIDATION-ERROR unless the tool was given either PATCHES or all
+four of FORM-TYPE, FORM-NAME, OLD-TEXT and NEW-TEXT, and not both."
+  (let ((single-arguments (remove nil (list form-type form-name old-text new-text))))
+    (cond
+      ((and patches single-arguments)
+       (error 'arg-validation-error :arg-name "patches"
+              :message "pass either patches or form_type/form_name/old_text/new_text, not both"))
+      ((and (not patches) (/= 4 (length single-arguments)))
+       (error 'arg-validation-error
+              :arg-name (cond ((null form-type) "form_type")
+                              ((null form-name) "form_name")
+                              ((null old-text) "old_text")
+                              (t "new_text"))
+              :message "form_type, form_name, old_text and new_text are required (or pass patches)")))))
+
 (defun %patch-plists (patches)
   "Return PATCHES, the tool's patches argument (a JSON array of objects), as the
 plists LISP-PATCH-FORM-MANY takes, refusing an element that is not an object."
@@ -692,24 +708,12 @@ is used to locate forms instead of Eclector. Only needed when the file does not
 declare its own (in-readtable ...): one earlier in the file is honoured automatically.
 The patch replaces text in place, so comments are kept."))
   :body
-  (progn
-   (let ((single-arguments (remove nil (list form_type form_name old_text new_text))))
-    (cond
-      ((and patches single-arguments)
-       (error 'arg-validation-error :arg-name "patches"
-              :message "pass either patches or form_type/form_name/old_text/new_text, not both"))
-      ((and (not patches) (/= 4 (length single-arguments)))
-       (error 'arg-validation-error
-              :arg-name (cond ((null form_type) "form_type")
-                              ((null form_name) "form_name")
-                              ((null old_text) "old_text")
-                              (t "new_text"))
-              :message "form_type, form_name, old_text and new_text are required (or pass patches)"))))
   (let ((readtable-designator
          (handler-case (%parse-readtable-designator readtable)
            (error (e)
              (error 'arg-validation-error :arg-name "readtable"
                     :message (format nil "~A" e))))))
+    (%check-patch-arguments patches form_type form_name old_text new_text)
     (handler-case
         (if patches
             (%patches-result id file_path dry_run (length patches)
@@ -802,4 +806,4 @@ The patch replaces text in place, so comments are kept."))
           (if (and (protocol-version state)
                    (string>= (protocol-version state) "2025-11-25"))
               (result id (make-ht "content" (text-content msg) "isError" t))
-              (rpc-error id -32603 msg))))))))
+              (rpc-error id -32603 msg)))))))
