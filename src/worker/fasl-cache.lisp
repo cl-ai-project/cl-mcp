@@ -48,7 +48,7 @@ configuration is cleared or initialized again.")
 
 (defun worker-fasl-cache-base ()
   "Return the directory holding every worker's own FASL cache, one subdirectory
-per worker process, named by its PID."
+per worker process, named <pid>-<token>."
   (uiop:xdg-cache-home "cl-mcp" "worker-fasls/"))
 
 (defun %cache-name-p (name)
@@ -69,20 +69,34 @@ so the lock exists before the directory does and outlives a half-deleted one."
                  :version nil
                  :defaults (uiop:pathname-parent-directory-pathname directory)))
 
-(defun %try-lock (path)
+(defun %try-lock (path &optional (attempts 3))
   "Open PATH, creating it, and take an exclusive lock on it without waiting.
 Return the open file descriptor when the lock was taken -- no live process holds
-it -- or NIL when another process does.  POSIX record locks belong to the
-process: one that already holds PATH's lock would take it again, and closing
-any descriptor of PATH drops its lock, so a worker never calls this on its own
-lock file twice."
-  (let ((fd (sb-posix:open (uiop:native-namestring path)
-                           (logior sb-posix:o-rdwr sb-posix:o-creat)
-                           #o600)))
-    (handler-case (progn (sb-posix:lockf fd sb-posix:f-tlock 0) fd)
-      (sb-posix:syscall-error ()
-        (sb-posix:close fd)
-        nil))))
+it -- or NIL when another process does, or PATH cannot be opened (a sweep then
+leaves it alone and goes on).  Any other failure of the lock itself, such as a
+filesystem without record locks, is signalled rather than taken for a holder.
+
+A sweep may unlink PATH between this open and the lock, leaving the lock on a
+file no one else can find; the lock is kept only when PATH still names the
+locked file, and taken again on a fresh file otherwise, up to ATTEMPTS times.
+POSIX record locks belong to the process: one that already holds PATH's lock
+would take it again, and closing any descriptor of PATH drops its lock, so a
+worker never calls this on its own lock file twice."
+  (let ((name (uiop:native-namestring path)))
+    (let ((fd (handler-case (sb-posix:open name (logior sb-posix:o-rdwr sb-posix:o-creat) #o600)
+                (sb-posix:syscall-error () (return-from %try-lock nil)))))
+      (handler-case (sb-posix:lockf fd sb-posix:f-tlock 0)
+        (sb-posix:syscall-error (e)
+          (sb-posix:close fd)
+          (if (member (sb-posix:syscall-errno e) (list sb-posix:eagain sb-posix:eacces))
+              (return-from %try-lock nil)
+              (error e))))
+      (if (eql (ignore-errors (sb-posix:stat-ino (sb-posix:stat name)))
+               (sb-posix:stat-ino (sb-posix:fstat fd)))
+          fd
+          (progn
+            (sb-posix:close fd)
+            (and (> attempts 1) (%try-lock path (1- attempts))))))))
 
 (defun %delete-cache-directory (directory base)
   "Delete DIRECTORY, a worker's cache directly under BASE, with everything in
@@ -117,7 +131,9 @@ file or directory not named like a cache, are kept."
       (let ((name (car (last (pathname-directory directory)))))
         (when (and (%cache-name-p name) (not (equal name own)))
           (let* ((lock (%lock-path directory))
-                 (fd (if (probe-file lock) (%try-lock lock) :no-lock)))
+                 ;; A lock that cannot be judged counts as held: one odd entry
+                 ;; must not stop the sweep of the rest.
+                 (fd (if (probe-file lock) (ignore-errors (%try-lock lock)) :no-lock)))
             (when fd
               (unwind-protect
                    (when (%delete-cache-directory directory base)
@@ -132,7 +148,7 @@ file or directory not named like a cache, are kept."
         (when (and (%cache-name-p name) (not (equal name own))
                    (not (uiop:directory-exists-p
                          (merge-pathnames (format nil "~A/" name) base))))
-          (let ((fd (%try-lock lock)))
+          (let ((fd (ignore-errors (%try-lock lock))))
             (when fd
               (unwind-protect (ignore-errors (delete-file lock))
                 (sb-posix:close fd)))))))
@@ -155,8 +171,12 @@ worker's own cache."
                 (ensure-directories-exist base)
                 (let ((fd (%try-lock (%lock-path directory))))
                   (unless fd
-                    (error "another process holds the lock of ~A" name))
-                  (ensure-directories-exist directory)
+                    (error "another process holds the lock of ~A, or it cannot be opened"
+                           name))
+                  (handler-case (ensure-directories-exist directory)
+                    (error (e)
+                      (sb-posix:close fd)
+                      (error e)))
                   (setf *worker-cache-lock-fd* fd
                         *worker-fasl-cache* directory)))
             (error (e)
@@ -223,5 +243,8 @@ next; a load in the same request that cleared it still uses the shared cache."
              (missing (remove-if (lambda (entry) (member entry current :test #'equal))
                                  *isolated-roots*)))
         (when missing
-          (setf (asdf/output-translations:output-translations) (append missing current)))
+          (setf (asdf/output-translations:output-translations) (append missing current))
+          ;; Said, since it overrides whatever cleared them -- a project's own
+          ;; INITIALIZE-OUTPUT-TRANSLATIONS included -- for the root's files.
+          (log-event :info "worker.fasl-cache.restored" "entries" (length missing)))
         (length missing))))

@@ -132,6 +132,7 @@ time.sleep(120)"
          (orphan-lock (merge-pathnames "666-fff.lock" base))
          (outside (%scratch-directory "fasl-cache-outside"))
          (link (merge-pathnames "555-eee" base))
+         (unopenable (merge-pathnames "000-unopenable/" base))
          (holder nil))
     (unwind-protect
          (progn
@@ -145,6 +146,12 @@ time.sleep(120)"
            ;; A link named like a cache, pointing out of the base.
            (sb-posix:symlink (uiop:native-namestring outside) (uiop:native-namestring link))
            (setf holder (%hold-lock-in-another-process (merge-pathnames "333-ccc.lock" base)))
+           ;; A lock this process cannot open: judged held, and the sweep goes
+           ;; on to the others instead of stopping there.
+           (%write-text (merge-pathnames "a.fasl" unopenable) "x")
+           (%write-text (merge-pathnames "000-unopenable.lock" base) "")
+           (sb-posix:chmod (uiop:native-namestring (merge-pathnames "000-unopenable.lock" base))
+                           0)
            (let ((deleted (let ((*worker-fasl-cache* own))
                             (sweep-dead-worker-caches base))))
              (testing "a cache whose lock nobody holds is deleted with its lock"
@@ -155,7 +162,8 @@ time.sleep(120)"
              (testing "a lock left without its directory is deleted"
                (ok (not (probe-file orphan-lock)) "gone"))
              (testing "only caches are counted"
-               (ok (= 2 deleted) (format nil "~D" deleted)))
+               ;; Root opens the unopenable lock too, and deletes that cache.
+               (ok (= (if (zerop (sb-posix:geteuid)) 3 2) deleted) (format nil "~D" deleted)))
              (testing "the rest is kept"
                (if holder
                    (ok (uiop:directory-exists-p live) "a cache whose lock a process holds")
@@ -163,11 +171,18 @@ time.sleep(120)"
                (ok (uiop:directory-exists-p own) "this worker's own")
                (ok (uiop:directory-exists-p not-a-cache) "a directory not named like a cache")
                (ok (probe-file (merge-pathnames "keep.fasl" outside))
-                   "and nothing behind a link out of the base"))))
+                   "and nothing behind a link out of the base")
+               (if (zerop (sb-posix:geteuid))
+                   (skip "root opens a file whatever its mode")
+                   (ok (uiop:directory-exists-p unopenable)
+                       "a cache whose lock cannot be opened, the sweep going on past it")))))
       (when holder
         (ignore-errors (sb-ext:process-kill holder 9))
         (ignore-errors (sb-ext:process-wait holder)))
       (ignore-errors (sb-posix:unlink (uiop:native-namestring link)))
+      (ignore-errors (sb-posix:chmod (uiop:native-namestring
+                                      (merge-pathnames "000-unopenable.lock" base))
+                                     #o600))
       (uiop:delete-directory-tree base :validate t :if-does-not-exist :ignore)
       (uiop:delete-directory-tree outside :validate t :if-does-not-exist :ignore))))
 
@@ -223,7 +238,8 @@ compiled from source RUN calls TWICE as a function.")
 (defun %swept-within (seconds directory)
   "Sweep the real cache base until DIRECTORY is gone or SECONDS have passed, and
 return true when it is gone: a killed worker's lock is dropped only once the
-kernel has ended the process."
+kernel has ended the process.  The real base holds every worker's cache on this
+machine, so this deletes every ended worker's, as a starting worker would."
   (loop with deadline = (+ (get-internal-real-time)
                            (* seconds internal-time-units-per-second))
         do (sweep-dead-worker-caches)
@@ -238,61 +254,63 @@ kernel has ended the process."
   ;; it expanded, into the cache every worker shared.  The FASL was newer than
   ;; a.lisp, so the next worker loaded it and passed, while a clean build
   ;; calls TWICE as a function and fails.
-  (unless (spawn-available-p)
-    (skip "Cannot spawn workers"))
-  (let* ((root (%scratch-directory "fasl-cache-project"))
-         (a (merge-pathnames "a.lisp" root))
-         (b (merge-pathnames "b.lisp" root))
-         (shared-a-fasl (asdf:apply-output-translations
-                         (compile-file-pathname (merge-pathnames "a.lisp" (truename root)))))
-         (first-worker nil)
-         (second-worker nil))
-    (unwind-protect
-         (progn
-           (ignore-errors (delete-file shared-a-fasl))
-           (%write-text (merge-pathnames "fasl-cache-fixture.asd" root)
-                        "(asdf:defsystem \"fasl-cache-fixture\" :serial t
+  (if (not (spawn-available-p))
+      (skip "Cannot spawn workers")
+      (let* ((root (%scratch-directory "fasl-cache-project"))
+             (a (merge-pathnames "a.lisp" root))
+             (b (merge-pathnames "b.lisp" root))
+             (shared-a-fasl (asdf:apply-output-translations
+                             (compile-file-pathname (merge-pathnames "a.lisp" (truename root)))))
+             (first-worker nil)
+             (second-worker nil))
+        (unwind-protect
+             (progn
+               (ignore-errors (delete-file shared-a-fasl))
+               (%write-text (merge-pathnames "fasl-cache-fixture.asd" root)
+                            "(asdf:defsystem \"fasl-cache-fixture\" :serial t
   :components ((:file \"a\") (:file \"b\")))
 ")
-           (%write-text a *macro-first-a*)
-           (%write-text b "(in-package #:fasl-cache-fixture)
+               (%write-text a *macro-first-a*)
+               (%write-text b "(in-package #:fasl-cache-fixture)
 (defun unused () nil)
 ")
-           (setf first-worker (spawn-worker))
-           (%set-worker-root first-worker root)
-           (testing "the first worker builds and runs it"
-             (ok (search "RESULT=42" (%eval-in first-worker *run-code*)) "42 before the edit"))
-           ;; The macro moves to the later file; this worker still has it.
-           (%write-text a *macro-moved-a*)
-           (%write-text b *macro-moved-b*)
-           (testing "the first worker still runs it after the edit"
-             (ok (search "RESULT=42" (%eval-in first-worker *run-code*))
-                 "its image holds the macro"))
-           (testing "and compiled nothing into the shared cache"
-             (ok (not (probe-file shared-a-fasl)) "no a.fasl there"))
-           (let ((first-cache (%worker-cache-of first-worker)))
-             (kill-worker first-worker)
-             (setf first-worker nil)
-             (setf second-worker (spawn-worker))
-             (%set-worker-root second-worker root)
-             (testing "a fresh worker compiles the saved source and fails as a clean build does"
-               (ok (search "RESULT=FAILED" (%eval-in second-worker *run-code*))
-                   "TWICE is called as a function"))
-             (let ((second-cache (%worker-cache-of second-worker)))
-               (testing "into a cache of its own"
-                 (ok (search second-cache
-                             (%eval-in second-worker
-                                       (format nil "(namestring (asdf:apply-output-translations ~S))"
-                                               (namestring (merge-pathnames
-                                                            "a.fasl" (truename root))))))
-                     "its a.fasl is there")
-                 (ok (search (format nil "/worker-fasls/~D-" (worker-pid second-worker))
-                             second-cache)
-                     "named by its PID"))
-               (testing "a sweep deletes the killed worker's cache and keeps the live one's"
-                 (ok (%swept-within 10 first-cache) "the killed worker's is gone")
-                 (ok (uiop:directory-exists-p second-cache) "the live worker's stays")))))
-      (when first-worker (kill-worker first-worker))
-      (when second-worker (kill-worker second-worker))
-      (ignore-errors (delete-file shared-a-fasl))
-      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+               (setf first-worker (spawn-worker))
+               (%set-worker-root first-worker root)
+               (testing "the first worker builds and runs it"
+                 (ok (search "RESULT=42" (%eval-in first-worker *run-code*))
+                     "42 before the edit"))
+               ;; The macro moves to the later file; this worker still has it.
+               (%write-text a *macro-moved-a*)
+               (%write-text b *macro-moved-b*)
+               (testing "the first worker still runs it after the edit"
+                 (ok (search "RESULT=42" (%eval-in first-worker *run-code*))
+                     "its image holds the macro"))
+               (testing "and compiled nothing into the shared cache"
+                 (ok (not (probe-file shared-a-fasl)) "no a.fasl there"))
+               (let ((first-cache (%worker-cache-of first-worker)))
+                 (kill-worker first-worker)
+                 (setf first-worker nil)
+                 (setf second-worker (spawn-worker))
+                 (%set-worker-root second-worker root)
+                 (testing "a fresh worker compiles the saved source and fails as a clean build does"
+                   (ok (search "RESULT=FAILED" (%eval-in second-worker *run-code*))
+                       "TWICE is called as a function"))
+                 (let ((second-cache (%worker-cache-of second-worker))
+                       (a-fasl (namestring (merge-pathnames "a.fasl" (truename root)))))
+                   (testing "into a cache of its own"
+                     (ok (search second-cache
+                                 (%eval-in second-worker
+                                           (format nil "(namestring ~
+                                                        (asdf:apply-output-translations ~S))"
+                                                   a-fasl)))
+                         "its a.fasl is there")
+                     (ok (search (format nil "/worker-fasls/~D-" (worker-pid second-worker))
+                                 second-cache)
+                         "named by its PID"))
+                   (testing "a sweep deletes the killed worker's cache and keeps the live one's"
+                     (ok (%swept-within 10 first-cache) "the killed worker's is gone")
+                     (ok (uiop:directory-exists-p second-cache) "the live worker's stays")))))
+          (when first-worker (kill-worker first-worker))
+          (when second-worker (kill-worker second-worker))
+          (ignore-errors (delete-file shared-a-fasl))
+          (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore)))))
