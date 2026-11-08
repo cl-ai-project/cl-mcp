@@ -51,6 +51,7 @@
                 #:%whitespace-char-p
                 #:%normalize-paths
                 #:%locate-target-form
+                #:%feature-prefix-end
                 #:file-unparseable-error)
   (:documentation "Scoped text replacement within a matched top-level Lisp form.")
   (:export #:lisp-patch-form))
@@ -315,7 +316,7 @@ silently accepts as part of a symbol), so the caller can check it."
            :message "old_text must not be empty"))
   (with-file-lock ((%normalize-paths file-path))
     (multiple-value-bind (abs rel original nodes target target-snippet _
-                          file-package-name)
+                          file-package-name inactive-p)
         (%locate-target-form file-path form-type form-name readtable)
       (declare (ignore _))
       (multiple-value-bind (updated modified-form form-text match-pos)
@@ -345,7 +346,11 @@ silently accepts as part of a symbol), so the caller can check it."
                                               match-pos old-text new-text)))))
           (when would-change
             (%validate-form-parseable
-             modified-form
+             ;; A form under a feature expression false here (issue #321) is
+             ;; read past its expressions, which would skip it again.
+             (if inactive-p
+                 (subseq modified-form (%feature-prefix-end modified-form 0))
+                 modified-form)
              :readtable-designator readtable-designator
              :package-name file-package-name
              :source-path abs
@@ -409,7 +414,11 @@ e.g., \"print-object ((obj my-class) stream)\" (a method whose name is unique ma
 by name alone). A name[N] suffix, 0-based, picks the Nth of several matches. For defstruct with
 options \"(defstruct (name opts...) ...)\", use just the bare struct name.
 Reader macro prefixes #: and : are stripped automatically, so
-\"#:my-pkg\" and \"my-pkg\" both match \"(defpackage #:my-pkg ...).\"")
+\"#:my-pkg\" and \"my-pkg\" both match \"(defpackage #:my-pkg ...).\"
+A form under a #+/#- expression false in this server (another implementation's
+branch) is named by its expressions in front of the name, as the file writes them:
+\"#+ecl impl\". A plain name means the form this server reads, and reaches a
+skipped one only when no read form has that name.")
          (old_text :type :string :required t
                    :description "Text to find within the matched form.
 Performs exact raw text matching (whitespace-sensitive). Must occur exactly once in the form.")

@@ -446,8 +446,8 @@ afterwards."
       (ok (equal *feature-twins-source* text) "the file is left as it was")
       (ok (and message (search "line 3" message) (search "line 7" message))
           "the message names the twin's line and the target's")
-      (ok (and message (search "#321" message))
-          "and points at the issue about addressing unread branches")))
+      (ok (and message (search "form_name \"#+ecl impl\"" message))
+          "and says how to name the skipped form itself")))
   (testing "a dry run is refused the same way"
     (ok (%twin-replace-outcome "defun" "impl" (format nil "#+ecl~%(defun impl (x) :dry)")
                                :dry-run t)
@@ -540,6 +540,76 @@ afterwards."
                               (defun impl (x) sb-ext::cl-mcp-edit-test-locked)~%~%~
                               #-ecl~%(defun impl (x) 2)~%"))
         "refused")))
+
+(defun %edit-feature-twins (&rest arguments)
+  "Run LISP-EDIT-FORM (or, when ARGUMENTS starts with :PATCH, LISP-PATCH-FORM) on
+*FEATURE-TWINS-SOURCE* with ARGUMENTS and return the refusal's message or NIL,
+and the file's text afterwards."
+  (let ((patch-p (eq (first arguments) :patch)))
+    (with-temp-file "tests/tmp/edit-form-inactive-branch.lisp" *feature-twins-source*
+      (lambda (path)
+        (let ((message (handler-case
+                           (progn (apply (if patch-p #'lisp-patch-form #'lisp-edit-form)
+                                         :file-path path
+                                         (if patch-p (rest arguments) arguments))
+                                  nil)
+                         (error (e) (princ-to-string e)))))
+          (values message (fs-read-file path)))))))
+
+(deftest lisp-edit-form-addresses-a-form-under-a-false-feature-expression
+  ;; Issue #321: a form the reader skips here could not be named at all.
+  (testing "its expressions in front of the name choose it over its active twin"
+    (multiple-value-bind (message text)
+        (%edit-feature-twins :form-type "defun" :form-name "#+ecl impl" :operation "replace"
+                             :content (format nil "(defun impl (x)~%  (list :ecl-v2 x))"))
+      (ok (null message) message)
+      (ok (search (format nil "#+ecl~%(defun impl (x)~%  (list :ecl-v2 x))") text)
+          "the #+ecl form is replaced and keeps its expression")
+      (ok (search (format nil "#-ecl~%(defun impl (x)~%  \"SBCL path.\"") text)
+          "the active twin is untouched")))
+  (testing "a plain name reaches a skipped form when no form read here has it"
+    (multiple-value-bind (message text)
+        (%edit-feature-twins :form-type "defun" :form-name "other" :operation "replace"
+                             :content "(defun other (x) (list :ccl x))")
+      (ok (null message) message)
+      (ok (search (format nil "#+ccl~%(defun other (x) (list :ccl x))") text))))
+  (testing "a plain name still means the form this server reads"
+    (multiple-value-bind (message text)
+        (%edit-feature-twins :form-type "defun" :form-name "plain" :operation "replace"
+                             :content "(defun plain (x) (list :edited x))")
+      (ok (null message) message)
+      (ok (search "(defun plain (x) (list :edited x))" text))
+      (ok (search (format nil "#+ecl~%(defun plain (x) (list :ecl x))") text)
+          "and the #+ecl twin is left alone")))
+  (testing "a skipped method is named by its expressions and signature"
+    (multiple-value-bind (message text)
+        (%edit-feature-twins :form-type "defmethod" :form-name "#+ecl area ((s string))"
+                             :operation "replace"
+                             :content "(defmethod area ((s string)) :ecl-string-v2)")
+      (ok (null message) message)
+      (ok (search (format nil "#+ecl~%(defmethod area ((s string)) :ecl-string-v2)") text))))
+  (testing "delete and patch reach it too"
+    (multiple-value-bind (message text)
+        (%edit-feature-twins :form-type "defun" :form-name "#+ccl other" :operation "delete")
+      (ok (null message) message)
+      (ok (null (search "(defun other" text)) "deleted, expression and all")
+      (ok (null (search "#+ccl" text))))
+    (multiple-value-bind (message text)
+        (%edit-feature-twins :patch :form-type "defun" :form-name "#+ecl impl"
+                             :old-text "(list :ecl x)" :new-text "(list :ecl-patched x)")
+      (ok (null message) message)
+      (ok (search (format nil "#+ecl~%(defun impl (x)~%  (list :ecl-patched x))") text))
+      (ok (search "(list :sbcl x)" text) "the active twin is untouched")))
+  (testing "expressions no form is written under find nothing"
+    (let ((message (%edit-feature-twins :form-type "defun" :form-name "#+ccl impl"
+                                        :operation "delete")))
+      (ok (and message (search "not found" message)) message)))
+  (testing "the not-found listing shows skipped forms and how to name them"
+    (let ((message (%edit-feature-twins :form-type "defun" :form-name "missing"
+                                        :operation "delete")))
+      (ok (and message (search "#+ecl (defun impl)" message)) message)
+      (ok (and message (search "#+ccl (defun other)" message)))
+      (ok (and message (search "form_name \"#+ecl impl\"" message))))))
 
 (deftest lisp-edit-form-replace-feature-expressions-need-a-form-and-not-a-true-reading
   ;; Review of #216: a comment-only replace kept #+sbcl with no form after it,

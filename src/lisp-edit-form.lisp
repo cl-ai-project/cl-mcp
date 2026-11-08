@@ -57,6 +57,7 @@
                 #:%skip-blank-and-comments
                 #:%feature-prefix-end
                 #:%skipped-feature-node-p
+                #:feature-key
                 #:%definition-candidates
                 #:%resolve-named-readtable
                 #:%nonstandard-readtable-p
@@ -857,8 +858,8 @@ would cost this server its definition (%FEATURE-TWIN)."
             ~A under ~A -- ~A. The reader skips that form here, so form_type/form_name ~
             reach only line ~D, and this replace would take away the definition this ~
             server uses and leave the file with two ~A forms where it had one for each ~
-            condition. Nothing was written. Forms under a false feature expression cannot ~
-            be addressed yet (issue #321)."
+            condition. Nothing was written. To edit the skipped form itself, name it with ~
+            its expressions in front: form_name ~S."
            form-type form-name (cst-node-start-line target)
            (and target-prefix (%feature-expressions-text target-prefix))
            (%feature-expressions-text own-prefix)
@@ -870,7 +871,8 @@ would cost this server its definition (%FEATURE-TWIN)."
              (:content "the same definition as the content")
              (:unreadable "a form that could not be read to compare but starts like one of them"))
            (cst-node-start-line target)
-           (%feature-expressions-text own-prefix))))
+           (%feature-expressions-text own-prefix)
+           (format nil "~A ~A" (feature-key original twin-start) form-name))))
 
 (defun %blank-lines-note (normalized)
   "Return the summary line saying a replace also moved the blank lines around the
@@ -1403,7 +1405,11 @@ e.g., \"print-object ((obj my-class) stream)\" (a method whose name is unique ma
 by name alone). A name[N] suffix, 0-based, picks the Nth of several matches. For defstruct with
 options \"(defstruct (name opts...) ...)\", use just the bare struct name.
 Reader macro prefixes #: and : are stripped automatically, so
-\"#:my-pkg\" and \"my-pkg\" both match \"(defpackage #:my-pkg ...).\"")
+\"#:my-pkg\" and \"my-pkg\" both match \"(defpackage #:my-pkg ...).\"
+A form under a #+/#- expression false in this server (another implementation's
+branch) is named by its expressions in front of the name, as the file writes them:
+\"#+ecl impl\". A plain name means the form this server reads, and reaches a
+skipped one only when no read form has that name.")
          (operation :type :string :required t
                     :enum ("replace" "insert_before" "insert_after" "delete")
                     :description "Operation to perform")
@@ -1417,8 +1423,9 @@ replace keeps the #+/#- feature expressions written in front of the target form
 when content starts with none of its own, and says so (kept_feature_expression);
 start content with the expression it should have to change or drop the condition
 (its form is checked whether or not that condition holds here). Comment-only
-content keeps none. A form under an expression false here is not read, so only
-its active twin can be targeted; content opening with expressions false here is
+content keeps none. A form under an expression false here is not read: a plain
+form_name targets its active twin, \"#+ecl name\" the skipped form; content
+opening with expressions false here is
 refused when such a skipped form is the same definition as the target or the
 content, since it would take away the definition this server uses.
 Missing closing parentheses are automatically repaired using parinfer; a block
