@@ -31,6 +31,7 @@
                 #:bounded-princ-to-string
                 #:circular-p)
   (:import-from #:cl-mcp/src/source-reader
+                #:*read-with-cl-reader*
                 #:source-read-from-string)
   (:import-from #:cl-mcp/src/package-context
                 #:call-with-package-context)
@@ -229,7 +230,10 @@ deep, which is deeper than cl-mcp will read"
          (*readtable*
            (if custom-rt
                custom-rt
-               (copy-readtable nil))))
+               (copy-readtable nil)))
+         ;; The file is read with CL:READ under any named readtable, so the
+         ;; patched form is too (SOURCE-READ-FROM-STRING).
+         (*read-with-cl-reader* (and custom-rt t)))
     (flet ((diagnosed (fallback &optional reader-text)
              ;; A readtable that is standard in all but name keeps the
              ;; standard diagnosis; only a syntax change withholds it.

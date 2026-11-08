@@ -21,6 +21,7 @@
            #:source-featurep
            #:source-readtable
            #:standard-syntax-readtable-p
+           #:*read-with-cl-reader*
            #:source-read-from-string
            #:source-read))
 
@@ -235,17 +236,27 @@ counts; one that adds or changes any of these does not.  Only code points below
                             (ignore-errors
                              (get-dispatch-macro-character #\# char standard))))))))
 
+(defvar *read-with-cl-reader* nil
+  "True while content is checked for a file the parser reads with CL:READ -- one
+under a named readtable, from a READTABLE argument or its own IN-READTABLE,
+which PARSE-TOP-LEVEL-FORMS hands to the CL-reader pass whatever syntax the
+readtable has.  SOURCE-READ-FROM-STRING and SOURCE-READ then read with CL:READ
+too, so content is held to what that file's reader can read back: no
+stand-ins, which SBCL's reader cannot make.  The editing tools bind it when a
+readtable designator is in effect for the target.")
+
 (defun source-read-from-string (string &key (eof-error-p t) eof-value (start 0) end
                                             preserve-whitespace)
   "READ-FROM-STRING as the editing tools' file parser reads: with
 SOURCE-SYNTAX-CLIENT when *READTABLE* has standard syntax
-(STANDARD-SYNTAX-READTABLE-P), else with CL:READ under SOURCE-READTABLE of it.
+(STANDARD-SYNTAX-READTABLE-P) and *READ-WITH-CL-READER* is false, else with
+CL:READ under SOURCE-READTABLE of it.
 So content validated with this reads exactly as the file it is written into
 will be read back -- #., #S and SBCL's character names included -- and a
 missing symbol of a real package is a stand-in, never an intern.  Run it inside
 CALL-WITH-LENIENT-PACKAGES, as the parser runs.  Returns the object and the
 index of the first character not read, as READ-FROM-STRING does."
-  (if (standard-syntax-readtable-p *readtable*)
+  (if (and (not *read-with-cl-reader*) (standard-syntax-readtable-p *readtable*))
       (let ((eclector.reader:*client* (make-instance 'source-syntax-client)))
         (eclector.reader:read-from-string string eof-error-p eof-value
                                           :start start :end end
@@ -257,7 +268,7 @@ index of the first character not read, as READ-FROM-STRING does."
 
 (defun source-read (stream &optional (eof-error-p t) eof-value)
   "READ from STREAM as SOURCE-READ-FROM-STRING reads a string."
-  (if (standard-syntax-readtable-p *readtable*)
+  (if (and (not *read-with-cl-reader*) (standard-syntax-readtable-p *readtable*))
       (let ((eclector.reader:*client* (make-instance 'source-syntax-client)))
         (eclector.reader:read stream eof-error-p eof-value))
       (let ((*readtable* (source-readtable *readtable*)))

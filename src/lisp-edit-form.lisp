@@ -54,6 +54,7 @@
   (:import-from #:cl-mcp/src/package-context
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/source-reader
+                #:*read-with-cl-reader*
                 #:read-time-evaluation-p
                 #:source-read-from-string)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
@@ -201,6 +202,9 @@ comments near a target form."
   (let* ((*read-eval* nil)
          (custom-rt (%resolve-named-readtable readtable-designator))
          (*readtable* (if custom-rt custom-rt (copy-readtable nil)))
+         ;; The file is read with CL:READ under any named readtable, so the
+         ;; content is too (SOURCE-READ-FROM-STRING).
+         (*read-with-cl-reader* (and custom-rt t))
          ;; Standard-syntax verdicts are withheld only for a readtable that
          ;; really changes the syntax; :standard (or a plain copy of it) must
          ;; not become a loophole around the ] refusal.
@@ -576,6 +580,9 @@ error are never taken on their own."
   (let* ((*read-eval* nil)
          (custom-rt (%resolve-named-readtable readtable-designator))
          (*readtable* (if custom-rt custom-rt (copy-readtable nil)))
+         ;; The file is read with CL:READ under any named readtable, so the
+         ;; content is too (SOURCE-READ-FROM-STRING).
+         (*read-with-cl-reader* (and custom-rt t))
          (nonstandard-rt (%nonstandard-readtable-p readtable-designator)))
     (flet ((one-form ()
              (multiple-value-bind (validated warning fixes bracket reparented)

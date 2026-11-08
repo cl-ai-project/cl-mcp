@@ -594,9 +594,11 @@ Inputs:
   form and `#-#.(...)` skips it), `#S(...)` builds no structure, SBCL's character names
   (`#\Nul`, `#\U+2192`, `#\RIGHTWARDS_ARROW`) are accepted, and a qualified symbol that a
   package of the server lacks (a typo, a newer API, `cl::foreign`) reads as a stand-in shown as
-  `pkg:name`, interning nothing. Under a named readtable SBCL's own reader reads the file and
-  stops on such a symbol; the error says so, and `fs-write-file` with
-  `allow_unparseable_overwrite` may then rewrite the file.
+  `pkg:name`, interning nothing. Under a named readtable (a `readtable` argument or the file's
+  own `in-readtable`) SBCL's own reader reads the file, and the content of an edit to it is
+  checked the same way, so a symbol a package lacks is refused there rather than written; a
+  file that already holds one stops the parse at it, the error says so, and `fs-write-file`
+  with `allow_unparseable_overwrite` may then rewrite the file.
 - `name_pattern` (string, optional): CL-PPCRE regex; matching definition names are
   expanded even in collapsed mode.
 - `content_pattern` (string, optional): CL-PPCRE regex applied to form bodies; if
