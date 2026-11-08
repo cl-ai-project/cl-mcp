@@ -1083,6 +1083,10 @@ package, the file it most likely came from.  Everything else stays, whatever
 its package: a test of a file the load leaves alone would not come back, so a
 later run of that file's own system ran none of it and called it a pass (issue
 #328), and a file sharing its package with a reloaded one keeps its tests.
+SBCL names a function after its file only when no named block encloses it, so
+a deftest a helper function or a (block ...) emits falls to the package rule.
+A reloaded file's tests are pushed back onto the suite, so where several files
+share a package they now run after the tests of the files left alone.
 
 Call it after the clearing and the .asd re-read RUN-TESTS does, and before the
 load.  Making the plan finds every system the load reaches, loading a .asd not
