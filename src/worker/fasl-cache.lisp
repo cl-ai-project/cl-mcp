@@ -172,8 +172,9 @@ file or directory not named like a cache, are kept."
 return (values DIRECTORY FD).  A NIL from %TRY-LOCK for a name just minted is no
 live owner but a sweep holding the new lock for a moment, so a fresh name is
 tried, up to ATTEMPTS times, before giving up with an error.  A lock that fails
-outright (a filesystem without record locks) is signalled, its file deleted
-first: the name is this worker's own, and no sweep could remove it."
+outright (a filesystem without record locks), or a directory that cannot be
+made, is signalled, the lock file deleted first: the name is this worker's own,
+and on such a filesystem no sweep could remove it."
   (loop repeat attempts
         do (let* ((name (format nil "~D-~36R" (sb-posix:getpid)
                                 (random (expt 36 10) (make-random-state t))))

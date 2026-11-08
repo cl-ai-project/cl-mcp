@@ -181,7 +181,8 @@ time.sleep(120)"
                        "a cache whose lock cannot be opened, the sweep going on past it")))))
       (when holder
         (ignore-errors (sb-ext:process-kill holder 9))
-        (ignore-errors (sb-ext:process-wait holder)))
+        (ignore-errors (sb-ext:process-wait holder))
+        (ignore-errors (sb-ext:process-close holder)))
       (ignore-errors (sb-posix:unlink (uiop:native-namestring link)))
       (ignore-errors (sb-posix:chmod (uiop:native-namestring
                                       (merge-pathnames "000-unopenable.lock" base))
@@ -220,15 +221,29 @@ so the lock's outcomes are steered at %TRY-LOCK itself."
            (testing "a lock that fails outright leaves no lock file behind"
              (let ((*worker-fasl-cache* nil)
                    (*worker-cache-lock-fd* nil)
-                   (before (uiop:directory-files base "*.lock")))
+                   (minted nil))
                ;; The lock file is made, then the lock fails, as with ENOLCK.
                (with-try-lock-wrapped ((lambda (function &rest arguments)
+                                         (setf minted (first arguments))
                                          (let ((fd (apply function arguments)))
                                            (when fd (sb-posix:close fd))
                                            (error "No locks available"))))
                  (ok (null (prepare-worker-fasl-cache base)) "the worker falls back")
-                 (ok (= (length before) (length (uiop:directory-files base "*.lock")))
-                     "and its own lock file is gone"))))
+                 (ok (and minted (not (probe-file minted))) "and its own lock file is gone"))))
+           (testing "a cache directory that cannot be made takes its lock file with it"
+             (let ((*worker-fasl-cache* nil)
+                   (*worker-cache-lock-fd* nil)
+                   (minted nil))
+               ;; A plain file where the directory should go.
+               (with-try-lock-wrapped ((lambda (function &rest arguments)
+                                         (setf minted (first arguments))
+                                         (let ((fd (apply function arguments)))
+                                           (%write-text (make-pathname :type nil
+                                                                       :defaults minted)
+                                                        "")
+                                           fd)))
+                 (ok (null (prepare-worker-fasl-cache base)) "the worker falls back")
+                 (ok (and minted (not (probe-file minted))) "and the lock file is gone"))))
            (testing "a sweep's open never recreates a lock file that vanished"
              (let ((missing (merge-pathnames "999-gone.lock" base)))
                (ok (null (%try-lock missing :create nil)) "not taken")
