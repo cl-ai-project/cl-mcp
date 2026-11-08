@@ -1587,13 +1587,15 @@ systems, REPL definitions, packages) in the worker is lost. Use this when a
 worker is stuck, has corrupted state, or you want a clean environment.
 
 Each worker compiles the files under its project root into a FASL cache of its
-own (`~/.cache/cl-mcp/worker-fasls/<pid>/`, or under `$XDG_CACHE_HOME`), so the
-replacement builds the project from its saved source: a FASL the old worker
-compiled while its image held definitions the files no longer have -- a macro
-since moved to a later file, a symbol exported only through `repl-eval` -- is
-not loaded by the new one (#317). Libraries outside the root keep ASDF's shared
-cache. A worker's cache is removed by the next worker that starts after it has
-ended.
+own (`~/.cache/cl-mcp/worker-fasls/<pid>-<token>/`, or under `$XDG_CACHE_HOME`),
+so the replacement builds the project from its saved source: a FASL the old
+worker compiled while its image held definitions the files no longer have -- a
+macro since moved to a later file, a symbol exported only through `repl-eval` --
+is not loaded by the new one (#317). Libraries outside the root keep ASDF's
+shared cache; a root that encloses them (`$HOME`) moves them too, and each fresh
+worker then compiles them again. A worker holds a lock on its cache for as long
+as it runs, and the next worker to start after it has ended removes the cache.
+The inline server (`MCP_NO_WORKER_POOL=1`) keeps the shared cache.
 
 Input:
 - `reset` (boolean, default `false`): when `true`, immediately spawn a replacement
