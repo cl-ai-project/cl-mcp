@@ -68,6 +68,14 @@
         (declare (ignore val))
         (ok (not presentp))))))
 
+(deftest lisp-check-parens-reads-as-the-editing-tools-read
+  (testing "#., #S, SBCL's character names and a real package's missing symbol are no error"
+    (let ((res (lisp-check-parens
+                :code (format nil "(defvar *x* #.(+ 1 2))~%(defvar *s* #S(p :x 1))~%~
+                                   (list #\\Nul #\\U+2192 (uiop:no-such-function-319))~%"))))
+      (ok (eq t (%ok? res)) (format nil "~S" (%kind res)))
+      (ok (null (find-symbol "NO-SUCH-FUNCTION-319" "UIOP"))))))
+
 (deftest lisp-check-parens-extra-close
   (testing "extra closing paren reported"
     (let ((res (lisp-check-parens :code "(+ 1 2))")))
@@ -249,9 +257,9 @@
       (unwind-protect
            (progn
              (testing "a reader-level failure plus a missing ) is not sent to the overwrite path"
-               ;; #. is disabled, so the edit tools' parser fails before the
-               ;; missing ); the guard refuses, and so must the hint.
-               (write-text (format nil "(defvar *x* #.(+ 1 2))~%~%(defun f ()~%  (list 1 2~%"))
+               ;; #? is no standard dispatch, so the edit tools' parser fails
+               ;; before the missing ); the guard refuses, and so must the hint.
+               (write-text (format nil "(defvar *x* #?x)~%~%(defun f ()~%  (list 1 2~%"))
                (let ((res (lisp-check-parens :path (namestring abs))))
                  (ok (string= (%kind res) "unclosed"))
                  (ok (null (guard-overwritable-p)) "the guard would refuse")

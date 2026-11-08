@@ -24,6 +24,8 @@
                 #:readtable-unavailable-designator
                 #:%skip-whitespace-and-comments
                 #:*standard-readtable*)
+  (:import-from #:cl-mcp/src/source-reader
+                #:standard-syntax-readtable-p)
   (:import-from #:cl-mcp/src/package-context
                 #:extract-in-package-name-from-text)
   (:import-from #:cl-mcp/src/paren-diagnostics
@@ -81,6 +83,7 @@
            #:file-unparseable-cause
            #:file-unparseable-readtable
            #:file-unparseable-recoverable-p
+           #:file-unparseable-unreadable-dispatch
            #:file-unparseable-editable-prefix-p
            #:file-unparseable-unavailable-readtable
            #:file-unparseable-message
@@ -416,36 +419,13 @@ editor-hints.named-readtables package."
             (funcall find-fn designator)))))))
 
 (defun %standard-syntax-readtable-p (rt)
-  "Return T when readtable RT reads exactly like the standard one: the same
-readtable case, the same macro function and terminating status for every
-character below 128, and the same dispatch function for every # sub-character
-below 128. A readtable that merely copies :standard (or the :standard
-designator itself) reads standard syntax and must not switch off the
-standard-syntax delimiter diagnostics.
-A dispatching macro character's own function is a fresh closure in every
-readtable copy (SBCL), so for a character that dispatches in both readtables
-the comparison is made on its sub-characters instead.
-Known limit: only code points below 128 are compared, so a reader macro
-defined on a non-ASCII character is not noticed and the standard-syntax
-diagnostics stay on for that readtable."
-  (let ((std *standard-readtable*))
-    (flet ((dispatching-p (table ch)
-             (and (ignore-errors (progn (get-dispatch-macro-character ch #\a table) t))
-                  t)))
-      (and (eq (readtable-case rt) (readtable-case std))
-           (loop for code from 0 below 128
-                 for ch = (code-char code)
-                 always (or (and (dispatching-p rt ch) (dispatching-p std ch))
-                            (multiple-value-bind (fn non-terminating)
-                                (get-macro-character ch rt)
-                              (multiple-value-bind (std-fn std-nt)
-                                  (get-macro-character ch std)
-                                (and (eq fn std-fn)
-                                     (eq (not non-terminating) (not std-nt)))))))
-           (loop for code from 0 below 128
-                 for ch = (code-char code)
-                 always (eq (ignore-errors (get-dispatch-macro-character #\# ch rt))
-                            (ignore-errors (get-dispatch-macro-character #\# ch std))))))))
+  "Return T when readtable RT reads exactly like the standard one; see
+CL-MCP/SRC/SOURCE-READER:STANDARD-SYNTAX-READTABLE-P, which decides it for the
+editing tools' reader too, so the delimiter diagnostics and the choice of
+reader never disagree. A readtable that merely copies :standard (or the
+:standard designator itself) reads standard syntax and must not switch off the
+standard-syntax delimiter diagnostics."
+  (standard-syntax-readtable-p rt))
 
 (defun %nonstandard-readtable-p (designator)
   "Return T when DESIGNATOR resolves (via named-readtables) to a readtable
@@ -965,16 +945,31 @@ before TARGET's start position."
 an unterminated string or #| comment, since \" and #| are macro characters
 too) or met a stray \")\" (cst's STRAY-RIGHT-PARENTHESIS, which cst raises
 itself on both its parsing paths). Every other reader failure -- an unknown
-dispatch macro such as #?, a disabled #. -- is not counted. Even a delimiter
+dispatch macro such as #? -- is not counted. Even a delimiter
 failure is not proof that the file is broken (a reader macro supplied through
 the readtable parameter could consume the offending characters), which is why
 fs-write-file additionally requires the caller to opt in before overwriting."
   (or (typep condition 'end-of-file)
       (typep condition 'stray-right-parenthesis)))
 
+(defun %missing-symbol-failure-p (condition)
+  "True when CONDITION is SBCL's reader refusing a package-qualified symbol
+because a package this process has lacks it (\"Symbol X not found in the P
+package\", \"... is not external\") or locks it against the intern.  The source
+reader reads such a token as a stand-in (issue #320), but SBCL's reader, which
+reads a file under a named readtable, can only intern the symbol into the
+server's package, so the parse stops there instead.  No readtable argument
+changes that, so -- like a delimiter failure -- it opens the overwrite path."
+  (or (typep condition 'sb-ext:package-locked-error)
+      (and (typep condition 'sb-int:simple-reader-package-error)
+           (let ((control (simple-condition-format-control condition)))
+             (and (stringp control)
+                  (or (search "not found" control :test #'char-equal)
+                      (search "not external" control :test #'char-equal)))))))
+
 (defun %reader-level-failure-p (condition)
   "Return T when the reader itself rejected the text for a reason other than
-a delimiter: a disabled #., an unknown dispatch macro such as #?. Only such a
+a delimiter: an unknown dispatch macro such as #?. Only such a
 failure makes a bracket verdict of the standard-syntax scan a finding rather
 than an instruction. END-OF-FILE is not a READER-ERROR and is excluded anyway
 as a delimiter failure; the edit tools' own synthesized errors (\"content is
@@ -1029,7 +1024,7 @@ cannot write -- gets no recovery path, since fs-write-file would refuse the
 absolute path; the text says to fix it outside cl-mcp. When the caller
 supplied a readtable, no standard-syntax verdict exists: the text names the
 readtable and says how the overwrite guard will decide. Otherwise the failure
-is reader-level (custom reader syntax, a disabled #. form); the file keeps its
+is reader-level (custom reader syntax); the file keeps its
 overwrite protection, so the text points at the readtable parameter instead.
 
 Two branches handle a readtable this process does not have, told apart by who
@@ -1054,30 +1049,36 @@ because %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P opens it for exactly that case."
       ((file-unparseable-read-only-p condition)
        ;; Reading a file is no reason to rewrite it (issue #324): what stopped
        ;; the parse, and the raw view that always works.
-       (format nil "~A~%~A~:[~; The forms before it can still be edited with ~
-                    lisp-edit-form.~] collapsed=false shows the file's text as it ~
-                    is~:[.~;; to repair it, lisp-check-parens path=~S gives the full ~
-                    diagnosis and the steps.~]"
-               (if (file-unparseable-unreadable-dispatch condition)
-                   (format nil "Cannot parse ~A: ~A" path
-                           (apply #'format-unreadable-dispatch
-                                  (file-unparseable-unreadable-dispatch condition)))
-                   head)
-               (cond
-                 ((file-unparseable-unavailable-readtable condition)
-                  (format nil "The parse stops at that declaration: this server process ~
-                               has no such readtable, and nothing an agent can call ~
-                               registers one here."))
-                 (readtable
-                  (format nil "Under a custom readtable a reader macro may consume what ~
-                               looks like a delimiter, so no standard-syntax diagnosis is ~
-                               offered."))
-                 (t ""))
-               (file-unparseable-editable-prefix-p condition)
-               ;; A parenthesis problem has a repair to point at; a missing
-               ;; readtable or reader macro does not.
-               (or (file-unparseable-recoverable-p condition) (not scan-ok))
-               path))
+       (let ((why (cond
+                    ((and readtable (file-unparseable-unavailable-readtable condition))
+                     (format nil "Retry without the readtable argument: if the file needs ~
+                                  none it will simply parse."))
+                    ((file-unparseable-unavailable-readtable condition)
+                     (format nil "The parse stops at that declaration: this server process ~
+                                  has no such readtable, and nothing an agent can call ~
+                                  registers one here."))
+                    ((file-unparseable-missing-symbol-p condition)
+                     (format nil "The server's package lacks that symbol, and under a named ~
+                                  readtable SBCL's reader cannot read past it."))
+                    (readtable
+                     (format nil "Under a custom readtable a reader macro may consume what ~
+                                  looks like a delimiter, so no standard-syntax diagnosis is ~
+                                  offered.")))))
+         (format nil "~A~@[~%~A~]~:[~;~%The forms before it can still be edited with ~
+                      lisp-edit-form.~]~%collapsed=false shows the file's text as it is~
+                      ~:[.~;; to repair it, lisp-check-parens path=~S gives the full ~
+                      diagnosis and the steps.~]"
+                 (if (file-unparseable-unreadable-dispatch condition)
+                     (format nil "Cannot parse ~A: ~A" path
+                             (apply #'format-unreadable-dispatch
+                                    (file-unparseable-unreadable-dispatch condition)))
+                     head)
+                 why
+                 (file-unparseable-editable-prefix-p condition)
+                 ;; A parenthesis problem has a repair to point at; a missing
+                 ;; readtable or reader macro does not.
+                 (or (file-unparseable-recoverable-p condition) (not scan-ok))
+                 path)))
       ((file-unparseable-recoverable-p condition)
        ;; fs-write-file takes only a project-relative path, so that is the
        ;; form the instruction gives; the absolute one stays in the head.
@@ -1141,6 +1142,17 @@ because %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P opens it for exactly that case."
                     in this same process, and no tool registers one here, so no ~
                     structural edit of this file is possible. ~A"
                head (%rewrite-whole-file-instruction path)))
+      ((file-unparseable-missing-symbol-p condition)
+       ;; Not the readtable advice of the last branch: no readtable makes
+       ;; SBCL's reader accept a symbol the package lacks, and
+       ;; %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P opens the overwrite path for it.
+       (format nil "~A~%The server's package lacks that symbol -- a typo, or an API ~
+                    newer than the one the cl-mcp server loaded. A file in standard ~
+                    syntax reads such a symbol anyway (as a stand-in), but this one ~
+                    is read under a named readtable by SBCL's reader, which could ~
+                    only intern it into the server's package, so the parse stops ~
+                    here; no readtable argument changes that. ~A"
+               head (%rewrite-whole-file-instruction path)))
       ((file-unparseable-unreadable-dispatch condition)
        ;; No readtable reads it, so the readtable parameter is no way round
        ;; it, and %FILE-UNPARSEABLE-BY-EDIT-TOOLS-P opens the overwrite path.
@@ -1197,7 +1209,13 @@ a delimiter and no readtable was supplied; NIL otherwise.")
               :documentation
               "T when the tool that met the file only reads it (lisp-read-file): the
 message then says what stopped the parse and where, and names no write path --
-the file may well be a dependency's, which reading it is no reason to rewrite."))
+the file may well be a dependency's, which reading it is no reason to rewrite.")
+   (missing-symbol :initarg :missing-symbol :initform nil
+                   :reader file-unparseable-missing-symbol-p
+                   :documentation
+                   "T when SBCL's reader stopped on a qualified symbol a package of this
+process lacks (%MISSING-SYMBOL-FAILURE-P), which happens only under a named
+readtable: the source reader reads such a token as a stand-in."))
   (:report (lambda (c s) (write-string (file-unparseable-message c) s)))
   (:documentation "Signaled when the target file cannot be parsed into top-level forms.
 RECOVERABLE is T when the failure is a delimiter problem (missing or stray
@@ -1234,7 +1252,10 @@ the forms it could still show."
                   :readtable readtable
                   :read-only read-only
                   :editable-prefix editable-prefix
-                  :diagnosis (if readtable
+                  ;; Under a readtable -- the caller's, or one the file declares
+                  ;; and this process lacks -- the standard delimiter scan is no
+                  ;; evidence: the syntax it would judge is not the file's.
+                  :diagnosis (if (or readtable (typep cause 'readtable-unavailable))
                                  (list :ok t)
                                  (diagnose-delimiters text))
                   :recoverable (and (null readtable)
@@ -1254,6 +1275,8 @@ the forms it could still show."
                        (multiple-value-bind (line column sub-char)
                            (unreadable-dispatch-position text)
                          (and line (list line column sub-char))))
+                  :missing-symbol (and (null readtable)
+                                       (%missing-symbol-failure-p cause))
                   :cause (sanitize-condition-text cause)))
 
 (defun signal-file-unparseable (abs text cause &key readtable editable-prefix read-only)
@@ -1800,7 +1823,9 @@ The second value says why: :DELIMITER (the primary value is T), :PARSED (the
 file parses cleanly, so a scan verdict against it is a false positive),
 :READER-LEVEL (it fails, but not on a delimiter, and a readtable this process
 has could still make it editable), :READTABLE-UNAVAILABLE (the primary value
-is T; see above), :UNREADABLE-DISPATCH (the primary value is T: the file
+is T; see above), :MISSING-SYMBOL (the primary value is T: under a named
+readtable SBCL's reader stopped on a qualified symbol a package of this process
+lacks, %MISSING-SYMBOL-FAILURE-P, which no readtable parameter fixes either), :UNREADABLE-DISPATCH (the primary value is T: the file
 declares no readtable and holds a #<, #) or # and whitespace, which the standard
 makes the reader reject, per UNREADABLE-DISPATCH-POSITION -- an object printed
 unreadably and pasted as source, which no readtable parameter can fix either),
@@ -1829,6 +1854,8 @@ by lisp-check-parens so its next-step hint rests on the same verdict."
                      (values t :delimiter (and nodes t)))
                     ((typep swallowed 'readtable-unavailable)
                      (values t :readtable-unavailable (and nodes t)))
+                    ((%missing-symbol-failure-p swallowed)
+                     (values t :missing-symbol (and nodes t)))
                     ((unreadable-dispatch-position source)
                      (values t :unreadable-dispatch (and nodes t)))
                     (t (values nil :reader-level (and nodes t)))))
@@ -1838,6 +1865,7 @@ by lisp-check-parens so its next-step hint rests on the same verdict."
             (values t :readtable-unavailable nil))
           (error (e)
             (cond ((%delimiter-failure-p e) (values t :delimiter nil))
+                  ((%missing-symbol-failure-p e) (values t :missing-symbol nil))
                   ((unreadable-dispatch-position source)
                    (values t :unreadable-dispatch nil))
                   (t (values nil :reader-level nil))))))))

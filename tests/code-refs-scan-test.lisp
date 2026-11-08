@@ -834,11 +834,11 @@ an option value this scanner refuses to guess at -- stays NIL."
     (let ((*project-root* (asdf:system-source-directory :cl-mcp))
           (path (%write-tmp "top-level-forms-at-bad.lisp"
                             (format nil "(in-package #:cl-user)~%~%~
-(defparameter *x* #.(+ 1 2))~%"))))
+(defparameter *x* #?x)~%"))))
       (unwind-protect
            (multiple-value-bind (table failure) (top-level-forms-at path '(3))
              (ok (zerop (hash-table-count table)))
-             (ok (and (stringp failure) (search "*READ-EVAL*" failure)) failure))
+             (ok (and (stringp failure) (search "dispatch function" failure)) failure))
         (ignore-errors (delete-file path)))))
   (testing "a file outside the readable paths is not opened"
     (let ((*project-root* (asdf:system-source-directory :cl-mcp))

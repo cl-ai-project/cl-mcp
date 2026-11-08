@@ -698,7 +698,7 @@ tests/tmp/NAME.lisp."
         (skip "cl-interpol not available")))))
 
 (deftest lisp-read-file-read-eval-disabled-in-package-context-scan
-  (testing "package-context header scan does not execute #. forms"
+  (testing "a file holding #. is read, the #. shown as written and never evaluated"
     (let* ((flag-path (merge-pathnames "tests/tmp/lisp-read-read-eval-flag"
                                        (system-source-directory :cl-mcp)))
            (content
@@ -710,6 +710,7 @@ tests/tmp/NAME.lisp."
                       ":if-exists :supersede :if-does-not-exist :create) "
                       "(write-line \"executed\" s)) "
                       "'(in-package #:cl-user))~%"
+                      "~%(defvar *three* #.(+ 1 2))~%"
                       "~%(defun target () :ok)~%")
                      (namestring flag-path))))
       (ignore-errors (delete-file flag-path))
@@ -717,20 +718,11 @@ tests/tmp/NAME.lisp."
            (with-temp-lisp-file "tests/tmp/lisp-read-read-eval.lisp"
                content
              (lambda (path)
-               (let ((error-message
-                       (handler-case
-                           (progn
-                             (lisp-read-file path)
-                             nil)
-                         (error (e)
-                           (format nil "~A" e)))))
-                 (ok error-message)
-                 (ok (or (search "Read-time evaluation (#.) is disabled for security"
-                                 error-message)
-                         (search "*READ-EVAL*" error-message)
-                         (search "can't read #." error-message)))
-                 (ok (not (probe-file flag-path)))))))
-        (ignore-errors (delete-file flag-path)))))
+               (let ((text (gethash "content" (lisp-read-file path))))
+                 (ok (search "(defun target ()" text) "the forms after the #. are read")
+                 (ok (search "(defvar *three* #.(+ 1 2)" text) "#. is shown as written")
+                 (ok (not (probe-file flag-path)) "and never evaluated"))))
+        (ignore-errors (delete-file flag-path))))))
 
 (deftest lisp-read-file-collapsed-shows-method-qualifiers
   (testing "collapsed view includes method qualifiers like :before, :after, :around"
@@ -1476,6 +1468,41 @@ message it signals, or NIL when it returns normally."
           (ng (search "fs-write-file" content)))
         (ok (eq t (gethash "unparseable" meta)))
         (ok (eql 4 (gethash "unparseable_from_line" meta)))))))
+
+(deftest lisp-read-file-reads-past-a-readtable-without-a-standard-diagnosis
+  ;; Review of PR #340: an odd number of " in a pythonic-string file made the
+  ;; standard scan's verdict the stop line and the reason, with a repair hint.
+  (with-temp-lisp-file "tests/tmp/read-file-pythonic.lisp"
+      (format nil "(in-package #:cl-user)~%(named-readtables:in-readtable :pythonic-324)~%~%~
+                   (defun doc-a () \"\"\"Say \"yes\" or \"no\" or \"maybe.\"\"\" 1)~%~%~
+                   (defun after-doc () 2)~%")
+    (lambda (path)
+      (let* ((result (lisp-read-file path))
+             (content (gethash "content" result)))
+        (ok (eql 0 (search "NOTE: the parse stops at line 3 of" content)) content)
+        (ok (eql 3 (gethash "unparseable_from_line" (gethash "meta" result))))
+        (ok (search "pythonic-324" content :test #'char-equal) "the readtable is named")
+        (ng (search "Unterminated string" content) "no standard-syntax verdict")
+        (ng (search "lisp-check-parens path=" content) "no repair pointer")))))
+
+(deftest lisp-read-file-reads-past-in-the-file-s-package
+  ;; Review of PR #340: the recovered part was read in the caller's package,
+  ;; so its symbols were interned there.
+  (let ((probe (make-package (format nil "CL-MCP-READ-PAST-PROBE-~D" (random 100000))
+                             :use '("CL"))))
+    (unwind-protect
+         (with-temp-lisp-file "tests/tmp/read-file-past-package.lisp"
+             (format nil "(defpackage #:cl-mcp-read-past-324 (:use #:cl))~%~
+                          (in-package #:cl-mcp-read-past-324)~%~
+                          (named-readtables:in-readtable :no-such-readtable-324b)~%~%~
+                          (defun read-past-only-symbol-324 () 1)~%")
+           (lambda (path)
+             (let ((*package* probe))
+               (ok (search "(defun read-past-only-symbol-324 ()"
+                           (gethash "content" (lisp-read-file path)))))
+             (ok (null (find-symbol "READ-PAST-ONLY-SYMBOL-324" probe))
+                 "nothing interned into the caller's package")))
+      (delete-package probe))))
 
 (deftest lisp-read-file-lists-a-file-with-an-unknown-dispatch-macro
   ;; Issue #324: a #@ the reader does not know made the whole file an error.

@@ -594,6 +594,18 @@ Inputs:
   is read by
   Eclector or by the CL reader (with `readtable`, or after an `in-readtable`), as long as its
   readtable reads `#+` and `#-` the standard way.
+  Source is read as SBCL reads it and never evaluated (#319, #320), by every tool that parses
+  a file and by `lisp-edit-form`/`lisp-patch-form` when they check `content`/`new_text`, so
+  what an edit writes reads back: `#.FORM` is shown as written and stands for FORM
+  unevaluated (a `#.` inside a feature expression counts as holding, so `#+#.(...)` keeps its
+  form and `#-#.(...)` skips it), `#S(...)` builds no structure, SBCL's character names
+  (`#\Nul`, `#\U+2192`, `#\RIGHTWARDS_ARROW`) are accepted, and a qualified symbol that a
+  package of the server lacks (a typo, a newer API, `cl::foreign`) reads as a stand-in shown as
+  `pkg:name`, interning nothing. Under a named readtable (a `readtable` argument or the file's
+  own `in-readtable`) SBCL's own reader reads the file, and the content of an edit to it is
+  checked the same way, so a symbol a package lacks is refused there rather than written; a
+  file that already holds one stops the parse at it, the error says so, and `fs-write-file`
+  with `allow_unparseable_overwrite` may then rewrite the file.
 - `name_pattern` (string, optional): CL-PPCRE regex; matching definition names are
   expanded even in collapsed mode.
 - `content_pattern` (string, optional): CL-PPCRE regex applied to form bodies; if
@@ -618,8 +630,12 @@ too, read without that readtable with Eclector's error recovery (an unknown read
 such as `#@` is skipped) under a `--- Read past the in-readtable without it ... ---`
 line, and a file in standard syntax that fails only on an unknown dispatch macro is
 listed the same way (`--- Read with recovery ... ---`). Those forms may be shown inexactly
-and the editing tools cannot reach them. `meta` then carries `unparseable: true`,
-`unparseable_from_line` and `forms_read_past`. The reason names no write path: this tool
+and the editing tools cannot reach them; comments among them are not shown, and a form at
+the very end of the file that recovery had to complete may show as `nil`. When the read past
+stops again (a second readtable the server lacks, say), the listing says where. `meta` then
+carries `unparseable: true`, `forms_read_past`, and `unparseable_from_line` when the line is
+known. Under a readtable the server lacks no standard-syntax delimiter diagnosis is given: the
+syntax it would judge is not the file's. The reason names no write path: this tool
 only reads, and the file may be a dependency's; a parenthesis problem points at
 `lisp-check-parens`, which gives the repair steps.
 
@@ -724,7 +740,7 @@ Output:
   delimiter no readtable can fix, `fs-write-file` with
   `allow_unparseable_overwrite`, since the structural tools cannot locate any
   form in such a file. A file that parses (a symbol such as `a[b`), one that
-  fails for a reader-level reason (`#.`, an unknown `#?`), or a windowed read
+  fails for a reader-level reason (an unknown `#?`), or a windowed read
   keeps the `lisp-edit-form` hint, so the hint never promises an overwrite the
   guard would refuse. A delimiter-broken file outside the project root gets
   none of the three: neither `fs-write-file` nor the structural tools can act
@@ -1263,6 +1279,7 @@ Output (the content text carries everything that matters for a decision):
 - `via_macros` (array): the project macros whose backquoted expansion names the symbol (a `defmacro` holding a `template` site), package-qualified; `names_class`: whether the symbol also names a class
 - `unresolved` (array): `path`, `package`, `count`, `tests` for matches in files whose package is not loaded
 - `notes` (array), `xref_count`, `files_scanned`, `name_matches`, `scan_skipped`, `project_only`, `symbol`
+- `files_unparsed`: files the source scan could not parse, so their call sites are missing from the count; the content text's headline says how many (`, N files not scanned (could not be parsed)`) and a note names up to three
 
 Limits: matching is positional, not a code walker. A `flet`/`labels`/`macrolet` binding the same
 name is flagged in `shadowed_by`; other lexical bindings are not. The name position of any
@@ -1428,7 +1445,7 @@ evaluated, and nothing is interned.
 Cost: confirming a definition means reading and parsing the file it was compiled from, so one
 call reads every distinct file its answer names — once each, whole — and its cost scales with
 that number of files, not with the number of definitions. A file the CST reader cannot read
-(`#.` with `*read-eval*` off, a custom reader macro) yields no candidates at all, so every entry
+(a custom reader macro the server lacks) yields no candidates at all, so every entry
 in it comes back `unverified` with no edit information, even when the definitions themselves are
 untouched.
 

@@ -11,6 +11,12 @@
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/utils/lenient-read
                 #:call-with-lenient-packages)
+  (:import-from #:cl-mcp/src/source-reader
+                #:read-time-evaluation-p
+                #:source-featurep
+                #:source-parse-client
+                #:source-read
+                #:source-readtable)
   (:import-from #:cl-mcp/src/utils/nesting
                 #:check-lisp-nesting
                 #:lisp-too-deep-p)
@@ -127,7 +133,7 @@ too deeply to read safely (LISP-TOO-DEEP-P)."
                (call-with-lenient-packages
                 (lambda ()
                   (with-input-from-string (stream text)
-                    (loop for form = (read stream nil stream)
+                    (loop for form = (source-read stream nil stream)
                           until (eq form stream)
                           thereis (%in-readtable-form-p form)))))
              (error () nil)))
@@ -263,6 +269,9 @@ carrying one."
   (cond
     ((> depth 64) "it is nested too deeply")
     ((symbolp expression) nil)
+    ;; #. in a feature expression: SOURCE-FEATUREP decides it without
+    ;; evaluating it.
+    ((read-time-evaluation-p expression) nil)
     ((not (and (consp expression) (ignore-errors (list-length expression))))
      ;; Not a proper list: it may be circular, as #+#1=(and . #1#) reads.
      (let ((*print-circle* t))
@@ -339,7 +348,7 @@ of that form overwrote both.  READTABLE must read #+ and #- the standard way
                                                :format-control "Reader error: malformed ~
                                                                 feature expression after #~A: ~A"
                                                :format-arguments (list sign problem)))))
-            (let ((holds (handler-case (uiop:featurep expression)
+            (let ((holds (handler-case (source-featurep expression)
                            ;; An operator UIOP does not take: CL:AND rather than
                            ;; the keyword, which Eclector refuses as well.
                            (error ()
@@ -450,7 +459,8 @@ and a form behind expressions that hold starts its span at their first #.
 Reading stays lenient so a partially broken file can still be displayed, but
 callers that need to know the file is unparseable (lisp-edit-form, the
 fs-write-file overwrite guard) inspect the second value."
-  (let ((*readtable* custom-readtable)
+  ;; SOURCE-READTABLE: #. and #S read as the Eclector pass reads them.
+  (let ((*readtable* (source-readtable custom-readtable))
         (*read-eval* nil)
         ;; The structural stray-")" check below assumes ")" still terminates
         ;; lists. A readtable that redefines ")" (constituent, or another
@@ -668,10 +678,12 @@ read without it has not been shown to read correctly."))
                                 the session's worker, so registering it there ~
                                 does not reach this process."
                            readtable))))
-      (let ((*readtable* (copy-readtable))
+      ;; SOURCE-READTABLE: the CL reads inside this pass (%SPLIT-SWALLOWED-TWINS
+      ;; reading feature expressions again) read #. as the client does.
+      (let ((*readtable* (source-readtable (copy-readtable)))
             (*read-eval* nil)
             (nodes '())
-            (client (make-instance 'parse-result-client)))
+            (client (make-instance 'source-parse-client)))
         (with-input-from-string (stream text)
           (handler-case
               (call-with-lenient-packages
@@ -733,14 +745,8 @@ read without it has not been shown to read correctly."))
                                                   files are parsed."
                                              designator))))))))))))))
             (reader-error (e)
-              (let ((msg (format nil "~A" e)))
+              (progn
                 (cond
-                  ((search "READ-EVAL" msg)
-                   (error
-                    "Reader error: ~A~%~%Read-time evaluation (#.) is disabled for security. ~
-If you need to parse files containing #., consider removing or replacing the #. forms, ~
-or use a separate evaluation step."
-                    e))
                   ((typep e 'eclector.reader:invalid-context-for-right-parenthesis)
                    ;; A ")" with no open form: a delimiter failure no
                    ;; readtable can fix, kept identifiable for the overwrite
@@ -777,8 +783,9 @@ means, so nothing that edits uses it.")
 
 (defun %recover-reader-error (condition)
   "Invoke Eclector's RECOVER restart for CONDITION while *RECOVER-READER-ERRORS*
-is true.  A package or symbol the image lacks is left to the lenient handlers
-(Eclector's own recovery would intern the symbol into a real package)."
+is true.  A package or symbol the image lacks is left to the lenient handlers,
+which read it as a stub's symbol or a stand-in; recovering instead would read a
+different object (an uninterned symbol, or NIL) than the parse without RECOVER."
   (when (and *recover-reader-errors*
              (not (typep condition '(or eclector.reader:package-does-not-exist
                                         eclector.reader:symbol-does-not-exist
