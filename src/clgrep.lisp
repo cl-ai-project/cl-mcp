@@ -121,6 +121,15 @@ contains:
                    "timed-out" timed-out))
       (values (mapcar #'%normalize-result results) timed-out))))
 
+(defun %one-line (text &optional (max-chars 120))
+  "Return TEXT trimmed, its whitespace runs made single spaces, cut to MAX-CHARS
+characters with \"...\" when longer; NIL for NIL."
+  (when text
+    (let ((line (string-trim " " (cl-ppcre:regex-replace-all "\\s+" text " "))))
+      (if (> (length line) max-chars)
+          (concatenate 'string (subseq line 0 (- max-chars 3)) "...")
+          line))))
+
 (defun %format-clgrep-results (results)
   "Convert clgrep results (list of alists) to a vector of hash tables.
 Deduplicates results by (file, form-start-byte): when a single form
@@ -214,12 +223,18 @@ TIMEOUT-SECONDS runs out first, the matches found until then are returned with
                                  (length formatted) (= 1 (length formatted))
                                  pattern path)
                          (loop for match across formatted
-                               do (format s "  ~A:~A [~A] ~A~%"
+                               do (format s "  ~A:~A [~A] ~A~@[  | ~A~]~%"
                                           (gethash "file" match)
                                           (gethash "line" match)
                                           (gethash "form-type" match)
                                           (or (gethash "signature" match)
-                                              (gethash "form-name" match))))
+                                              (gethash "form-name" match)
+                                              "")
+                                          ;; No signature (a test, a top-level
+                                          ;; call): the line that matched is
+                                          ;; what says why it is listed (#322).
+                                          (and (null (gethash "signature" match))
+                                               (%one-line (gethash "match" match)))))
                          ;; Notes go in the text: sibling JSON fields
                          ;; are not rendered by most clients.
                          (dolist (note notes)

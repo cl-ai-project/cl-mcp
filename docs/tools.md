@@ -578,8 +578,12 @@ Inputs:
   string with its quotes (`(defsystem "mylib" ...)` for `"MyLib"`), and a list such as
   `(define-controller (show :require-token t) ...)`. A name over 80 characters is cut at
   the last space before the limit, or at 80 when it has none. A top-level call whose head
-  merely starts with `def` (`(default-handler x)`) is shown the same way. Any other form
-  shows its head, `(progn ...)`. A definition's docstring follows as `;; first line`, taken
+  merely starts with `def` (`(default-handler x)`) is shown the same way, and so is a form
+  whose head is not a COMMON-LISP operator and whose second element is a symbol -- FiveAM's
+  `(test my-test ...)`, `(in-suite all)` (#322). Any other form shows its head,
+  `(progn ...)`; a wrapper (`eval-when`, `progn`, `let`, `with-upgradability` …) is followed by
+  the definitions directly inside it, indented under it (a definition under a `#+`/`#-` false
+  here inside a wrapper is not listed). A definition's docstring follows as `;; first line`, taken
   from where its definer puts one: after a variable's value, a `defstruct`'s name, or a function's
   lambda list (never a function's only form, which is its value), so a variable whose
   value is a string does not show that value as its documentation. A variable's value is cut
@@ -607,7 +611,13 @@ Inputs:
   file that already holds one stops the parse at it, the error says so, and `fs-write-file`
   with `allow_unparseable_overwrite` may then rewrite the file.
 - `name_pattern` (string, optional): CL-PPCRE regex; matching definition names are
-  expanded even in collapsed mode.
+  expanded even in collapsed mode. A definition's name is the second element of a `def…` /
+  `define-…` form -- plus, for an FFI definer such as CFFI's `(defcfun ("strlen" c-strlen) …)`,
+  its Lisp name `c-strlen` -- or of any other form whose second element is a symbol (FiveAM's
+  `(test name …)`). The collapsed view lists the definitions directly inside a wrapper
+  (`eval-when`, `progn`, `macrolet`, `let`, `with-upgradability` …) indented under it, and
+  `name_pattern` expands the one that matches (#322). When no name matches, the content opens
+  with `NOTE: no definition's name matches name_pattern …`; `meta.name_matches` counts them.
 - `content_pattern` (string, optional): CL-PPCRE regex applied to form bodies; if
   it matches, the full form is expanded. For non-Lisp files, this triggers a
   grep-like text filter with ±5 lines of context.
@@ -784,7 +794,7 @@ Input:
   the name itself still matches as written (`def:thing`, or `|def:thing|`, for `(|DEF:THING| ...)`), and
   when those two readings name different forms the call is refused as ambiguous. When nothing
   matches, the error lists the file's forms of that type (or all its top-level forms when it has none)
-- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`. A leading `#:` or `:` is stripped (`"#:my-pkg"` matches `(defpackage #:my-pkg ...)`), and a `defstruct` with options, `(defstruct (name opts...) ...)`, is matched by its bare name. A form under a `#+`/`#-` expression false in the server is named with its expressions in front, `"#+ecl impl"` (see `content` below)
+- `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`. A leading `#:` or `:` is stripped (`"#:my-pkg"` matches `(defpackage #:my-pkg ...)`), and a `defstruct` with options, `(defstruct (name opts...) ...)`, is matched by its bare name. A form under a `#+`/`#-` expression false in the server is named with its expressions in front, `"#+ecl impl"` (see `content` below). When no top-level form has the name, a definition directly inside a wrapper (`eval-when`, `progn`, `with-upgradability` …) is reached, and edited in place without touching the wrapper's spacing -- an insert after its last definition goes on its own line at that definition's indentation, so give multi-line `content` the indentation it should have; when a top-level form has the same name, the top-level one is meant, and the nested one cannot be named; an FFI definition such as `(defcfun ("strlen" c-strlen) …)` is also reached by its Lisp name `c-strlen` (#322)
 - `operation` (string, required): one of `replace`, `insert_before`, `insert_after`, `delete`
 - `content` (string): the form text to insert or replace with; required for every operation but
   `delete`, where it is ignored. `replace` takes exactly one top-level form (several are an error
@@ -1108,8 +1118,13 @@ Input:
 - `form_types` (array of strings, optional): keep only hits whose top-level form has one of
   these heads, compared case-insensitively with any package prefix on the form's head dropped;
   give bare names (`"defun"`, `"defmethod"`, `"deftest"`; `"asdf:defsystem"` matches nothing). A head is recognized when it is one of the usual
-  definers or starts with `def`; a form whose head is neither — FiveAM's `test`, a DSL macro —
-  has no type and is never kept by this filter. Hits inside an unterminated form bypass it.
+  definers or starts with `def`; any other head whose second element is a symbol — FiveAM's
+  `test`, `in-suite`, serapeum's `->` — is its type too (named by that symbol, with no
+  signature), so `["test"]` keeps a FiveAM project's tests (#322). A hit inside a wrapper
+  (`eval-when`, `progn`, `macrolet`, `let`, `locally`, `flet`, `labels`, ASDF's
+  `with-upgradability`) is attributed to the definition directly inside it that holds the hit,
+  so `["defclass"]` finds `(eval-when (...) (defclass ...))`. Hits inside an unterminated form
+  bypass the filter.
 - `limit` (integer, default `200`): cap on the line hits that pass `form_types`, counted
   **before** hits are grouped by form, so fewer entries than `limit` can come back.
 - `include_form` (boolean, default `false`): attach each form's full text; a form longer than
@@ -1137,8 +1152,8 @@ line outside every top-level form (a comment between forms) is dropped.
 Output:
 - `content`: `N matches for "PATTERN"[ in PATH]:` (`1 match for` when there is one), then one
   line per form,
-  `FILE:LINE [FORM-TYPE] SIGNATURE`, then any `NOTE` lines. `FORM-TYPE` prints `NIL` for an
-  unrecognized head.
+  `FILE:LINE [FORM-TYPE] SIGNATURE`, then any `NOTE` lines. A form with no signature (a test, a
+  top-level call) shows its name and then `| ` and the line that matched.
 - `matches` (array), one entry per (file, form), with:
   - `file`: relative to the project root, not to `path`, so a file under the root can be passed
     straight to `lisp-read-file`. A file outside the root is printed absolute (see

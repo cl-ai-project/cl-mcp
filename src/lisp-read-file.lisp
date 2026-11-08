@@ -10,6 +10,7 @@
                 #:cst-node-start
                 #:cst-node-end
                 #:cst-node-start-line
+                #:cst-node-children
                 #:cst-node-end-line
                 #:readtable-unavailable
                 #:readtable-unavailable-origin
@@ -41,6 +42,8 @@
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%feature-prefix-end
                 #:%skipped-feature-node-p
+                #:%wrapper-head-p
+                #:%ffi-definer-head-p
                 #:feature-verdict
                 #:%skip-blank-and-comments
                 #:%parse-readtable-designator
@@ -366,18 +369,53 @@ matched it and as the nine definers show their names."
           (with-output-to-string (out)
             (write name :stream out :pretty t :escape t :case :downcase)))))))
 
+(defun %ffi-lisp-name (head name)
+  "Return the Lisp name an FFI definer gives the definition named NAME, or NIL:
+the symbol of a (\"c_name\" lisp-name) or (lisp-name \"c_name\") list -- CFFI's
+defcfun, defcvar and the like -- or, for a plain C name string after a HEAD
+naming one (CFUN, CVAR or FOREIGN in its name), the name CFFI derives from it
+(lower case, _ made -), when the string is a C identifier.  code-find knows
+such a definition by that name, so name_pattern does too."
+  (cond
+    ((not (%ffi-definer-head-p head)) nil)
+    ((and (consp name) (consp (cdr name)) (null (cddr name)))
+     (let ((symbol (find-if (lambda (part) (and part (symbolp part))) name))
+           (string (find-if #'stringp name)))
+       (and symbol string (not (keywordp symbol))
+            (string-downcase (symbol-name symbol)))))
+    ((and (stringp name) (plusp (length name))
+          (every (lambda (ch) (or (alphanumericp ch) (char= ch #\_))) name)
+          (not (digit-char-p (char name 0))))
+     (substitute #\- #\_ (string-downcase name)))))
+
 (defun %definition-names (form)
   "Return a list of stringified definition names for FORM, when applicable:
-the text %DEFINITION-NAME-TEXT gives its second element, when its head is a
-symbol starting with DEF or DEFINE- and it has one."
+the text %DEFINITION-NAME-TEXT gives its second element when its head is a
+symbol starting with DEF or DEFINE- -- plus the Lisp name of an FFI definer
+(%FFI-LISP-NAME), as code-find knows it -- or, for any other head, its second
+element when that is a symbol (not a keyword): FiveAM's (test name ...), (in-suite
+name), serapeum's (-> name ...).  So the collapsed view names such a form and
+name_pattern finds it (issue #322)."
   (when (and (consp form) (consp (cdr form)))
     (let ((head (car form))
           (name (second form)))
-      (when (and (symbolp head)
-                 (let ((n (symbol-name head)))
-                   (or (and (>= (length n) 3) (string= n "DEF" :end1 3))
-                       (and (>= (length n) 7) (string= n "DEFINE-" :end1 7)))))
-        (list (%definition-name-text name))))))
+      (when (symbolp head)
+        (let ((n (symbol-name head)))
+          (cond
+            ((or (and (>= (length n) 3) (string= n "DEF" :end1 3))
+                 (and (>= (length n) 7) (string= n "DEFINE-" :end1 7)))
+             (let ((text (%definition-name-text name))
+                   (lisp-name (%ffi-lisp-name head name)))
+               (if (and lisp-name (string/= lisp-name text))
+                   (list text lisp-name)
+                   (list text))))
+            ;; Not a COMMON-LISP operator -- (setf *x* ...), (format t ...) are
+            ;; calls, not definitions -- nor in-package.
+            ((and name (symbolp name) (not (keywordp name))
+                  (not (%wrapper-head-p head))
+                  (not (eq (symbol-package head) (find-package "COMMON-LISP")))
+                  (string/= n "IN-PACKAGE"))
+             (list (%definition-name-text name)))))))))
 
 (defun %form->string (form)
   "Return FORM printed as Lisp source text for display.
@@ -639,9 +677,28 @@ unread.  It was never read, so it has no signature to print, only its text."
                 form-text)
             (feature-verdict (cst-node-value node)))))
 
+(defun %indent-numbered-lines (text)
+  "Return TEXT, lines numbered \"N: ...\", with two spaces put after each
+number's colon: a definition listed inside a wrapper, under it."
+  (format nil "~{~A~^~%~}"
+          (mapcar (lambda (line)
+                    (let ((colon (search ": " line)))
+                      (if colon
+                          (concatenate 'string (subseq line 0 (+ colon 2)) "  "
+                                       (subseq line (+ colon 2)))
+                          line)))
+                  (uiop:split-string (string-right-trim '(#\Newline) text)
+                                     :separator '(#\Newline)))))
+
 (defun %format-lisp-form (node source-text name-scanner content-scanner
                           line-width)
-  "Return two values: display string and whether NODE was expanded.
+  "Return three values: display string, whether NODE (or a definition listed
+inside it) was expanded, and whether a name of it matched NAME-SCANNER.
+
+A wrapper (*WRAPPER-HEADS*: eval-when, progn, macrolet, with-upgradability ...)
+shown collapsed is followed by the definitions directly inside it, one line
+each, indented under it and named as top-level ones are, so name_pattern finds
+them and expands the one that matches (issue #322).
 
 An expanded form is echoed from SOURCE-TEXT rather than re-printed from the
 CST, because three things depend on the text being what is on disk:
@@ -695,8 +752,34 @@ whitespace."
                      (format nil "~VD: ~@[~A ~]~A" line-width start-line prefix
                              (%collapse-named-form form)))
                     (t (format nil "~VD: ~@[~A ~]~A" line-width start-line prefix
-                               (%collapse-generic form))))))
-    (values display expand?)))
+                               (%collapse-generic form)))))
+         (child-expanded nil)
+         (child-matched nil))
+    (when (and (not expand?) (%wrapper-head-p head))
+      (let ((lines
+              (loop for child in (cst-node-children node)
+                    for value = (and (typep child 'cst-node)
+                                     (eq (cst-node-kind child) :expr)
+                                     (cst-node-value child))
+                    when (and (consp value)
+                              (symbolp (car value))
+                              (not (%wrapper-head-p (car value)))
+                              (%definition-names value))
+                      collect (multiple-value-bind (line expanded matched)
+                                  (%format-lisp-form child source-text name-scanner
+                                                     content-scanner line-width)
+                                (when expanded (setf child-expanded t))
+                                (when matched (setf child-matched t))
+                                ;; An expanded child is echoed verbatim, so its
+                                ;; text can be copied into a patch's old_text;
+                                ;; only a collapsed line is indented under the
+                                ;; wrapper.
+                                (if expanded
+                                    (string-right-trim '(#\Newline) line)
+                                    (%indent-numbered-lines line))))))
+        (when lines
+          (setf display (format nil "~A~{~%~A~}" display lines)))))
+    (values display (or expand? child-expanded) (or name-match child-matched))))
 
 (defun %line-stats (text)
   "Return three values: source lines, comment lines, and blank lines for TEXT."
@@ -845,6 +928,7 @@ and, when the diagnosis names it, \"unparseable_from_line\"."
               (error condition))))
       (let* ((line-width (%line-number-width source-lines-count))
              (expanded 0)
+             (name-matches 0)
              (total-forms 0)
              (*package* *package*)
              (display
@@ -868,10 +952,11 @@ and, when the diagnosis names it, \"unparseable_from_line\"."
                          (dolist (comment (nreverse pending-comments))
                            (write-string comment out))
                          (setf pending-comments nil))
-                       (multiple-value-bind (line expanded?)
+                       (multiple-value-bind (line expanded? name-matched?)
                            (%format-lisp-form node text name-scanner
                                               content-scanner line-width)
                          (when expanded? (incf expanded))
+                         (when name-matched? (incf name-matches))
                          (write-string (ensure-trailing-newline line) out))
                        ;; Track in-package to set *package* for correct
                        ;; symbol printing of subsequent forms.
@@ -908,6 +993,7 @@ and, when the diagnosis names it, \"unparseable_from_line\"."
              (meta (make-hash-table :test #'equal)))
         (setf (gethash "total_forms" meta) total-forms
               (gethash "expanded_forms" meta) expanded
+              (gethash "name_matches" meta) name-matches
               (gethash "comment_lines" meta) comment-lines
               (gethash "blank_lines" meta) blank-lines
               (gethash "source_lines" meta) source-lines-count)
@@ -1122,6 +1208,13 @@ Returns a hash-table payload with keys \"content\", \"path\", \"mode\", and \"me
                                  offset line-limit include-comments comment-context
                                  :readtable readtable)
       (let ((payload (make-hash-table :test #'equal)))
+        ;; A name_pattern that matches nothing returns the plain outline,
+        ;; which reads like a hit unless it says so (issue #322).
+        (when (and name-pattern (hash-table-p meta)
+                   (eql 0 (gethash "name_matches" meta)))
+          (setf content (format nil "NOTE: no definition's name matches name_pattern ~S; ~
+                                     the whole outline follows.~%~A"
+                                name-pattern content)))
         (setf (gethash "content" payload) content
               (gethash "path" payload) (normalize-path-for-display resolved)
               (gethash "mode" payload) mode

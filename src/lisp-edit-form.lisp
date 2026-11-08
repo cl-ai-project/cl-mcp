@@ -9,6 +9,7 @@
                           #:cst-node-start
                           #:cst-node-end)
   (:import-from #:cl-mcp/src/cst
+                #:cst-node-children
                 #:cst-node-start-line
                 #:parse-top-level-forms
                 #:%feature-expression-problem
@@ -918,7 +919,25 @@ form itself that the summary would otherwise leave unmentioned."
 (defun %comment-floor (nodes target)
   "Return where the last node before TARGET among NODES ends, line comments left
 out, or 0 for the first: the comment block %ATTACHED-COMMENT-START may take for
-TARGET's lies after it."
+TARGET's lies after it.  A TARGET inside a wrapper (issue #322) is not one of
+NODES: its floor is the end of the sibling before it, or just inside the
+wrapper's ( for its first child."
+  (unless (member target nodes :test #'eq)
+    (let ((parent (find-if (lambda (node)
+                             (and (eq (cst-node-kind node) :expr)
+                                  (<= (cst-node-start node) (cst-node-start target))
+                                  (>= (cst-node-end node) (cst-node-end target))))
+                           nodes)))
+      (when parent
+        (return-from %comment-floor
+          (let ((floor (1+ (cst-node-start parent))))
+            (dolist (child (cst-node-children parent) floor)
+              ;; Expressions only: a comment is among the children too, and
+              ;; the comment above TARGET is what the floor must not pass.
+              (when (and (typep child 'cst-node)
+                         (eq (cst-node-kind child) :expr)
+                         (<= (cst-node-end child) (cst-node-start target)))
+                (setf floor (max floor (cst-node-end child))))))))))
   (let ((floor 0))
     (dolist (node nodes floor)
       (when (eq node target)
@@ -995,7 +1014,10 @@ file's own (CRLF in a CRLF file)."
                                       suffix)
                      (length suffix)))
          (gap-after (subseq suffix 0 ws-end))
-         (following (subseq suffix ws-end)))
+         (following (subseq suffix ws-end))
+         ;; The last definition inside a wrapper (issue #322): what follows
+         ;; is the wrapper's own ), not a sibling.
+         (closing (and (plusp (length following)) (char= (char following 0) #\)))))
     (flet ((line-gap (gap)
              ;; A gap that does not end a line (forms on one line) cannot hold
              ;; a form of its own: give it a blank line.
@@ -1025,7 +1047,16 @@ file's own (CRLF in a CRLF file)."
          ;; Above the comment written directly over the target, so the comment
          ;; still reads as the target's, with the gap the file has there on
          ;; both sides.
-         (let ((comment-start (%attached-comment-start text start comment-floor)))
+         (let* ((comment-start (%attached-comment-start text start comment-floor))
+                ;; A comment block starts at its line's start, indentation
+                ;; included: the new form takes that indentation too.
+                (indent (if (< comment-start start)
+                            (subseq text comment-start
+                                    (or (position-if-not (lambda (ch)
+                                                           (member ch '(#\Space #\Tab)))
+                                                         text :start comment-start)
+                                        comment-start))
+                            "")))
            (multiple-value-bind (before-core before-gap) (gap-before comment-start)
              (let ((gap (line-gap (if (plusp (length before-core))
                                       before-gap
@@ -1033,10 +1064,19 @@ file's own (CRLF in a CRLF file)."
                (concatenate 'string
                             before-core
                             (if (plusp (length before-core)) gap before-gap)
+                            indent
                             snippet
                             gap
                             (subseq text comment-start))))))
         ((:insert-after)
+         (if closing
+             ;; After the last child: on its own line at the child's
+             ;; indentation, the wrapper's ) still closing right after.
+             (multiple-value-bind (before-core before-gap) (gap-before start)
+               (declare (ignore before-core))
+               (concatenate 'string (subseq text 0 end)
+                            (if (find #\Newline before-gap) before-gap (string #\Space))
+                            snippet suffix))
          (let ((gap (cond ((plusp (length following)) gap-after)
                           (t
                            ;; The last form: the gap in front of it (its comment
@@ -1050,16 +1090,18 @@ file's own (CRLF in a CRLF file)."
                         snippet
                         (if (plusp (length following))
                             (concatenate 'string (line-gap gap-after) following)
-                            newline))))
+                            newline)))))
         ((:delete)
-         (if (plusp (length following))
+         (if (and (plusp (length following)) (not closing))
              (concatenate 'string (subseq text 0 start) following)
              ;; The last form: the gap before it goes too, and the file keeps
-             ;; one final line break.
+             ;; one final line break -- or, inside a wrapper, the wrapper's
+             ;; ) follows the child before it.
              (let ((before-core (gap-before start)))
-               (if (plusp (length before-core))
-                   (concatenate 'string before-core newline)
-                   ""))))))))
+               (cond (closing (concatenate 'string before-core following))
+                     ((plusp (length before-core))
+                      (concatenate 'string before-core newline))
+                     (t "")))))))))
 
 (defun %apply-operation-normalized (text node operation content
                                     &optional (comment-floor 0))
@@ -1275,7 +1317,12 @@ replaced form, and the line the matched form starts on. A dry run carries the re
                 ;; A form under a feature expression false here (issue #321):
                 ;; the edit lands on a form this server does not read, which
                 ;; the result says, since load-system will show no change.
-                (and inactive-p (feature-key original (cst-node-start target)))))
+                (and inactive-p (feature-key original (cst-node-start target))))
+              ;; A definition inside a wrapper (issue #322) is not one of NODES:
+              ;; blank lines inside the wrapper are its own, never normalized.
+              (normalize-blank-lines (and normalize-blank-lines
+                                          (member target nodes :test #'eq)
+                                          t)))
         (if (eq op-key :delete)
             ;; Delete path: no content validation needed
             (let* ((updated

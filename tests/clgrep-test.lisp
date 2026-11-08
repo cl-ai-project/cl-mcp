@@ -58,6 +58,52 @@
             (ok (or (null form-type)
                     (string-equal form-type "defparameter")))))))))
 
+(deftest clgrep-search-names-wrapped-and-untyped-forms
+  ;; Issue #322: a defclass inside an eval-when was found by no form_types
+  ;; filter, and a FiveAM test came back as [NIL] NIL without its line.
+  (let* ((root (asdf:system-source-directory :cl-mcp))
+         (file (merge-pathnames "tests/tmp/clgrep-wrapped.lisp" root)))
+    (ensure-directories-exist file)
+    (with-open-file (out file :direction :output :if-exists :supersede)
+      (format out "(in-package :cl-user)~%~%~
+                   (eval-when (:compile-toplevel :load-toplevel :execute)~%~
+                   ~2@T(defclass wrapped-322 () ())~%~
+                   ~2@T(defun wrapped-322-helper (x) x))~%~%~
+                   (test untyped-322~%~2@T(is (= 1 1)))~%~%~
+                   (defcfun \"int size_of(int type)\" :int)~%~%~
+                   (with-upgradability ()~%~2@T(defun wu-fn-322 (x) x))~%~%~
+                   (progn (test nested-test-322 (is t)))~%~%~
+                   (eval-when (:compile-toplevel) (defclass one-line-322 () ()))~%"))
+    (unwind-protect
+         (let ((*project-root* root))
+           (testing "form_types finds a definition inside a wrapper"
+             (let ((results (clgrep-search "wrapped-322" :path "tests/tmp/clgrep-wrapped.lisp"
+                                           :form-types '("defclass"))))
+               (ok (= 1 (length results)))
+               (ok (equal "wrapped-322" (cdr (assoc :form-name (first results)))))
+               (ok (= 4 (cdr (assoc :form-start-line (first results)))))))
+           (testing "a match inside a wrapped defun is attributed to the defun"
+             (let ((result (first (clgrep-search "helper" :path "tests/tmp/clgrep-wrapped.lisp"))))
+               (ok (equal "defun" (cdr (assoc :form-type result))))
+               (ok (equal "(wrapped-322-helper x)" (cdr (assoc :signature result))))))
+           (testing "an untyped form is named by its second element and has no signature"
+             (let ((result (first (clgrep-search "is \\(" :path "tests/tmp/clgrep-wrapped.lisp"))))
+               (ok (equal "test" (cdr (assoc :form-type result))))
+               (ok (equal "untyped-322" (cdr (assoc :form-name result))))
+               (ok (null (cdr (assoc :signature result))))))
+           (testing "a wrapper with () after its head, an untyped child, a one-line wrapper"
+             (flet ((type-of-hit (pattern)
+                      (cdr (assoc :form-type
+                                  (first (clgrep-search pattern
+                                                        :path "tests/tmp/clgrep-wrapped.lisp"))))))
+               (ok (equal "defun" (type-of-hit "wu-fn-322")) "with-upgradability ()")
+               (ok (equal "test" (type-of-hit "nested-test-322")) "a test inside progn")
+               (ok (equal "defclass" (type-of-hit "one-line-322")) "one line")))
+           (testing "a string name is read whole"
+             (let ((result (first (clgrep-search "size_of" :path "tests/tmp/clgrep-wrapped.lisp"))))
+               (ok (equal "\"int size_of(int type)\"" (cdr (assoc :form-name result)))))))
+      (ignore-errors (delete-file file)))))
+
 (deftest clgrep-search-filters-by-form-type-vector
   (testing "clgrep-search filters by form-types when passed as vector (JSON array)"
     ;; This test verifies the fix for the bug where JSON arrays (parsed as vectors
