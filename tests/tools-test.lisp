@@ -2052,13 +2052,13 @@
 
 (deftest tools-call-lisp-check-parens-reader-error
   (testing "lisp-check-parens detects reader error when parens are balanced"
-    ;; #. triggers a reader-error when *read-eval* is nil.
-    ;; The parens in (+ 1 #.(+ 1 2)) are balanced, so the paren scan passes.
-    ;; The reader check should catch the #. and return ok: false, kind: "reader-error".
+    ;; #? is no standard dispatch macro, so it is a reader error.
+    ;; The parens in (+ 1 #?(+ 1 2)) are balanced, so the paren scan passes.
+    ;; The reader check should catch the #? and return ok: false, kind: "reader-error".
     (let ((req (concatenate 'string
                  "{\"jsonrpc\":\"2.0\",\"id\":5004,\"method\":\"tools/call\","
                  "\"params\":{\"name\":\"lisp-check-parens\","
-                 "\"arguments\":{\"code\":\"(defun foo () nil)\\n(+ 1 #.(+ 1 2))\"}}}")))
+                 "\"arguments\":{\"code\":\"(defun foo () nil)\\n(+ 1 #?(+ 1 2))\"}}}")))
       (let* ((resp (%pjl req))
              (obj (yason:parse resp))
              (result (gethash "result" obj))

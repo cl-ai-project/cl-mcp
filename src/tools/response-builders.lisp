@@ -1116,6 +1116,15 @@ there counted from one; any other note is written out."
         (format nil "skipped (~A)" skipped)
         (format nil "~D file~:P, ~D match~:[es~;~]" files matches (= matches 1)))))
 
+(defun %unparsed-phrase (report)
+  "Return \", N file(s) not scanned (could not be parsed)\" for the files REPORT's
+source scan could not read, or \"\" when it read them all.  It belongs in the
+headline: a count that left files out is only a lower bound."
+  (let ((unparsed (or (gethash "files_unparsed" report) 0)))
+    (if (and (integerp unparsed) (plusp unparsed))
+        (format nil ", ~D file~:P not scanned (could not be parsed)" unparsed)
+        "")))
+
 (defun %format-references-report (report)
   "Return the content text for REPORT, a code-find-references payload."
   (let ((status (gethash "symbol_status" report))
@@ -1136,13 +1145,15 @@ there counted from one; any other note is written out."
                     Is the system loaded? Run load-system first.~%"
                  (gethash "lookup_name" report) (gethash "lookup_package" report)))
         ((zerop count)
-         (format s "~A (~A) — no references.~%  xref: ~D entr~:@P   source scan: ~A~%"
+         (format s "~A (~A) — no references~A.~%  xref: ~D entr~:@P   source scan: ~A~%"
                  (gethash "resolved_symbol" report) (gethash "symbol_kind" report)
+                 (%unparsed-phrase report)
                  (or (gethash "xref_count" report) 0) (%scan-summary report)))
         (t
-         (format s "~A (~A) — ~D form~:P in ~D file~:P~[~:;, ~:*~D test~:P~]~%"
+         (format s "~A (~A) — ~D form~:P in ~D file~:P~[~:;, ~:*~D test~:P~]~A~%"
                  (gethash "resolved_symbol" report) (gethash "symbol_kind" report)
-                 count (gethash "file_count" report) (length tests))
+                 count (gethash "file_count" report) (length tests)
+                 (%unparsed-phrase report))
          (let ((shared-notes (%shared-notes refs)))
            (dolist (ref refs)
              (%format-reference s ref shared-notes))

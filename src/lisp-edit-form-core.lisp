@@ -810,7 +810,7 @@ before TARGET's start position."
 an unterminated string or #| comment, since \" and #| are macro characters
 too) or met a stray \")\" (cst's STRAY-RIGHT-PARENTHESIS, which cst raises
 itself on both its parsing paths). Every other reader failure -- an unknown
-dispatch macro such as #?, a disabled #. -- is not counted. Even a delimiter
+dispatch macro such as #? -- is not counted. Even a delimiter
 failure is not proof that the file is broken (a reader macro supplied through
 the readtable parameter could consume the offending characters), which is why
 fs-write-file additionally requires the caller to opt in before overwriting."
@@ -819,7 +819,7 @@ fs-write-file additionally requires the caller to opt in before overwriting."
 
 (defun %reader-level-failure-p (condition)
   "Return T when the reader itself rejected the text for a reason other than
-a delimiter: a disabled #., an unknown dispatch macro such as #?. Only such a
+a delimiter: an unknown dispatch macro such as #?. Only such a
 failure makes a bracket verdict of the standard-syntax scan a finding rather
 than an instruction. END-OF-FILE is not a READER-ERROR and is excluded anyway
 as a delimiter failure; the edit tools' own synthesized errors (\"content is
@@ -874,7 +874,7 @@ cannot write -- gets no recovery path, since fs-write-file would refuse the
 absolute path; the text says to fix it outside cl-mcp. When the caller
 supplied a readtable, no standard-syntax verdict exists: the text names the
 readtable and says how the overwrite guard will decide. Otherwise the failure
-is reader-level (custom reader syntax, a disabled #. form); the file keeps its
+is reader-level (custom reader syntax); the file keeps its
 overwrite protection, so the text points at the readtable parameter instead.
 
 Two branches handle a readtable this process does not have, told apart by who

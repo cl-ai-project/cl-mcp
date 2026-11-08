@@ -53,6 +53,8 @@
                 #:check-lisp-nesting)
   (:import-from #:cl-mcp/src/package-context
                 #:call-with-package-context)
+  (:import-from #:cl-mcp/src/source-reader
+                #:source-read-from-string)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%skip-blank-and-comments
                 #:%feature-prefix-end
@@ -211,7 +213,7 @@ comments near a target form."
                     (some (lambda (ch) (not (whitespace-char-p ch))) text)
                     (handler-case
                         (multiple-value-bind (form pos)
-                            (read-from-string text nil :eof)
+                            (source-read-from-string text :eof-error-p nil :eof-value :eof)
                           (declare (ignore pos))
                           (eq form :eof))
                       (error () nil))
@@ -231,8 +233,8 @@ comments near a target form."
                               (when (>= cursor len)
                                 (return saw-form))
                               (multiple-value-bind (next-form next-pos)
-                                  (read-from-string text nil :eof
-                                                    :start cursor :end len)
+                                  (source-read-from-string text :eof-error-p nil :eof-value :eof
+                                                                :start cursor :end len)
                                 (when (eq next-form :eof)
                                   (return saw-form))
                                 (setf saw-form t
@@ -264,7 +266,7 @@ comments near a target form."
                     (lambda ()
                       (stray-close-check text)
                       (multiple-value-bind (form pos)
-                          (read-from-string text nil :eof)
+                          (source-read-from-string text :eof-error-p nil :eof-value :eof)
                         (when (eq form :eof)
                           (if (comment-only-p text)
                               (return-from try-parse text)
@@ -316,7 +318,7 @@ comments near a target form."
                 ;; (an unknown #? macro, say) is then the actionable part.
                 ;; Sanitized so no SBCL stream object reaches the client.
                 ;; When the reader stopped on something other than a
-                ;; delimiter (a disabled #., an unknown #?), the bracket may
+                ;; delimiter (an unknown #?), the bracket may
                 ;; well be a symbol character: describe it, but do not
                 ;; instruct; the reader's own complaint is the actionable part.
                 (error 'content-unrepairable-error
@@ -378,7 +380,7 @@ comments near a target form."
   "Read TEXT as a sequence of complete top-level forms under the current
 *READTABLE*, and return a list of (START . END), one per form, in order.
 Whitespace and comments between the forms are not forms.  When any part of
-TEXT does not read -- an unterminated form, a stray ), a disabled #., an
+TEXT does not read -- an unterminated form, a stray ), an unknown #?, an
 unterminated block comment -- return NIL and the condition as a second value:
 a block that reads only in part is not a block of forms.
 
@@ -404,7 +406,8 @@ nothing between the forms is ever rewritten."
                          (error open-comment)))
                      (incf start (file-position stream))))
                  (multiple-value-bind (form end)
-                     (read-from-string text nil eof :start pos :preserve-whitespace t)
+                     (source-read-from-string text :eof-error-p nil :eof-value eof
+                                                   :start pos :preserve-whitespace t)
                    ;; Only whitespace and comments were left (or a trailing
                    ;; #+nil form, which reads as end of input).
                    (when (eq form eof)

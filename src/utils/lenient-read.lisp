@@ -12,6 +12,7 @@
                 #:symbol-is-not-external)
   (:export #:call-with-lenient-packages
            #:call-with-managed-packages
+           #:lenient-package-p
            #:*homeless-due-to-teardown*
            #:record-homeless-on-teardown))
 
@@ -165,6 +166,19 @@ Safe to call even if packages have already been deleted."
           (unintern s pkg))
         (delete-package pkg)))))
 
+(defvar *lenient-stub-cells* '()
+  "The stub cells of the CALL-WITH-LENIENT-PACKAGES calls in progress,
+innermost first: each a list whose car is the stub packages that call made.")
+
+(defun lenient-package-p (package)
+  "True when PACKAGE is a temporary one a reader operation in progress owns:
+a stub CALL-WITH-LENIENT-PACKAGES made for a package the image lacks, or one
+of *MANAGED-LENIENT-PACKAGES*.  Any other package is a real one of this image,
+which a lenient read must not intern into."
+  (or (member package *managed-lenient-packages* :test #'eq)
+      (some (lambda (cell) (member package (car cell) :test #'eq))
+            *lenient-stub-cells*)))
+
 (defun call-with-lenient-packages (thunk)
   "Call THUNK with handler-bind that intercepts unknown-package conditions.
 
@@ -179,6 +193,8 @@ Handles four condition types:
   3. ECLECTOR.READER:SYMBOL-IS-NOT-EXTERNAL -- invokes USE-ANYWAY restart
   4. SB-INT:SIMPLE-READER-PACKAGE-ERROR (SBCL) -- creates stub, retries
 
+While THUNK runs, LENIENT-PACKAGE-P is true of the stubs it made.
+
 Arguments:
   THUNK -- A function of zero arguments to call under lenient resolution.
 
@@ -190,7 +206,8 @@ Examples:
     (lambda ()
       (eclector.reader:read-from-string \"(unknown-pkg:sym)\")))
   => (UNKNOWN-PKG::SYM)"
-  (let ((stubs-cell (list nil)))
+  (let* ((stubs-cell (list nil))
+         (*lenient-stub-cells* (cons stubs-cell *lenient-stub-cells*)))
     (unwind-protect
          (handler-bind
              ((package-does-not-exist

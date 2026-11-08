@@ -3,7 +3,13 @@
 (defpackage #:cl-mcp/tests/cst-test
   (:use #:cl)
   (:import-from #:rove
-                #:deftest #:testing #:ok)
+                #:deftest #:testing #:ok #:skip)
+  (:import-from #:cl-mcp/src/source-reader
+                #:read-time-evaluation-p
+                #:read-time-evaluation-form
+                #:structure-literal-p
+                #:structure-literal-name
+                #:stand-in-symbol-package-name)
   (:import-from #:cl-mcp/src/cst
                 #:parse-top-level-forms
                 #:cst-node-kind
@@ -115,19 +121,90 @@
       (ok (search "readtable" error-message))
       (ok (search "interpol-syntax" error-message)))))
 
-(deftest parse-top-level-forms-read-eval-error-message
-  (testing "read-time evaluation error shows security message, not readtable suggestion"
-    (let ((error-message
-            (handler-case
-                (progn
-                  (parse-top-level-forms "#.(+ 1 2)")
-                  nil)
-              (error (e)
-                (format nil "~A" e)))))
-      (ok error-message)
-      (ok (search "security" error-message))
-      (ok (search "#." error-message))
-      (ok (null (search "readtable" error-message))))))
+(defun %expr-values (text)
+  "The values of the :EXPR nodes PARSE-TOP-LEVEL-FORMS reads from TEXT, failing
+the test when the parse reports an error."
+  (multiple-value-bind (nodes swallowed) (parse-top-level-forms text)
+    (ok (null swallowed) (format nil "parsed without an error: ~A" swallowed))
+    (mapcar #'cst-node-value (remove :expr nodes :key #'cst-node-kind :test-not #'eq))))
+
+(deftest parse-top-level-forms-reads-sharpsign-dot-without-evaluating
+  (dolist (prefix (list "" (format nil "(named-readtables:in-readtable :standard)~%")))
+    (testing (format nil "#. reads as its form, unevaluated~:[~; (CL-reader pass)~]"
+                     (plusp (length prefix)))
+      (if (and (plusp (length prefix)) (not (find-package "NAMED-READTABLES")))
+          (skip "named-readtables not available")
+          (let* ((forms (%expr-values
+                         (format nil "~A(defvar *x* #.(error \"evaluated\"))~%(defun y () 1)"
+                                 prefix)))
+                 (defvar-form (car (last forms 2)))
+                 (stand (third defvar-form)))
+            (ok (= (if (plusp (length prefix)) 3 2) (length forms))
+                "the form after the #. is read too")
+            (ok (read-time-evaluation-p stand))
+            (ok (string= "ERROR" (symbol-name (first (read-time-evaluation-form stand)))))
+            (ok (string= "#.(error \"evaluated\")"
+                         (let ((*print-case* :downcase))
+                           (prin1-to-string stand)))))))))
+
+(deftest parse-top-level-forms-reads-a-sharpsign-dot-feature-expression-as-holding
+  (dolist (prefix (list "" (format nil "(named-readtables:in-readtable :standard)~%")))
+    (testing (format nil "#+#.(...) keeps its form, #-#.(...) skips it~:[~; (CL-reader pass)~]"
+                     (plusp (length prefix)))
+      (if (and (plusp (length prefix)) (not (find-package "NAMED-READTABLES")))
+          (skip "named-readtables not available")
+          (let ((nodes (parse-top-level-forms
+                        (format nil "~A#+#.(cl:if (cl:find-package \"NO-SUCH-319\") '(:and) '(:or))~%~
+                                     (defun kept () 1)~%~
+                                     #-(:and :sbcl #.(error \"never\"))~%(defun skipped () 2)~%~
+                                     (defun after () 3)"
+                                prefix))))
+            (ok (equal '("KEPT" "AFTER")
+                       (loop for node in nodes
+                             when (and (eq :expr (cst-node-kind node))
+                                       (consp (cst-node-value node))
+                                       (string= "DEFUN" (symbol-name
+                                                         (first (cst-node-value node)))))
+                               collect (symbol-name (second (cst-node-value node)))))
+                "the form under #+ is read; the one under #- is skipped"))))))
+
+(deftest parse-top-level-forms-reads-sbcl-character-names-and-sharpsign-s
+  (dolist (prefix (list "" (format nil "(named-readtables:in-readtable :standard)~%")))
+    (testing (format nil "SBCL's character names and #S~:[~; (CL-reader pass)~]"
+                     (plusp (length prefix)))
+      (if (and (plusp (length prefix)) (not (find-package "NAMED-READTABLES")))
+          (skip "named-readtables not available")
+          (let* ((forms (%expr-values
+                         (format nil "~A(defparameter *c* '(#\\Nul #\\Esc #\\U+2192 ~
+                                      #\\RIGHTWARDS_DOUBLE_ARROW #\\Greek_Small_Letter_Lambda))~%~
+                                      (defparameter *s* #S(no-such-struct-319 :x 1))"
+                                 prefix)))
+                 (chars (second (third (car (last forms 2)))))
+                 (literal (third (car (last forms)))))
+            (ok (equal chars (mapcar #'name-char '("Nul" "Esc" "U+2192"
+                                                   "RIGHTWARDS_DOUBLE_ARROW"
+                                                   "Greek_Small_Letter_Lambda"))))
+            (ok (structure-literal-p literal))
+            (ok (string= "NO-SUCH-STRUCT-319"
+                         (symbol-name (structure-literal-name literal)))))))))
+
+(deftest parse-top-level-forms-never-interns-into-a-real-package
+  (testing "a symbol a real package lacks reads as a stand-in, interned nowhere"
+    (let* ((form (first (%expr-values
+                         "(defun f (l) (uiop:no-such-function-320 l) (cl::no-such-symbol-320))")))
+           (missing (first (fourth form)))
+           (locked (first (fifth form))))
+      (ok (null (find-symbol "NO-SUCH-FUNCTION-320" "UIOP")))
+      (ok (null (find-symbol "NO-SUCH-SYMBOL-320" "CL")) "CL's package lock was never met")
+      (ok (string= "NO-SUCH-FUNCTION-320" (symbol-name missing)))
+      (ok (null (symbol-package missing)))
+      (ok (equal "UIOP" (stand-in-symbol-package-name missing)))
+      (ok (equal "CL" (stand-in-symbol-package-name locked))
+          "the package is named as the token wrote it")))
+  (testing "a symbol the package has reads as itself, internal ones included"
+    (let ((form (first (%expr-values "(list uiop:getenv cl-mcp/src/cst:%pos->line)"))))
+      (ok (eq (second form) 'uiop:getenv))
+      (ok (eq (third form) 'cl-mcp/src/cst::%pos->line)))))
 
 (deftest parse-top-level-forms-unknown-package-succeeds
   (testing "files with unknown package-qualified symbols parse successfully"
@@ -165,9 +242,9 @@
               "the swallowed error is the classified condition"))
         (rove:skip "named-readtables not available")))
   (testing "a macro that reads a balanced list and then fails keeps its own error"
-    ;; #S(...) consumes "(no-such-struct-xyz)" and signals afterwards: the text
-    ;; before that ) does not read as nothing, so it is not a stray ).
-    (ok (handler-case (progn (parse-top-level-forms "(a) #S(no-such-struct-xyz)") nil)
+    ;; #C(...) consumes "(1 2 3)" and signals afterwards: the text before that )
+    ;; does not read as nothing, so it is not a stray ).
+    (ok (handler-case (progn (parse-top-level-forms "(a) #C(1 2 3)") nil)
           (cl-mcp/src/cst::stray-right-parenthesis () nil)
           (end-of-file () nil)
           (error () t)))))

@@ -883,7 +883,8 @@ also carries may_reach true, unless another reference confirms it."
 (defun build-references-report (&key symbol resolved-symbol (status :found) kind
                                   lookup-package lookup-name project-only (limit 50)
                                   refs unresolved notes (xref-count 0)
-                                  (files-scanned 0) (name-matches 0) scan-skipped
+                                  (files-scanned 0) (files-unparsed 0) (name-matches 0)
+                                  scan-skipped
                                   via-macros names-class)
   "Return the code-find-references payload, everything but its content text.
 
@@ -930,6 +931,7 @@ docs/tools.md describes every field."
              "notes" (coerce notes 'vector)
              "xref_count" xref-count
              "files_scanned" files-scanned
+             "files_unparsed" files-unparsed
              "name_matches" name-matches
              "scan_skipped" scan-skipped
              "via_macros" (coerce via-macros 'vector)

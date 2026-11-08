@@ -693,7 +693,7 @@ tests/tmp/NAME.lisp."
         (skip "cl-interpol not available")))))
 
 (deftest lisp-read-file-read-eval-disabled-in-package-context-scan
-  (testing "package-context header scan does not execute #. forms"
+  (testing "a file holding #. is read, the #. shown as written and never evaluated"
     (let* ((flag-path (merge-pathnames "tests/tmp/lisp-read-read-eval-flag"
                                        (system-source-directory :cl-mcp)))
            (content
@@ -705,6 +705,7 @@ tests/tmp/NAME.lisp."
                       ":if-exists :supersede :if-does-not-exist :create) "
                       "(write-line \"executed\" s)) "
                       "'(in-package #:cl-user))~%"
+                      "~%(defvar *three* #.(+ 1 2))~%"
                       "~%(defun target () :ok)~%")
                      (namestring flag-path))))
       (ignore-errors (delete-file flag-path))
@@ -712,20 +713,11 @@ tests/tmp/NAME.lisp."
            (with-temp-lisp-file "tests/tmp/lisp-read-read-eval.lisp"
                content
              (lambda (path)
-               (let ((error-message
-                       (handler-case
-                           (progn
-                             (lisp-read-file path)
-                             nil)
-                         (error (e)
-                           (format nil "~A" e)))))
-                 (ok error-message)
-                 (ok (or (search "Read-time evaluation (#.) is disabled for security"
-                                 error-message)
-                         (search "*READ-EVAL*" error-message)
-                         (search "can't read #." error-message)))
-                 (ok (not (probe-file flag-path)))))))
-        (ignore-errors (delete-file flag-path)))))
+               (let ((text (gethash "content" (lisp-read-file path))))
+                 (ok (search "(defun target ()" text) "the forms after the #. are read")
+                 (ok (search "(defvar *three* #.(+ 1 2)" text) "#. is shown as written")
+                 (ok (not (probe-file flag-path)) "and never evaluated"))))
+        (ignore-errors (delete-file flag-path))))))
 
 (deftest lisp-read-file-collapsed-shows-method-qualifiers
   (testing "collapsed view includes method qualifiers like :before, :after, :around"

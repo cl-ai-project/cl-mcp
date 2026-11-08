@@ -30,6 +30,8 @@
   (:import-from #:cl-mcp/src/utils/printing
                 #:bounded-princ-to-string
                 #:circular-p)
+  (:import-from #:cl-mcp/src/source-reader
+                #:source-read-from-string)
   (:import-from #:cl-mcp/src/package-context
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/utils/nesting
@@ -241,7 +243,7 @@ deep, which is deeper than cl-mcp will read"
            package-name
            (lambda ()
              (multiple-value-bind (form pos)
-                 (read-from-string form-text nil :eof)
+                 (source-read-from-string form-text :eof-error-p nil :eof-value :eof)
                (when (eq form :eof)
                  (error 'patch-operation-error
                         :reason "patch produced an empty form"))

@@ -23,6 +23,8 @@
                 #:protocol-version)
   (:import-from #:cl-mcp/src/utils/lenient-read
                 #:*homeless-due-to-teardown*)
+  (:import-from #:cl-mcp/src/source-reader
+                #:stand-in-symbol-package-name)
   (:import-from #:cl-mcp/src/utils/paths
                 #:normalize-path-for-display)
   (:import-from #:cl-mcp/src/utils/sanitize
@@ -103,6 +105,11 @@ to the default printer with *PRINT-CIRCLE* forced to NIL. Rebinding
 that would otherwise label shared symbol objects with `#1=#1#'
 self-references when the outer tree is walked under *PRINT-PRETTY*."
   (cond
+    ((stand-in-symbol-package-name sym)
+     ;; A token whose package this process has but whose symbol it lacks.
+     (%print-homeless-symbol-name stream (stand-in-symbol-package-name sym))
+     (write-char #\: stream)
+     (%print-homeless-symbol-name stream (symbol-name sym)))
     ((and (symbolp sym) (null (symbol-package sym)))
      (unless (gethash sym *homeless-due-to-teardown*)
        (write-string "#:" stream))

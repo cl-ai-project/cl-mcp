@@ -704,7 +704,7 @@ Output:
   delimiter no readtable can fix, `fs-write-file` with
   `allow_unparseable_overwrite`, since the structural tools cannot locate any
   form in such a file. A file that parses (a symbol such as `a[b`), one that
-  fails for a reader-level reason (`#.`, an unknown `#?`), or a windowed read
+  fails for a reader-level reason (an unknown `#?`), or a windowed read
   keeps the `lisp-edit-form` hint, so the hint never promises an overwrite the
   guard would refuse. A delimiter-broken file outside the project root gets
   none of the three: neither `fs-write-file` nor the structural tools can act
@@ -1235,6 +1235,7 @@ Output (the content text carries everything that matters for a decision):
 - `via_macros` (array): the project macros whose backquoted expansion names the symbol (a `defmacro` holding a `template` site), package-qualified; `names_class`: whether the symbol also names a class
 - `unresolved` (array): `path`, `package`, `count`, `tests` for matches in files whose package is not loaded
 - `notes` (array), `xref_count`, `files_scanned`, `name_matches`, `scan_skipped`, `project_only`, `symbol`
+- `files_unparsed`: files the source scan could not parse, so their call sites are missing from the count; the content text's headline says how many (`, N files not scanned (could not be parsed)`) and a note names up to three
 
 Limits: matching is positional, not a code walker. A `flet`/`labels`/`macrolet` binding the same
 name is flagged in `shadowed_by`; other lexical bindings are not. The name position of any
@@ -1400,7 +1401,7 @@ evaluated, and nothing is interned.
 Cost: confirming a definition means reading and parsing the file it was compiled from, so one
 call reads every distinct file its answer names — once each, whole — and its cost scales with
 that number of files, not with the number of definitions. A file the CST reader cannot read
-(`#.` with `*read-eval*` off, a custom reader macro) yields no candidates at all, so every entry
+(a custom reader macro the server lacks) yields no candidates at all, so every entry
 in it comes back `unverified` with no edit information, even when the definitions themselves are
 untouched.
 
