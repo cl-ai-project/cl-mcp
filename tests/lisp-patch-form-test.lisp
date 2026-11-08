@@ -985,7 +985,10 @@ running as root), THUNK is skipped instead."
               "no net-count instruction that would write (list 1 2])")
           (ok (search "found \"]\"" err-msg) "the ] is named")
           (ok (search "replace it with \")\"" err-msg))
-          (ok (search "The reader itself reported: unexpected end of input" err-msg)
+          ;; In Eclector's words now that content is read as files are (#319).
+          (ok (search (concatenate 'string "The reader itself reported: While reading list, "
+                                   "expected the character ) when input ended")
+                      err-msg)
               "the reader's own words are kept for the ambiguous bracket")
           (ok (null (search "invalid Lisp" err-msg
                             :start2 (1+ (search "invalid Lisp" err-msg))))

@@ -622,10 +622,9 @@ afterwards."
                   "#+#.(progn (setf cl-mcp/tests/lisp-edit-form-test::*feature-read-evaluated* t)"
                   " :sbcl) (defun probe-b () :new)")))
     (setf *feature-read-evaluated* nil)
-    (testing "a #. in the content's feature expression is refused, not run"
-      (ok (handler-case
-              (progn (%replace-in-feature-fixture source "probe-b" content) nil)
-            (error () t)))
+    (testing "a #. in the content's feature expression is read as the parser reads it, not run"
+      ;; Accepted since #319: the file's parser reads it too, as holding.
+      (ok (search "#+#.(progn" (%replace-in-feature-fixture source "probe-b" content)))
       (ok (null *feature-read-evaluated*)))
     (testing "nor is it run while finding where the content's form starts"
       (cl-mcp/src/lisp-edit-form::%feature-prefix-end content 0)
@@ -1298,6 +1297,8 @@ afterwards."
         (dolist (content '("(defun f () (string #\\Nul))"
                            "(defun f () (list #\\Esc #\\RIGHTWARDS_DOUBLE_ARROW #\\U+2192))"
                            "(defun f () (list #.(+ 1 2) #S(point :x 1)))"
+                           "(defun f () (uiop:no-such-function-336 1))"
+                           "(defun f () (list #+#.(cl:if t '(:and) '(:or)) :kept))"
                            "(defun f () :done)"))
           (lisp-edit-form :file-path path :form-type "defun" :form-name "f"
                           :operation "replace" :content content)
@@ -1311,6 +1312,32 @@ afterwards."
         (ok (search "(defun f (l) (uiop:getenv l))" (fs-read-file path)))
         (ok (null (find-symbol "NO-SUCH-FUNCTION-320" "UIOP"))
             "reading the typo interned nothing into UIOP")))))
+
+(deftest lisp-edit-form-missing-symbol-under-a-readtable-names-the-way-out
+  ;; Under a named readtable SBCL's reader reads the file, and it can only
+  ;; intern a symbol the package lacks, so the parse stops there (#320): the
+  ;; error must not send the caller to the readtable argument, and the file
+  ;; must still be rewritable.
+  (if (not (find-package "NAMED-READTABLES"))
+      (skip "named-readtables not available")
+      (with-temp-file "tests/tmp/edit-form-missing-symbol-rt.lisp"
+          (format nil "(named-readtables:in-readtable :standard)~%~%~
+                       (defun f (l) (uiop:no-such-function-336-rt l))~%")
+        (lambda (path)
+          (let ((message (handler-case
+                             (progn (lisp-edit-form :file-path path :form-type "defun"
+                                                    :form-name "f" :operation "replace"
+                                                    :content "(defun f (l) l)")
+                                    nil)
+                           (error (e) (princ-to-string e)))))
+            (ok (and message (search "lacks that symbol" message)) message)
+            (ok (and message (null (search "pass the readtable parameter" message)))
+                "no readtable advice"))
+          (ok (eq :missing-symbol
+                  (nth-value 1 (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                                (pathname path))))
+              "the overwrite path is open")
+          (ok (null (find-symbol "NO-SUCH-FUNCTION-336-RT" "UIOP")))))))
 
 (deftest lisp-edit-form-auto-repair-missing-parens
   (testing "missing closing parentheses are automatically added via parinfer"

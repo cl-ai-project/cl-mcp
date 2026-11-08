@@ -678,7 +678,9 @@ read without it has not been shown to read correctly."))
                                 the session's worker, so registering it there ~
                                 does not reach this process."
                            readtable))))
-      (let ((*readtable* (copy-readtable))
+      ;; SOURCE-READTABLE: the CL reads inside this pass (%SPLIT-SWALLOWED-TWINS
+      ;; reading feature expressions again) read #. as the client does.
+      (let ((*readtable* (source-readtable (copy-readtable)))
             (*read-eval* nil)
             (nodes '())
             (client (make-instance 'source-parse-client)))

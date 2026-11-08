@@ -54,6 +54,7 @@
   (:import-from #:cl-mcp/src/package-context
                 #:call-with-package-context)
   (:import-from #:cl-mcp/src/source-reader
+                #:read-time-evaluation-p
                 #:source-read-from-string)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%skip-blank-and-comments
@@ -662,8 +663,10 @@ package is left homeless by the deletion; one written with a package keeps it."
                                   (*readtable* *standard-readtable*)
                                   (*read-eval* nil)
                                   (*read-suppress* nil))
-                              (read-from-string prefix t nil :start (+ pos 2)
-                                                             :preserve-whitespace t))
+                              ;; As the file's parser reads it: a #. in the
+                              ;; expression is read, never evaluated (#319).
+                              (source-read-from-string prefix :start (+ pos 2)
+                                                              :preserve-whitespace t))
                           (error (e)
                             (error "content's feature expression ~A cannot be read: ~A"
                                    (subseq prefix pos) (sanitize-condition-text e))))
@@ -727,17 +730,21 @@ expressions (%FEATURE-EXPRESSIONS-TEXT) put back, or NIL when it kept none."
 read it, holds against this process's *FEATURES* -- the ones the reader judged
 the file's own expressions by.  A name written without a package stands for the
 keyword of that name, as the reader reads feature expressions in KEYWORD; it is
-looked up, never interned, and a keyword that does not exist is no feature."
-  (if (symbolp expression)
-      (let ((feature (if (symbol-package expression)
-                         expression
-                         (find-symbol (symbol-name expression) "KEYWORD"))))
-        (and feature (member feature *features*) t))
-      (let ((operator (symbol-name (first expression)))
-            (arguments (rest expression)))
-        (cond ((string= operator "AND") (every #'%feature-holds-p arguments))
-              ((string= operator "OR") (some #'%feature-holds-p arguments))
-              (t (not (%feature-holds-p (first arguments))))))))
+looked up, never interned, and a keyword that does not exist is no feature.  A
+#. (READ-TIME-EVALUATION) holds, as SOURCE-FEATUREP decides it for the parser."
+  (cond
+    ((read-time-evaluation-p expression) t)
+    ((symbolp expression)
+     (let ((feature (if (symbol-package expression)
+                        expression
+                        (find-symbol (symbol-name expression) "KEYWORD"))))
+       (and feature (member feature *features*) t)))
+    (t
+     (let ((operator (symbol-name (first expression)))
+           (arguments (rest expression)))
+       (cond ((string= operator "AND") (every #'%feature-holds-p arguments))
+             ((string= operator "OR") (some #'%feature-holds-p arguments))
+             (t (not (%feature-holds-p (first arguments)))))))))
 
 (defun %feature-prefix-holds-p (expressions)
   "True when every feature expression in EXPRESSIONS, the (SIGN . EXPRESSION)

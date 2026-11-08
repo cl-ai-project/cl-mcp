@@ -168,6 +168,28 @@ the test when the parse reports an error."
                                collect (symbol-name (second (cst-node-value node)))))
                 "the form under #+ is read; the one under #- is skipped"))))))
 
+(deftest parse-top-level-forms-splits-a-twin-behind-a-sharpsign-dot-expression
+  (testing "#+#.(...) #+ecl (defun impl) is a skipped twin, not part of the next form"
+    (let* ((nodes (parse-top-level-forms
+                   (format nil "#+#.(cl:if t '(:and) '(:or)) #+ecl (defun impl () 1)~%~
+                                (defun next () 2)")))
+           (exprs (remove :expr nodes :key #'cst-node-kind :test-not #'eq))
+           (next (find-if (lambda (node)
+                            (let ((value (cst-node-value node)))
+                              (and (consp value) (consp (cdr value))
+                                   (symbolp (second value))
+                                   (string= "NEXT" (symbol-name (second value))))))
+                          exprs)))
+      (ok next)
+      (ok (and next (= 2 (cst-node-start-line next))
+               (< 50 (cst-node-start next)))
+          "NEXT starts at its own text, not at the #+ of the skipped twin")
+      (ok (some (lambda (node)
+                  (and (eq :skipped (cst-node-kind node))
+                       (consp (cst-node-value node))))
+                nodes)
+          "the twin is listed as skipped"))))
+
 (deftest parse-top-level-forms-reads-sbcl-character-names-and-sharpsign-s
   (dolist (prefix (list "" (format nil "(named-readtables:in-readtable :standard)~%")))
     (testing (format nil "SBCL's character names and #S~:[~; (CL-reader pass)~]"
@@ -205,6 +227,29 @@ the test when the parse reports an error."
     (let ((form (first (%expr-values "(list uiop:getenv cl-mcp/src/cst:%pos->line)"))))
       (ok (eq (second form) 'uiop:getenv))
       (ok (eq (third form) 'cl-mcp/src/cst::%pos->line)))))
+
+(deftest source-read-from-string-uses-the-parser-s-reader-for-standard-syntax
+  (testing "a copy of the standard readtable is standard syntax"
+    ;; SBCL gives every copy a fresh # dispatcher closure, so comparing that
+    ;; function by EQ sent every validation to the CL reader (Codex, PR #336).
+    (ok (cl-mcp/src/source-reader:standard-syntax-readtable-p (copy-readtable nil)))
+    (let ((custom (copy-readtable nil)))
+      (set-macro-character #\! (lambda (stream char) (declare (ignore stream char)) :bang)
+                           nil custom)
+      (ok (not (cl-mcp/src/source-reader:standard-syntax-readtable-p custom))
+          "a readtable with a macro character of its own is not")))
+  (testing "under a copy of the standard readtable, content reads as files do"
+    (let ((*readtable* (copy-readtable nil)))
+      (cl-mcp/src/utils/lenient-read:call-with-lenient-packages
+       (lambda ()
+         (let ((missing (cl-mcp/src/source-reader:source-read-from-string
+                         "(uiop:no-such-function-336)")))
+           (ok (null (symbol-package (first missing))) "a stand-in, not an error")
+           (ok (null (find-symbol "NO-SUCH-FUNCTION-336" "UIOP"))))
+         (ok (equal '(:kept)
+                    (cl-mcp/src/source-reader:source-read-from-string
+                     "(#+#.(cl:if t '(:and) '(:or)) :kept)"))
+             "a #. feature expression holds"))))))
 
 (deftest parse-top-level-forms-unknown-package-succeeds
   (testing "files with unknown package-qualified symbols parse successfully"

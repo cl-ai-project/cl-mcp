@@ -587,6 +587,16 @@ Inputs:
   server]` (never expanded; read it with `collapsed=false`), whether the file is read by
   Eclector or by the CL reader (with `readtable`, or after an `in-readtable`), as long as its
   readtable reads `#+` and `#-` the standard way.
+  Source is read as SBCL reads it and never evaluated (#319, #320), by every tool that parses
+  a file and by `lisp-edit-form`/`lisp-patch-form` when they check `content`/`new_text`, so
+  what an edit writes reads back: `#.FORM` is shown as written and stands for FORM
+  unevaluated (a `#.` inside a feature expression counts as holding, so `#+#.(...)` keeps its
+  form and `#-#.(...)` skips it), `#S(...)` builds no structure, SBCL's character names
+  (`#\Nul`, `#\U+2192`, `#\RIGHTWARDS_ARROW`) are accepted, and a qualified symbol that a
+  package of the server lacks (a typo, a newer API, `cl::foreign`) reads as a stand-in shown as
+  `pkg:name`, interning nothing. Under a named readtable SBCL's own reader reads the file and
+  stops on such a symbol; the error says so, and `fs-write-file` with
+  `allow_unparseable_overwrite` may then rewrite the file.
 - `name_pattern` (string, optional): CL-PPCRE regex; matching definition names are
   expanded even in collapsed mode.
 - `content_pattern` (string, optional): CL-PPCRE regex applied to form bodies; if

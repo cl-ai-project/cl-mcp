@@ -27,8 +27,12 @@
 (in-package #:cl-mcp/src/source-reader)
 
 (defstruct (read-time-evaluation (:constructor make-read-time-evaluation (form)))
-  "What #.FORM reads as in source cl-mcp reads but never evaluates: FORM itself,
-unevaluated, standing where its value would have gone.  Printed as #.FORM."
+  "What #.FORM reads as in source cl-mcp reads but never evaluates, standing
+where FORM's value would have gone.  Printed as #.FORM.
+
+Slots:
+  FORM -- the form after #., as read and unevaluated."
+  ;; The form after #., unevaluated.
   form)
 
 (defmethod print-object ((object read-time-evaluation) stream)
@@ -36,10 +40,16 @@ unevaluated, standing where its value would have gone.  Printed as #.FORM."
   (write (read-time-evaluation-form object) :stream stream))
 
 (defstruct (structure-literal (:constructor make-structure-literal (name initargs)))
-  "What #S(NAME . INITARGS) reads as in source cl-mcp reads: the name and the
-slot initargs as written, with no structure built (the parsing process need not
-have NAME defined, and its constructor is code).  Printed as #S(NAME . INITARGS)."
+  "What #S(NAME . INITARGS) reads as in source cl-mcp reads: no structure is
+built (the parsing process need not have NAME defined, and its constructor is
+code).  Printed as #S(NAME . INITARGS).
+
+Slots:
+  NAME     -- the structure name, the first element of the list after #S.
+  INITARGS -- the rest of that list, the slot initargs and values as written."
+  ;; The structure name written after #S.
   name
+  ;; The slot initargs and values as written.
   initargs)
 
 (defmethod print-object ((object structure-literal) stream)
@@ -126,8 +136,9 @@ PARSE-TOP-LEVEL-FORMS reads files with."))
 (defun source-featurep (expression)
   "UIOP:FEATUREP of EXPRESSION, a feature expression the source reader read,
 except that a #. inside it (a READ-TIME-EVALUATION) holds.  Only evaluating
-the form could decide it, which reading source never does; holding keeps the
-form it guards read and editable, where any other answer would hide it.
+the form could decide it, which reading source never does, so one answer is
+picked: #+#.(...) keeps the form it guards read and editable, and #-#.(...)
+skips it, as the opposite branch of the usual pair.
 Everything else -- including an operator that is not :AND, :OR or :NOT, which
 UIOP refuses -- is UIOP:FEATUREP's."
   (cond
@@ -195,24 +206,34 @@ SOURCE-SYNTAX-CLIENT."
 
 (defun standard-syntax-readtable-p (readtable)
   "True when READTABLE reads as the standard readtable does: the same case,
-the same macro function on every ASCII character, and the same # dispatch for
-every ASCII sub-character.  A named readtable that only renames the standard
-one (:standard, or a copy of it) counts; one that adds or changes any of these
-does not."
-  (and (eq (readtable-case readtable) :upcase)
-       (loop for code from 0 below 128
-             for char = (code-char code)
-             always (multiple-value-bind (function non-terminating)
-                        (get-macro-character char readtable)
-                      (multiple-value-bind (standard standard-non-terminating)
-                          (get-macro-character char *pristine-readtable*)
-                        (and (eq function standard)
-                             (eq (not non-terminating) (not standard-non-terminating))))))
-       (loop for code from 0 below 128
-             for char = (code-char code)
-             always (eq (ignore-errors (get-dispatch-macro-character #\# char readtable))
-                        (ignore-errors
-                         (get-dispatch-macro-character #\# char *pristine-readtable*))))))
+the same macro function and terminating status on every ASCII character, and
+the same # dispatch for every ASCII sub-character.  A dispatching macro
+character's own function is a fresh closure in every readtable copy (SBCL), so
+for a character that dispatches in both readtables the comparison is made on
+its sub-characters instead -- (COPY-READTABLE NIL) is standard syntax.  A named
+readtable that only renames the standard one (:standard, or a copy of it)
+counts; one that adds or changes any of these does not.  Only code points below
+128 are compared, so a reader macro on a non-ASCII character goes unnoticed."
+  (let ((standard *pristine-readtable*))
+    (flet ((dispatching-p (table char)
+             (and (ignore-errors (progn (get-dispatch-macro-character char #\a table) t))
+                  t)))
+      (and (eq (readtable-case readtable) (readtable-case standard))
+           (loop for code from 0 below 128
+                 for char = (code-char code)
+                 always (or (and (dispatching-p readtable char) (dispatching-p standard char))
+                            (multiple-value-bind (function non-terminating)
+                                (get-macro-character char readtable)
+                              (multiple-value-bind (standard-function standard-non-terminating)
+                                  (get-macro-character char standard)
+                                (and (eq function standard-function)
+                                     (eq (not non-terminating)
+                                         (not standard-non-terminating)))))))
+           (loop for code from 0 below 128
+                 for char = (code-char code)
+                 always (eq (ignore-errors (get-dispatch-macro-character #\# char readtable))
+                            (ignore-errors
+                             (get-dispatch-macro-character #\# char standard))))))))
 
 (defun source-read-from-string (string &key (eof-error-p t) eof-value (start 0) end
                                             preserve-whitespace)
