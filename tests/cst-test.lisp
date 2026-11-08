@@ -52,10 +52,30 @@
           (format nil "~S" described))
       (ok (member (list :expr 6 "(defun plain () 3)") described :test #'equal)
           "and a plain form after it as before"))
+    (testing "a malformed expression is a read error, as it is to SBCL"
+      (ok (nth-value 1 (parse-top-level-forms (format nil "(a)~%#+(not) (b)~%")
+                                              :readtable :standard))
+          "reported as the second value"))
     (testing "an expression with no form after it is a read error"
       (ok (nth-value 1 (parse-top-level-forms (format nil "(a)~%#+sbcl~%")
                                               :readtable :standard))
           "reported as the second value"))))
+
+(deftest both-passes-split-a-twin-off-stacked-expressions
+  ;; Second review of #331: behind #+sbcl #+cl-mcp-no-such-feature the reader
+  ;; skips the guarded form and the outer #+sbcl takes the next one, which the
+  ;; Eclector pass returned as one node starting at the skipped form's #.
+  (let ((text (format nil "(in-package :cl-user)~%~%#+sbcl #+cl-mcp-no-such-feature~%~
+                           (defun impl (x) 2)~%~%#+sbcl #-cl-mcp-no-such-feature~%~
+                           (defun impl (x) 1)~%~%(defun z () 3)~%")))
+    (dolist (readtable '(nil :standard))
+      (let ((described (mapcar (lambda (node)
+                                 (list (cst-node-kind node) (cst-node-start-line node)))
+                               (if readtable
+                                   (parse-top-level-forms text :readtable readtable)
+                                   (parse-top-level-forms text)))))
+        (ok (equal '((:expr 1) (:skipped 3) (:expr 6) (:expr 9)) described)
+            (format nil "readtable ~S: ~S" readtable described))))))
 
 (deftest parse-top-level-forms-error-suggests-readtable
   (testing "reader error message suggests using readtable parameter"

@@ -573,10 +573,12 @@ TEXT, each as written (its whitespace made single spaces) and separated by a
 space, or NIL when there are none.  A form read under them carries no trace of
 them, so a collapsed signature printed from it would read as unconditional.
 With END, the end of the node the form is read as, they are the expressions of
-the form that ends there: a node can start at the # of a form the reader
-skipped -- an inner #- under an outer #+ that holds, or a false twin the CL
-reader returned no value for -- and the forms after it are walked to the one
-that is the node's, whose own expressions they are (NIL when it has none)."
+the form that ends there.  Both parse passes split a skipped form off the node
+after it (%SPLIT-SWALLOWED-TWINS, %PASS-FEATURE-CONDITIONALS), but not where
+they cannot -- under a readtable that reads #+ its own way, or behind an
+expression that does not read again -- so a node can still start at the # of a
+skipped form; the forms after it are then walked to the one that is the node's,
+whose own expressions they are (NIL when it has none)."
   (flet ((suppressed-end (from)
            (ignore-errors
             (let ((*read-suppress* t)

@@ -511,6 +511,28 @@ afterwards."
           "and leaves the skipped twin in place")
       (ok (search (format nil "#-ecl~%(defun impl (x) :rt-edited)") text)
           "while the target keeps its own expression")))
+  (testing "a twin behind stacked expressions whose first holds"
+    ;; The reader skips the guarded form and the outer #+sbcl takes the next
+    ;; form, which came back as one node starting at the twin's #.
+    (let ((source (format nil "(in-package :cl-user)~%~%#+sbcl #+ecl~%(defun impl (x) 2)~%~%~
+                               #+sbcl #-ecl~%(defun impl (x) 1)~%~%(defun z () 3)~%")))
+      (dolist (readtable '(nil :standard))
+        (ok (%twin-replace-outcome "defun" "impl" (format nil "#+sbcl #+ecl~%(defun impl (x) 3)")
+                                   :source source :readtable readtable)
+            (format nil "content for the twin is refused (readtable ~S)" readtable))
+        (multiple-value-bind (message text)
+            (%twin-replace-outcome "defun" "impl" "(defun impl (x) 7)"
+                                   :source source :readtable readtable)
+          (ok (null message) (format nil "a plain replace goes through (readtable ~S)" readtable))
+          (ok (search (format nil "#+sbcl #+ecl~%(defun impl (x) 2)") text)
+              (format nil "and keeps the twin (readtable ~S)" readtable))
+          (ok (search (format nil "#+sbcl #-ecl~%(defun impl (x) 7)") text)
+              (format nil "while the target keeps its expressions (readtable ~S)" readtable))))))
+  (testing "a twin written last in the file"
+    (ok (%twin-replace-outcome "defun" "impl" (format nil "#+ecl~%(defun impl (x) 3)")
+                               :source (format nil "(in-package :cl-user)~%~%#-ecl~%~
+                                                    (defun impl (x) 1)~%~%#+ecl~%(defun impl (x) 2)~%"))
+        "is found as well"))
   (testing "a skipped form that cannot be read is taken for a twin by its head and name"
     (ok (%twin-replace-outcome
          "defun" "impl" (format nil "#+ecl~%(defun impl (x) :v2)")

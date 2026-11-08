@@ -11,6 +11,7 @@
   (:import-from #:cl-mcp/src/cst
                 #:cst-node-start-line
                 #:parse-top-level-forms
+                #:%feature-expression-problem
                 #:%skip-whitespace-and-comments
                 #:stray-right-parenthesis
                 #:*standard-readtable*)
@@ -632,35 +633,6 @@ no form at all.  CONTENT and NIL when it starts with none."
                                (remove #\Newline prefix :test-not #'char=)
                                (subseq content prefix-end))
                   prefix)))))
-
-(defun %feature-expression-problem (expression &optional (depth 0))
-  "Return why EXPRESSION, a feature expression as read, breaks the grammar of
-CLHS 24.1.2.1 -- a symbol, or a proper list headed by AND, OR or NOT, NOT with
-exactly one argument, whose arguments are feature expressions in turn -- or NIL
-when it keeps it.  Operators are compared by name, so :NOT and a NOT read in
-another package both count, as readers accept both.  Nothing is evaluated: a
-condition false in this process is as valid as a true one."
-  (cond
-    ((> depth 64) "it is nested too deeply")
-    ((symbolp expression) nil)
-    ((not (and (consp expression) (ignore-errors (list-length expression))))
-     ;; Not a proper list: it may be circular, as #+#1=(and . #1#) reads.
-     (let ((*print-circle* t))
-       (format nil "~S is neither a symbol nor a proper list" expression)))
-    ((not (and (symbolp (first expression))
-               (member (symbol-name (first expression)) '("AND" "OR" "NOT")
-                       :test #'string=)))
-     ;; By name: its package was the reader's scratch one, deleted by now.
-     (format nil "~A is not AND, OR or NOT"
-             (let ((operator (first expression)))
-               (if (symbolp operator)
-                   (symbol-name operator)
-                   (let ((*print-circle* t)) (prin1-to-string operator))))))
-    ((and (string= (symbol-name (first expression)) "NOT")
-          (/= 1 (length (rest expression))))
-     "NOT takes exactly one feature expression")
-    (t (some (lambda (argument) (%feature-expression-problem argument (1+ depth)))
-             (rest expression)))))
 
 (defun %check-feature-prefix (prefix)
   "Signal an error naming the first malformed feature expression in PREFIX, the
