@@ -841,7 +841,8 @@ and the file's text afterwards."
 (deftest lisp-edit-form-reaches-a-definition-inside-a-wrapper
   ;; Issue #322: (eval-when (...) (defclass ...)) could not be named at all.
   (with-temp-file "tests/tmp/edit-form-wrapped.lisp"
-      (format nil "(in-package :cl-user)~%~%(eval-when (:compile-toplevel :load-toplevel :execute)~%~
+      (format nil "(in-package :cl-user)~%~%~
+                   (eval-when (:compile-toplevel :load-toplevel :execute)~%~
                    ~2@T(defclass wrapped-322 () ())~%~2@T(defun wrapped-helper (x) x))~%~%~
                    (defcfun (\"strlen\" c-strlen-322) :int (s :string))~%")
     (lambda (path)

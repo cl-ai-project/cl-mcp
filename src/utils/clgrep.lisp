@@ -635,7 +635,13 @@ in none of its definitions."
       ;; repository is slash-delimited, so both sides of the colon accept them.
       (multiple-value-bind (match groups)
           (cl-ppcre:scan-to-strings
-           "^\\(\\s*([a-zA-Z*+<>=/-][a-zA-Z0-9*_+./<>=-]*(?::{1,2}[a-zA-Z*][a-zA-Z0-9*_+./-]*)?)\\s+(\"(?:[^\"\\\\]|\\\\.)*\"|[^\\s()\"]+|\\([^)]+\\))"
+           (concatenate
+            'string
+            ;; The head, with an optional PACKAGE: or PACKAGE:: prefix.
+            "^\\(\\s*([a-zA-Z*+<>=/-][a-zA-Z0-9*_+./<>=-]*"
+            "(?::{1,2}[a-zA-Z*][a-zA-Z0-9*_+./-]*)?)"
+            ;; The name: a string read whole, a token, or a short list.
+            "\\s+(\"(?:[^\"\\\\]|\\\\.)*\"|[^\\s()\"]+|\\([^)]+\\))")
            trimmed)
         (when match
           (let ((form-type (%strip-package-qualifier

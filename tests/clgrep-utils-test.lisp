@@ -478,8 +478,11 @@ said of the same tree."
     (let ((result (extract-form-type-and-name "(defclass my-class () ())")))
       (ok (string= "defclass" (cdr (assoc :type result))))
       (ok (string= "my-class" (cdr (assoc :name result)))))
-    ;; Non-recognized form
-    (ok (null (extract-form-type-and-name "(my-custom-form foo)")))
+    ;; Any other head with a symbol after it is named by it, untyped (#322)
+    (let ((result (extract-form-type-and-name "(my-custom-form foo)")))
+      (ok (string= "my-custom-form" (cdr (assoc :type result))))
+      (ok (string= "foo" (cdr (assoc :name result))))
+      (ok (cdr (assoc :untyped result))))
     ;; Non-form string
     (ok (null (extract-form-type-and-name "just some text"))))
   (testing "should classify user-defined defining macros by DEF/DEFINE- prefix"
@@ -496,8 +499,11 @@ said of the same tree."
     (let ((result (extract-form-type-and-name "(in-package #:foo)")))
       (ok (string= "in-package" (cdr (assoc :type result))))
       (ok (string= "#:foo" (cdr (assoc :name result)))))
-    ;; Clearly not a definition: the head token parses but is rejected.
-    (ok (null (extract-form-type-and-name "(let ((x 1)) x)"))))
+    ;; A wrapper is no definition: no name, marked so its children are
+    ;; looked into (#322).
+    (let ((result (extract-form-type-and-name "(let ((x 1)) x)")))
+      (ok (null (cdr (assoc :name result))))
+      (ok (cdr (assoc :wrapper result)))))
   (testing "should classify package-qualified defining macro heads"
     ;; A DSL macro reached through its package. The qualifier is dropped so the
     ;; type equals what a caller filters on and what %DEFINITION-NAMES reports
@@ -530,9 +536,12 @@ said of the same tree."
     (let ((result (extract-form-type-and-name "(my.dsl::defthing foo 1)")))
       (ok (string= "defthing" (cdr (assoc :type result))))
       (ok (string= "foo" (cdr (assoc :name result)))))
-    ;; A qualified head that is not a definition is still rejected.
-    (ok (null (extract-form-type-and-name "(routes:apply-rules x)")))
-    (ok (null (extract-form-type-and-name "(cl-mcp/src/dsl:apply-rules x)")))
+    ;; A qualified head that is not a definition is untyped, its qualifier
+    ;; dropped as for a definer (#322).
+    (dolist (text '("(routes:apply-rules x)" "(cl-mcp/src/dsl:apply-rules x)"))
+      (let ((result (extract-form-type-and-name text)))
+        (ok (string= "apply-rules" (cdr (assoc :type result))) text)
+        (ok (cdr (assoc :untyped result)) text)))
     ;; A keyword head is not a package qualifier: .asd component forms such as
     ;; (:file \"main\") must keep parsing as non-definitions.
     (ok (null (extract-form-type-and-name "(:file \"main\")")))))
