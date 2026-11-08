@@ -639,9 +639,9 @@ structures, conditions, generic functions, macros, and variables are
 all locatable, not only ordinary functions.
 
 ON-DISK is decided here, on the absolute pathname SB-INTROSPECT returned,
-because PATH has already been made relative for display and the relativization
-is not always against the process's working directory: a worker's CWD is
-whatever it inherited, not *PROJECT-ROOT*.  Probing the relative string
+because PATH has already been made relative for display -- to *PROJECT-ROOT*,
+not to the process's working directory, which in a worker is whatever it
+inherited.  Probing the relative string
 downstream therefore failed for every file that does exist."
   (let* ((qualified (position #\: symbol-name))
          (pkg (if qualified nil package))
