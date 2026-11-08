@@ -15,6 +15,7 @@
                 #:*standard-readtable*
                 #:%feature-expression-problem)
   (:import-from #:cl-mcp/src/fs
+                #:fs-read-file
                 #:fs-write-file
                 #:with-file-lock)
   (:import-from #:cl-mcp/src/log
@@ -37,7 +38,8 @@
                 #:*read-with-cl-reader*
                 #:source-read-from-string)
   (:import-from #:cl-mcp/src/package-context
-                #:call-with-package-context)
+                #:call-with-package-context
+                #:extract-in-package-name-from-text)
   (:import-from #:cl-mcp/src/utils/nesting
                 #:lisp-too-deep-p
                 #:+max-lisp-nesting+)
@@ -57,6 +59,7 @@
                 #:%whitespace-char-p
                 #:%normalize-paths
                 #:%locate-target-form
+                #:locate-form-in-text
                 #:%feature-prefix-end
                 #:file-unparseable-error)
   (:documentation "Scoped text replacement within a matched top-level Lisp form.")
@@ -283,6 +286,62 @@ deep, which is deeper than cl-mcp will read"
                                         reader-text)
                                 reader-text)))))))))
 
+(defun %patch-located (abs text nodes target old-text new-text readtable file-package-name
+                       &optional inactive-p)
+  "Replace OLD-TEXT by NEW-TEXT within TARGET, a form of NODES parsed from TEXT
+(the contents of ABS), and check the patched form still reads.  Returns
+(values UPDATED WOULD-CHANGE BRACKET-WARNING MODIFIED-FORM); signals
+PATCH-OPERATION-ERROR when OLD-TEXT is not found exactly once or the patched
+form does not read.  Nothing is written.  INACTIVE-P says TARGET is a form under
+a feature expression false here (issue #321): it is then checked past its
+expressions (%INACTIVE-FORM-TEXT), which would otherwise skip it again."
+  (multiple-value-bind (updated modified-form form-text match-pos)
+      (%apply-patch-operation text target old-text new-text)
+    (let* ((would-change (not (string= text updated)))
+           (readtable-designator
+             (or readtable (%detect-readtable-before-node nodes target)))
+           ;; Computed once: the readtable comparison probes 256 characters.
+           (nonstandard-rt (%nonstandard-readtable-p readtable-designator))
+           ;; Counted in the form's lexical context: a ")" inside a string
+           ;; or comment is not code and must not produce a depth message.
+           ;; Under a readtable that changes the syntax the standard lexical
+           ;; rules cannot be trusted (a reader macro may consume raw
+           ;; parentheses as data), so no depth message is offered at all;
+           ;; the reader's own failure is reported through the normal
+           ;; diagnosis path.
+           ;; A ] or } typed for ) changes the net count too, but "add 1 )"
+           ;; would then write code that reads (as a symbol ending in ]);
+           ;; let the bracket diagnosis speak instead.
+           ;; Deferred: the scans behind it run only once the patched form
+           ;; has failed to parse, so a successful patch pays nothing.
+           (depth-reason
+             (lambda ()
+               (and (not nonstandard-rt)
+                    (not (%bracket-mismatch-p modified-form))
+                    (%check-depth-balance form-text modified-form
+                                          match-pos old-text new-text)))))
+      (when would-change
+        (%validate-form-parseable
+         (if inactive-p
+             (%inactive-form-text modified-form)
+             modified-form)
+         :readtable-designator readtable-designator
+         :package-name file-package-name
+         :source-path abs
+         :depth-reason depth-reason
+         :nonstandard-rt nonstandard-rt))
+      ;; The form reads, but a ] or } where ) was meant reads too (as part
+      ;; of a symbol). Written as asked -- the caller may mean it -- but
+      ;; flagged, since silently accepting it is how such typos survive.
+      ;; Only the found side: an unmatched [ or { opener is a symbol
+      ;; character in standard syntax and carries no ) typo to flag.
+      (values updated
+              would-change
+              (and would-change
+                   (not nonstandard-rt)
+                   (format-bracket-warning modified-form
+                                           :target "the patched form"))
+              modified-form))))
 (defun %inactive-form-text (modified-form)
   "Return MODIFIED-FORM, the patched text of a form under a feature expression
 false here (issue #321), past its expressions, for the reader to check -- read
@@ -377,75 +436,221 @@ silently accepts as part of a symbol), so the caller can check it."
                           file-package-name inactive-p)
         (%locate-target-form file-path form-type form-name readtable)
       (declare (ignore _))
-      (multiple-value-bind (updated modified-form form-text match-pos)
-          (%apply-patch-operation original target old-text new-text)
-        (let* ((would-change (not (string= original updated)))
-               (readtable-designator
-                 (or readtable (%detect-readtable-before-node nodes target)))
-               ;; Computed once: the readtable comparison probes 256 characters.
-               (nonstandard-rt (%nonstandard-readtable-p readtable-designator))
-               ;; Counted in the form's lexical context: a ")" inside a string
-               ;; or comment is not code and must not produce a depth message.
-               ;; Under a readtable that changes the syntax the standard lexical
-               ;; rules cannot be trusted (a reader macro may consume raw
-               ;; parentheses as data), so no depth message is offered at all;
-               ;; the reader's own failure is reported through the normal
-               ;; diagnosis path.
-               ;; A ] or } typed for ) changes the net count too, but "add 1 )"
-               ;; would then write code that reads (as a symbol ending in ]);
-               ;; let the bracket diagnosis speak instead.
-               ;; Deferred: the scans behind it run only once the patched form
-               ;; has failed to parse, so a successful patch pays nothing.
-               (depth-reason
-                 (lambda ()
-                   (and (not nonstandard-rt)
-                        (not (%bracket-mismatch-p modified-form))
-                        (%check-depth-balance form-text modified-form
-                                              match-pos old-text new-text)))))
-          (when would-change
-            (%validate-form-parseable
-             ;; A form under a feature expression false here (issue #321) is
-             ;; read past its expressions, which would skip it again.
-             (if inactive-p
-                 (%inactive-form-text modified-form)
-                 modified-form)
-             :readtable-designator readtable-designator
-             :package-name file-package-name
-             :source-path abs
-             :depth-reason depth-reason
-             :nonstandard-rt nonstandard-rt))
-          ;; The form reads, but a ] or } where ) was meant reads too (as part
-          ;; of a symbol). Written as asked -- the caller may mean it -- but
-          ;; flagged, since silently accepting it is how such typos survive.
-          ;; Only the found side: an unmatched [ or { opener is a symbol
-          ;; character in standard syntax and carries no ) typo to flag.
-          (let ((bracket-warning
-                  (and would-change
-                       (not nonstandard-rt)
-                       (format-bracket-warning modified-form
-                                               :target "the patched form"))))
-            (log-event :debug "lisp.patch.form"
-                       "path" (namestring abs)
-                       "form_type" form-type
-                       "form_name" form-name
-                       "dry_run" dry-run
-                       "would_change" would-change)
-            (cond
-              (dry-run
-               (let ((result (make-hash-table :test #'equal)))
-                 (setf (gethash "would_change" result) would-change
-                       (gethash "original" result) target-snippet
-                       (gethash "preview" result) modified-form
-                       (gethash "file_path" result) (namestring abs)
-                       (gethash "operation" result) "patch")
-                 (when bracket-warning
-                   (setf (gethash "bracket_warning" result) bracket-warning))
-                 result))
-              (would-change
-               (fs-write-file rel updated)
-               (values updated t bracket-warning))
-              (t
-               (values updated nil nil)))))))))
+      (multiple-value-bind (updated would-change bracket-warning modified-form)
+          (%patch-located abs original nodes target old-text new-text readtable
+                          file-package-name inactive-p)
+        (log-event :debug "lisp.patch.form"
+                   "path" (namestring abs)
+                   "form_type" form-type
+                   "form_name" form-name
+                   "dry_run" dry-run
+                   "would_change" would-change)
+        (cond
+          (dry-run
+           (let ((result (make-hash-table :test #'equal)))
+             (setf (gethash "would_change" result) would-change
+                   (gethash "original" result) target-snippet
+                   (gethash "preview" result) modified-form
+                   (gethash "file_path" result) (namestring abs)
+                   (gethash "operation" result) "patch")
+             (when bracket-warning
+               (setf (gethash "bracket_warning" result) bracket-warning))
+             result))
+          (would-change
+           (fs-write-file rel updated)
+           (values updated t bracket-warning))
+          (t
+           (values updated nil nil)))))))
+
+(defun lisp-patch-form-many (&key file-path patches dry-run readtable)
+  "Apply PATCHES to the file at FILE-PATH together: all of them or none.
+Each patch is a plist (:FORM-TYPE :FORM-NAME :OLD-TEXT :NEW-TEXT) and does what
+LISP-PATCH-FORM does with those arguments, to the text the patches before it
+left -- so a later patch finds its form, and may patch a form an earlier one
+changed, as the file will be once written.  The first patch that cannot be
+applied (its form not found, OLD-TEXT not found exactly once, a form that no
+longer reads) signals PATCH-OPERATION-ERROR naming its number, and nothing is
+written: a rename across a function and its callers is never left half done
+(issue #326).  The file is read once and written once, under one
+WITH-FILE-LOCK.
+
+Returns three values: the updated file text, whether it changed, and a list of
+(NUMBER . BRACKET-WARNING) for the patches whose form reads with a ] or } where
+) may have been meant.  With DRY-RUN nothing is written and a hash table is
+returned instead: would_change, preview (the whole file), file_path, operation
+\"patch\", patches (their count), and bracket_warnings when there are any."
+  (unless (stringp file-path)
+    (error "file_path must be a string"))
+  (unless (and (listp patches) patches)
+    (error 'arg-validation-error :arg-name "patches"
+           :message "patches must be a non-empty array of {form_type, form_name, old_text, new_text}"))
+  (unless (member dry-run '(t nil))
+    (error "dry-run must be boolean"))
+  (loop for patch in patches
+        for number from 1
+        do (destructuring-bind (&key form-type form-name old-text new-text) patch
+             (unless (and (stringp form-type) (stringp form-name)
+                          (stringp old-text) (stringp new-text))
+               (error 'arg-validation-error :arg-name "patches"
+                      :message (format nil "patch ~D needs string form_type, form_name, ~
+                                            old_text and new_text"
+                                       number)))
+             (when (zerop (length old-text))
+               (error 'arg-validation-error :arg-name "patches"
+                      :message (format nil "patch ~D: old_text must not be empty" number)))))
+  (with-file-lock ((%normalize-paths file-path))
+    (multiple-value-bind (abs rel) (%normalize-paths file-path)
+     ;; Read once, before any patch: a file that cannot be read is about the
+     ;; file, not about patch 1, and is reported as it is.
+     (multiple-value-bind (original truncated file-length) (fs-read-file abs)
+      (when truncated
+        (error "~A exceeds the read limit (~@[~D bytes, ~]only ~D characters read); ~
+                lisp-patch-form cannot edit files this large."
+               (namestring abs) file-length (length original)))
+      (let ((total (length patches))
+            (warnings '())
+            (previews '())
+            (text original)
+            (file-package-name (extract-in-package-name-from-text original)))
+      (loop for patch in patches
+            for number from 1
+            do (destructuring-bind (&key form-type form-name old-text new-text) patch
+                 (flet ((fail (message)
+                          (error 'patch-operation-error
+                                 :reason (format nil "Patch ~D of ~D (~A ~A): ~A~%Nothing was ~
+                                                      written: the patches are applied ~
+                                                      together or not at all."
+                                                 number total form-type form-name message))))
+                   (handler-case
+                       (multiple-value-bind (nodes target type inactive-p)
+                           (locate-form-in-text abs text form-type form-name readtable)
+                         (declare (ignore type))
+                         (multiple-value-bind (updated would-change bracket-warning
+                                               modified-form)
+                             (%patch-located abs text nodes target old-text new-text readtable
+                                             file-package-name inactive-p)
+                           (declare (ignore would-change))
+                           (when bracket-warning
+                             (push (cons number bracket-warning) warnings))
+                           (push (list number form-type form-name modified-form) previews)
+                           (setf text updated)))
+                     ;; The file itself does not parse: about the file, not
+                     ;; about this patch, so it is reported as it is.
+                     (file-unparseable-error (e) (error e))
+                     (patch-operation-error (e) (fail (patch-operation-reason e)))
+                     (error (e)
+                       (fail (sanitize-error-message (bounded-princ-to-string e))))))))
+      (let ((would-change (not (string= original text)))
+            (warnings (nreverse warnings)))
+        (log-event :debug "lisp.patch.form"
+                   "path" (namestring abs)
+                   "patches" total
+                   "dry_run" dry-run
+                   "would_change" would-change)
+        (cond
+          (dry-run
+           (let ((result (make-hash-table :test #'equal)))
+             (setf (gethash "would_change" result) would-change
+                   (gethash "preview" result) text
+                   ;; Each patched form as it would be: what a client that
+                   ;; renders only the content text gets to see.
+                   (gethash "preview_forms" result) (reverse previews)
+                   (gethash "file_path" result) (namestring abs)
+                   (gethash "operation" result) "patch"
+                   (gethash "patches" result) total)
+             (when warnings
+               (setf (gethash "bracket_warnings" result) warnings))
+             result))
+          (would-change
+           (fs-write-file rel text)
+           (values text t warnings))
+          (t (values text nil warnings)))))))))
+
+(defun %check-patch-arguments (patches form-type form-name old-text new-text)
+  "Signal ARG-VALIDATION-ERROR unless the tool was given either PATCHES or all
+four of FORM-TYPE, FORM-NAME, OLD-TEXT and NEW-TEXT, and not both."
+  (let ((single-arguments (remove nil (list form-type form-name old-text new-text))))
+    (cond
+      ((and patches single-arguments)
+       (error 'arg-validation-error :arg-name "patches"
+              :message "pass either patches or form_type/form_name/old_text/new_text, not both"))
+      ((and (not patches) (/= 4 (length single-arguments)))
+       (error 'arg-validation-error
+              :arg-name (cond ((null form-type) "form_type")
+                              ((null form-name) "form_name")
+                              ((null old-text) "old_text")
+                              (t "new_text"))
+              :message "form_type, form_name, old_text and new_text are required (or pass patches)")))))
+
+(defun %patch-plists (patches)
+  "Return PATCHES, the tool's patches argument (a JSON array of objects), as the
+plists LISP-PATCH-FORM-MANY takes, refusing an element that is not an object."
+  (loop for patch in (coerce patches 'list)
+        for number from 1
+        collect (if (hash-table-p patch)
+                    (list :form-type (gethash "form_type" patch)
+                          :form-name (gethash "form_name" patch)
+                          :old-text (gethash "old_text" patch)
+                          :new-text (gethash "new_text" patch))
+                    (error 'arg-validation-error :arg-name "patches"
+                           :message (format nil "patch ~D is not an object with form_type, ~
+                                                 form_name, old_text and new_text"
+                                            number)))))
+
+(defun %patches-result (id file-path dry-run count outcome)
+  "Return the tool result for LISP-PATCH-FORM-MANY's OUTCOME, the list of its
+values, for COUNT patches on FILE-PATH."
+  (if dry-run
+      (let* ((preview (first outcome))
+             (would-change (eq t (gethash "would_change" preview)))
+             (warnings (gethash "bracket_warnings" preview)))
+        (result id
+                (apply #'make-ht
+                       "path" file-path
+                       "operation" "patch"
+                       "patches" count
+                       "would_change" (json-bool would-change)
+                       "preview" (gethash "preview" preview)
+                       "content" (text-content
+                                  (format nil "Dry-run of ~D patches on ~A (~:[no change~;would ~
+                                               change~])~{~%WARNING (patch ~D): ~A~}~
+                                               ~{~%~%--- patch ~D (~A ~A) ---~%~A~}"
+                                          count file-path would-change
+                                          (loop for (number . warning) in warnings
+                                                collect number collect warning)
+                                          (loop for (number type name form)
+                                                  in (gethash "preview_forms" preview)
+                                                collect number collect type collect name
+                                                collect (%bound-snippet form))))
+                       (when warnings
+                         (list "bracket_warnings"
+                               (map 'vector (lambda (entry)
+                                              (make-ht "patch" (car entry)
+                                                       "warning" (cdr entry)))
+                                    warnings))))))
+      (destructuring-bind (updated changed-p warnings) outcome
+        (result id
+                (apply #'make-ht
+                       "path" file-path
+                       "operation" "patch"
+                       "would_change" (json-bool changed-p)
+                       "bytes" (length updated)
+                       "content" (text-content
+                                  (format nil "~A~{~%WARNING (patch ~D): ~A~}"
+                                          (if changed-p
+                                              (format nil "Applied ~D patches to ~A"
+                                                      count file-path)
+                                              (format nil "No change to ~A (every old_text ~
+                                                           already matches its new_text)"
+                                                      file-path))
+                                          (loop for (number . warning) in warnings
+                                                collect number collect warning)))
+                       (when warnings
+                         (list "bracket_warnings"
+                               (map 'vector (lambda (entry)
+                                              (make-ht "patch" (car entry)
+                                                       "warning" (cdr entry)))
+                                    warnings))))))))
 
 (define-tool "lisp-patch-form"
   :description "Scoped text replacement within a matched top-level Lisp form.
@@ -460,13 +665,13 @@ Use 'lisp-edit-form' instead when replacing or inserting entire forms."
                     :description "Target file path: relative to the project root, or absolute inside
 it (absolute recommended). Files outside the project root, registered ASDF sources included, are
 refused")
-         (form_type :type :string :required t
+         (form_type :type :string
                     :description "Form type to search, e.g., \"defun\", \"defmacro\", \"defmethod\".
 A package prefix is ignored: \"asdf:defsystem\" and \"defsystem\" both match
 (asdf:defsystem ...). A colon inside the name itself still matches as written
 (\"def:thing\" or \"|def:thing|\" for (|DEF:THING| ...)); when the two readings
 name different forms, the call is refused as ambiguous.")
-         (form_name :type :string :required t
+         (form_name :type :string
                     :description "Form name to match; for defmethod include specializers,
 e.g., \"print-object ((obj my-class) stream)\" (a method whose name is unique matches
 by name alone). A name[N] suffix, 0-based, picks the Nth of several matches. For defstruct with
@@ -477,14 +682,22 @@ A form under a #+/#- expression false in this server (another implementation's
 branch) is named by its expressions in front of the name, as the file writes them:
 \"#+ecl impl\". A plain name means the form this server reads, and reaches a
 skipped one only when no read form has that name.")
-         (old_text :type :string :required t
+         (old_text :type :string
                    :description "Text to find within the matched form.
 Performs exact raw text matching (whitespace-sensitive). Must occur exactly once in the form.")
-         (new_text :type :string :required t
+         (new_text :type :string
                    :description "Replacement text.
 If new_text opens and closes a different net number of parentheses than old_text
 and the patched form no longer parses, the error says exactly how many \")\" to
 add or remove.")
+         (patches :type :array :item-type :object
+                  :description "Several patches to apply to file_path together, in place of
+form_type/form_name/old_text/new_text: an array of objects each holding those four keys.
+They are applied in order, each to the text the ones before it left (so a later patch may
+patch a form an earlier one changed), and the file is written once: if any patch cannot be
+applied -- its form not found, its old_text not found exactly once, a form that no longer
+reads -- nothing is written and the error names that patch's number. Use it for a rename
+across a function and its callers, or a parameter added to a definition and its calls.")
          (dry_run :type :boolean
                   :description "When true, return a preview without writing to disk")
          (readtable :type :string
@@ -500,7 +713,15 @@ The patch replaces text in place, so comments are kept."))
            (error (e)
              (error 'arg-validation-error :arg-name "readtable"
                     :message (format nil "~A" e))))))
+    (%check-patch-arguments patches form_type form_name old_text new_text)
     (handler-case
+        (if patches
+            (%patches-result id file_path dry_run (length patches)
+                             (multiple-value-list
+                              (lisp-patch-form-many :file-path file_path
+                                                    :patches (%patch-plists patches)
+                                                    :dry-run dry_run
+                                                    :readtable readtable-designator)))
         (multiple-value-bind (updated changed-p bracket-warning)
             (lisp-patch-form :file-path file_path
                              :form-type form_type
@@ -554,7 +775,7 @@ The patch replaces text in place, so comments are kept."))
                                 (when changed-p
                                   (list "delta" (- (length new_text) (length old_text))))
                                 (when bracket-warning
-                                  (list "bracket_warning" bracket-warning))))))))
+                                  (list "bracket_warning" bracket-warning)))))))))
       ;; CLAUSE ORDER IS LOAD-BEARING. PATCH-OPERATION-ERROR and
       ;; ARG-VALIDATION-ERROR are both subtypes of ERROR, so both must stay
       ;; ahead of the generic clause; reordering silently changes the response
