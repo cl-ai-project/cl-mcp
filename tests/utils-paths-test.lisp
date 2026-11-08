@@ -230,6 +230,33 @@
         (ignore-errors (delete-file file))
         (ignore-errors (uiop:delete-empty-directory dir))))))
 
+(deftest normalize-path-for-display-is-absolute-outside-the-root
+  (let* ((cl-mcp-dir (asdf:system-source-directory :cl-mcp))
+         (file (merge-pathnames "src/fs.lisp" cl-mcp-dir)))
+    (testing "a path under the root is relative to it"
+      (let ((*project-root* cl-mcp-dir))
+        (ok (equal "src/fs.lisp" (normalize-path-for-display file)))))
+    (testing "a path outside the root is absolute, whatever the server's directory (#325)"
+      ;; The root is a sibling of the file's tree, so neither the server's
+      ;; working directory nor cl-mcp's own source directory may be used to
+      ;; shorten the path: the tools resolve a relative path against the root.
+      (let ((*project-root* (merge-pathnames "tests/" cl-mcp-dir)))
+        (ok (equal (native-path-namestring file) (normalize-path-for-display file)))
+        (ok (uiop:absolute-pathname-p
+             (uiop:parse-native-namestring (normalize-path-for-display file))))))
+    (testing "a root spelled through a symlink still covers the truenames under it"
+      (let ((link (merge-pathnames "tests/tmp/display-root-link" cl-mcp-dir)))
+        (ensure-directories-exist link)
+        (ignore-errors (sb-posix:unlink (native-path-namestring link)))
+        (sb-posix:symlink (native-path-namestring cl-mcp-dir) (native-path-namestring link))
+        (unwind-protect
+             (let ((*project-root* (uiop:ensure-directory-pathname link)))
+               (ok (equal "src/fs.lisp" (normalize-path-for-display (truename file)))))
+          (ignore-errors (sb-posix:unlink (native-path-namestring link))))))
+    (testing "with no root at all the path is absolute"
+      (let ((*project-root* nil))
+        (ok (equal (native-path-namestring file) (normalize-path-for-display file)))))))
+
 (deftest root-not-set-advice-survives-the-client-cut
   (testing "the reconnect advice is not lost to the 500-character cut"
     ;; Found dogfooding v3.0.1: the message reaches the client through a

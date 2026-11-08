@@ -934,9 +934,9 @@ NIL the symbol was not found and an isError payload is returned.
 
 ON-DISK says whether the source file exists.  The caller decides it, because
 by the time PATH reaches here it has been made relative for display, and
-relative to what is not knowable from this side: NORMALIZE-PATH-FOR-DISPLAY
-tries *PROJECT-ROOT*, then the working directory, then cl-mcp's own source
-directory.  Probing the relative string here resolved it against the process's
+relative to what is not knowable from this side (NORMALIZE-PATH-FOR-DISPLAY
+makes a path under *PROJECT-ROOT* relative to it).  Probing the relative string
+here resolved it against the process's
 CWD -- which in a worker is whatever it inherited -- so every existing file was
 annotated \"source not on disk\".
 

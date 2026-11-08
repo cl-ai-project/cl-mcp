@@ -35,6 +35,7 @@
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%feature-prefix-end
                 #:%skipped-feature-node-p
+                #:feature-verdict
                 #:%skip-blank-and-comments
                 #:%parse-readtable-designator
                 #:file-unparseable-error
@@ -619,7 +620,8 @@ unread.  It was never read, so it has no signature to print, only its text."
          (form-text (%collapse-whitespace-runs
                      (subseq source-text (min form-start (cst-node-end node))
                              (cst-node-end node)))))
-    (format nil "~VD: ~@[~A ~]~A  [not read: its feature expression is false in this server]"
+    (format nil "~VD: ~@[~A ~]~A  [not read: its feature expression is false in this ~
+                 server~@[, whose *features* ~A~]]"
             line-width (cst-node-start-line node)
             (%feature-prefix-display source-text start)
             (if (> (length form-text) *skipped-form-max-chars*)
@@ -627,7 +629,8 @@ unread.  It was never read, so it has no signature to print, only its text."
                              (string-right-trim
                               " " (subseq form-text 0 (- *skipped-form-max-chars* 4)))
                              " ...")
-                form-text))))
+                form-text)
+            (feature-verdict (cst-node-value node)))))
 
 (defun %format-lisp-form (node source-text name-scanner content-scanner
                           line-width)
