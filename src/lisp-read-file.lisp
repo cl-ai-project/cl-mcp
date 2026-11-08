@@ -10,7 +10,13 @@
                 #:cst-node-start
                 #:cst-node-end
                 #:cst-node-start-line
+                #:cst-node-end-line
+                #:readtable-unavailable
+                #:readtable-unavailable-origin
+                #:%in-package-form-p
                 #:*standard-readtable*)
+  (:import-from #:cl-mcp/src/package-context
+                #:extract-in-package-name-from-text)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-resolve-read-path)
@@ -42,7 +48,8 @@
                 #:file-unparseable-message
                 #:file-unparseable-diagnosis
                 #:make-file-unparseable-condition
-                #:signal-file-unparseable)
+                #:file-unparseable-recoverable-p
+                #:file-unparseable-unreadable-dispatch)
   (:import-from #:cl-ppcre
                 #:scan
                 #:create-scanner)
@@ -715,6 +722,73 @@ whitespace."
                    (incf comment))))))
     (values source comment blank)))
 
+(defun %format-forms-read-past (text start source-path name-scanner content-scanner
+                                line-width &key package-name)
+  "List the forms of TEXT after START, the end of an (in-readtable ...) form
+naming a readtable this process lacks, reading them without it: the standard
+syntax, with the reader errors Eclector can recover from recovered from (an
+unknown dispatch macro such as #@ is skipped).  Returns (DISPLAY COUNT), or NIL
+when nothing after START reads even so.  The forms keep their file line
+numbers: TEXT before START is blanked rather than cut.  They are read and
+printed in PACKAGE-NAME, the package in effect at START (the blanked text
+holds no IN-PACKAGE to find it by), or in the package SOURCE-PATH's text
+declares when START is 0.  They may be shown inexactly, which DISPLAY's first
+line says, and no editing tool reaches them -- the editing tools stop at the
+declaration.  When the recovered read itself stops again (a second unknown
+in-readtable, a reader error recovery cannot pass), DISPLAY ends saying where."
+  (let ((padded (let ((copy (copy-seq text)))
+                  (loop for i from 0 below (min start (length copy))
+                        unless (char= (char copy i) #\Newline)
+                          do (setf (char copy i) #\Space))
+                  copy)))
+    (multiple-value-bind (nodes again)
+        (handler-case
+            (if package-name
+                ;; SOURCE-PATH too: the file's own defpackage is found through
+                ;; it, which the walk under the project root does not reach for
+                ;; a file outside it.
+                (parse-top-level-forms padded :initial-package package-name
+                                              :source-path source-path :recover t)
+                (parse-top-level-forms padded :source-path source-path :recover t))
+          (error (e) (values nil e)))
+      (let* ((count 0)
+             ;; Symbols print as the main listing prints them: in the file's
+             ;; package, followed through its IN-PACKAGE forms.
+             (*package* (or (let ((name (or package-name
+                                            (extract-in-package-name-from-text text))))
+                              (and name (find-package name)))
+                            *package*))
+             (last-node nil)
+             (display
+               (with-output-to-string (out)
+                 (dolist (node nodes)
+                   (cond
+                     ((and (typep node 'cst-node) (eq (cst-node-kind node) :expr))
+                      (incf count)
+                      (setf last-node node)
+                      (let ((package (find-package
+                                      (or (%in-package-form-p (cst-node-value node)) ""))))
+                        (when package
+                          (setf *package* package)))
+                      (write-string (ensure-trailing-newline
+                                     (%format-lisp-form node text name-scanner
+                                                        content-scanner line-width))
+                                    out))
+                     ((%skipped-feature-node-p node)
+                      (write-string (ensure-trailing-newline
+                                     (%format-skipped-feature-form node text line-width))
+                                    out)))))))
+        (when (plusp count)
+          (list (format nil "--- Read ~:[past the in-readtable without it~;with recovery~] ~
+                             (unknown reader macros skipped), so these may be shown ~
+                             inexactly; lisp-edit-form cannot reach them ---~%~A~
+                             ~@[~%--- The listing stops again after line ~D: ~A ---~]"
+                        (zerop start)
+                        (string-right-trim '(#\Newline) display)
+                        (and again (cst-node-end-line last-node))
+                        (and again (sanitize-error-message (princ-to-string again))))
+                count))))))
+
 (defun %format-lisp-file (text name-scanner content-scanner include-comments
                           comment-context &key readtable source-path)
   "Render TEXT, the Lisp source at SOURCE-PATH, in collapsed form.
@@ -736,7 +810,39 @@ and, when the diagnosis names it, \"unparseable_from_line\"."
                                    :readtable readtable
                                    :source-path source-path)
           (error (e)
-            (signal-file-unparseable source-path text e :readtable readtable)))
+            (let ((condition (make-file-unparseable-condition source-path text e
+                                                              :readtable readtable
+                                                              :read-only t)))
+              ;; A reader-level failure (an unknown dispatch macro such as #@):
+              ;; the file is still listed, read with recovery (issue #324),
+              ;; above the reason it does not parse.
+              (unless (or readtable (file-unparseable-recoverable-p condition))
+                (let ((past (%format-forms-read-past text 0 source-path name-scanner
+                                                     content-scanner
+                                                     (%line-number-width
+                                                      source-lines-count))))
+                  (when past
+                    (let ((meta (make-hash-table :test #'equal)))
+                      (setf (gethash "total_forms" meta) 0
+                            (gethash "expanded_forms" meta) 0
+                            (gethash "comment_lines" meta) comment-lines
+                            (gethash "blank_lines" meta) blank-lines
+                            (gethash "source_lines" meta) source-lines-count
+                            (gethash "unparseable" meta) t
+                            (gethash "forms_read_past" meta) (second past))
+                      ;; Where the parse stopped, when that is known.
+                      (let ((line (or (getf (file-unparseable-diagnosis condition) :line)
+                                      (first (file-unparseable-unreadable-dispatch
+                                              condition)))))
+                        (when line
+                          (setf (gethash "unparseable_from_line" meta) line)))
+                      (return-from %format-lisp-file
+                        (values (format nil "NOTE: the file does not parse as written, so ~
+                                             it is listed read with recovery; why is said ~
+                                             at the end.~%~A~%~%~A~%"
+                                        (first past) (file-unparseable-message condition))
+                                meta))))))
+              (error condition))))
       (let* ((line-width (%line-number-width source-lines-count))
              (expanded 0)
              (total-forms 0)
@@ -811,15 +917,46 @@ and, when the diagnosis names it, \"unparseable_from_line\"."
             (let* ((condition (make-file-unparseable-condition
                                source-path text swallowed
                                :readtable readtable
-                               :editable-prefix (and nodes t)))
+                               :editable-prefix (and nodes t)
+                               :read-only t))
                    (diagnosis (file-unparseable-diagnosis condition))
                    (from-line (or (getf diagnosis :unclosed-form-line)
-                                  (getf diagnosis :line))))
-              (setf (gethash "unparseable" meta) t)
-              (when from-line
-                (setf (gethash "unparseable_from_line" meta) from-line))
-              (values (format nil "~A~%~%~A~%"
+                                  (getf diagnosis :line)))
+                   (last-node (car (last nodes)))
+                   (stop-line (or from-line
+                                  (if last-node (1+ (cst-node-end-line last-node)) 1)))
+                   ;; Past a readtable the server lacks, the rest is still
+                   ;; listed, read without it (issue #324).
+                   (past (and (typep swallowed 'readtable-unavailable)
+                              (eq (readtable-unavailable-origin swallowed) :source)
+                              last-node
+                              (%format-forms-read-past
+                               text (cst-node-end last-node) source-path
+                               name-scanner content-scanner line-width
+                               ;; The package in effect where the listing
+                               ;; stopped: the last IN-PACKAGE read before it.
+                               :package-name
+                               (let ((name nil))
+                                 (dolist (node nodes name)
+                                   (when (and (typep node 'cst-node)
+                                              (eq (cst-node-kind node) :expr))
+                                     (let ((in (%in-package-form-p (cst-node-value node))))
+                                       (when in (setf name in))))))))))
+              (setf (gethash "unparseable" meta) t
+                    (gethash "unparseable_from_line" meta) stop-line)
+              (when past
+                (setf (gethash "forms_read_past" meta) (second past)))
+              (values (format nil "~A~%~A~@[~%~%~A~]~%~%~A~%"
+                              ;; At the top: a listing that stops partway must
+                              ;; not read as the whole file.
+                              (format nil "NOTE: the parse stops at line ~D of ~D, so ~
+                                           ~:[the forms after it are not listed~;~
+                                           the forms after it are listed below, read ~
+                                           without the readtable~]; why is said at ~
+                                           the end."
+                                      stop-line source-lines-count past)
                               (string-right-trim '(#\Newline) display)
+                              (and past (first past))
                               (file-unparseable-message condition))
                       meta))
             (values display meta))))))
