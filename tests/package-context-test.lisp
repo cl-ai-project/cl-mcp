@@ -154,6 +154,169 @@ The source form is left out: it holds uninterned symbols, fresh on every read."
          (ok (discover-package-spec "CL-MCP-TEST-MISSING-PKG" :source-path user-b)
              "without the cache the walk sees the added definition"))))))
 
+(defun %set-write-date (path universal-time)
+  "Set PATH's access and modification times to UNIVERSAL-TIME."
+  (let ((unix (- universal-time (encode-universal-time 0 0 0 1 1 1970 0))))
+    (uiop:symbol-call :sb-posix :utimes (namestring path) unix unix)))
+
+(defun %counting-header-reads (thunk)
+  "Call THUNK and return (values ITS-VALUE READS), READS being how many times
+it read a file's package definitions (%PACKAGE-SPECS-IN-FILE)."
+  (let ((reads 0)
+        (name 'cl-mcp/src/package-context::%package-specs-in-file))
+    (sb-int:encapsulate name 'count-header-reads
+                        (lambda (function &rest arguments)
+                          (incf reads)
+                          (apply function arguments)))
+    (unwind-protect (values (funcall thunk) reads)
+      (sb-int:unencapsulate name 'count-header-reads))))
+
+(defun %calling-with-clock-ahead (seconds thunk)
+  "Call THUNK with the cache's clock (%UNIX-NOW) SECONDS ahead, as if they had
+passed since the files THUNK finds were written: their entries are trusted
+without the test waiting out the one-second margin."
+  (let ((name 'cl-mcp/src/package-context::%unix-now))
+    (sb-int:encapsulate name 'clock-ahead
+                        (lambda (function) (+ (funcall function) seconds)))
+    (unwind-protect (funcall thunk)
+      (sb-int:unencapsulate name 'clock-ahead))))
+
+(deftest discover-package-spec-sees-a-file-replaced-under-the-same-write-date
+  ;; A copy that keeps the modification time (cp -p, rsync -t, tar), or a
+  ;; second edit in the second of the first, leaves the write date where it
+  ;; was; the inode change time still moves.
+  (call-with-temp-project
+   (lambda (root)
+     (let ((defining (write-source root "src/package.lisp"
+                                   "(defpackage #:cl-mcp-test-same-date-x)"))
+           (user (write-source root "src/a.lisp" "(in-package #:cl-mcp-test-same-date-x)"))
+           (date (- (get-universal-time) 30)))
+       (%set-write-date defining date)
+       (%calling-with-clock-ahead
+        10
+        (lambda ()
+          (ok (discover-package-spec "CL-MCP-TEST-SAME-DATE-X" :source-path user)
+              "the first definition is found")
+          ;; The clock is only faked for the cache: a change made in the very
+          ;; second of the read would rightly not be trusted yet.
+          (sleep 1.1)
+          (write-source root "src/package.lisp" "(defpackage #:cl-mcp-test-same-date-y)")
+          (%set-write-date defining date)
+          (ok (discover-package-spec "CL-MCP-TEST-SAME-DATE-Y" :source-path user)
+              "the same-length replacement with the old write date is read")))))))
+
+(deftest discover-package-spec-reads-again-a-file-it-could-not-read
+  ;; A failed read (a permission, a policy refusal, no descriptor left) says
+  ;; nothing about the file's packages and is not kept.
+  (if (zerop (sb-posix:getuid))
+      (ok t "skipped: root reads a file of mode 000")
+      (call-with-temp-project
+       (lambda (root)
+         (let ((defining (write-source root "src/package.lisp"
+                                       "(defpackage #:cl-mcp-test-unreadable-pkg)"))
+               (user (write-source root "src/a.lisp"
+                                   "(in-package #:cl-mcp-test-unreadable-pkg)")))
+           (%calling-with-clock-ahead
+            10
+            (lambda ()
+              (sb-posix:chmod (namestring defining) #o000)
+              (unwind-protect
+                   (multiple-value-bind (spec reads)
+                       (%counting-header-reads
+                        (lambda ()
+                          (discover-package-spec "CL-MCP-TEST-UNREADABLE-PKG"
+                                                 :source-path user)
+                          (discover-package-spec "CL-MCP-TEST-UNREADABLE-PKG"
+                                                 :source-path user)))
+                     (ok (null spec) "an unreadable file defines nothing found")
+                     (ok (= 4 reads) "and is tried again on the next lookup"))
+                (sb-posix:chmod (namestring defining) #o644))
+              (ok (discover-package-spec "CL-MCP-TEST-UNREADABLE-PKG" :source-path user)
+                  "once readable, its package is found"))))))))
+
+(deftest discover-package-spec-reads-only-files-that-changed
+  ;; Issue #323: every lookup for a package defined in another file read the
+  ;; header forms of the whole project, 2.5 to 5.4 seconds per lisp-read-file
+  ;; on a real tree.  A file is now read again only when its stamp moved, or
+  ;; when its times are not yet in the past -- a second edit within the same
+  ;; second would not move them.
+  (call-with-temp-project
+   (lambda (root)
+     (let ((defining (write-source root "src/package.lisp"
+                                   "(defpackage #:cl-mcp-test-reread-pkg (:use #:cl))"))
+           (user (write-source root "src/a.lisp"
+                               "(in-package #:cl-mcp-test-reread-pkg)")))
+       (write-source root "src/other.lisp" "(defun other () 1)")
+       (flet ((lookup (name)
+                (%counting-header-reads
+                 (lambda () (discover-package-spec name :source-path user)))))
+         (%calling-with-clock-ahead
+          10
+          (lambda ()
+            (multiple-value-bind (spec reads) (lookup "CL-MCP-TEST-MISSING-PKG")
+              (ok (null spec) "a package defined nowhere is not found")
+              (ok (= 3 reads) "the first walk reads the looked-up file and the other two"))
+            (multiple-value-bind (spec reads) (lookup "CL-MCP-TEST-MISSING-PKG")
+              (ok (null spec) "nor the second time")
+              (ok (= 1 reads) "the second walk reads only the looked-up file itself"))
+            (multiple-value-bind (spec reads) (lookup "CL-MCP-TEST-REREAD-PKG")
+              (ok (and spec (null (package-spec-nicknames spec))) "the defining file is found")
+              (ok (= 1 reads) "from what the first walk read"))
+            (write-source root "src/package.lisp"
+                          "(defpackage #:cl-mcp-test-reread-pkg (:use #:cl)
+  (:nicknames #:cl-mcp-test-reread-nick))")
+            (multiple-value-bind (spec reads) (lookup "CL-MCP-TEST-REREAD-NICK")
+              (ok (and spec (equal "CL-MCP-TEST-REREAD-PKG" (package-spec-name spec)))
+                  "an edited file is read again: its new nickname is found")
+              (ok (= 2 reads) "it and the looked-up file are all that is read"))
+            ;; Times not before the second of the read: the file could be
+            ;; written again without them moving, so it is never trusted.
+            (%set-write-date defining (+ (get-universal-time) 60))
+            (multiple-value-bind (spec reads) (lookup "CL-MCP-TEST-REREAD-PKG")
+              (declare (ignore spec))
+              (ok (= 2 reads) "a file dated after its read is read"))
+            (multiple-value-bind (spec reads) (lookup "CL-MCP-TEST-REREAD-PKG")
+              (declare (ignore spec))
+              (ok (= 2 reads) "and read again on the next lookup"))
+            ;; A real second between a directory's listing and its change:
+            ;; the faked clock trusts the listing, the stamp must then move.
+            (sleep 1.1)
+            (write-source root "src/late.lisp" "(defpackage #:cl-mcp-test-missing-pkg)")
+            (ok (lookup "CL-MCP-TEST-MISSING-PKG") "a file added since is read and found")
+            (sleep 1.1)
+            (delete-file defining)
+            (ok (null (lookup "CL-MCP-TEST-REREAD-PKG"))
+                "a defining file deleted since is no longer found"))))))))
+
+(deftest discover-package-spec-lists-only-directories-that-changed
+  ;; The walk's other cost: listing every directory of the tree, which on a
+  ;; thousand files took longer than the cached reads.
+  (call-with-temp-project
+   (lambda (root)
+     (let ((user (write-source root "src/a.lisp" "(in-package #:cl-mcp-test-listed-pkg)")))
+       (write-source root "src/deep/b.lisp" "(defun b () 2)")
+       (flet ((listings ()
+                (let ((count 0))
+                  (sb-int:encapsulate 'uiop:directory-files 'count-listings
+                                      (lambda (function &rest arguments)
+                                        (incf count)
+                                        (apply function arguments)))
+                  (unwind-protect
+                       (discover-package-spec "CL-MCP-TEST-LISTED-PKG" :source-path user)
+                    (sb-int:unencapsulate 'uiop:directory-files 'count-listings))
+                  count)))
+         (%calling-with-clock-ahead
+          10
+          (lambda ()
+            (ok (= 3 (listings)) "the first walk lists the root, src/ and src/deep/")
+            (ok (= 0 (listings)) "the second lists none of them")
+            ;; A real second, so the change moves the directory's stamp.
+            (sleep 1.1)
+            (write-source root "src/deep/c.lisp" "(defpackage #:cl-mcp-test-listed-pkg)")
+            (ok (= 1 (listings)) "a directory an entry was added to is listed again, alone")
+            (ok (discover-package-spec "CL-MCP-TEST-LISTED-PKG" :source-path user)
+                "and the file added there is found"))))))))
+
 (deftest call-with-package-context-existing-package
  (testing "binds *package* when target package already exists"
   (let ((seen-package nil))

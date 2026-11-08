@@ -19,6 +19,9 @@
                 #:lisp-too-deep-p)
   (:import-from #:cl-mcp/src/utils/printing
                 #:circular-p)
+  (:import-from #:bordeaux-threads
+                #:make-lock
+                #:with-lock-held)
   (:import-from #:uiop
                 #:directory-files
                 #:ensure-directory-pathname
@@ -72,8 +75,33 @@ around its file loop.  Entries are keyed on the package name and the walk's
 root directory, so one table never answers for a different root, and the
 looked-up file's own definitions are still read on every call.
 
-The default NIL disables memoizing, so lisp-read-file, lisp-edit-form and the
-other callers see a package definition edited between two calls.")
+The default NIL disables memoizing the walk, so lisp-read-file, lisp-edit-form
+and the other callers see a package definition added, edited or deleted between
+two calls.  The walk still lists a directory, and reads a file, only when it
+changed since it was last listed or read (%DIRECTORY-LISTING,
+%CACHED-PACKAGE-SPECS-IN-FILE), so an unchanged tree costs a stat(2) per
+directory and per file.")
+
+(defvar *package-specs-by-file* (make-hash-table :test #'equal)
+  "The package definitions found in each source file read so far, for
+%CACHED-PACKAGE-SPECS-IN-FILE: namestring -> (STAMP READ-AT SPECS), STAMP
+and READ-AT as %TRUSTED-ENTRY reads them.  A file that could not be read is
+not kept.
+Shared by every session of the server, guarded by *PACKAGE-SPECS-BY-FILE-LOCK*.")
+
+(defvar *directory-listings* (make-hash-table :test #'equal)
+  "The source files and subdirectories of each directory the walk listed, for
+%DIRECTORY-LISTING: namestring -> (STAMP READ-AT FILES
+SUBDIRECTORIES).
+Guarded by *PACKAGE-SPECS-BY-FILE-LOCK*.")
+
+(defvar *package-specs-by-file-lock* (make-lock "cl-mcp-package-specs-by-file")
+  "Guards *PACKAGE-SPECS-BY-FILE* and *DIRECTORY-LISTINGS*.")
+
+(defparameter *package-specs-by-file-limit* 50000
+  "Entries *PACKAGE-SPECS-BY-FILE* or *DIRECTORY-LISTINGS* holds before it is
+emptied and starts over: a file deleted, or under a root no longer in use, is
+never looked up again, and this bounds what such entries keep.")
 
 (defstruct package-spec
   "Minimal package metadata needed to reconstruct reader context."
@@ -136,19 +164,78 @@ other callers see a package definition edited between two calls.")
     (and base
          (member base *package-context-skip-directories* :test #'string=))))
 
+(defun %file-stamp (pathname)
+  "Return PATHNAME's stamp, (MTIME CTIME SIZE INODE) as stat(2) gives them,
+following a symbolic link, or NIL when it cannot be had.  The inode change
+time moves on every write, rename or chmod and cannot be set back, so a file
+replaced with an old modification time, or made readable again, still stamps
+differently."
+  (handler-case
+      (let ((status (sb-posix:stat (uiop:native-namestring pathname))))
+        (list (sb-posix:stat-mtime status) (sb-posix:stat-ctime status)
+              (sb-posix:stat-size status) (sb-posix:stat-ino status)))
+    (error () nil)))
+
+(defun %unix-now ()
+  "Return the current time in seconds since 1970, as stat(2) counts them."
+  ;; 2208988800 = (encode-universal-time 0 0 0 1 1 1970 0)
+  (- (get-universal-time) 2208988800))
+
+(defun %trusted-entry (table key stamp)
+  "Return REST from TABLE's entry for KEY, (STAMP READ-AT . REST), when STAMP
+is the one stored and both of its times are more than a second older than
+READ-AT, the second the stored read began; else NIL.  A file or directory
+written in the second it was read could change again within that second
+without either one-second time moving, and the file system's clock can trail
+the one READ-AT is taken from by a tick, so such an entry is not trusted:
+it is read again until its times are in the past."
+  (let ((entry (and stamp
+                    (with-lock-held (*package-specs-by-file-lock*)
+                      (gethash key table)))))
+    (and entry
+         (equal (first entry) stamp)
+         (< (1+ (max (first stamp) (second stamp))) (second entry))
+         (cddr entry))))
+
+(defun %remember-entry (table key stamp read-at &rest values)
+  "Store VALUES in TABLE under KEY with STAMP, taken before they were read, and
+READ-AT, the second (%UNIX-NOW) their read began.  Nothing is stored without a
+STAMP.  TABLE is emptied first once it holds *PACKAGE-SPECS-BY-FILE-LIMIT*
+entries."
+  (when stamp
+    (with-lock-held (*package-specs-by-file-lock*)
+      (when (>= (hash-table-count table) *package-specs-by-file-limit*)
+        (clrhash table))
+      (setf (gethash key table) (list* stamp read-at values)))))
+
+(defun %directory-listing (dir)
+  "Return (values SOURCE-FILES SUBDIRECTORIES) of the directory DIR, listing it
+again only when its stamp moved -- an entry added, removed or renamed, or its
+permissions changed -- or is not yet in the past (%TRUSTED-ENTRY)."
+  (let* ((key (namestring dir))
+         (stamp (%file-stamp dir))
+         (cached (%trusted-entry *directory-listings* key stamp)))
+    (if cached
+        (values (first cached) (second cached))
+        ;; LET evaluates in order: READ-AT is taken before the listing.
+        (let ((read-at (%unix-now))
+              (files (remove-if-not #'%source-file-p (directory-files dir)))
+              (subdirs (subdirectories dir)))
+          (%remember-entry *directory-listings* key stamp read-at files subdirs)
+          (values files subdirs)))))
+
 (defun %collect-source-files (root)
-  "Return a list of source files under ROOT, recursively."
+  "Return a list of source files under ROOT, recursively.  Each directory is
+listed again only when it changed (%DIRECTORY-LISTING)."
   (labels ((walk (dir)
-             (let ((results nil))
-               (dolist (entry (directory-files dir))
-                 (when (%source-file-p entry)
-                   (push entry results)))
-               (dolist (subdir (subdirectories dir))
-                 (unless (%skip-directory-p subdir)
-                   (setf results
-                         (nconc results
-                                (walk (ensure-directory-pathname subdir))))))
-               results)))
+             (multiple-value-bind (files subdirs) (%directory-listing dir)
+               (let ((results (reverse files)))
+                 (dolist (subdir subdirs)
+                   (unless (%skip-directory-p subdir)
+                     (setf results
+                           (nconc results
+                                  (walk (ensure-directory-pathname subdir))))))
+                 results))))
     (walk (ensure-directory-pathname root))))
 
 (defun %skip-dispatch-digits (stream)
@@ -552,39 +639,67 @@ it could be trusted."
              (member target (package-spec-nicknames spec) :test #'string=)))))
 
 (defun %package-specs-in-file (pathname)
-  "Return a list of PACKAGE-SPEC values extracted from PATHNAME."
-  (handler-case
-      (let* ((text (fs-read-file pathname))
-             (forms (%read-header-forms-from-text text))
-             (specs nil))
-        (dolist (form forms (nreverse specs))
-          (let ((spec (%extract-package-spec form pathname)))
-            (when spec
-              (push spec specs)))))
-    (reader-error ()
-      nil)
-    #+sbcl
-    (sb-int:simple-reader-package-error ()
-      nil)
-    ;; Implementation-specific reader conditionals in vendored sources (e.g.
-    ;; a bare Allegro #+(version>= 9) in bordeaux-threads' impl-allegro.lisp)
-    ;; signal a plain SIMPLE-ERROR from CL:READ, not a READER-ERROR.
-    (error ()
-      nil)))
+  "Return a list of PACKAGE-SPEC values extracted from PATHNAME, and as a second
+value true when its text was read: NIL then means it defines no package, not
+that it could not be opened (a permission, a policy refusal, no descriptor
+left), which a later read may get past."
+  (let ((text (handler-case (fs-read-file pathname)
+                (error () (return-from %package-specs-in-file (values nil nil))))))
+    (handler-case
+        (let ((forms (%read-header-forms-from-text text))
+              (specs nil))
+          (dolist (form forms (values (nreverse specs) t))
+            (let ((spec (%extract-package-spec form pathname)))
+              (when spec
+                (push spec specs)))))
+      (reader-error ()
+        (values nil t))
+      #+sbcl
+      (sb-int:simple-reader-package-error ()
+        (values nil t))
+      ;; Implementation-specific reader conditionals in vendored sources (e.g.
+      ;; a bare Allegro #+(version>= 9) in bordeaux-threads' impl-allegro.lisp)
+      ;; signal a plain SIMPLE-ERROR from CL:READ, not a READER-ERROR.
+      (error ()
+        (values nil t)))))
+
+(defun %cached-package-specs-in-file (pathname)
+  "Return %PACKAGE-SPECS-IN-FILE of PATHNAME, reading the file only when its
+stamp moved since it was last read, or is not yet in the past (%TRUSTED-ENTRY;
+issue #323).  A file that could not be read, or whose stamp cannot be had, is
+not kept: it is read again on the next call.  The specs returned are shared
+with later callers and must not be modified."
+  (let* ((key (namestring pathname))
+         (stamp (%file-stamp pathname))
+         (cached (%trusted-entry *package-specs-by-file* key stamp)))
+    (if cached
+        (first cached)
+        ;; READ-AT is taken before the read.
+        (let ((read-at (%unix-now)))
+          (multiple-value-bind (specs read-p) (%package-specs-in-file pathname)
+            (when read-p
+              (%remember-entry *package-specs-by-file* key stamp read-at specs))
+            specs)))))
 
 (defun %find-package-spec-under (root target source-path)
   "Return the first PACKAGE-SPEC for TARGET among the source files under ROOT, or NIL.
-SOURCE-PATH, when given, is skipped: DISCOVER-PACKAGE-SPEC reads it first."
-  (dolist (file (%collect-source-files root) nil)
-    (unless (and source-path
-                 (equal (probe-file file)
-                        (probe-file (ensure-pathname source-path :want-pathname t))))
-      (let ((match
-              (find-if (lambda (spec)
-                         (%package-spec-matches-p spec target))
-                       (%package-specs-in-file file))))
-        (when match
-          (return match))))))
+SOURCE-PATH, when given, is skipped: DISCOVER-PACKAGE-SPEC reads it first.
+A file is read only when it changed since it was last read
+(%CACHED-PACKAGE-SPECS-IN-FILE)."
+  (let ((skipped (and source-path
+                      (probe-file (ensure-pathname source-path :want-pathname t)))))
+    (dolist (file (%collect-source-files root) nil)
+      ;; The name first: a PROBE-FILE per file would cost the walk more than
+      ;; the cached reads do.
+      (unless (and skipped
+                   (equal (pathname-name file) (pathname-name skipped))
+                   (equal (probe-file file) skipped))
+        (let ((match
+                (find-if (lambda (spec)
+                           (%package-spec-matches-p spec target))
+                         (%cached-package-specs-in-file file))))
+          (when match
+            (return match)))))))
 
 (defun discover-package-spec (package-name &key source-path)
   "Discover a PACKAGE-SPEC for PACKAGE-NAME from project source files.
