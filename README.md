@@ -392,8 +392,9 @@ With Docker Compose, set `user: "1000:1000"` (your `id -u` and `id -g`) on the
 service.
 
 - Your user has to be able to read the image's Lisp installation (Roswell,
-  Quicklisp), and to write a home directory and ASDF's FASL cache
-  (`~/.cache/common-lisp`). Point `HOME` at a writable directory as above, or
+  Quicklisp), and to write a home directory and the FASL caches
+  (`~/.cache/common-lisp`, ASDF's, and `~/.cache/cl-mcp/worker-fasls`, where
+  each worker compiles its project's files). Point `HOME` at a writable directory as above, or
   mount a volume there, so the cache survives restarts. Roswell looks for its
   installation in `$ROSWELL_HOME`, or else `$HOME/.roswell`: when the image
   installed it under its own user's home, set `ROSWELL_HOME` to that directory

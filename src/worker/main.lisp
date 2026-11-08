@@ -19,6 +19,9 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*
                 #:register-project-root-source-registry)
+  (:import-from #:cl-mcp/src/worker/fasl-cache
+                #:prepare-worker-fasl-cache
+                #:isolate-project-fasls)
   (:import-from #:cl-mcp/src/log
                 #:log-event
                 #:*log-context*)
@@ -109,6 +112,8 @@ the directory does not exist."
               ;; helper's docstring). Runs at worker startup when the root is
               ;; known via MCP_PROJECT_ROOT.
               (register-project-root-source-registry dir)
+              ;; Its files compile into this worker's own cache (issue #317).
+              (isolate-project-fasls dir)
               (log-event :info "worker.project-root.set"
                          "path" (uiop:native-namestring dir))
               dir)
@@ -206,6 +211,9 @@ Roswell REPL."
         (let ((wid (uiop/os:getenv "MCP_WORKER_ID")))
           (when (and wid (plusp (length wid)))
             (setf *log-context* (list "worker_id" wid))))
+        ;; Before the root is set: setting it moves the root's files into
+        ;; this worker's own FASL cache, which must exist by then.
+        (prepare-worker-fasl-cache)
         (%setup-project-root)
         (let* ((server (make-worker-server :port 0))
                (tcp-port (server-port server)))

@@ -36,6 +36,8 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*
                 #:register-project-root-source-registry)
+  (:import-from #:cl-mcp/src/worker/fasl-cache
+                #:isolate-project-fasls)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
   (:import-from #:cl-mcp/src/utils/paths
@@ -447,6 +449,8 @@ Returns a success payload."
       ;; pool workers: without it a same-named system already reachable via the
       ;; inherited registry keeps winning after a root change.
       (register-project-root-source-registry dir-path)
+      ;; Its files compile into this worker's own cache (issue #317).
+      (isolate-project-fasls dir-path)
       (log-event :info "worker.project-root.set"
                  "path" (native-path-namestring dir-path))
       (make-ht "content" (text-content
