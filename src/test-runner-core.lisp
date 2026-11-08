@@ -978,94 +978,136 @@ Never FIND-SYSTEM; see %TRANSITIVE-DEPENDENCY-NAMES."
   (or (ignore-errors (asdf:registered-system name))
       (system-left-by-root-change name)))
 
+(defun %planned-loads (system-name)
+  "Return the Lisp source file components that ASDF:LOAD-SYSTEM of SYSTEM-NAME
+would load now, read from the plan ASDF makes for it.  A file whose load ASDF
+counts as done and current is not among them.  Signals what FIND-SYSTEM or
+MAKE-PLAN signals, a missing dependency for one."
+  (let ((files '()))
+    (asdf/session:with-asdf-session ()
+      (let ((plan (asdf:make-plan nil 'asdf:load-op (asdf:find-system system-name))))
+        (dolist (action (asdf/plan:plan-actions plan))
+          (destructuring-bind (operation . component) action
+            (when (and (typep operation 'asdf:load-op)
+                       (typep component 'asdf:cl-source-file))
+              (push component files))))))
+    (nreverse files)))
+
+(defun %function-file (function)
+  "Return the namestring of the file FUNCTION was compiled in, as SBCL names a
+function compiled there -- (LAMBDA () :IN \"<file>\") -- or NIL when its name
+tells none.  A file compiled under repl-eval is named \"repl-eval\"."
+  (let* ((name (and (functionp function)
+                    (ignore-errors (sb-kernel:%fun-name function))))
+         (in (and (consp name) (member :in name))))
+    (and in (stringp (second in)) (second in))))
+
+(defun %reloaded-file-names (components)
+  "Return (values FILES PACKAGES) for COMPONENTS, the source files a load is
+about to load again: FILES, the namestrings each may be known by -- its source,
+its fasl, and the truenames of both -- and PACKAGES, those the sources define
+with DEFPACKAGE that exist in this image."
+  (let ((files '())
+        (packages '())
+        (scan-package (make-package (gensym "CL-MCP-DEFPACKAGE-SCAN") :use '(:cl))))
+    (flet ((note (path)
+             (when path
+               (pushnew (namestring path) files :test #'string=)
+               (let ((true (ignore-errors (probe-file path))))
+                 (when true (pushnew (namestring true) files :test #'string=))))))
+      (unwind-protect
+           (dolist (component components)
+             (let ((source (ignore-errors (asdf:component-pathname component))))
+               (note source)
+               (mapc #'note (ignore-errors (asdf:output-files 'asdf:compile-op component)))
+               (when (and source (probe-file source))
+                 (dolist (name (%extract-defpackage-names-from-file source scan-package))
+                   (let ((package (find-package name)))
+                     (when package (pushnew package packages)))))))
+        (ignore-errors (delete-package scan-package))))
+    (values files packages)))
+
+(defun %rove-forget-made-by (suites rove reloaded defined)
+  "Remove from every suite in SUITES, Rove's *PACKAGE-SUITES*, the tests and the
+setup, teardown and defhook functions made by a file named in RELOADED -- or,
+when the file that made one is not told or is repl-eval, by its suite's
+package being in DEFINED.  ROVE is the package ROVE/CORE/SUITE/PACKAGE."
+  (let ((get-test (find-symbol "GET-TEST" rove))
+        (tests-slot (find-symbol "%TESTS" rove))
+        (hook-slots (mapcar (lambda (name) (find-symbol name rove))
+                            '("BEFORE-HOOKS" "AFTER-HOOKS")))
+        (function-slots (mapcar (lambda (name) (find-symbol name rove))
+                                '("SETUP" "TEARDOWN"))))
+    (maphash
+     (lambda (package suite)
+       (flet ((made-here-p (function)
+                (let ((file (%function-file function)))
+                  (if (and file (string/= file "repl-eval"))
+                      (member file reloaded :test #'string=)
+                      (member package defined)))))
+         (when (and tests-slot (slot-exists-p suite tests-slot))
+           (setf (slot-value suite tests-slot)
+                 (remove-if (lambda (name)
+                              (made-here-p (and get-test (funcall get-test name))))
+                            (slot-value suite tests-slot))))
+         (dolist (slot function-slots)
+           (when (and slot (slot-exists-p suite slot) (slot-boundp suite slot)
+                      (slot-value suite slot)
+                      (made-here-p (slot-value suite slot)))
+             (setf (slot-value suite slot) nil)))
+         (dolist (slot hook-slots)
+           (when (and slot (slot-exists-p suite slot) (slot-boundp suite slot))
+             (setf (slot-value suite slot)
+                   (remove-if (lambda (entry) (made-here-p (cdr entry)))
+                              (slot-value suite slot)))))))
+     suites)))
+
 (defun %rove-purge-ghost-suites (system-name)
-  "Remove Rove suite entries for every test package associated with
-SYSTEM-NAME. This prevents `ghost deftests' — tests that were deleted
-from source on disk but are still remembered by Rove's in-image
-registry and therefore keep running (and possibly failing) after a
-reload.
+  "Remove from Rove's suites the tests and hooks that the files a load of
+SYSTEM-NAME is about to load again made, so a deftest deleted from its file
+since the last load does not stay behind as a `ghost test' and keep running
+(and failing): the load makes again what the files still hold.
 
-Rove stores its per-package suite in a hash-table keyed by package
-object: ROVE/CORE/SUITE/PACKAGE::*PACKAGE-SUITES*. Clearing the entry
-for a package makes Rove rebuild the suite from scratch on the next
-deftest load, so forms that no longer exist in source disappear.
+Rove keeps one suite per package in ROVE/CORE/SUITE/PACKAGE::*PACKAGE-SUITES*
+and adds every deftest it loads to it, and every setup, teardown and defhook to
+its hooks; it never drops one.
 
-Two discovery strategies are combined to cover both
-package-inferred-system and classic ASDF layouts:
+Which files load again is ASDF's decision, so it is asked rather than guessed:
+the plan ASDF:LOAD-SYSTEM would follow for SYSTEM-NAME (%PLANNED-LOADS) names
+every source file it will load -- those of the systems RUN-TESTS just cleared,
+of the ones a re-read .asd redefined, and of any dependency whose source
+changed.  Which file made a test or a hook, SBCL's name for its function says
+(%FUNCTION-FILE), as for FiveAM's tests (%FIVEAM-TEST-FILE).  One whose file is
+not told, or was compiled under repl-eval, goes when a reloaded file defines its
+package, the file it most likely came from.  Everything else stays, whatever
+its package: a test of a file the load leaves alone would not come back, so a
+later run of that file's own system ran none of it and called it a pass (issue
+#328), and a file sharing its package with a reloaded one keeps its tests.
+SBCL names a function after its file only when no named block encloses it, so
+a deftest a helper function or a (block ...) emits falls to the package rule.
+A reloaded file's tests are pushed back onto the suite, so where several files
+share a package they now run after the tests of the files left alone.
 
-  1. **Dependency names**: for package-inferred systems, every
-     sub-system name like `foo/tests/bar-test' is also the package
-     name it defines. Walk SYSTEM-NAME's transitive dependency list
-     and clear packages matching each string name.
-  2. **Component source files**: recursively walk the ASDF component
-     tree under SYSTEM-NAME, read each source file, and clear
-     packages named in its `(defpackage ...)' forms. Catches classic
-     defsystems where the package name does not match any ASDF
-     sub-system name.
-
-Names resolve through ASDF:REGISTERED-SYSTEM, never FIND-SYSTEM -- the
-rule %TRANSITIVE-DEPENDENCY-NAMES follows, for the same two reasons.
-FIND-SYSTEM resolves a name by *loading the .asd*, which may carry
-:DEFSYSTEM-DEPENDS-ON and build whole systems as a side effect, here in
-the middle of RUN-TESTS.  It is also ruinous for latency: outside an ASDF
-session every call re-runs the source-registry search, measured at 114 ms,
-and a large package-inferred project reaches 905 systems -- 103 seconds of
-purging before a single test runs.  REGISTERED-SYSTEM makes the same
-traversal cost 0.3 seconds and loses nothing, because a system that is not
-registered has never been loaded -- its packages do not exist, so Rove holds
-no suite for them and there is no ghost to purge -- unless a root change
-unregistered it, and that system is still known (%LOADED-SYSTEM-BY-NAME).
-
-Nothing is walked when Rove's registry is empty, and the source scan
-interns into one throwaway package, deleted afterwards, rather than into
-CL-USER."
-  (let ((pkgs-var (find-symbol "*PACKAGE-SUITES*" :rove/core/suite/package)))
+Call it after the clearing and the .asd re-read RUN-TESTS does, and before the
+load.  Making the plan finds every system the load reaches, loading a .asd not
+yet read exactly as the load right after it would, inside one ASDF session so
+the source registry is searched once.  Nothing is planned when Rove's registry
+is empty, and nothing is removed when the plan cannot be made: the load that
+follows fails the same way.  The DEFPACKAGE scan interns into one throwaway
+package, deleted afterwards, rather than into CL-USER."
+  (let* ((rove (find-package :rove/core/suite/package))
+         (pkgs-var (and rove (find-symbol "*PACKAGE-SUITES*" rove))))
     (when (and pkgs-var (boundp pkgs-var)
                (hash-table-p (symbol-value pkgs-var))
                (plusp (hash-table-count (symbol-value pkgs-var))))
-      (let ((suites (symbol-value pkgs-var))
-            (visited-systems (make-hash-table :test #'equal))
-            (visited-files (make-hash-table :test #'equal))
-            (scan-package (make-package (gensym "CL-MCP-DEFPACKAGE-SCAN")
-                                        :use '(:cl))))
-        (unwind-protect
-            (labels ((clear-pkg (pkg-name)
-                       (let ((pkg (and (stringp pkg-name) (find-package pkg-name))))
-                         (when pkg (remhash pkg suites))))
-                     (walk-components (component)
-                       (when component
-                         (cond
-                           ((typep component 'asdf:cl-source-file)
-                            (let ((path (ignore-errors
-                                          (asdf:component-pathname component))))
-                              (when (and path
-                                         (not (gethash (namestring path)
-                                                       visited-files))
-                                         (probe-file path))
-                                (setf (gethash (namestring path) visited-files) t)
-                                (dolist (pkg-name
-                                         (%extract-defpackage-names-from-file
-                                          path scan-package))
-                                  (clear-pkg pkg-name)))))
-                           ((ignore-errors (asdf:component-children component))
-                            (dolist (child (asdf:component-children component))
-                              (walk-components child))))))
-                     (walk-system (name)
-                       (when (and (stringp name)
-                                  (not (gethash name visited-systems)))
-                         (setf (gethash name visited-systems) t)
-                         (clear-pkg name)
-                         (let ((sys (%loaded-system-by-name name)))
-                           (when sys
-                             (walk-components sys)
-                             (dolist (dep (ignore-errors
-                                            (asdf:system-depends-on sys)))
-                               (cond
-                                 ((stringp dep) (walk-system dep))
-                                 ((and (consp dep) (stringp (second dep)))
-                                  (walk-system (second dep))))))))))
-              (walk-system system-name))
-          (ignore-errors (delete-package scan-package)))))))
+      (let ((components (handler-case (%planned-loads system-name)
+                          (error (c)
+                            (log-event :debug "test.runner.rove-purge.no-plan"
+                                       "system" system-name "error" (princ-to-string c))
+                            nil))))
+        (when components
+          (multiple-value-bind (reloaded defined) (%reloaded-file-names components)
+            (%rove-forget-made-by (symbol-value pkgs-var) rove reloaded defined)))))))
 
 (defun %ensure-rove-test-name-method ()
   "Add a TEST-NAME method for FAILED-ASSERTION if Rove is loaded and the
@@ -1182,11 +1224,8 @@ COMPILE-FILE-ERROR."
                     ;; %find-rove-test-sub-systems already wraps its
                     ;; ASDF lookups in IGNORE-ERRORS internally.
                     (sub-systems (%find-rove-test-sub-systems system-name)))
-                ;; Purge Rove suite registry BEFORE clearing the system,
-                ;; so any deftest forms deleted from source since the
-                ;; previous load do not linger as ghost tests.
-                (ignore-errors (%rove-purge-ghost-suites system-name))
-                ;; FiveAM's, for the files the clearing below reloads.
+                ;; FiveAM's, for the files the clearing below reloads, read
+                ;; while those systems are still registered.
                 (ignore-errors
                   (%fiveam-purge-ghost-tests (cons system-name sub-systems)))
                 (asdf:clear-system system-name)
@@ -1199,7 +1238,11 @@ COMPILE-FILE-ERROR."
                 ;; Always re-read the .asd so edits to :depends-on
                 ;; and other system metadata are picked up.
                 (when asd-src
-                  (ignore-errors (asdf:load-asd asd-src)))))
+                  (ignore-errors (asdf:load-asd asd-src)))
+                ;; Rove's, for exactly the packages the load below loads
+                ;; again, which only ASDF's plan, made after the clearing and
+                ;; the re-read, can tell (#328).
+                (ignore-errors (%rove-purge-ghost-suites system-name))))
             (setf loading t)
             (let ((*error-output* captured-stderr))
               (call-with-own-compilation-unit
