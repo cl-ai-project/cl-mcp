@@ -436,10 +436,12 @@ function whose job is to describe one."
       (error () (namestring pathname)))))
 
 (defun normalize-path-for-display (pathname)
-  "Return a native path string for PATHNAME, relative to *project-root* when
-possible.  Native (NATIVE-PATH-NAMESTRING) because this is the path a caller
-reads and then passes back to another tool.
-Falls back to CWD, then cl-mcp system source directory, else absolute.
+  "Return a native path string for PATHNAME: relative to *project-root* when it
+lies under the root, absolute otherwise.  Native (NATIVE-PATH-NAMESTRING)
+because this is the path a caller reads and then passes back to another tool,
+and those resolve a relative path against the project root only -- so a path
+made relative to anything else (the server's working directory, cl-mcp's own
+source directory) named a file under the root that does not exist.
 Logical pathnames are translated to physical before processing.  Returns NIL,
 without signaling, when PATHNAME is a logical pathname with no registered
 translation for it -- SBCL build-internal pseudo-hosts such as SYS:OBJ;... can
@@ -449,13 +451,7 @@ appear this way in xref source locations."
                   (translate-logical-pathname (uiop/pathname:ensure-pathname pathname))
                 (file-error () nil))))
       (when pn
-        (let ((bases (remove nil
-                             (list *project-root*
-                                   (uiop/os:getcwd)
-                                   (ignore-errors
-                                    (asdf/system:system-source-directory :cl-mcp))))))
-          (dolist (base bases (native-path-namestring pn))
-            (when (uiop/pathname:subpathp pn base)
-              (return
-               (native-path-namestring
-                (uiop/pathname:enough-pathname pn base))))))))))
+        (native-path-namestring
+         (if (and *project-root* (uiop/pathname:subpathp pn *project-root*))
+             (uiop/pathname:enough-pathname pn *project-root*)
+             pn))))))

@@ -4,7 +4,10 @@ Detailed input/output schemas and examples for all cl-mcp tools.
 
 ## Paths cl-mcp prints
 
-Every path a tool reports can be passed straight back to another tool. Paths are POSIX-style,
+Every path a tool reports can be passed straight back to another tool. A path under the project
+root is printed relative to it, and any other path absolute: the tools resolve a relative path
+against the project root only, so a path made relative to anything else (the server's working
+directory, cl-mcp's own source directory) would name a file that does not exist. Paths are POSIX-style,
 and they are **not** escaped for the Common Lisp pathname reader — which is what `namestring`
 produces, escaping the characters that reader treats as wild (on SBCL `[` and `]` among them),
 so that a file under `demo[old]/` is described as `demo\[old]/`, a name nothing on disk answers
