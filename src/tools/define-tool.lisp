@@ -48,9 +48,11 @@
            :required nil
            :default nil
            :enum nil
+           :item-type :string
            :description nil))
     (list
-     (destructuring-bind (name &key json-name type required default enum description)
+     (destructuring-bind (name &key json-name type required default enum description
+                               (item-type :string))
          spec
        (list :name name
              :json-name (or json-name (%symbol-to-json-name name))
@@ -58,6 +60,7 @@
              :required required
              :default default
              :enum enum
+             :item-type item-type
              :description description)))))
 
 (defun %type-to-json-type (type)
@@ -88,11 +91,12 @@
   (let ((json-name (getf parsed-spec :json-name))
         (type (getf parsed-spec :type))
         (enum (getf parsed-spec :enum))
+        (item-type (getf parsed-spec :item-type))
         (description (getf parsed-spec :description)))
     `(setf (gethash ,json-name properties)
            (make-ht "type" ,(%type-to-json-type type)
                     ,@(when (eq type :array)
-                        '("items" (make-ht "type" "string")))
+                        `("items" (make-ht "type" ,(%type-to-json-type (or item-type :string)))))
                     ,@(when enum
                         `("enum" (vector ,@enum)))
                     ,@(when description
@@ -122,6 +126,7 @@ ARGS is a list of argument specifications. Each spec can be:
     - required: T if required
     - default: Default value (for :boolean only)
     - enum: List of allowed string values (e.g., '(\"a\" \"b\" \"c\"))
+    - item-type: for an :array, the JSON type of its items (default :string)
     - description: Schema description
 
 GROUP, when given, is a keyword naming an optional tool group.  The tool is
