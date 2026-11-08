@@ -755,10 +755,9 @@ and the file's text afterwards."
                   "#+#.(progn (setf cl-mcp/tests/lisp-edit-form-test::*feature-read-evaluated* t)"
                   " :sbcl) (defun probe-b () :new)")))
     (setf *feature-read-evaluated* nil)
-    (testing "a #. in the content's feature expression is refused, not run"
-      (ok (handler-case
-              (progn (%replace-in-feature-fixture source "probe-b" content) nil)
-            (error () t)))
+    (testing "a #. in the content's feature expression is read as the parser reads it, not run"
+      ;; Accepted since #319: the file's parser reads it too, as holding.
+      (ok (search "#+#.(progn" (%replace-in-feature-fixture source "probe-b" content)))
       (ok (null *feature-read-evaluated*)))
     (testing "nor is it run while finding where the content's form starts"
       (cl-mcp/src/lisp-edit-form::%feature-prefix-end content 0)
@@ -1506,9 +1505,9 @@ handling and return the file's text afterwards."
           (ok (< seconds 5) (format nil "listing took ~,1Fs" seconds)))))))
 
 (deftest lisp-edit-form-read-eval-disabled
-  (testing "read-time evaluation is disabled when parsing source"
+  (testing "a file holding #. is edited without the #. ever being evaluated"
     (let* ((flag-path (project-path "tests/tmp/read-eval-flag"))
-           (content
+           (read-eval-form
              (format nil
                      (concatenate
                       'string
@@ -1516,27 +1515,91 @@ handling and return the file's text afterwards."
                       "(s \"~A\" :direction :output "
                       ":if-exists :supersede :if-does-not-exist :create) "
                       "(write-line \"executed\" s)) "
-                      "'(defun target () :ok))~%"
-                      "(defun target () :ok)~%")
-                     flag-path)))
+                      "'(defun target () :ok))")
+                     flag-path))
+           (content (format nil "~A~%(defun target () :ok)~%" read-eval-form)))
       (ignore-errors (delete-file flag-path))
       (unwind-protect
            (with-temp-file "tests/tmp/edit-form-read-eval.lisp"
              content
              (lambda (path)
-               (let ((before (fs-read-file path)))
-                 (ok (handler-case
-                         (progn
-                           (lisp-edit-form :file-path path
-                                           :form-type "defun"
-                                           :form-name "target"
-                                           :operation "replace"
-                                           :content "(defun target () :updated)")
-                           nil)
-                       (error () t)))
-                 (ok (string= before (fs-read-file path)))
-                 (ok (not (probe-file flag-path))))))
+               (lisp-edit-form :file-path path
+                               :form-type "defun"
+                               :form-name "target"
+                               :operation "replace"
+                               :content "(defun target () :updated)")
+               (let ((after (fs-read-file path)))
+                 (ok (search "(defun target () :updated)" after) "the defun is replaced")
+                 (ok (eql 0 (search read-eval-form after)) "the #. form is kept as written"))
+               (ok (not (probe-file flag-path)) "the #. was never evaluated")))
         (ignore-errors (delete-file flag-path))))))
+
+(deftest lisp-edit-form-cannot-write-what-it-cannot-read-back
+  (testing "content holding SBCL's character names, #. and #S is written and edited again"
+    (with-temp-file "tests/tmp/edit-form-reader-parity.lisp"
+        (format nil "(defun f () :old)~%")
+      (lambda (path)
+        (dolist (content '("(defun f () (string #\\Nul))"
+                           "(defun f () (list #\\Esc #\\RIGHTWARDS_DOUBLE_ARROW #\\U+2192))"
+                           "(defun f () (list #.(+ 1 2) #S(point :x 1)))"
+                           "(defun f () (uiop:no-such-function-336 1))"
+                           "(defun f () (list #+#.(cl:if t '(:and) '(:or)) :kept))"
+                           "(defun f () :done)"))
+          (lisp-edit-form :file-path path :form-type "defun" :form-name "f"
+                          :operation "replace" :content content)
+          (ok (search content (fs-read-file path)) content)))))
+  (testing "a typo of a real package's symbol leaves the file editable (#320)"
+    (with-temp-file "tests/tmp/edit-form-symbol-typo.lisp"
+        (format nil "(in-package #:cl-user)~%~%(defun f (l) (uiop:no-such-function-320 l))~%")
+      (lambda (path)
+        (lisp-edit-form :file-path path :form-type "defun" :form-name "f"
+                        :operation "replace" :content "(defun f (l) (uiop:getenv l))")
+        (ok (search "(defun f (l) (uiop:getenv l))" (fs-read-file path)))
+        (ok (null (find-symbol "NO-SUCH-FUNCTION-320" "UIOP"))
+            "reading the typo interned nothing into UIOP")))))
+
+(deftest lisp-edit-form-missing-symbol-under-a-readtable-names-the-way-out
+  ;; Under a named readtable SBCL's reader reads the file, and it can only
+  ;; intern a symbol the package lacks, so the parse stops there (#320): the
+  ;; error must not send the caller to the readtable argument, and the file
+  ;; must still be rewritable.
+  (if (not (find-package "NAMED-READTABLES"))
+      (skip "named-readtables not available")
+      (progn
+        (with-temp-file "tests/tmp/edit-form-missing-symbol-rt.lisp"
+            (format nil "(named-readtables:in-readtable :standard)~%~%~
+                         (defun f (l) (uiop:no-such-function-336-rt l))~%")
+          (lambda (path)
+            (let ((message (handler-case
+                               (progn (lisp-edit-form :file-path path :form-type "defun"
+                                                      :form-name "f" :operation "replace"
+                                                      :content "(defun f (l) l)")
+                                      nil)
+                             (error (e) (princ-to-string e)))))
+              (ok (and message (search "lacks that symbol" message)) message)
+              (ok (and message (null (search "pass the readtable parameter" message)))
+                  "no readtable advice"))
+            (ok (eq :missing-symbol
+                    (nth-value 1 (cl-mcp/src/lisp-edit-form-core::%file-unparseable-by-edit-tools-p
+                                  (pathname path))))
+                "the overwrite path is open")
+            (ok (null (find-symbol "NO-SUCH-FUNCTION-336-RT" "UIOP")))))
+        ;; Review of PR #336: content was checked with stand-ins while the file
+        ;; is read by SBCL's reader, so an edit wrote what no tool read back.
+        (with-temp-file "tests/tmp/edit-form-missing-symbol-rt-content.lisp"
+            (format nil "(in-package #:cl-user)~%~%(named-readtables:in-readtable :standard)~%~%~
+                         (defun f (l) l)~%~%(defun g () 1)~%")
+          (lambda (path)
+            (let ((before (fs-read-file path)))
+              (ok (handler-case
+                      (progn (lisp-edit-form :file-path path :form-type "defun" :form-name "f"
+                                             :operation "replace"
+                                             :content "(defun f (l) (uiop:no-such-fn-336-rt l))")
+                             nil)
+                    (error () t))
+                  "content the file's reader cannot read back is refused")
+              (ok (equal before (fs-read-file path)) "and nothing is written")
+              (ok (null (find-symbol "NO-SUCH-FN-336-RT" "UIOP")))))))))
 
 (deftest lisp-edit-form-auto-repair-missing-parens
   (testing "missing closing parentheses are automatically added via parinfer"
@@ -2945,7 +3008,7 @@ handling and return the file's text afterwards."
               "the multi-line diagnosis itself is untouched"))))))
 
 (deftest lisp-edit-form-refusal-does-not-instruct-when-the-reader-failed-elsewhere
-  (testing "a ] the scan trips over is only described when the reader stopped on #."
+  (testing "a ] the scan trips over is only described when the reader stopped on #?"
     (with-temp-file "tests/tmp/edit-form-refusal-reader-elsewhere.lisp"
         (format nil "(defun target () :old)~%")
       (lambda (path)
@@ -2955,7 +3018,7 @@ handling and return the file's text afterwards."
                               :form-type "defun"
                               :form-name "target"
                               :operation "replace"
-                              :content "(defun target () (list a] #.(1+ 1)))")
+                              :content "(defun target () (list a] #?x))")
             (error (e) (setf err (princ-to-string e))))
           (ok err "the content does not read, so it is refused")
           (ok (search "found \"]\"" err) "the scan's finding is described")
@@ -4482,7 +4545,7 @@ Return the condition it signals, or NIL when it succeeds."
       (lambda (path)
         (ok (%insert-block path "insert_after" "a"
                            (format nil "(defun b () 2)~%(defun c () 3)~%~
-                                        (defun d () #.(error \"no\"))")))
+                                        (defun d () #?x)")))
         (ok (string= +block-anchor-file+ (fs-read-file path))))))
   (testing "a stale guard refuses a block, file unchanged"
     (with-temp-file "tests/tmp/multi-insert-guard.lisp" +block-anchor-file+
