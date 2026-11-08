@@ -1080,8 +1080,8 @@ Output:
   unrecognized head.
 - `matches` (array), one entry per (file, form), with:
   - `file`: relative to the project root, not to `path`, so a file under the root can be passed
-    straight to `lisp-read-file`. A file outside the root can come back relative to the server's
-    working directory or cl-mcp's own source directory rather than absolute
+    straight to `lisp-read-file`. A file outside the root is printed absolute (see
+    [Paths cl-mcp prints](#paths-cl-mcp-prints))
   - `line`, `match`: the first hit; `match_lines`: every hit in the form, as `{line, match}`
   - `package`: from the last `in-package` above the hit, upper-cased (`"UNKNOWN"` if none)
   - `form-type`, `form-name` (either may be null), `signature` (`(name lambda-list)` for

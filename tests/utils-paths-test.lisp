@@ -244,6 +244,15 @@
         (ok (equal (native-path-namestring file) (normalize-path-for-display file)))
         (ok (uiop:absolute-pathname-p
              (uiop:parse-native-namestring (normalize-path-for-display file))))))
+    (testing "a root spelled through a symlink still covers the truenames under it"
+      (let ((link (merge-pathnames "tests/tmp/display-root-link" cl-mcp-dir)))
+        (ensure-directories-exist link)
+        (ignore-errors (sb-posix:unlink (native-path-namestring link)))
+        (sb-posix:symlink (native-path-namestring cl-mcp-dir) (native-path-namestring link))
+        (unwind-protect
+             (let ((*project-root* (uiop:ensure-directory-pathname link)))
+               (ok (equal "src/fs.lisp" (normalize-path-for-display (truename file)))))
+          (ignore-errors (sb-posix:unlink (native-path-namestring link))))))
     (testing "with no root at all the path is absolute"
       (let ((*project-root* nil))
         (ok (equal (native-path-namestring file) (normalize-path-for-display file)))))))

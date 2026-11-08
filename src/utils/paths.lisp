@@ -442,6 +442,9 @@ because this is the path a caller reads and then passes back to another tool,
 and those resolve a relative path against the project root only -- so a path
 made relative to anything else (the server's working directory, cl-mcp's own
 source directory) named a file under the root that does not exist.
+The root is compared both as spelled and as its truename, as the read and write
+policies compare it: a root set through a symlink still covers the truenames
+the tools and the image record for its files.
 Logical pathnames are translated to physical before processing.  Returns NIL,
 without signaling, when PATHNAME is a logical pathname with no registered
 translation for it -- SBCL build-internal pseudo-hosts such as SYS:OBJ;... can
@@ -451,7 +454,12 @@ appear this way in xref source locations."
                   (translate-logical-pathname (uiop/pathname:ensure-pathname pathname))
                 (file-error () nil))))
       (when pn
-        (native-path-namestring
-         (if (and *project-root* (uiop/pathname:subpathp pn *project-root*))
-             (uiop/pathname:enough-pathname pn *project-root*)
-             pn))))))
+        (let* ((root *project-root*)
+               (base (and root
+                          (or (and (uiop/pathname:subpathp pn root) root)
+                              (let ((real (ignore-errors
+                                           (uiop/pathname:ensure-directory-pathname
+                                            (truename root)))))
+                                (and real (uiop/pathname:subpathp pn real) real))))))
+          (native-path-namestring
+           (if base (uiop/pathname:enough-pathname pn base) pn)))))))
