@@ -759,6 +759,12 @@ Input:
   whether or not that condition holds in the server, so `#-sbcl (defun ...)` on SBCL is
   accepted, while an expression with no form after it, or one that breaks the feature
   expression grammar (`#+(not a b)`, `#+(bogus a)`), is refused and nothing is written.
+  A form under an expression false in the server (`#+ecl` on SBCL) is never read, so
+  `form_type`/`form_name` reach only its active twin; a `replace` whose content opens with an
+  expression a skipped twin is written under -- compared as read, so `#+:ecl` is `#+ecl` --
+  while the target's differs, is refused when that twin is what `form_type`/`form_name` name
+  or the same definition as the content: applying it would overwrite the definition the
+  server uses with a second copy of the other one (#316). The refusal names both lines.
   Comment-only content keeps no expression, which would otherwise fall onto the next form in
   the file. `delete` removes the expressions with the form
 - `dry_run` (boolean, default `false`): preview changes without writing to disk

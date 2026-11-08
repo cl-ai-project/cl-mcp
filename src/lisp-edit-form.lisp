@@ -10,6 +10,7 @@
                           #:cst-node-end)
   (:import-from #:cl-mcp/src/cst
                 #:cst-node-start-line
+                #:parse-top-level-forms
                 #:%skip-whitespace-and-comments
                 #:stray-right-parenthesis
                 #:*standard-readtable*)
@@ -54,6 +55,9 @@
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%skip-blank-and-comments
                 #:%feature-prefix-end
+                #:%skipped-feature-node-p
+                #:%definition-candidates
+                #:locate-form-in-nodes
                 #:%resolve-named-readtable
                 #:%nonstandard-readtable-p
                 #:%parse-readtable-designator
@@ -737,6 +741,156 @@ expressions (%FEATURE-EXPRESSIONS-TEXT) put back, or NIL when it kept none."
                  insert_after on a neighbouring form."
             kept)))
 
+(defun %feature-names (expression)
+  "Return EXPRESSION, a well-formed feature expression as read, with each symbol
+replaced by its name, so that spellings that read alike -- ecl, :ecl, ECL -- give
+EQUAL results whatever package the reader put them in."
+  (if (symbolp expression)
+      (symbol-name expression)
+      (mapcar #'%feature-names expression)))
+
+(defun %feature-prefix-key (prefix)
+  "Return PREFIX's #+/#- feature expressions as a list of (SIGN . NAMES): SIGN
+the + or - character, NAMES the expression as %FEATURE-NAMES writes it.  Two
+prefixes compare EQUAL when they read alike, however they are spelled.  NIL
+when PREFIX holds none, or one cannot be read or breaks the grammar: there is
+nothing to compare.  Read as %CHECK-FEATURE-PREFIX reads them -- in a package
+of their own, deleted afterwards, nothing evaluated."
+  (let ((pos 0)
+        (key '()))
+    (loop while (and (< (1+ pos) (length prefix))
+                     (char= (char prefix pos) #\#)
+                     (member (char prefix (1+ pos)) '(#\+ #\-)))
+          do (let ((package (make-package (symbol-name (gensym "CL-MCP-FEATURE-KEY-"))
+                                          :use '())))
+               (multiple-value-bind (expression end)
+                   (unwind-protect
+                        (handler-case
+                            (let ((*package* package)
+                                  (*readtable* *standard-readtable*)
+                                  (*read-eval* nil)
+                                  (*read-suppress* nil))
+                              (read-from-string prefix t nil :start (+ pos 2)
+                                                             :preserve-whitespace t))
+                          (error () (return-from %feature-prefix-key nil)))
+                     (delete-package package))
+                 (when (%feature-expression-problem expression)
+                   (return-from %feature-prefix-key nil))
+                 (push (cons (char prefix (1+ pos)) (%feature-names expression)) key)
+                 (setf pos (%skip-blank-and-comments prefix end)))))
+    (nreverse key)))
+
+(defun %definition-identity (value)
+  "Return VALUE, a top-level form as read, as (HEAD . SIGNATURE): its head's
+lower-cased name and the full signature %DEFINITION-CANDIDATES writes last for
+it, which a method's specializers are part of.  NIL when VALUE has no head
+symbol and name to identify it by."
+  (when (and (consp value) (symbolp (car value)) (consp (cdr value)))
+    (let* ((head (string-downcase (symbol-name (car value))))
+           (candidates (ignore-errors (%definition-candidates value head))))
+      (and candidates (cons head (car (last candidates)))))))
+
+(defun %strip-name-index (form-name)
+  "Return FORM-NAME without the [N] suffix that picks one of several matches."
+  (let ((open (position #\[ form-name :from-end t))
+        (length (length form-name)))
+    (if (and open (plusp open) (> length (+ open 2))
+             (char= (char form-name (1- length)) #\])
+             (every #'digit-char-p (subseq form-name (1+ open) (1- length))))
+        (subseq form-name 0 open)
+        form-name)))
+
+(defun %feature-twin (original nodes target form-type form-name own-prefix content
+                      readtable package-name)
+  "Return the node of a form the reader skipped -- its feature expression false in
+this server -- that replacing TARGET by CONTENT, opening with the feature
+expressions OWN-PREFIX, would duplicate; NIL when there is none.
+
+A form under a false expression is never read, so FORM-TYPE/FORM-NAME can only
+reach its active twin: content written for the skipped one, under its
+expression, would overwrite the definition this server uses and leave two
+copies under the same expression (issue #316).  A skipped form counts when its
+expressions read as OWN-PREFIX's (%FEATURE-PREFIX-KEY) while TARGET's do not,
+and it is either what FORM-TYPE/FORM-NAME name, or the same definition as
+CONTENT (%DEFINITION-IDENTITY): one of the two is the form the caller meant.
+Its text is read under READTABLE in PACKAGE-NAME, as the file's forms are; one
+that cannot be read is no twin."
+  (let ((own-key (%feature-prefix-key own-prefix))
+        (target-prefix (%target-feature-prefix original target)))
+    (when (and own-key
+               (not (equal own-key (and target-prefix (%feature-prefix-key target-prefix)))))
+      (flet ((read-forms (text)
+               (ignore-errors
+                (if package-name
+                    (parse-top-level-forms text :readtable readtable
+                                                :initial-package package-name)
+                    (parse-top-level-forms text :readtable readtable)))))
+        (let ((content-identity
+                (let ((form (find :expr (read-forms content) :key #'cst-node-kind)))
+                  (and form (%definition-identity (cst-node-value form)))))
+              (base-name (%strip-name-index form-name)))
+          (dolist (node nodes)
+            (when (%skipped-feature-node-p node)
+              (let* ((start (cst-node-start node))
+                     (end (cst-node-end node))
+                     (form-start (%feature-prefix-end original start)))
+                (when (and (< form-start end)
+                           (equal own-key
+                                  (%feature-prefix-key (subseq original start form-start))))
+                  (let ((twin-nodes (read-forms (subseq original form-start end))))
+                    (when (and twin-nodes
+                               (or (ignore-errors
+                                    (locate-form-in-nodes twin-nodes form-type base-name))
+                                   (and content-identity
+                                        (some (lambda (twin)
+                                                (and (eq (cst-node-kind twin) :expr)
+                                                     (equal content-identity
+                                                            (%definition-identity
+                                                             (cst-node-value twin)))))
+                                              twin-nodes))))
+                      (return node))))))))))))
+
+(defun %one-line-start (text &optional (max-chars 60))
+  "Return TEXT on one line, its whitespace runs made single spaces, cut to
+MAX-CHARS with \" ...\" when longer."
+  (let ((line (string-trim " "
+                           (with-output-to-string (out)
+                             (let ((space nil))
+                               (loop for ch across text
+                                     do (if (%whitespace-char-p ch)
+                                            (setf space t)
+                                            (progn (when space (write-char #\Space out))
+                                                   (setf space nil)
+                                                   (write-char ch out)))))))))
+    (if (> (length line) max-chars)
+        (concatenate 'string (subseq line 0 (- max-chars 4)) " ...")
+        line)))
+
+(defun %refuse-feature-twin (original target twin form-type form-name own-prefix)
+  "Signal the error refusing a replace of TARGET by content opening with
+OWN-PREFIX, because TWIN, a form skipped under that same expression, is what the
+content would duplicate (%FEATURE-TWIN)."
+  (let* ((target-prefix (%target-feature-prefix original target))
+         (twin-start (cst-node-start twin))
+         (twin-form-start (%feature-prefix-end original twin-start)))
+    (error "Refusing to replace ~A ~A at line ~D, ~:[which is unconditional~;~:*under ~A~]: ~
+            the content opens with ~A, and line ~D already holds ~A under ~A. The reader ~
+            skips that form here -- its feature expression is false in this server -- so ~
+            form_type/form_name reach only line ~D, and this replace would overwrite the ~
+            definition this server uses with a second copy under ~A. Nothing was written. ~
+            Forms under a false feature expression cannot be addressed yet (issue #321). ~
+            To change line ~D's own condition, give it an expression no twin of it is ~
+            written under."
+           form-type form-name (cst-node-start-line target)
+           (and target-prefix (%feature-expressions-text target-prefix))
+           (%feature-expressions-text own-prefix)
+           (cst-node-start-line twin)
+           (%one-line-start (subseq original twin-form-start (cst-node-end twin)))
+           (%feature-expressions-text (subseq original twin-start twin-form-start))
+           (cst-node-start-line target)
+           (%feature-expressions-text own-prefix)
+           (cst-node-start-line target))))
+
 (defun %blank-lines-note (normalized)
   "Return the summary line saying a replace also moved the blank lines around the
 form, when NORMALIZED says it did, or NIL.  Forms written with no blank line
@@ -1105,6 +1259,15 @@ replaced form, and the line the matched form starts on. A dry run carries the re
                                                   file-package-name abs)
                       (%validate-and-repair-content form-content content-readtable
                                                     file-package-name abs))
+                ;; Content written for a twin the reader skips here would
+                ;; overwrite the one form this server reads (issue #316).
+                (when own-prefix
+                  (let ((twin (%feature-twin original nodes target form-type form-name
+                                             own-prefix validated-content content-readtable
+                                             file-package-name)))
+                    (when twin
+                      (%refuse-feature-twin original target twin form-type form-name
+                                            own-prefix))))
                 (let* ((block-spliced
                          ;; Normalise only the gaps between a block's forms, and
                          ;; only where the gaps read the standard way.
@@ -1274,7 +1437,9 @@ replace keeps the #+/#- feature expressions written in front of the target form
 when content starts with none of its own, and says so (kept_feature_expression);
 start content with the expression it should have to change or drop the condition
 (its form is checked whether or not that condition holds here). Comment-only
-content keeps none.
+content keeps none. A form under an expression false here is not read, so only
+its active twin can be targeted; content opening with the twin's expression is
+refused when it would overwrite the active definition with a copy of the twin.
 Missing closing parentheses are automatically repaired using parinfer; a block
 is repaired as a whole and must then read as complete forms, or nothing is
 written.")

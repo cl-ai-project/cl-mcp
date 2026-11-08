@@ -32,6 +32,7 @@
                 #:ensure-trailing-newline)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
                 #:%feature-prefix-end
+                #:%skipped-feature-node-p
                 #:%skip-blank-and-comments
                 #:%parse-readtable-designator
                 #:file-unparseable-error
@@ -599,15 +600,6 @@ that is the node's, whose own expressions they are (NIL when it has none)."
 
 (defparameter *skipped-form-max-chars* 80
   "Characters of a form the reader skipped shown in its collapsed line.")
-
-(defun %skipped-feature-node-p (node)
-  "True when NODE is a form the reader skipped for its #+ or #- feature
-expression: a definition for another implementation or configuration."
-  (and (typep node 'cst-node)
-       (eq (cst-node-kind node) :skipped)
-       (let ((reason (cst-node-value node)))
-         (and (consp reason)
-              (member (car reason) '(:sharpsign-plus :sharpsign-minus))))))
 
 (defun %format-skipped-feature-form (node source-text line-width)
   "Return the collapsed line for NODE, a form skipped for its feature expression

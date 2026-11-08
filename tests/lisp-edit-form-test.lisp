@@ -406,6 +406,87 @@ text and LISP-EDIT-FORM's ninth value, the feature expressions it kept."
                           :operation "delete")
           (ok (not (search "ccl" (fs-read-file path)))))))))
 
+(defparameter *feature-twins-source*
+  (format nil "(in-package :cl-user)~%~%#+ecl~%(defun impl (x)~%  (list :ecl x))~%~%~
+               #-ecl~%(defun impl (x)~%  \"SBCL path.\"~%  (list :sbcl x))~%~%~
+               #+ccl~%(defun other (x) x)~%~%~
+               (defun plain (x) x)~%~%~
+               (defun lone (x) x)~%~%~
+               #+ecl~%(defun plain (x) (list :ecl x))~%~%~
+               #+ecl~%(defmethod area ((s string)) :ecl-string)~%~%~
+               (defmethod area ((s symbol)) :symbol)~%")
+  "Definitions written twice, once for ECL and once for the rest: on SBCL the
+reader skips the #+ecl twin, so only the other one can be addressed.")
+
+(defun %twin-replace-refused-p (form-type form-name content &rest options)
+  "Replace FORM-TYPE FORM-NAME in *FEATURE-TWINS-SOURCE* with CONTENT and return
+two values: the refusal's message, or NIL when the replace went through, and
+the file's text afterwards."
+  (with-temp-file "tests/tmp/edit-form-feature-twins.lisp" *feature-twins-source*
+    (lambda (path)
+      (let ((message (handler-case
+                         (progn (apply #'lisp-edit-form :file-path path :form-type form-type
+                                       :form-name form-name :operation "replace"
+                                       :content content options)
+                                nil)
+                       (error (e) (princ-to-string e)))))
+        (values message (fs-read-file path))))))
+
+(deftest lisp-edit-form-replace-refuses-to-overwrite-a-feature-twin
+  ;; Issue #316: content carrying #+ecl replaced the #-ecl definition, the only
+  ;; one SBCL reads, so the file was left with two #+ecl copies and SBCL's
+  ;; definition was gone, under a plain "Applied replace" summary.
+  (testing "content under the twin's expression is refused, and nothing is written"
+    (multiple-value-bind (message text)
+        (%twin-replace-refused-p "defun" "impl"
+                                 (format nil "#+ecl~%(defun impl (x)~%  (list :ecl-v2 x))"))
+      (ok message "the replace is refused")
+      (ok (equal *feature-twins-source* text) "the file is left as it was")
+      (ok (and message (search "line 3" message) (search "line 7" message))
+          "the message names the twin's line and the target's")
+      (ok (and message (search "#321" message))
+          "and points at the issue about addressing unread branches")))
+  (testing "a dry run is refused the same way"
+    (ok (%twin-replace-refused-p "defun" "impl"
+                                 (format nil "#+ecl~%(defun impl (x) :dry)")
+                                 :dry-run t)
+        "dry run refused"))
+  (testing "the expression is compared as read, not as spelled"
+    (ok (%twin-replace-refused-p "defun" "impl" (format nil "#+:ecl (defun impl (x) :kw)"))
+        "#+:ecl is #+ecl")
+    (ok (%twin-replace-refused-p "defun" "impl" (format nil "#+ECL~%(defun impl (x) :up)"))
+        "#+ECL is #+ecl"))
+  (testing "an unconditional target with a twin under the content's expression"
+    (multiple-value-bind (message text)
+        (%twin-replace-refused-p "defun" "plain" (format nil "#+ecl~%(defun plain (x) :p)"))
+      (ok message "is refused")
+      (ok (equal *feature-twins-source* text) "and left as it was")))
+  (testing "a method twin is matched by its whole signature"
+    (ok (null (%twin-replace-refused-p "defmethod" "area ((s symbol))"
+                                       (format nil "#+ecl~%(defmethod area ((s symbol)) :e)")))
+        "no #+ecl method on symbol exists, so this is a plain condition change")
+    (ok (%twin-replace-refused-p "defmethod" "area ((s symbol))"
+                                 (format nil "#+ecl~%(defmethod area ((s string)) :e)"))
+        "a #+ecl method on string exists, and the content is that method"))
+  (testing "content that is the twin is refused whatever form_name named"
+    (ok (%twin-replace-refused-p "defun" "lone" (format nil "#+ecl~%(defun impl (x) :moved)"))
+        "replacing lone with an #+ecl impl would put a second #+ecl impl in the file"))
+  (testing "changing a form's own condition still works when no twin has the new one"
+    (multiple-value-bind (message text)
+        (%twin-replace-refused-p "defun" "impl" (format nil "#+ccl~%(defun impl (x) :ccl)"))
+      (ok (null message) "#+ccl holds no impl")
+      (ok (search (format nil "#+ccl~%(defun impl (x) :ccl)") text) "the new condition is written")))
+  (testing "content under the target's own expression is an ordinary replace"
+    (multiple-value-bind (message text)
+        (%twin-replace-refused-p "defun" "impl" (format nil "#-ecl~%(defun impl (x) :edited)"))
+      (ok (null message) "not refused")
+      (ok (search (format nil "#-ecl~%(defun impl (x) :edited)") text) "and applied")
+      (ok (search ":ecl x" text) "the ECL twin is untouched")))
+  (testing "a twin of another name under the same expression does not count"
+    (ok (null (%twin-replace-refused-p "defun" "impl"
+                                       (format nil "#+ccl ; other is here too~%(defun impl (x) 1)")))
+        "#+ccl holds other, not impl")))
+
 (deftest lisp-edit-form-replace-feature-expressions-need-a-form-and-not-a-true-reading
   ;; Review of #216: a comment-only replace kept #+sbcl with no form after it,
   ;; so it applied to the next definition in the file or broke the read at
