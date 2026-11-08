@@ -859,8 +859,8 @@ would cost this server its definition (%FEATURE-TWIN)."
             server uses and leave the file with two ~A forms where it had one for each ~
             condition. Nothing was written. Forms under a false feature expression cannot ~
             be addressed yet (issue #321). To drop line ~D's definition on purpose, ~
-            delete it and insert the new form with insert_before or insert_after on a ~
-            neighbouring form."
+            first insert the new form with insert_after on it, then delete it: deleted ~
+            first, it could leave a feature expression with no form after it."
            form-type form-name (cst-node-start-line target)
            (and target-prefix (%feature-expressions-text target-prefix))
            (%feature-expressions-text own-prefix)

@@ -447,7 +447,12 @@ tests/tmp/NAME.lisp."
       (ok (notany (lambda (line)
                     (search "#+sbcl #+cl-mcp-no-such-feature (defun sig-nested-b" line))
                   lines)
-          (format nil "the next definition carries no prefix: ~S" lines))))
+          (format nil "the next definition carries no prefix: ~S" lines))
+      (ok (some (lambda (line)
+                  (and (scan "^ *1: #\\+sbcl #\\+cl-mcp-no-such-feature \\(defun sig-nested-a " line)
+                       (search "not read" line)))
+                lines)
+          (format nil "and the skipped form is listed as not read: ~S" lines))))
   (testing "a file read by the CL reader"
     (let ((lines (%collapsed-lines
                   "tests/tmp/sig-in-readtable.lisp"

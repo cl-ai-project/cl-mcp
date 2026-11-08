@@ -767,8 +767,9 @@ Input:
   spelled (`#-sbcl` and `#+(not sbcl)` alike), or one that cannot be read but starts with
   the same head and name: applying it would take away the definition the server uses and
   leave two forms under the false condition (#316). The refusal names both lines. To drop a
-  definition from the server on purpose, `delete` it and insert the new form with
-  `insert_before`/`insert_after` on a neighbouring form.
+  definition from the server on purpose, first insert the new form with `insert_after` on
+  it, then `delete` it: deleted first, it could leave a feature expression with no form
+  after it.
   Comment-only content keeps no expression, which would otherwise fall onto the next form in
   the file. `delete` removes the expressions with the form
 - `dry_run` (boolean, default `false`): preview changes without writing to disk

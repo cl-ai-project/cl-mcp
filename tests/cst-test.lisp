@@ -56,6 +56,15 @@
       (ok (nth-value 1 (parse-top-level-forms (format nil "(a)~%#+(not) (b)~%")
                                               :readtable :standard))
           "reported as the second value"))
+    (testing "an operator UIOP does not evaluate is a read error, not a signal"
+      (ok (nth-value 1 (parse-top-level-forms (format nil "#+(cl:and sbcl) (defun a () 1)~%")
+                                              :readtable :standard))
+          "reported as the second value"))
+    (testing "stacked expressions with no form for the outer one are a read error"
+      (ok (nth-value 1 (parse-top-level-forms
+                        (format nil "(a)~%#+sbcl #+cl-mcp-no-such-feature (defun impl (x) 2)~%")
+                        :readtable :standard))
+          "reported as the second value, as the Eclector pass reports it"))
     (testing "an expression with no form after it is a read error"
       (ok (nth-value 1 (parse-top-level-forms (format nil "(a)~%#+sbcl~%")
                                               :readtable :standard))

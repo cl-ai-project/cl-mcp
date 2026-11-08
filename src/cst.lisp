@@ -339,7 +339,10 @@ of that form overwrote both.  READTABLE must read #+ and #- the standard way
                                                :format-control "Reader error: malformed ~
                                                                 feature expression after #~A: ~A"
                                                :format-arguments (list sign problem)))))
-            (let ((holds (uiop:featurep expression)))
+            (let ((holds (handler-case (uiop:featurep expression)
+                           ;; An operator UIOP does not take, such as CL:AND.
+                           (error (e) (return-from %pass-feature-conditionals
+                                        (values :error e))))))
               (when (char= sign #\-)
                 (setf holds (not holds)))
               (unless holds
@@ -347,6 +350,15 @@ of that form overwrote both.  READTABLE must read #+ and #- the standard way
                                 (read-preserving-whitespace stream t nil nil))
                   (end-of-file () (return-from %pass-feature-conditionals (no-form)))
                   (error (e) (return-from %pass-feature-conditionals (values :error e))))
+                ;; Behind expressions that held, the outer one still takes the
+                ;; next form, so input that ends here is as short of a form as
+                ;; after a single expression that holds.
+                (when passed
+                  (let ((end (file-position stream)))
+                    (when (or (%skip-whitespace-and-comments stream readtable)
+                              (eq (peek-char nil stream nil :eof) :eof))
+                      (return-from %pass-feature-conditionals (no-form)))
+                    (file-position stream end)))
                 (return-from %pass-feature-conditionals
                   (values :skipped (cons (if (char= sign #\+) :sharpsign-plus :sharpsign-minus)
                                          expression))))
