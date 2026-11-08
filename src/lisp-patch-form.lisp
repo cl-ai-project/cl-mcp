@@ -308,8 +308,11 @@ writes a prefix that would make the file unreadable."
                               (*readtable* *standard-readtable*)
                               (*read-eval* nil)
                               (*read-suppress* nil))
-                          (read-from-string modified-form t nil
-                                            :start (+ (car span) 2) :end (cdr span)))
+                          ;; As the file's parser reads it: a #. is read,
+                          ;; never evaluated (#319).
+                          (source-read-from-string modified-form
+                                                   :start (+ (car span) 2)
+                                                   :end (cdr span)))
                       (error (e)
                         (error 'patch-operation-error
                                :reason (format nil "the patched feature expression ~A cannot ~
