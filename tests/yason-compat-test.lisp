@@ -44,12 +44,3 @@
                                          :json-arrays-as-vectors t
                                          :json-booleans-as-symbols t
                                          :json-nulls-as-keyword t)))))))
-
-(deftest control-characters-encode-escaped
-  (let ((controls (coerce (loop for code below #x20 collect (code-char code)) 'string)))
-    (testing "no character below U+0020 is written raw, in a value or a key"
-      (let ((object (make-hash-table :test #'equal)))
-        (setf (gethash controls object) controls)
-        (ok (notany (lambda (c) (< (char-code c) #x20)) (%encode object)))))
-    (testing "the escaped string parses back to the same characters"
-      (ok (string= controls (yason:parse (%encode controls)))))))

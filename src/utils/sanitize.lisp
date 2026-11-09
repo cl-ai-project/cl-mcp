@@ -9,7 +9,7 @@
   (:export #:sanitize-for-json
            #:sanitize-error-message
            #:sanitize-condition-text
-           #:replace-lone-surrogates))
+           #:transport-safe-json))
 
 (in-package #:cl-mcp/src/utils/sanitize)
 
@@ -165,21 +165,44 @@ of a #S it could not build, say -- would otherwise print forever."
       "unexpected end of input"
       (sanitize-error-message (bounded-princ-to-string condition))))
 
-(defun replace-lone-surrogates (json)
-  "Return JSON, an encoded JSON text, with every UTF-16 surrogate character
-\(U+D800-U+DFFF) replaced by U+FFFD; JSON itself when it holds none.
+(defun %unsendable-json-char-p (char)
+  "True for a character that must not reach the transport as itself: a UTF-16
+surrogate (U+D800-U+DFFF), or a control character below U+0020 other than tab,
+newline and carriage return."
+  (let ((code (char-code char)))
+    (or (<= #xD800 code #xDFFF)
+        (and (< code #x20) (/= code 9) (/= code 10) (/= code 13)))))
 
-Yason escapes a character above U+FFFF as a \\uXXXX surrogate pair, which is
-plain ASCII, but writes a lone surrogate as the character itself -- and a UTF-8
-stream cannot encode one.  The write then signals: a worker writing to the
-parent died, and the parent writing to a client broke the HTTP response,
-dropped the TCP connection, or ended the stdio loop.  A lone surrogate reaches
-a string easily: a client's JSON \"\\uDFFF\" decodes to one, and so does
-(code-char #xDFFF) in evaluated code.  Applied to the encoded text, so every
-field is covered whatever produced it; such a character can only occur inside
-a JSON string, never in the structure."
-  (if (find-if (lambda (c) (<= #xD800 (char-code c) #xDFFF)) json)
-      (substitute-if (code-char #xFFFD)
-                     (lambda (c) (<= #xD800 (char-code c) #xDFFF))
-                     json)
+(defun transport-safe-json (json)
+  "Return JSON, an encoded JSON text, with every character that would break
+the transport rewritten; JSON itself when it holds none.
+
+- A lone UTF-16 surrogate (U+D800-U+DFFF) becomes U+FFFD.  Yason escapes a
+  character above U+FFFF as a \\uXXXX surrogate pair, which is plain ASCII, but
+  writes a lone surrogate as the character itself -- and a UTF-8 stream cannot
+  encode one.  The write then signals: a worker writing to the parent died, and
+  the parent writing to a client broke the HTTP response, dropped the TCP
+  connection, or ended the stdio loop.  A client's JSON \"\\uDFFF\" decodes to
+  one, and so does (code-char #xDFFF) in evaluated code.
+- A control character below U+0020 becomes its \\u00XX escape.  Yason 0.7.x
+  escapes only \\b \\f \\n \\r \\t and writes the others raw, which no JSON
+  parser accepts (RFC 8259 section 7): one NUL in a repl-eval result_preview made
+  the client drop the connection (#342).  Yason 0.8 escapes them itself, so on
+  it this finds nothing.  Tab, newline and carriage return are left alone: every
+  yason escapes them inside a string, so raw they are whitespace between tokens.
+
+Applied to the encoded text rather than by changing yason's escaping, so it
+holds for every yason version and every field whatever produced it, and leaves
+the yason that a user's own code runs in the worker as it was.  It is safe
+because yason writes no other character below U+0020 and no surrogate outside a
+JSON string, where an escape means the same character."
+  (if (find-if #'%unsendable-json-char-p json)
+      (with-output-to-string (out)
+        (loop for char across json
+              for code = (char-code char)
+              do (cond ((<= #xD800 code #xDFFF)
+                        (write-char (code-char #xFFFD) out))
+                       ((%unsendable-json-char-p char)
+                        (format out "\\u~4,'0X" code))
+                       (t (write-char char out)))))
       json))

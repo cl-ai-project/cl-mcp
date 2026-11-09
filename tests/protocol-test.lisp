@@ -83,6 +83,15 @@
             (gethash "bad" h) (make-condition 'simple-error))
       (ok (%surrogate-free-p (cl-mcp/src/protocol::%encode-json h))))))
 
+(deftest encode-json-sends-no-raw-control-character
+  (testing "a value holding every character below U+0020 is sent escaped, key and value"
+    (let ((controls (coerce (loop for code below #x20 collect (code-char code)) 'string))
+          (h (make-hash-table :test 'equal)))
+      (setf (gethash controls h) controls)
+      (let ((json (cl-mcp/src/protocol::%encode-json h)))
+        (ok (notany (lambda (c) (< (char-code c) #x20)) json))
+        (ok (string= controls (gethash controls (parse json))))))))
+
 (deftest initialized-notification
   (testing "notifications/initialized returns no response"
     (let ((line (concatenate

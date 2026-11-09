@@ -35,7 +35,7 @@
                 #:cancel-inline-request)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json
-                #:replace-lone-surrogates)
+                #:transport-safe-json)
   (:import-from #:cl-mcp/src/utils/nesting
                 #:json-too-deep-p
                 #:+max-json-nesting+)
@@ -203,9 +203,9 @@ On second failure, return a hardcoded valid JSON-RPC error response."
   "Encode OBJ as a JSON string with resilient error handling.
 Fast path: try normal yason:encode. On failure, sanitize all strings and retry.
 On second failure, return a hardcoded valid JSON-RPC error response.
-Every path's result has its lone surrogates replaced (REPLACE-LONE-SURROGATES):
-yason writes one raw, and the UTF-8 transport then cannot send the line."
-  (replace-lone-surrogates (%encode-json-unchecked obj)))
+Every path's result goes through TRANSPORT-SAFE-JSON: yason writes a lone
+surrogate raw, and 0.7.x a control character too, and neither can be sent."
+  (transport-safe-json (%encode-json-unchecked obj)))
 
 ;;; Response builders are imported from cl-mcp/src/tools/helpers:
 ;;;   result, rpc-error, text-content, tool-error
