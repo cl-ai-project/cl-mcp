@@ -23,3 +23,18 @@ its own dist gets that version."))
   (defmethod yason:encode ((object (eql :null)) &optional (stream *standard-output*))
     (write-string "null" stream)
     object))
+
+;; 0.7.x escapes only \b \f \n \r \t and writes the other characters below
+;; U+0020 raw, which no JSON parser accepts (RFC 8259 section 7): one NUL in a
+;; repl-eval result_preview made the client drop the connection (#342).
+;; Changed only when yason writes one raw, so 0.8's own escaping stays as is.
+(let ((table (let ((symbol (find-symbol "*CHAR-REPLACEMENTS*" '#:yason)))
+               (and symbol (boundp symbol) (symbol-value symbol)))))
+  (when (and (hash-table-p table)
+             (find (code-char 0)
+                   (with-output-to-string (s)
+                     (yason:encode (string (code-char 0)) s))))
+    (loop for code below #x20
+          for char = (code-char code)
+          unless (gethash char table)
+            do (setf (gethash char table) (format nil "\\u~4,'0X" code)))))
