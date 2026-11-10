@@ -7,7 +7,9 @@
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json
                 #:sanitize-error-message
-                #:sanitize-condition-text))
+                #:sanitize-condition-text
+                #:transport-safe-json)
+  (:import-from #:yason))
 
 (in-package #:cl-mcp/tests/utils-sanitize-test)
 
@@ -252,3 +254,34 @@
       (ok (stringp result) "answered")
       (ok (and (stringp result) (search "cannot use #1=(1 2 #1# . #1#)" result))
           (format nil "the report is kept, cut short: ~A" result)))))
+
+(defun %raw-controls ()
+  "Every character below U+0020 but tab, newline and return, in order."
+  (coerce (loop for code below #x20
+                unless (member code '(9 10 13)) collect (code-char code))
+          'string))
+
+(deftest transport-safe-json-escapes-raw-control-characters
+  ;; Raw input on purpose: this is what yason 0.7.x writes, so the rewrite is
+  ;; exercised whatever yason the test image has.
+  (testing "every control character but tab, newline and return becomes \\u00XX"
+    (let ((out (transport-safe-json (format nil "\"~A\"" (%raw-controls)))))
+      (ok (notany (lambda (c) (< (char-code c) #x20)) out))
+      (ok (search "\\u0000" out))
+      (ok (search "\\u001F" out))))
+  (testing "the escaped text parses back to the same characters"
+    (let ((raw (%raw-controls)))
+      (ok (string= raw (yason:parse (transport-safe-json (format nil "\"~A\"" raw)))))))
+  (testing "tab, newline and return are left as they are"
+    (let ((text (format nil "{~C\"a\":~C1~C}" #\Tab #\Newline #\Return)))
+      (ok (string= text (transport-safe-json text))))))
+
+(deftest transport-safe-json-replaces-lone-surrogates
+  (testing "a lone surrogate becomes U+FFFD"
+    (ok (string= (format nil "\"a~Cb\"" (code-char #xFFFD))
+                 (transport-safe-json (format nil "\"a~Cb\"" (code-char #xDC00)))))))
+
+(deftest transport-safe-json-returns-clean-text-itself
+  (testing "text with nothing to rewrite is returned as the same object"
+    (let ((text "{\"a\":\"b\\u0000c\"}"))
+      (ok (eq text (transport-safe-json text))))))

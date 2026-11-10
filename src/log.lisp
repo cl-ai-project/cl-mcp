@@ -5,6 +5,7 @@
   (:import-from #:uiop #:getenv)
   (:import-from #:yason #:encode #:*parse-json-arrays-as-vectors*)
   (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
+  (:import-from #:cl-mcp/src/utils/sanitize #:transport-safe-json)
   (:export
    #:log-event
    #:set-log-level-from-env
@@ -76,9 +77,12 @@ when *log-stream* becomes a broken pipe."
             when k
             do (setf (gethash k obj) v))
       (ignore-errors
-        (with-lock-held (*log-lock*)
-          (yason:encode obj *log-stream*)
-          (terpri *log-stream*))
+        ;; Through TRANSPORT-SAFE-JSON, so a lone surrogate or (on yason 0.7.x)
+        ;; a raw control character in a logged value cannot break the line.
+        (let ((line (transport-safe-json
+                     (with-output-to-string (s) (encode obj s)))))
+          (with-lock-held (*log-lock*)
+            (write-line line *log-stream*)))
         (finish-output *log-stream*)))))
 
 (defun %ts-filename ()

@@ -9,7 +9,7 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/utils/sanitize
-                #:sanitize-error-message #:replace-lone-surrogates)
+                #:sanitize-error-message #:transport-safe-json)
   (:import-from #:cl-mcp/src/utils/nesting #:json-too-deep-p)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:leaked-threads
@@ -84,9 +84,10 @@ that returns a hash-table to be used as the JSON-RPC result."
   (log-event :debug "worker.method.registered" "method" method-name))
 
 (defun %encode-response (obj)
-  "Encode OBJ as a single-line JSON string, lone surrogates replaced (see
-REPLACE-LONE-SURROGATES): written raw, one killed the worker."
-  (replace-lone-surrogates (with-output-to-string (s) (yason:encode obj s))))
+  "Encode OBJ as a single-line JSON string through TRANSPORT-SAFE-JSON: a lone
+surrogate written raw killed the worker, and on yason 0.7.x a raw control
+character broke the line for the parent."
+  (transport-safe-json (with-output-to-string (s) (yason:encode obj s))))
 
 (defparameter *retire-action*
   (lambda (leaked)

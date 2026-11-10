@@ -23,3 +23,9 @@ its own dist gets that version."))
   (defmethod yason:encode ((object (eql :null)) &optional (stream *standard-output*))
     (write-string "null" stream)
     object))
+
+;;; 0.7.x also writes control characters other than \b \f \n \r \t raw (#342).
+;;; That is not patched here: changing yason's escaping table would also change
+;;; the yason a user's own code runs in the worker, and a reload of yason would
+;;; undo it.  The encoded text is fixed instead, by TRANSPORT-SAFE-JSON in
+;;; src/utils/sanitize.lisp, on every path that sends it.
