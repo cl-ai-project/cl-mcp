@@ -14,6 +14,7 @@
   (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
   (:import-from #:hunchentoot)
   (:import-from #:yason)
+  (:import-from #:cl-mcp/src/utils/sanitize #:encode-json-line)
   (:import-from #:cl-mcp/src/utils/random #:generate-random-hex-string)
   (:import-from #:cl-mcp/src/utils/nesting #:json-too-deep-p)
   (:export
@@ -301,7 +302,8 @@ Sessions with active in-flight requests are skipped even when expired."
 (defun %http-error-json (code message)
   "Build a JSON-RPC error response string using yason for proper escaping.
 Uses NIL (not :NULL) for the id field because YASON encodes NIL as
-JSON null across all versions.  The :NULL keyword requires YASON >= 0.8."
+JSON null across all versions.  The :NULL keyword requires YASON >= 0.8.
+Encoded by ENCODE-JSON-LINE, as every line sent is."
   (let ((error-obj (make-hash-table :test #'equal))
         (outer (make-hash-table :test #'equal)))
     (setf (gethash "code" error-obj) code
@@ -309,8 +311,7 @@ JSON null across all versions.  The :NULL keyword requires YASON >= 0.8."
     (setf (gethash "jsonrpc" outer) "2.0"
           (gethash "error" outer) error-obj
           (gethash "id" outer) nil)
-    (with-output-to-string (s)
-      (yason:encode outer s))))
+    (encode-json-line outer)))
 
 (defun %handle-mcp-post-initialize (body)
   (when (initialize-request-p body)

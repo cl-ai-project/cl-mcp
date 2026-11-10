@@ -22,6 +22,7 @@
   (:import-from #:cl-mcp/src/worker/fasl-cache
                 #:prepare-worker-fasl-cache
                 #:isolate-project-fasls)
+  (:import-from #:cl-mcp/src/utils/sanitize #:encode-json-line)
   (:import-from #:cl-mcp/src/log
                 #:log-event
                 #:*log-context*)
@@ -87,8 +88,7 @@ requires YASON >= 0.8 which may not be available under Qlot."
           (gethash "swank_port" ht) swank-port
           (gethash "pid" ht) (%get-pid)
           (gethash "protocol_version" ht) +worker-protocol-version+)
-    (yason:encode ht stream)
-    (terpri stream)
+    (write-line (encode-json-line ht) stream)
     (force-output stream)))
 
 (defun %setup-project-root ()
