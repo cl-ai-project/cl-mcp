@@ -18,7 +18,7 @@
                 #:%read-line-limited #:+max-json-line-bytes+
                 #:line-too-long)
   (:import-from #:usocket)
-  (:import-from #:yason)
+  (:import-from #:cl-mcp/src/utils/sanitize #:encode-json-line)
   (:import-from #:cl-mcp/src/tools/helpers #:rpc-error)
   (:export
    #:*tcp-server-thread*
@@ -174,10 +174,9 @@ supplied, uses *enabled-tool-groups*, which comes from MCP_ENABLE_TOOL_GROUPS."
 
 (defun %error-response-line (code message)
   "Return the JSON-RPC error response with CODE and MESSAGE and a null id, as
-one line of JSON encoded by yason: the answer to a line that never became a
+one line of JSON (ENCODE-JSON-LINE): the answer to a line that never became a
 request, so there is no id to echo."
-  (with-output-to-string (out)
-    (yason:encode (rpc-error nil code message) out)))
+  (encode-json-line (rpc-error nil code message)))
 
 (defparameter *too-large-response*
   (%error-response-line -32600 "Request too large")

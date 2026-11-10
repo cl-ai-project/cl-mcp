@@ -3,9 +3,9 @@
 (defpackage #:cl-mcp/src/log
   (:use #:cl)
   (:import-from #:uiop #:getenv)
-  (:import-from #:yason #:encode #:*parse-json-arrays-as-vectors*)
+  (:import-from #:yason #:*parse-json-arrays-as-vectors*)
   (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
-  (:import-from #:cl-mcp/src/utils/sanitize #:transport-safe-json)
+  (:import-from #:cl-mcp/src/utils/sanitize #:encode-json-line)
   (:export
    #:log-event
    #:set-log-level-from-env
@@ -77,10 +77,10 @@ when *log-stream* becomes a broken pipe."
             when k
             do (setf (gethash k obj) v))
       (ignore-errors
-        ;; Through TRANSPORT-SAFE-JSON, so a lone surrogate or (on yason 0.7.x)
-        ;; a raw control character in a logged value cannot break the line.
-        (let ((line (transport-safe-json
-                     (with-output-to-string (s) (encode obj s)))))
+        ;; Through ENCODE-JSON-LINE, so a lone surrogate or (on yason 0.7.x) a
+        ;; raw control character in a logged value cannot break the line; and
+        ;; encoded before the lock is taken, which then covers one write.
+        (let ((line (encode-json-line obj)))
           (with-lock-held (*log-lock*)
             (write-line line *log-stream*)))
         (finish-output *log-stream*)))))

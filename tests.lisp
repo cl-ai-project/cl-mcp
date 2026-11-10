@@ -19,6 +19,7 @@
   (:import-from #:cl-mcp/tests/logging-test)
   (:import-from #:cl-mcp/tests/protocol-test)
   (:import-from #:cl-mcp/tests/nesting-test)
+  (:import-from #:cl-mcp/tests/transport-encoding-test)
   (:import-from #:cl-mcp/tests/session-project-root-test)
   (:import-from #:cl-mcp/tests/server-instructions-test)
   (:import-from #:cl-mcp/tests/proxy-test)

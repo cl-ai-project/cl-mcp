@@ -4,12 +4,14 @@
   (:use #:cl)
   (:import-from #:cl-ppcre
                 #:regex-replace-all)
+  (:import-from #:yason)
   (:import-from #:cl-mcp/src/utils/printing
                 #:bounded-princ-to-string)
   (:export #:sanitize-for-json
            #:sanitize-error-message
            #:sanitize-condition-text
-           #:transport-safe-json))
+           #:transport-safe-json
+           #:encode-json-line))
 
 (in-package #:cl-mcp/src/utils/sanitize)
 
@@ -165,6 +167,7 @@ of a #S it could not build, say -- would otherwise print forever."
       "unexpected end of input"
       (sanitize-error-message (bounded-princ-to-string condition))))
 
+(declaim (inline %unsendable-json-char-p))
 (defun %unsendable-json-char-p (char)
   "True for a character that must not reach the transport as itself: a UTF-16
 surrogate (U+D800-U+DFFF), or a control character below U+0020 other than tab,
@@ -195,14 +198,29 @@ Applied to the encoded text rather than by changing yason's escaping, so it
 holds for every yason version and every field whatever produced it, and leaves
 the yason that a user's own code runs in the worker as it was.  It is safe
 because yason writes no other character below U+0020 and no surrogate outside a
-JSON string, where an escape means the same character."
-  (if (find-if #'%unsendable-json-char-p json)
-      (with-output-to-string (out)
-        (loop for char across json
-              for code = (char-code char)
-              do (cond ((<= #xD800 code #xDFFF)
-                        (write-char (code-char #xFFFD) out))
-                       ((%unsendable-json-char-p char)
-                        (format out "\\u~4,'0X" code))
-                       (t (write-char char out)))))
-      json))
+JSON string, where an escape means the same character.
+
+One scan when there is nothing to rewrite; otherwise the text before the first
+such character is copied whole and only the rest is gone through."
+  (let ((first (position-if #'%unsendable-json-char-p json)))
+    (if (null first)
+        json
+        (with-output-to-string (out)
+          (write-string json out :end first)
+          (loop for index from first below (length json)
+                for char = (char json index)
+                for code = (char-code char)
+                do (cond ((<= #xD800 code #xDFFF)
+                          (write-char (code-char #xFFFD) out))
+                         ((and (< code #x20) (/= code 9) (/= code 10) (/= code 13))
+                          (format out "\\u~4,'0X" code))
+                         (t (write-char char out))))))))
+
+(defun encode-json-line (object)
+  "Return OBJECT encoded by yason as one line of JSON that every transport can
+carry: the encoded text through TRANSPORT-SAFE-JSON.  Every line cl-mcp sends --
+to a client, between parent and worker, or to the log -- is made here (#344), so
+no send site can leave the safe path out; the parent's answers to a client go
+through %ENCODE-JSON in src/protocol.lisp, which adds a fallback for an object
+yason cannot encode and ends in TRANSPORT-SAFE-JSON as well."
+  (transport-safe-json (with-output-to-string (stream) (yason:encode object stream))))

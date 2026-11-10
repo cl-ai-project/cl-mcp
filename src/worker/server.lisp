@@ -9,7 +9,7 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/utils/sanitize
-                #:sanitize-error-message #:transport-safe-json)
+                #:sanitize-error-message #:encode-json-line)
   (:import-from #:cl-mcp/src/utils/nesting #:json-too-deep-p)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:leaked-threads
@@ -83,11 +83,36 @@ that returns a hash-table to be used as the JSON-RPC result."
   (setf (gethash method-name (worker-server-methods server)) handler)
   (log-event :debug "worker.method.registered" "method" method-name))
 
-(defun %encode-response (obj)
-  "Encode OBJ as a single-line JSON string through TRANSPORT-SAFE-JSON: a lone
-surrogate written raw killed the worker, and on yason 0.7.x a raw control
-character broke the line for the parent."
-  (transport-safe-json (with-output-to-string (s) (yason:encode obj s))))
+(defun %oversized-response (obj length limit)
+  "Return OBJ, a response, as an error answer saying its JSON is LENGTH
+characters, over LIMIT: its id and every other field kept, its result or error
+replaced."
+  (let ((ht (make-hash-table :test 'equal))
+        (err (make-hash-table :test 'equal)))
+    (maphash (lambda (key value)
+               (unless (member key '("result" "error") :test #'equal)
+                 (setf (gethash key ht) value)))
+             obj)
+    (setf (gethash "code" err) -32603
+          (gethash "message" err)
+          (format nil "The worker's answer is ~:D characters of JSON, over the ~:D a ~
+line between the worker and the server may hold; ask for a smaller result (a lower ~
+print_length, print_level or max_chars, or fewer items)."
+                  length limit)
+          (gethash "error" ht) err)
+    ht))
+
+(defun %encode-response (obj &optional (limit +max-json-line-bytes+))
+  "Encode OBJ as a single-line JSON string by ENCODE-JSON-LINE: a lone surrogate
+written raw killed the worker, and on yason 0.7.x a raw control character broke
+the line for the parent.  A line over LIMIT characters, which the parent would
+refuse in the middle of reading it and so take the worker for broken, becomes an
+error answer saying so (#344): escaping makes a control character six, so a
+result can outgrow the limit in encoding alone."
+  (let ((line (encode-json-line obj)))
+    (if (and (hash-table-p obj) (> (length line) limit))
+        (encode-json-line (%oversized-response obj (length line) limit))
+        line)))
 
 (defparameter *retire-action*
   (lambda (leaked)
