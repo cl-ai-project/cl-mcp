@@ -200,9 +200,12 @@ the yason that a user's own code runs in the worker as it was.  It is safe
 because yason writes no other character below U+0020 and no surrogate outside a
 JSON string, where an escape means the same character.
 
-One scan when there is nothing to rewrite; otherwise the text before the first
-such character is copied whole and only the rest is gone through."
-  (let ((first (position-if #'%unsendable-json-char-p json)))
+One scan when there is nothing to rewrite, with the predicate open-coded (a
+POSITION-IF would call it for every character); otherwise the text before the
+first such character is copied whole and only the rest is gone through."
+  (let ((first (loop for index from 0 below (length json)
+                     when (%unsendable-json-char-p (char json index))
+                       return index)))
     (if (null first)
         json
         (with-output-to-string (out)

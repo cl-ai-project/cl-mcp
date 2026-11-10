@@ -3,6 +3,8 @@
 (defpackage #:cl-mcp/src/run
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
+  (:import-from #:cl-mcp/src/utils/sanitize #:encode-json-line)
+  (:import-from #:cl-mcp/src/tools/helpers #:rpc-error)
   (:import-from #:cl-mcp/src/protocol #:process-json-line #:make-state)
   (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/tools/registry
@@ -170,7 +172,8 @@ call."
                            (handler-case
                                (progn
                                  (write-line
-                                  "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Request too large\"}}"
+                                  (encode-json-line
+                                   (rpc-error nil -32600 "Request too large"))
                                   out)
                                  (force-output out))
                              (stream-error (e)
