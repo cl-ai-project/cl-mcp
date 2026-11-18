@@ -378,61 +378,62 @@ in the cleanup form regardless of success or failure."
         (parse (gethash "text" (aref (gethash "content" result) 0)))
         (make-ht))))
 
-(deftest repl-handles-isolate-workers-on-one-mcp-session
-  (unless (spawn-available-p)
-    (skip "SBCL launcher unavailable"))
-  (let ((*use-worker-pool* t)
-        (*current-session-id* "repl-isolation-test")
-        (state (make-state))
-        (next-id 0))
-    (unwind-protect
-         (with-pool ()
-           (labels ((call-tool (name args &optional (connection state))
-                      (parse
-                       (process-json-line
-                        (encode-json-line
-                         (make-ht "jsonrpc" "2.0" "id" (incf next-id)
-                                  "method" "tools/call"
-                                  "params" (make-ht "name" name "arguments" args)))
-                        connection)))
-                    (evaluate (code &optional handle)
-                      (gethash "result"
-                               (call-tool "repl-eval"
-                                          (if handle
-                                              (make-ht "code" code "repl_id" handle)
-                                              (make-ht "code" code)))))
-                    (printed (response)
-                      (gethash "text" (aref (gethash "content" response) 0))))
-             (let* ((left-response (call-tool "repl-open" (make-ht)))
-                    (right-response (call-tool "repl-open" (make-ht)))
-                    (left (gethash "repl_id" (%repl-result-data left-response)))
-                    (right (gethash "repl_id" (%repl-result-data right-response))))
-               (ok (and (stringp left) (stringp right) (not (equal left right)))
-                   "repl-open returns separate handles for the same MCP session")
-               (when (and left right)
-                 (let* ((pid "(sb-posix:getpid)")
-                        (left-pid (printed (evaluate pid left)))
-                        (right-pid (printed (evaluate pid right))))
-                   (ok (not (equal left-pid right-pid)) "the handles use different OS processes")
-                   (ok (not (equal left-pid (printed (evaluate pid))))
-                       "the default REPL uses a different OS process")
+(defun %call-repl-tool (state name arguments)
+  (parse
+   (process-json-line
+    (encode-json-line
+     (make-ht "jsonrpc" "2.0" "id" 1 "method" "tools/call"
+              "params" (make-ht "name" name "arguments" arguments)))
+    state)))
+
+(deftest agent-ids-isolate-workers-within-and-across-mcp-sessions
+  (if (not (spawn-available-p))
+      (skip "SBCL launcher unavailable")
+      (let ((*use-worker-pool* t)
+            (*current-session-id* "repl-isolation-test")
+            (state (make-state))
+            (other-state (make-state))
+            (left "review")
+            (right "implementation")
+            (pid "(sb-posix:getpid)"))
+        (unwind-protect
+             (with-pool ()
+               (labels ((evaluate (code &optional agent-id (connection state))
+                          (%call-repl-tool connection "repl-eval"
+                                           (if agent-id
+                                               (make-ht "code" code "agent_id" agent-id)
+                                               (make-ht "code" code))))
+                        (printed (reply)
+                          (gethash "text" (aref (gethash "content" (gethash "result" reply)) 0)))
+                        (other-pid ()
+                          (let ((*current-session-id* "repl-isolation-other"))
+                            (printed (evaluate pid left other-state))))
+                        (close-agent (agent-id)
+                          (let ((reply (%call-repl-tool state "repl-close"
+                                                       (make-ht "agent_id" agent-id))))
+                            (gethash "closed" (%repl-result-data reply)))))
+                 (let* ((left-pid (printed (evaluate pid left)))
+                        (right-pid (printed (evaluate pid right)))
+                        (pids (list left-pid right-pid (printed (evaluate pid)) (other-pid))))
+                   (ok (= 4 (length (remove-duplicates pids :test #'equal)))
+                       "agents on one session, the default, and the same agent elsewhere differ")
+                   (ok (equal left-pid (printed (evaluate pid left))) "one agent stays on one REPL")
                    (evaluate "(defparameter cl-user::*isolated-repl-value* 42)" left)
-                   (ok (search "42" (printed (evaluate "cl-user::*isolated-repl-value*" left))))
-                   (let ((code "(boundp 'cl-user::*isolated-repl-value*)"))
-                     (ok (string-equal "nil" (printed (evaluate code right)))))
-                   (ok (gethash "error"
-                                (call-tool "repl-eval" (make-ht "code" pid "repl_id" left)
-                                           (make-state)))
-                       "another MCP session cannot use the handle")
-                   (let* ((reply (call-tool "repl-close" (make-ht "repl_id" left)))
-                          (closed (%repl-result-data reply)))
-                     (ok (gethash "closed" closed))
-                     (ok (gethash "error"
-                                  (call-tool "repl-eval" (make-ht "code" pid "repl_id" left)))
-                         "a closed handle is refused")
-                     (ok (equal right-pid (printed (evaluate pid right)))
-                         "closing one handle preserves the other process")))))))
-      (cl-mcp/src/tools/repl-session:close-repl-sessions state))))
+                   (ok (equal "42" (printed (evaluate "cl-user::*isolated-repl-value*" left))))
+                   (let ((boundp-code "(boundp 'cl-user::*isolated-repl-value*)"))
+                     (ok (string-equal "nil" (printed (evaluate boundp-code right)))))
+                   (ok (close-agent left))
+                   (ok (close-agent left) "closing is idempotent in the parent MCP session")
+                   (ok (gethash "error" (evaluate pid left)) "a closed agent cannot reopen")
+                   (ok (close-agent "finished-before-first-call"))
+                   (ok (gethash "error" (evaluate pid "finished-before-first-call"))
+                       "a late first call cannot revive a closed agent")
+                   (ok (equal right-pid (printed (evaluate pid right)))
+                       "closing one agent preserves its sibling")
+                   (ok (equal (fourth pids) (other-pid))
+                       "closing one agent preserves the same ID in another MCP session"))))
+          (cl-mcp/src/tools/repl-session:close-repl-sessions state)
+          (cl-mcp/src/tools/repl-session:close-repl-sessions other-state)))))
 
 (deftest dedicated-repl-keeps-singleton-runtime-on-the-default-worker
   (if (not (spawn-available-p))
@@ -442,32 +443,27 @@ in the cleanup form regardless of success or failure."
             (state (make-state)))
         (with-pool ()
           (let ((cl-mcp/src/pool::*worker-init-config* '(:system "cl-mcp")))
-            (flet ((call-tool (name args)
-                     (parse
-                      (process-json-line
-                       (encode-json-line
-                        (make-ht "jsonrpc" "2.0" "id" 1 "method" "tools/call"
-                                 "params" (make-ht "name" name "arguments" args)))
-                       state))))
-              (unwind-protect
-                   (let* ((opened (call-tool "repl-open" (make-ht)))
-                          (handle (gethash "repl_id" (%repl-result-data opened))))
-                     (ok (stringp handle))
-                     (ok (null (gethash "init_owner_session" (cl-mcp/src/pool:pool-status-info)))
-                         "opening a dedicated REPL leaves singleton ownership available")
-                     (let ((cl-mcp/src/pool::*runtime-init-disabled* t)
-                           (cl-mcp/src/pool::*runtime-init-failures* 1))
-                       (let* ((reply (call-tool "pool-kill-worker" (make-ht "repl_id" handle)))
-                              (result (gethash "result" reply)))
-                         (ok (and result (gethash "killed" result))))
-                       (ok cl-mcp/src/pool::*runtime-init-disabled*
-                           "killing a dedicated worker does not re-arm singleton init")
-                       (ok (= 1 cl-mcp/src/pool::*runtime-init-failures*)))
-                     (get-or-assign-worker *current-session-id*)
-                     (ok (equal *current-session-id*
-                                (gethash "init_owner_session" (cl-mcp/src/pool:pool-status-info)))
-                         "the first default REPL owns the singleton runtime"))
-                (cl-mcp/src/tools/repl-session:close-repl-sessions state))))))))
+            (unwind-protect
+                 (progn
+                   (ok (gethash "result" (%call-repl-tool state "repl-eval"
+                                                         (make-ht "agent_id" "review"
+                                                                  "code" "42"))))
+                   (ok (null (gethash "init_owner_session" (cl-mcp/src/pool:pool-status-info)))
+                       "a dedicated REPL leaves singleton ownership available")
+                   (let ((cl-mcp/src/pool::*runtime-init-disabled* t)
+                         (cl-mcp/src/pool::*runtime-init-failures* 1))
+                     (let* ((reply (%call-repl-tool state "pool-kill-worker"
+                                                    (make-ht "agent_id" "review")))
+                            (result (gethash "result" reply)))
+                       (ok (and result (gethash "killed" result))))
+                     (ok cl-mcp/src/pool::*runtime-init-disabled*
+                         "killing a dedicated worker does not re-arm singleton init")
+                     (ok (= 1 cl-mcp/src/pool::*runtime-init-failures*)))
+                   (get-or-assign-worker *current-session-id*)
+                   (ok (equal *current-session-id*
+                              (gethash "init_owner_session" (cl-mcp/src/pool:pool-status-info)))
+                       "the first default REPL owns the singleton runtime"))
+              (cl-mcp/src/tools/repl-session:close-repl-sessions state)))))))
 
 (deftest repl-without-a-root-keeps-that-state-after-parent-changes-and-worker-replacement
   (unless (spawn-available-p)
@@ -476,36 +472,117 @@ in the cleanup form regardless of success or failure."
         (cl-mcp/src/project-root:*project-root* nil)
         (*use-worker-pool* t)
         (*current-session-id* "repl-root-test")
-        (state (make-state)))
+        (state (make-state))
+        (eval-args (make-ht "agent_id" "review" "code"
+                            "(null cl-mcp/src/project-root:*project-root*)")))
     (with-pool ()
-      (flet ((call-tool (name args)
-               (parse
-                (process-json-line
-                 (encode-json-line
-                  (make-ht "jsonrpc" "2.0" "id" 1 "method" "tools/call"
-                           "params" (make-ht "name" name "arguments" args)))
-                 state))))
-        (unwind-protect
-             (let* ((open (%repl-result-data (call-tool "repl-open" (make-ht))))
-                    (handle (gethash "repl_id" open))
-                    (eval-args (make-ht "repl_id" handle "code"
-                                       "(null cl-mcp/src/project-root:*project-root*)")))
-               (call-tool "fs-set-project-root" (make-ht "path" (uiop:native-namestring root)))
-               (ok (gethash "result" (call-tool "fs-get-project-info" (make-ht)))
-                   "the parent has a project root")
-               (ok (gethash "error"
-                            (call-tool "fs-get-project-info" (make-ht "repl_id" handle)))
-                   "the dedicated REPL still has no project root on the server")
-               (let* ((reply (call-tool "pool-kill-worker"
-                                        (make-ht "repl_id" handle "reset" t)))
-                      (reset (gethash "result" reply)))
-                 (ok (and reset (gethash "killed" reset) (gethash "reset" reset))
-                     "the dedicated worker was killed and replaced"))
-               (let* ((response (gethash "result" (call-tool "repl-eval" eval-args)))
-                      (text (gethash "text" (aref (gethash "content" response) 0))))
-                 (ok (string-equal "t" text) "the replacement worker also has no root")))
-          (cl-mcp/src/tools/repl-session:close-repl-sessions state)
-          (cl-mcp/src/project-root:forget-session-project-root *current-session-id*))))))
+      (unwind-protect
+           (progn
+             (ok (gethash "result" (%call-repl-tool state "repl-eval" eval-args))
+                 "the dedicated worker was started before the parent's root change")
+             (%call-repl-tool state "fs-set-project-root"
+                              (make-ht "path" (uiop:native-namestring root)))
+             (ok (gethash "result" (%call-repl-tool state "fs-get-project-info" (make-ht)))
+                 "the parent has a project root")
+             (ok (gethash "error" (%call-repl-tool state "fs-get-project-info"
+                                                  (make-ht "agent_id" "review")))
+                 "the dedicated REPL still has no project root on the server")
+             (let* ((reply (%call-repl-tool state "pool-kill-worker"
+                                            (make-ht "agent_id" "review" "reset" t)))
+                    (reset (gethash "result" reply)))
+               (ok (and reset (gethash "killed" reset) (gethash "reset" reset))
+                   "the dedicated worker was killed and replaced"))
+             (let* ((response (gethash "result" (%call-repl-tool state "repl-eval" eval-args)))
+                    (text (gethash "text" (aref (gethash "content" response) 0))))
+               (ok (string-equal "t" text) "the replacement worker also has no root")))
+        (cl-mcp/src/tools/repl-session:close-repl-sessions state)
+        (cl-mcp/src/project-root:forget-session-project-root *current-session-id*)))))
+
+(deftest a-root-change-during-first-agent-spawn-reaches-the-worker
+  (if (not (spawn-available-p))
+      (skip "SBCL launcher unavailable")
+      (let ((state (make-state))
+            (agent-id "review")
+            (root (asdf:system-source-directory "cl-mcp"))
+            (worker-booted (sb-thread:make-semaphore))
+            (publish-worker (sb-thread:make-semaphore))
+            (root-set (sb-thread:make-semaphore))
+            (eval-thread nil)
+            (setter-thread nil)
+            (*use-worker-pool* t)
+            (*current-session-id* "agent-spawn-root-test"))
+        (with-pool ()
+          (unwind-protect
+               (flet ((call-agent (tool args)
+                        (let ((*use-worker-pool* t)
+                              (*current-session-id* "agent-spawn-root-test")
+                              (cl-mcp/src/project-root:*project-root* nil))
+                          (setf (gethash "agent_id" args) agent-id)
+                          (%call-repl-tool state tool args))))
+                 (setf eval-thread
+                       (bordeaux-threads:make-thread
+                        (lambda ()
+                          (let ((cl-mcp/src/pool::*spawn-worker-function*
+                                  (lambda ()
+                                    (let ((worker (spawn-worker)))
+                                      (sb-thread:signal-semaphore worker-booted)
+                                      (sb-thread:wait-on-semaphore publish-worker :timeout 15)
+                                      worker))))
+                            (call-agent "repl-eval" (make-ht "code" "42"))))))
+                 (ok (sb-thread:wait-on-semaphore worker-booted :timeout 10))
+                 (setf setter-thread
+                       (bordeaux-threads:make-thread
+                        (lambda ()
+                          (prog1 (call-agent "fs-set-project-root"
+                                             (make-ht "path" (uiop:native-namestring root)))
+                            (sb-thread:signal-semaphore root-set)))))
+                 (ok (not (sb-thread:wait-on-semaphore root-set :timeout 0.3))
+                     "the root change waits for the worker that is starting")
+                 (sb-thread:signal-semaphore publish-worker)
+                 (ok (gethash "result" (bordeaux-threads:join-thread setter-thread)))
+                 (ok (gethash "result" (bordeaux-threads:join-thread eval-thread)))
+                 (let* ((code (format nil "(equal cl-mcp/src/project-root:*project-root* ~S)"
+                                      root))
+                        (response (call-agent "repl-eval" (make-ht "code" code)))
+                        (content (gethash "content" (gethash "result" response))))
+                   (ok (string-equal "t" (gethash "text" (aref content 0)))
+                       "the first worker has the root once the root change returns")))
+            (sb-thread:signal-semaphore publish-worker)
+            (dolist (thread (list eval-thread setter-thread))
+              (when (and thread (bordeaux-threads:thread-alive-p thread))
+                (ignore-errors (bordeaux-threads:join-thread thread))))
+            (cl-mcp/src/tools/repl-session:close-repl-sessions state))))))
+
+(deftest a-delayed-agent-root-update-sends-the-latest-root
+  (if (not (spawn-available-p))
+      (skip "SBCL launcher unavailable")
+      (let* ((state (make-state))
+             (agent-id "review")
+             (root (asdf:system-source-directory "cl-mcp"))
+             (latest-root (merge-pathnames #P"tests/" root))
+             (*use-worker-pool* t)
+             (*current-session-id* "agent-delayed-root-test"))
+        (with-pool ()
+          (unwind-protect
+               (flet ((call-agent (tool args)
+                        (setf (gethash "agent_id" args) agent-id)
+                        (%call-repl-tool state tool args)))
+                 (call-agent "fs-set-project-root" (make-ht "path" (uiop:native-namestring root)))
+                 (ok (gethash "result" (call-agent "repl-eval" (make-ht "code" "42"))))
+                 (call-agent "fs-set-project-root"
+                             (make-ht "path" (uiop:native-namestring latest-root)))
+                 (let ((internal-id
+                         (cl-mcp/src/tools/repl-session::repl-session-id
+                          (gethash agent-id (cl-mcp/src/state:repl-sessions state)))))
+                   ;; Model an older setter getting the stream after the newer setter.
+                   (cl-mcp/src/pool:send-root-to-session-worker internal-id root))
+                 (let* ((code (format nil "(equal cl-mcp/src/project-root:*project-root* ~S)"
+                                      latest-root))
+                        (reply (call-agent "repl-eval" (make-ht "code" code)))
+                        (content (gethash "content" (gethash "result" reply))))
+                   (ok (string-equal "t" (gethash "text" (aref content 0)))
+                       "an older RPC cannot roll the agent worker back to its previous root")))
+            (cl-mcp/src/tools/repl-session:close-repl-sessions state))))))
 
 (deftest e2e-fallback-mode-works
   (testing "with *use-worker-pool* nil, tool handlers skip proxy"

@@ -699,7 +699,7 @@ Host header's value, which is 127.0.0.1:PORT otherwise."
             (setf cl-mcp/src/proxy:*use-worker-pool* previous-pool)
             (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))))
 
-(deftest http-cancels-repl-requests-and-releases-handles-on-delete
+(deftest http-cancels-agent-repl-requests-and-releases-workers-on-delete
   (if (not (and (http-port-available-p) (spawn-available-p)))
       (ok t "HTTP or SBCL launcher unavailable")
       (let ((previous-pool cl-mcp/src/proxy:*use-worker-pool*)
@@ -721,69 +721,75 @@ Host header's value, which is 127.0.0.1:PORT otherwise."
                           (parse (nth-value 2
                                    (post (request id "tools/call"
                                                   (make-ht "name" name "arguments" args))
-                                         session)))))
+                                         session))))
+                        (worker-session-id (state agent-id)
+                          (bordeaux-threads:with-lock-held
+                              ((cl-mcp/src/state:repl-sessions-lock state))
+                            (cl-mcp/src/tools/repl-session::repl-session-id
+                             (gethash agent-id (cl-mcp/src/state:repl-sessions state))))))
                  (let* ((headers (nth-value 1 (post (request 1 "initialize" (make-ht)))))
                         (session (%header-value headers "Mcp-Session-Id"))
-                        (left-result (gethash "result" (tool 2 "repl-open" (make-ht) session)))
-                         (right-result (gethash "result" (tool 3 "repl-open" (make-ht) session)))
-                         (left (gethash "repl_id" (gethash "structuredContent" left-result)))
-                         (right (gethash "repl_id" (gethash "structuredContent" right-result)))
-                         (answer nil))
-                    (ok (and (stringp left) (stringp right) (not (equal left right))))
-                    (let* ((text (gethash "text" (aref (gethash "content" left-result) 0)))
-                           (data (parse text)))
-                      (ok (equal left (gethash "repl_id" data))
-                          "structured and text-only clients get the same handle"))
-                   (let ((worker (find-session-worker right)))
-                     (cl-mcp/src/http::delete-session right)
-                     (ok (and worker (eq worker (find-session-worker right)))
+                        (state (cl-mcp/src/http::http-session-state (get-session session)))
+                        (left "review")
+                        (right "implementation")
+                        (answer nil))
+                   (ok (gethash "result" (tool 2 "repl-eval"
+                                              (make-ht "agent_id" right "code" "42") session)))
+                   (let* ((right-id (worker-session-id state right))
+                          (worker (find-session-worker right-id)))
+                     (cl-mcp/src/http::delete-session right-id)
+                     (ok (and worker (eq worker (find-session-worker right-id)))
                          "an unknown HTTP session cannot release a dedicated worker")
-                     (ok (nth-value 1 (cl-mcp/src/project-root:session-project-root right))
-                         "an unknown HTTP session cannot erase a dedicated REPL's root"))
-                   (setf runner
-                         (bordeaux-threads:make-thread
+                     (ok (nth-value 1 (cl-mcp/src/project-root:session-project-root right-id))
+                         "an unknown HTTP session cannot erase a dedicated REPL's root")
+                     (setf runner
+                           (bordeaux-threads:make-thread
+                            (lambda ()
+                              (setf answer (tool 3 "repl-eval"
+                                                 (make-ht "agent_id" left "code" "(sleep 30)")
+                                                 session)))
+                            :name "http-test-dedicated-repl"))
+                     (ok (cl-mcp/src/utils/deadline:wait-until
                           (lambda ()
-                            (setf answer (tool 4 "repl-eval"
-                                               (make-ht "repl_id" left "code" "(sleep 30)")
-                                               session)))
-                          :name "http-test-dedicated-repl"))
-                   (ok (cl-mcp/src/utils/deadline:wait-until
-                        (lambda ()
-                          (let ((record (find-request session 4)))
-                            (and record (eq :executing (request-phase record)))))
-                        :timeout 5)
-                       "the dedicated worker's request is tracked under the HTTP session")
-                   (let* ((closed (tool 5 "repl-close" (make-ht "repl_id" left) session))
-                          (result (gethash "result" closed))
-                          (data (and result (gethash "structuredContent" result))))
-                     (ok (and data (gethash "closed" data)))
-                     (ok (find-session-worker left) "close preserves the admitted call's worker"))
-                   (let* ((refused (tool 6 "repl-eval" (make-ht "repl_id" left "code" "nil")
-                                        session))
-                          (result (gethash "result" refused)))
-                     (ok (and result (gethash "isError" result))
-                         "close immediately refuses new calls"))
-                   (post (make-ht "jsonrpc" "2.0" "method" "notifications/cancelled"
-                                  "params" (make-ht "requestId" 4))
-                         session)
-                   (ok (cl-mcp/src/utils/deadline:wait-until
-                        (lambda () (not (bordeaux-threads:thread-alive-p runner))) :timeout 5)
-                       "cancelling by request ID stops the dedicated worker")
-                   (let ((payload (and answer (gethash "result" answer))))
-                     (ok (and payload (gethash "isError" payload))
-                         "the cancelled request returns a tool error")
-                     (when payload
-                       (ok (search "cancelled"
-                                   (gethash "text" (aref (gethash "content" payload) 0))))))
-                   (ok (null (find-session-worker left)) "closing releases the worker on exit")
-                   (ok (not (nth-value 1 (cl-mcp/src/project-root:session-project-root left)))
-                       "closing removes the REPL's root on exit")
-                   (ok (find-session-worker right) "the sibling worker is still assigned")
-                   (ok (= 204 (send-http-request
-                               port "DELETE" "/mcp"
-                               :headers (list (cons "Mcp-Session-Id" session)))))
-                   (ok (null (find-session-worker right))
-                       "ending the HTTP session releases its dedicated workers"))))
+                            (let ((record (find-request session 3)))
+                              (and record (eq :executing (request-phase record)))))
+                          :timeout 5)
+                         "the first call is tracked under the parent MCP session")
+                     (let* ((left-id (worker-session-id state left))
+                            (closed (tool 4 "repl-close" (make-ht "agent_id" left) session))
+                            (result (gethash "result" closed))
+                            (data (and result (gethash "structuredContent" result))))
+                       (ok (and data (gethash "closed" data)))
+                       (ok (find-session-worker left-id)
+                           "close preserves the admitted call's worker")
+                       (let* ((refused (tool 5 "repl-eval" (make-ht "agent_id" left "code" "nil")
+                                            session))
+                              (result (gethash "result" refused)))
+                         (ok (and result (gethash "isError" result))
+                             "close immediately refuses new calls"))
+                       (post (make-ht "jsonrpc" "2.0" "method" "notifications/cancelled"
+                                      "params" (make-ht "requestId" 3))
+                             session)
+                       (ok (cl-mcp/src/utils/deadline:wait-until
+                            (lambda () (not (bordeaux-threads:thread-alive-p runner))) :timeout 5)
+                           "cancelling by request ID stops the dedicated worker")
+                       (let ((payload (and answer (gethash "result" answer))))
+                         (ok (and payload (gethash "isError" payload))
+                             "the cancelled request returns a tool error")
+                         (when payload
+                           (ok (search "cancelled"
+                                       (gethash "text" (aref (gethash "content" payload) 0))))))
+                       (ok (null (find-session-worker left-id))
+                           "closing releases the worker on exit")
+                       (ok (not (nth-value 1 (cl-mcp/src/project-root:session-project-root
+                                             left-id)))
+                           "closing removes the REPL's root on exit"))
+                     (ok (find-session-worker right-id) "the sibling worker is still assigned")
+                     (ok (= 204 (send-http-request
+                                 port "DELETE" "/mcp"
+                                 :headers (list (cons "Mcp-Session-Id" session)))))
+                     (ok (null (find-session-worker right-id))
+                         "ending the HTTP session releases its dedicated workers")))))
           (when (and runner (bordeaux-threads:thread-alive-p runner))
             (ignore-errors (bordeaux-threads:destroy-thread runner)))
           (stop-http-server)

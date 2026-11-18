@@ -303,3 +303,19 @@ scratch directories %SCRATCH-DIR made."
               (ok (every (lambda (root) (equal root a)) seen)
                   (format nil "every spawn for the session saw its root; saw ~S"
                           seen)))))))))
+
+(deftest an-agents-first-worker-starts-with-its-root-before-publication
+  (let ((id (cl-mcp/src/state:make-dedicated-repl-id))
+        (root (%scratch-dir "agent-first-root"))
+        (spawn-root nil))
+    (with-isolated-roots (id)
+      (with-fake-pool (ledger :warmup 1 :max-size 1)
+        (run-pending-work ledger)
+        (setf cl-mcp/src/pool::*spawn-worker-function*
+              (lambda ()
+                (setf spawn-root *project-root*)
+                (fake-spawn ledger)))
+        (set-project-root root :session-id id)
+        (ok (get-or-assign-worker id))
+        (ok (equal spawn-root root)
+            "a dedicated worker starts with its recorded root even when a standby is available")))))

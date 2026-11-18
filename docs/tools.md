@@ -113,24 +113,27 @@ issued them; see `inspect-object`.
 
 ## Dedicated REPLs for subagents
 
-With the worker pool enabled, each subagent sharing an MCP session can call
-`repl-open` with `{}` to allocate a dedicated SBCL process. The result includes
-a `repl_id`. Pass it in `arguments` on subsequent tool calls, for example:
+With the worker pool enabled, the harness can pass its own stable `agent_id`
+in tool `arguments` for a subagent sharing an MCP session. Use a non-empty
+string that identifies one subagent instance within the session. cl-mcp creates
+the REPL on first use and starts a dedicated SBCL process when a call needs one.
+For example:
 
 ```json
-{"name":"repl-eval","arguments":{"repl_id":"<id from repl-open>","code":"(+ 1 2)"}}
+{"name":"repl-eval","arguments":{"agent_id":"review-2","code":"(+ 1 2)"}}
 ```
 
-Use the same `repl_id` for `load-system`, `run-tests`, `inspect-object`, and
-other calls that need that Lisp image. The REPL starts with the MCP session's
-project root. `fs-set-project-root` with the handle changes that REPL's root.
-Calls without `repl_id` use the default REPL for the MCP session.
+Use the same `agent_id` for calls that share Lisp state, including `load-system`,
+`run-tests`, and `inspect-object`. Each MCP session has its own agent IDs.
+The REPL inherits the session's project root at first use. `fs-set-project-root`
+with `agent_id` changes that REPL's root. Omit `agent_id` to use the default REPL.
 
-Call `repl-close` with `{"repl_id":"<id from repl-open>"}` when finished.
-The handle stops accepting new calls immediately and its worker is freed once
-admitted calls finish. Handles close automatically when their MCP session ends
-and can only be used in that session. Dedicated REPLs count against
-`CL_MCP_MAX_POOL_SIZE`. The processes can still access the same project files.
+Dedicated REPLs close automatically when their MCP session ends. To release a
+worker earlier, call `repl-close` with `{"agent_id":"review-2"}` when the agent
+is finished. That call can be repeated. Further calls with that ID are
+refused in the same MCP session, and previously admitted calls can finish before
+the worker is released. Dedicated workers count against `CL_MCP_MAX_POOL_SIZE`.
+The processes can still access the same project files.
 If a worker init hook is configured, its singleton runtime starts in a default
 REPL. Open and close dedicated REPLs independently of that app worker.
 

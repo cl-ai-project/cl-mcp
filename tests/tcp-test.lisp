@@ -529,7 +529,7 @@ and SB-EXT:TIMEOUT are not."))
             (ignore-errors (usocket:socket-close client))
             (ignore-errors (usocket:socket-close listener)))))))
 
-(deftest tcp-legacy-client-routes-two-repls-using-only-mcp-content
+(deftest tcp-legacy-client-routes-agents-using-only-mcp-content
   (when (and (socket-available-p) (spawn-available-p))
     (let ((server-thread
             (%call-with-one-shot-server
@@ -550,12 +550,9 @@ and SB-EXT:TIMEOUT are not."))
                                (tool (name &rest args)
                                  (request "tools/call"
                                           (make-ht "name" name "arguments" (apply #'make-ht args))))
-                               (text (response)
-                                 (gethash "text"
-                                          (aref (gethash "content" (gethash "result" response)) 0)))
-                               (payload (response)
-                                 ;; Legacy client consumes only the standard TextContent field.
-                                 (ignore-errors (parse (text response)))))
+                               (content-text (response)
+                                 (let ((result (gethash "result" response)))
+                                   (gethash "text" (aref (gethash "content" result) 0)))))
                         (let* ((initialized (gethash "result"
                                                     (request "initialize"
                                                              (make-ht "protocolVersion"
@@ -563,27 +560,24 @@ and SB-EXT:TIMEOUT are not."))
                                (tools (gethash "tools"
                                                (gethash "result" (request "tools/list" (make-ht)))))
                                (eval-tool (find "repl-eval" tools :test #'equal
-                                                :key (lambda (d) (gethash "name" d))))
+                                                :key (lambda (tool) (gethash "name" tool))))
                                (props (gethash "properties" (gethash "inputSchema" eval-tool)))
-                               (left-result (tool "repl-open"))
-                               (right-result (tool "repl-open"))
-                               (left (gethash "repl_id" (or (payload left-result) (make-ht))))
-                               (right (gethash "repl_id" (or (payload right-result) (make-ht)))))
+                               (left "review")
+                               (right "implementation"))
                           (ok (equal "2024-11-05" (gethash "protocolVersion" initialized)))
-                          (ok (equal "string" (gethash "type" (gethash "repl_id" props))))
-                          (ok (not (gethash "structuredContent" (gethash "result" left-result))))
-                          (ok (and (stringp left) (stringp right) (not (equal left right))))
-                          (when (and left right)
-                            (tool "repl-eval" "repl_id" left
-                                  "code" "(defparameter *wire-value* 11)")
-                            (tool "repl-eval" "repl_id" right
-                                  "code" "(defparameter *wire-value* 22)")
-                            (ok (equal "11" (text (tool "repl-eval" "repl_id" left
-                                                       "code" "*wire-value*"))))
-                            (ok (gethash "closed" (payload (tool "repl-close" "repl_id" left))))
-                            (ok (gethash "error" (tool "repl-eval" "repl_id" left "code" "nil")))
-                            (ok (equal "22" (text (tool "repl-eval" "repl_id" right
-                                                       "code" "*wire-value*")))))))
+                          (ok (equal "string" (gethash "type" (gethash "agent_id" props))))
+                          (tool "repl-eval" "agent_id" left "code" "(defparameter *wire-value* 11)")
+                          (tool "repl-eval" "agent_id" right
+                                "code" "(defparameter *wire-value* 22)")
+                          (ok (equal "11" (content-text (tool "repl-eval" "agent_id" left
+                                                             "code" "*wire-value*"))))
+                          (let ((close-reply (tool "repl-close" "agent_id" left)))
+                            (ok (not (gethash "structuredContent"
+                                              (gethash "result" close-reply))))
+                            (ok (gethash "closed" (parse (content-text close-reply)))))
+                          (ok (gethash "error" (tool "repl-eval" "agent_id" left "code" "nil")))
+                          (ok (equal "22" (content-text (tool "repl-eval" "agent_id" right
+                                                             "code" "*wire-value*"))))))
                    (usocket:socket-close socket))))
              :worker-pool t)))
       (ok (%thread-ends-within-p server-thread 10) "EOF releases REPL workers and the listener"))))

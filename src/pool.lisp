@@ -1557,12 +1557,14 @@ slip through.
 
 Signals an error if the pool is shutting down or if the worker
 cannot be created."
-  (let ((entry nil) (need-spawn nil) (assigned-from-standby nil)
-        (old-worker-to-kill nil) (standbys-to-kill '()) (spawn-generation nil)
-        (capacity-exceeded nil) (circuit-breaker-tripped nil)
-        (rootless-session-p
-          (multiple-value-bind (root recorded-p) (session-project-root session-id)
-            (and recorded-p (null root)))))
+  (let* ((entry nil) (need-spawn nil) (assigned-from-standby nil)
+         (old-worker-to-kill nil) (standbys-to-kill '()) (spawn-generation nil)
+         (capacity-exceeded nil) (circuit-breaker-tripped nil)
+         (dedicated-p (dedicated-repl-id-p session-id))
+         (fresh-worker-p
+           (or dedicated-p
+               (multiple-value-bind (root recorded-p) (session-project-root session-id)
+                 (and recorded-p (null root))))))
     (bordeaux-threads:with-lock-held (*pool-lock*)
       (unless *pool-running*
         (error 'pool-shutting-down))
@@ -1625,16 +1627,17 @@ cannot be created."
       ;; Skip when circuit breaker tripped — the error is raised after
       ;; the lock, but we must not leave a placeholder that nobody resolves.
       (when (and (null entry) (not circuit-breaker-tripped))
-        ;; An explicitly unset root requires a fresh worker: a standby may
-        ;; already have a root (including its ASDF registry and FASL cache).
+        ;; Dedicated workers start under their agent's root before concurrent
+        ;; calls can acquire them. An explicitly unset root also needs a fresh
+        ;; worker, since a standby may already have a root and an ASDF registry.
         ;; If the standbys fill the pool, reclaim a slot for that spawn.
-        (when (and rootless-session-p *standby-workers*
+        (when (and fresh-worker-p *standby-workers*
                    (>= (%effective-pool-size) *max-pool-size*))
           (let ((standby (pop *standby-workers*)))
             (push (%begin-ending standby) standbys-to-kill)
             (setf *all-workers* (remove standby *all-workers*))))
         ;; Skip standbys that died since the last health check.
-        (loop while (and (not rootless-session-p) *standby-workers*)
+        (loop while (and (not fresh-worker-p) *standby-workers*)
               for w = (pop *standby-workers*)
               do (cond
                    ;; Its state as well as its process.  An RPC that timed out
@@ -1713,7 +1716,9 @@ cannot be created."
       ;; stream/connection error.  If this happens, the worker's state
       ;; becomes :crashed and its socket is closed — the worker is
       ;; unusable.  We MUST detect this and not return a corrupted worker.
-      (when (and (or assigned-from-standby need-spawn) *project-root*)
+      ;; A dedicated worker started under its recorded root. Sending the
+      ;; caller's binding now could overwrite a concurrent root change.
+      (when (and (not dedicated-p) (or assigned-from-standby need-spawn) *project-root*)
         (ignore-errors
           (send-root-to-session-worker session-id *project-root*))
         ;; Check if send-root corrupted the worker.  If so, clean up
@@ -1915,33 +1920,39 @@ individual workers are logged but do not propagate."
 
 (defun send-root-to-session-worker (session-id path)
   "Send worker/set-project-root RPC to the worker bound to SESSION-ID.
-Only targets the calling session's worker, preserving per-session
-isolation (unlike broadcast-root-to-workers which updates all workers).
-No-op when SESSION-ID is NIL or no worker is bound to the session.
-Failures are logged but do not propagate."
+Wait for a dedicated worker whose spawn is already in flight. With no
+worker or pending dedicated spawn, the worker will read the session's
+recorded root when it starts. Failures are logged."
   (when session-id
-    (let ((worker nil))
-      (bt:with-lock-held (*pool-lock*)
-        (let ((entry (gethash session-id *affinity-map*)))
-          (when (and entry (typep entry 'worker)
-                     (eq :bound (worker-state entry)))
-            (setf worker entry))))
-      (when worker
-        ;; NATIVE-NAMESTRING: see BROADCAST-ROOT-TO-WORKERS above -- the
-        ;; worker parses this natively, so it must not be reader-escaped.
-        (let ((path-string (if (pathnamep path)
-                               (uiop:native-namestring path)
-                               path)))
-          (let ((params (make-hash-table :test 'equal)))
-            (setf (gethash "path" params) path-string)
-            (handler-case
-                (worker-rpc worker "worker/set-project-root" params
-                            :timeout 5)
-              (error (e)
-                (log-event :warn "pool.send-root.failed"
-                           "session" session-id
-                           "worker_id" (worker-id worker)
-                           "error" (princ-to-string e))))))))))
+    (let ((entry (bt:with-lock-held (*pool-lock*) (gethash session-id *affinity-map*)))
+          (worker nil))
+      (handler-case
+          (progn
+            (setf worker
+                  (typecase entry
+                    (worker (when (eq :bound (worker-state entry)) entry))
+                    (worker-placeholder
+                     (when (dedicated-repl-id-p session-id)
+                       (%wait-for-placeholder entry)))))
+            (when worker
+              (let ((params (make-hash-table :test 'equal)))
+                (flet ((set-path (root)
+                         ;; The worker parses the pathname natively.
+                         (setf (gethash "path" params)
+                               (if (pathnamep root) (uiop:native-namestring root) root))))
+                  (set-path path)
+                  (worker-rpc worker "worker/set-project-root" params :timeout 5
+                              :before-send
+                              (when (dedicated-repl-id-p session-id)
+                                (lambda ()
+                                  ;; Root writes can reach the stream in a different order.
+                                  (set-path (or (session-project-root session-id) path))
+                                  :send)))))))
+        (error (e)
+          (log-event :warn "pool.send-root.failed"
+                     "session" session-id
+                     "worker_id" (and worker (worker-id worker))
+                     "error" (princ-to-string e)))))))
 
 (defun pool-worker-info ()
   "Return a vector of worker info hash-tables suitable for inclusion

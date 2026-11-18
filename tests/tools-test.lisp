@@ -1508,29 +1508,60 @@
             (ok (stringp (gethash "description" desc)))
             (ok (hash-table-p (gethash "inputSchema" desc)))))))))
 
-(deftest tools-discover-dedicated-repl-handles
+(deftest tools-discover-dedicated-repls-by-agent-id
   (let ((*use-worker-pool* t))
     (let* ((response
              (parse (process-json-line
                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")))
-           (descriptors (gethash "tools" (gethash "result" response))))
-      (let* ((eval-tool (%find-tool-descriptor descriptors "repl-eval"))
-             (close-tool (%find-tool-descriptor descriptors "repl-close"))
-             (eval-schema (gethash "inputSchema" eval-tool))
-             (close-schema (gethash "inputSchema" close-tool))
-             (eval-selector (gethash "repl_id" (gethash "properties" eval-schema))))
-        (ok (%find-tool-descriptor descriptors "repl-open"))
-        (ok (equal "string" (gethash "type" eval-selector)))
-        (ok (not (find "repl_id" (gethash "required" eval-schema) :test #'equal)))
-        (ok (find "repl_id" (gethash "required" close-schema) :test #'equal)))))
-  (let ((*use-worker-pool* nil))
-    (let* ((request (concatenate 'string
-                                 "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
-                                 "\"params\":{\"name\":\"repl-open\",\"arguments\":{}}}"))
-           (response (parse (%pjl request)))
-           (error (gethash "error" response)))
-      (ok (= -32602 (gethash "code" error)))
+           (descriptors (gethash "tools" (gethash "result" response)))
+           (eval-tool (%find-tool-descriptor descriptors "repl-eval"))
+           (close-tool (%find-tool-descriptor descriptors "repl-close"))
+           (eval-schema (gethash "inputSchema" eval-tool))
+           (close-schema (gethash "inputSchema" close-tool))
+           (selector (gethash "agent_id" (gethash "properties" eval-schema))))
+      (ok (not (%find-tool-descriptor descriptors "repl-open")))
+      (ok (and selector (equal "string" (gethash "type" selector))))
+      (ok (not (find "agent_id" (gethash "required" eval-schema) :test #'equal)))
+      (ok (find "agent_id" (gethash "required" close-schema) :test #'equal))))
+  (let* ((request (concatenate 'string
+                               "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
+                               "\"params\":{\"name\":\"repl-eval\","
+                               "\"arguments\":{\"code\":\"nil\",\"agent_id\":\"review\"}}}"))
+         (response (parse (%pjl request)))
+         (error (gethash "error" response)))
+    (ok (and error (= -32602 (gethash "code" error))))
+    (when error
       (ok (search "requires the worker pool" (gethash "message" error))))))
+
+(deftest concurrent-first-agent-calls-share-a-repl
+  (let ((state (cl-mcp/src/protocol:make-state))
+        (gate (bordeaux-threads:make-lock "agent routing test"))
+        (threads nil))
+    (flet ((route ()
+             (bordeaux-threads:with-lock-held (gate) nil)
+             (let ((*use-worker-pool* t)
+                   (cl-mcp/src/state:*current-session-id* "agent-routing-test"))
+               (cl-mcp/src/tools/repl-session:call-with-repl-session
+                state 1 "repl-eval" (make-ht "agent_id" "review")
+                (lambda () cl-mcp/src/state:*current-session-id*)))))
+      (unwind-protect
+           (progn
+             (bordeaux-threads:with-lock-held (gate)
+               (loop repeat 2
+                     do (push (bordeaux-threads:make-thread #'route) threads)))
+             (let ((finished (cl-mcp/src/utils/deadline:wait-until
+                              (lambda () (notany #'bordeaux-threads:thread-alive-p threads))
+                              :timeout 5)))
+               (ok finished)
+               (when finished
+                 (destructuring-bind (first second)
+                     (mapcar #'bordeaux-threads:join-thread threads)
+                   (ok (cl-mcp/src/state:dedicated-repl-id-p first))
+                   (ok (equal first second) "concurrent first calls share one REPL ID")))))
+        (dolist (thread threads)
+          (when (bordeaux-threads:thread-alive-p thread)
+            (bordeaux-threads:destroy-thread thread)))
+        (cl-mcp/src/tools/repl-session:close-repl-sessions state)))))
 
 (deftest tools-list-accepts-registered-schema-without-properties
   (let* ((*use-worker-pool* t)
@@ -1548,7 +1579,7 @@
       (ok listed)
       (when listed
         (let* ((properties (gethash "properties" (gethash "inputSchema" listed)))
-               (selector (gethash "repl_id" properties)))
+               (selector (gethash "agent_id" properties)))
           (ok (equal "string" (gethash "type" selector))))))
     (ok (not (nth-value 1 (gethash "properties" schema)))
         "tools/list preserves the registered schema")))
