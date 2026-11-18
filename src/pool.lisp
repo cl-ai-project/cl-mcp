@@ -59,7 +59,8 @@
                 #:discard-all-resets)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*
-                #:session-project-root)
+                #:session-project-root #:with-session-project-root)
+  (:import-from #:cl-mcp/src/state #:dedicated-repl-id-p)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:export #:*worker-pool-warmup*
            #:*max-pool-size*
@@ -712,7 +713,7 @@ worker before the init monitor does."
   (let ((config nil) (granted nil))
     (bt:with-lock-held (*pool-lock*)
       (setf config *worker-init-config*)
-      (when (and config (not *runtime-init-disabled*))
+      (when (and config (not *runtime-init-disabled*) (not (dedicated-repl-id-p session-id)))
         (setf granted (%elect-runtime-owner worker session-id))
         (when granted
           (setf (gethash (worker-id worker) *init-attributable-crashes*) t))))
@@ -806,8 +807,7 @@ in its place, or once the worker is ended."
               ;; root -- the replacement would start under the server default
               ;; while the parent kept editing under the session's (#129).
               (setf new-worker
-                    (let ((*project-root* (or (session-project-root session-id)
-                                              *project-root*)))
+                    (with-session-project-root (:session-id session-id)
                       (%spawn-worker)))
               (setf (worker-state new-worker) :bound)
               (setf (worker-session-id new-worker) session-id)
@@ -1559,7 +1559,10 @@ Signals an error if the pool is shutting down or if the worker
 cannot be created."
   (let ((entry nil) (need-spawn nil) (assigned-from-standby nil)
         (old-worker-to-kill nil) (standbys-to-kill '()) (spawn-generation nil)
-        (capacity-exceeded nil) (circuit-breaker-tripped nil))
+        (capacity-exceeded nil) (circuit-breaker-tripped nil)
+        (rootless-session-p
+          (multiple-value-bind (root recorded-p) (session-project-root session-id)
+            (and recorded-p (null root)))))
     (bordeaux-threads:with-lock-held (*pool-lock*)
       (unless *pool-running*
         (error 'pool-shutting-down))
@@ -1622,9 +1625,16 @@ cannot be created."
       ;; Skip when circuit breaker tripped — the error is raised after
       ;; the lock, but we must not leave a placeholder that nobody resolves.
       (when (and (null entry) (not circuit-breaker-tripped))
-        ;; Try to assign a standby worker, skipping any that have died
-        ;; between the last health check and now.
-        (loop while *standby-workers*
+        ;; An explicitly unset root requires a fresh worker: a standby may
+        ;; already have a root (including its ASDF registry and FASL cache).
+        ;; If the standbys fill the pool, reclaim a slot for that spawn.
+        (when (and rootless-session-p *standby-workers*
+                   (>= (%effective-pool-size) *max-pool-size*))
+          (let ((standby (pop *standby-workers*)))
+            (push (%begin-ending standby) standbys-to-kill)
+            (setf *all-workers* (remove standby *all-workers*))))
+        ;; Skip standbys that died since the last health check.
+        (loop while (and (not rootless-session-p) *standby-workers*)
               for w = (pop *standby-workers*)
               do (cond
                    ;; Its state as well as its process.  An RPC that timed out
@@ -1837,8 +1847,8 @@ taken for a crash, and is told the worker was killed."
         ;; It must fire even when the crashed owner worker was already reaped
         ;; from the affinity map (so kill found :no-worker).  disabled=t implies
         ;; owner=nil, so clearing the latch unconditionally (feature on) cannot
-        ;; disturb a live healthy owner.
-        (when *worker-init-config*
+        ;; disturb a live healthy owner. Dedicated REPLs do not own the runtime.
+        (when (and *worker-init-config* (not (dedicated-repl-id-p session-id)))
           (setf *runtime-init-disabled* nil
                 *runtime-init-failures* 0))
         ;; Under the pool lock, so no request can be handed a worker between

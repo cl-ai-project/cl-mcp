@@ -3,6 +3,7 @@
 
 (defpackage #:cl-mcp/src/http
   (:use #:cl)
+  (:import-from #:cl-mcp/src/tools/repl-session #:close-repl-sessions)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/protocol #:make-state #:process-json-line)
   (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
@@ -112,7 +113,7 @@ With ACQUIRE, a session returned is counted as having one more request in
 flight, in the same critical section that found it, so a DELETE-SESSION after
 this call sees the request (see %RELEASE-SESSION-REQUEST)."
   (let ((result nil)
-        (expired-id nil))
+        (expired-session nil))
     (bordeaux-threads:with-lock-held (*sessions-lock*)
       (let ((session (gethash session-id *sessions*)))
         (when session
@@ -130,7 +131,7 @@ this call sees the request (see %RELEASE-SESSION-REQUEST)."
                          (http-session-active-requests session))))
                  (when (zerop active)
                    (remhash session-id *sessions*)
-                   (setf expired-id session-id))))
+                   (setf expired-session session))))
               (t
                (setf (http-session-last-access session) now)
                (setf result session)))))
@@ -138,10 +139,11 @@ this call sees the request (see %RELEASE-SESSION-REQUEST)."
           (bordeaux-threads:with-lock-held
               ((http-session-active-requests-lock result))
             (incf (http-session-active-requests result))))))
-    (when expired-id
-      (forget-session-project-root expired-id))
-    (when (and expired-id *use-worker-pool*)
-      (ignore-errors (release-session expired-id)))
+    (when expired-session
+      (close-repl-sessions (http-session-state expired-session))
+      (forget-session-project-root session-id)
+      (when *use-worker-pool*
+        (ignore-errors (release-session session-id))))
     result))
 
 (defun create-session ()
@@ -153,23 +155,28 @@ this call sees the request (see %RELEASE-SESSION-REQUEST)."
     session))
 
 (defun delete-session (session-id)
-  "Delete a session by ID.  Also releases the worker pool assignment.
+  "Delete a registered HTTP session by ID and release its worker assignment.
+Unknown and already deleted session IDs are ignored.
 The session's project root is forgotten now when no request of it is in
 flight, and otherwise by the last of them to finish
 (%RELEASE-SESSION-REQUEST): a request already accepted runs under the root it
 was sent for, never the server default."
-  (let ((idle t))
+  (let ((idle t)
+        (session nil))
     (bordeaux-threads:with-lock-held (*sessions-lock*)
-      (let ((session (gethash session-id *sessions*)))
-        (remhash session-id *sessions*)
-        (when session
-          (setf idle (bordeaux-threads:with-lock-held
-                         ((http-session-active-requests-lock session))
-                       (zerop (http-session-active-requests session)))))))
-    (when idle
-      (forget-session-project-root session-id)))
-  (when *use-worker-pool*
-    (release-session session-id)))
+      (setf session (gethash session-id *sessions*))
+      (remhash session-id *sessions*)
+      (when session
+        (setf idle (bordeaux-threads:with-lock-held
+                       ((http-session-active-requests-lock session))
+                     (zerop (http-session-active-requests session))))))
+    (when session
+      (unwind-protect
+           (close-repl-sessions (http-session-state session))
+        (when idle
+          (forget-session-project-root session-id))
+        (when *use-worker-pool*
+          (release-session session-id))))))
 
 (defun %release-session-request (session)
   "Count one request of SESSION as finished.  The last one to finish after the
@@ -215,6 +222,7 @@ Sessions with active in-flight requests are skipped even when expired."
                      (when *session-timeout-seconds*
                        (maphash
                         (lambda (id session)
+                          (declare (ignore id))
                           (when (> (- now (http-session-last-access session))
                                    *session-timeout-seconds*)
                             (let ((active
@@ -222,18 +230,20 @@ Sessions with active in-flight requests are skipped even when expired."
                                         ((http-session-active-requests-lock session))
                                       (http-session-active-requests session))))
                               (if (zerop active)
-                                  (push id expired)
+                                  (push session expired)
                                   (incf skipped)))))
                         *sessions*)
-                       (dolist (id expired)
-                         (remhash id *sessions*))))
+                       (dolist (session expired)
+                         (remhash (http-session-id session) *sessions*))))
                    (when expired
                      (log-event :info "http.session.cleanup"
                                 "expired_count" (length expired))
-                     (mapc #'forget-session-project-root expired)
-                     (when *use-worker-pool*
-                       (dolist (id expired)
-                         (ignore-errors (release-session id)))))
+                      (dolist (session expired)
+                        (let ((id (http-session-id session)))
+                          (close-repl-sessions (http-session-state session))
+                          (forget-session-project-root id)
+                          (when *use-worker-pool*
+                            (ignore-errors (release-session id))))))
                    (when (plusp skipped)
                      (log-event :debug "http.session.cleanup.skipped"
                                 "skipped_count" skipped)))
@@ -659,14 +669,12 @@ Returns the acceptor instance and port number."
     ;; Shut down worker pool before clearing sessions
     (when *use-worker-pool*
       (shutdown-pool))
-    ;; Clear all sessions
-    (bordeaux-threads:with-lock-held (*sessions-lock*)
-      ;; Their roots too: a session no longer in the table can never be
-      ;; asked for again, so its entry would only outlive it.
-      (maphash (lambda (id session)
-                 (declare (ignore session))
-                 (forget-session-project-root id))
-               *sessions*)
-      (clrhash *sessions*))
+    (let ((sessions
+            (bordeaux-threads:with-lock-held (*sessions-lock*)
+              (prog1 (loop for session being the hash-values of *sessions* collect session)
+                (clrhash *sessions*)))))
+      (dolist (session sessions)
+        (close-repl-sessions (http-session-state session))
+        (forget-session-project-root (http-session-id session))))
     (log-event :info "http.stopped")
     t))

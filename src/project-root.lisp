@@ -10,6 +10,7 @@
   (:export #:*project-root*
            #:*project-root-lock*
            #:session-project-root
+           #:remember-session-project-root
            #:set-project-root
            #:forget-session-project-root
            #:call-with-session-project-root
@@ -44,8 +45,7 @@ Set via MCP_PROJECT_ROOT environment variable or fs-set-project-root tool.")
 ;;; *PROJECT-ROOT* keeps working unchanged.
 
 (defvar *session-project-roots* (make-hash-table :test #'equal)
-  "Maps a session id to the project root (a directory pathname) that session set.
-A session with no entry works under the global value of *PROJECT-ROOT*.")
+  "Map a session ID to its root pathname or to a cons holding unset-root pathname defaults.")
 
 (defvar *session-project-roots-lock* (bt:make-lock "session-project-roots-lock")
   "Guards *SESSION-PROJECT-ROOTS*.")
@@ -57,10 +57,19 @@ binding only when it belongs to the session being set, so a session's root never
 reaches the global value.")
 
 (defun session-project-root (session-id)
-  "Return the project root SESSION-ID set, or NIL when it set none."
-  (and session-id
-       (bt:with-lock-held (*session-project-roots-lock*)
-         (values (gethash session-id *session-project-roots*)))))
+  "Return SESSION-ID's project root, whether it has an entry, and pathname defaults."
+  (when session-id
+    (bt:with-lock-held (*session-project-roots-lock*)
+      (multiple-value-bind (entry present-p) (gethash session-id *session-project-roots*)
+        (if (consp entry)
+            (values nil present-p (cdr entry))
+            (values entry present-p entry))))))
+
+(defun remember-session-project-root (session-id)
+  "Record the current project root and pathname defaults for a new SESSION-ID."
+  (bt:with-lock-held (*session-project-roots-lock*)
+    (setf (gethash session-id *session-project-roots*)
+          (or *project-root* (cons nil *default-pathname-defaults*)))))
 
 (defun forget-session-project-root (session-id)
   "Drop the project root SESSION-ID set.  Called when the session ends, so a
@@ -100,16 +109,15 @@ and error messages and fs-get-project-info printed it."
     dir))
 
 (defun call-with-session-project-root (thunk &key (session-id *current-session-id*))
-  "Call THUNK with *PROJECT-ROOT* and *DEFAULT-PATHNAME-DEFAULTS* bound to the
-root SESSION-ID set, or to the global default when it set none.  With a NIL
-SESSION-ID nothing is bound, so a root set inside THUNK is the global default."
+  "Call THUNK with SESSION-ID's root and pathname defaults, when recorded.
+A session without an entry inherits the caller's bindings. With a NIL
+SESSION-ID no root or pathname defaults are bound."
   (if session-id
-      (let* ((root (session-project-root session-id))
-             (*bound-session-id* session-id)
-             (*project-root* (or root *project-root*))
-             (*default-pathname-defaults*
-               (if root root *default-pathname-defaults*)))
-        (funcall thunk))
+      (multiple-value-bind (root present-p defaults) (session-project-root session-id)
+        (let ((*bound-session-id* session-id)
+              (*project-root* (if present-p root *project-root*))
+              (*default-pathname-defaults* (if present-p defaults *default-pathname-defaults*)))
+          (funcall thunk)))
       (funcall thunk)))
 
 (defmacro with-session-project-root ((&key (session-id '*current-session-id*)) &body body)

@@ -2,6 +2,7 @@
 
 (defpackage #:cl-mcp/src/run
   (:use #:cl)
+  (:import-from #:cl-mcp/src/tools/repl-session #:close-repl-sessions)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/utils/sanitize #:encode-json-line)
   (:import-from #:cl-mcp/src/tools/helpers #:rpc-error)
@@ -147,11 +148,10 @@ call."
     (:stdio
      (%call-with-stdout-isolated
       out
-      (lambda ()
+      (lambda (&aux (state (make-state)))
         (when *use-worker-pool* (initialize-pool))
         (unwind-protect
-             (let ((state (make-state))
-                   (cl-mcp/src/protocol:*current-session-id* "stdio"))
+             (let ((cl-mcp/src/protocol:*current-session-id* "stdio"))
                (log-event :info "stdio.start")
                (loop for line = (handler-case
                                     (%read-line-limited in :eof
@@ -196,7 +196,8 @@ call."
           ;; The session ends with the stream: a later RUN in this image is a
           ;; new "stdio" session and starts from the server default.
           (forget-session-project-root "stdio")
-          (when *use-worker-pool* (ignore-errors (shutdown-pool)))))))
+          (when *use-worker-pool* (ignore-errors (shutdown-pool)))
+          (close-repl-sessions state)))))
     (:tcp
      (log-event :info "tcp.start" "host" host "port" port)
      (serve-tcp :host host :port port :accept-once accept-once

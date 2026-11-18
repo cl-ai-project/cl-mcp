@@ -17,6 +17,7 @@
   ;; These symbols are not used directly; the import triggers ASDF loading.
   (:import-from #:cl-mcp/src/repl
                 #:repl-eval)
+  (:import-from #:cl-mcp/src/tools/repl-session)
   (:import-from #:cl-mcp/src/fs
                 #:fs-read-file
                 #:fs-write-file

@@ -16,7 +16,7 @@
                 #:make-ht #:result #:text-content #:json-bool
                 #:arg-validation-error)
   (:import-from #:cl-mcp/src/state
-                #:*current-session-id*)
+                #:*current-session-id* #:*transport-session-id*)
   (:import-from #:cl-mcp/src/inline-cancel
                 #:call-cancellable #:inline-request-cancelled)
   (:import-from #:cl-mcp/src/tools/define-tool
@@ -202,7 +202,7 @@ notifications/cancelled for ID in this session interrupts it.  When
 TIMEOUT-SECONDS runs out first, the matches found until then are returned with
 'timed_out' true and a line in the text that says so."
   (multiple-value-bind (results timed-out)
-      (call-cancellable *current-session-id* id
+      (call-cancellable (or *transport-session-id* *current-session-id*) id
                         (lambda ()
                           (clgrep-search pattern
                                          :path path

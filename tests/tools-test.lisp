@@ -1508,6 +1508,51 @@
             (ok (stringp (gethash "description" desc)))
             (ok (hash-table-p (gethash "inputSchema" desc)))))))))
 
+(deftest tools-discover-dedicated-repl-handles
+  (let ((*use-worker-pool* t))
+    (let* ((response
+             (parse (process-json-line
+                     "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")))
+           (descriptors (gethash "tools" (gethash "result" response))))
+      (let* ((eval-tool (%find-tool-descriptor descriptors "repl-eval"))
+             (close-tool (%find-tool-descriptor descriptors "repl-close"))
+             (eval-schema (gethash "inputSchema" eval-tool))
+             (close-schema (gethash "inputSchema" close-tool))
+             (eval-selector (gethash "repl_id" (gethash "properties" eval-schema))))
+        (ok (%find-tool-descriptor descriptors "repl-open"))
+        (ok (equal "string" (gethash "type" eval-selector)))
+        (ok (not (find "repl_id" (gethash "required" eval-schema) :test #'equal)))
+        (ok (find "repl_id" (gethash "required" close-schema) :test #'equal)))))
+  (let ((*use-worker-pool* nil))
+    (let* ((request (concatenate 'string
+                                 "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
+                                 "\"params\":{\"name\":\"repl-open\",\"arguments\":{}}}"))
+           (response (parse (%pjl request)))
+           (error (gethash "error" response)))
+      (ok (= -32602 (gethash "code" error)))
+      (ok (search "requires the worker pool" (gethash "message" error))))))
+
+(deftest tools-list-accepts-registered-schema-without-properties
+  (let* ((*use-worker-pool* t)
+         (cl-mcp/src/tools/registry::*tool-registry* (make-ht))
+         (schema (make-ht "type" "object"))
+         (descriptor (make-ht "name" "empty-schema-test"
+                              "description" "An extension with no parameters."
+                              "inputSchema" schema)))
+    (cl-mcp/src/tools/registry:register-tool "empty-schema-test" descriptor (constantly nil))
+    (let* ((reply (parse (process-json-line
+                          "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")))
+           (result (gethash "result" reply))
+           (tools (and result (gethash "tools" result)))
+           (listed (%find-tool-descriptor tools "empty-schema-test")))
+      (ok listed)
+      (when listed
+        (let* ((properties (gethash "properties" (gethash "inputSchema" listed)))
+               (selector (gethash "repl_id" properties)))
+          (ok (equal "string" (gethash "type" selector))))))
+    (ok (not (nth-value 1 (gethash "properties" schema)))
+        "tools/list preserves the registered schema")))
+
 (deftest tools-list-repl-eval-schema-has-locals-preview-controls
   (testing "tools/list exposes repl-eval locals-preview controls with descriptions"
     (multiple-value-bind (obj result tools)

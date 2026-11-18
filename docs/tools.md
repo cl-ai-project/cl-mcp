@@ -111,6 +111,29 @@ told after the session is released, or after the server's pool shuts down.
 Object ids (`result_object_id`, `[object-id: ...]`) belong to the worker that
 issued them; see `inspect-object`.
 
+## Dedicated REPLs for subagents
+
+With the worker pool enabled, each subagent sharing an MCP session can call
+`repl-open` with `{}` to allocate a dedicated SBCL process. The result includes
+a `repl_id`. Pass it in `arguments` on subsequent tool calls, for example:
+
+```json
+{"name":"repl-eval","arguments":{"repl_id":"<id from repl-open>","code":"(+ 1 2)"}}
+```
+
+Use the same `repl_id` for `load-system`, `run-tests`, `inspect-object`, and
+other calls that need that Lisp image. The REPL starts with the MCP session's
+project root. `fs-set-project-root` with the handle changes that REPL's root.
+Calls without `repl_id` use the default REPL for the MCP session.
+
+Call `repl-close` with `{"repl_id":"<id from repl-open>"}` when finished.
+The handle stops accepting new calls immediately and its worker is freed once
+admitted calls finish. Handles close automatically when their MCP session ends
+and can only be used in that session. Dedicated REPLs count against
+`CL_MCP_MAX_POOL_SIZE`. The processes can still access the same project files.
+If a worker init hook is configured, its singleton runtime starts in a default
+REPL. Open and close dedicated REPLs independently of that app worker.
+
 ## `repl-eval`
 Evaluate one or more forms and return the last value as a text item.
 
