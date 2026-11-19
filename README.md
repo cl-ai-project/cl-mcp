@@ -295,6 +295,7 @@ Disable the worker pool with `MCP_NO_WORKER_POOL=1` or the `:worker-pool` keywor
 | `MCP_WORKER_SWANK` | Any non-empty value makes each worker `(ql:quickload :swank)` and start a Swank server on a free port, reported in the `worker.swank.started` log event (needs Quicklisp in the worker; without it the worker runs without Swank) | (off) |
 | `CL_MCP_WORKER_POOL_WARMUP` | Number of standby workers to maintain (non-negative integer) | `1` |
 | `CL_MCP_MAX_POOL_SIZE` | Maximum total workers, bound + standby (positive integer) | `16` |
+| `CL_MCP_DEDICATED_REPL_IDLE_SECONDS` | Seconds of inactivity before a dedicated worker is retired (`0` disables idle retirement) | `300` |
 | `MCP_WORKER_INIT_SYSTEM` | ASDF system to load in the elected owner worker at bind (master gate for the init hook) | (unset = off) |
 | `MCP_WORKER_INIT_ENTRY` | `PKG:SYMBOL` nullary thunk run after the load (preferred activation) | (none) |
 | `MCP_WORKER_INIT_EVAL` | Lisp form run via repl-eval as an escape hatch | (none) |

@@ -128,9 +128,16 @@ Use the same `agent_id` for calls that share Lisp state, including `load-system`
 The REPL inherits the session's project root at first use. `fs-set-project-root`
 with `agent_id` changes that REPL's root. Omit `agent_id` to use the default REPL.
 
-Dedicated REPLs close automatically when their MCP session ends. To release a
-worker earlier, call `repl-close` with `{"agent_id":"review-2"}` when the agent
-is finished. That call can be repeated. Further calls with that ID are
+Dedicated REPLs close automatically when their MCP session ends. The pool
+monitor reclaims a dedicated worker after `CL_MCP_DEDICATED_REPL_IDLE_SECONDS`
+of inactivity (default 300 seconds, or 0 to disable). The timer starts when the
+last admitted call finishes. The agent ID and project root are retained.
+The next call that needs a worker reports the state loss once with
+`execution_status: "not-executed"`. Reload any needed systems and definitions
+before continuing.
+
+Call `repl-close` with `{"agent_id":"review-2"}` when the agent is finished.
+That call can be repeated. Further calls with that ID are
 refused in the same MCP session, and previously admitted calls can finish before
 the worker is released. Dedicated workers count against `CL_MCP_MAX_POOL_SIZE`.
 Dedicated workers can use at most 15 slots in the default 16-slot pool, leaving

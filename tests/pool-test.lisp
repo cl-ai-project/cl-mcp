@@ -465,6 +465,200 @@ in the cleanup form regardless of success or failure."
                        "the first default REPL owns the singleton runtime"))
               (cl-mcp/src/tools/repl-session:close-repl-sessions state)))))))
 
+(deftest idle-dedicated-repl-retires-and-reports-one-reset
+  (if (not (spawn-available-p))
+      (skip "SBCL launcher unavailable")
+      (let ((*use-worker-pool* t)
+            (*current-session-id* "ttl-parent")
+            (cl-mcp/src/pool::*dedicated-repl-idle-seconds* 600)
+            (state (make-state))
+            (root (uiop:native-namestring
+                   (merge-pathnames #P"tests/" (asdf:system-source-directory "cl-mcp"))))
+            (agent (make-ht "agent_id" "review"))
+            (session-id nil))
+        (declare (special cl-mcp/src/pool::*dedicated-repl-idle-seconds*))
+        (with-pool ()
+          (unwind-protect
+               (flet ((evaluate (code)
+                        (%call-repl-tool state "repl-eval" (make-ht "agent_id" "review"
+                                                                 "code" code)))
+                      (sweep ()
+                        (cl-mcp/src/pool::%expire-idle-dedicated-workers
+                         most-positive-fixnum)))
+                 (%call-repl-tool state "fs-set-project-root"
+                                  (make-ht "agent_id" "review" "path" root))
+                 (ok (gethash "result" (evaluate "(defparameter *ttl-lost-value* 42)")))
+                 (let ((parent (get-or-assign-worker *current-session-id*))
+                       (retired nil))
+                   (cl-mcp/src/tools/repl-session:call-with-repl-session
+                    state 2 "repl-eval" agent
+                    (lambda ()
+                      (setf session-id *current-session-id*
+                            retired (cl-mcp/src/pool:find-session-worker session-id))
+                      (sweep)
+                      (ok (eq retired (cl-mcp/src/pool:find-session-worker session-id))
+                          "a request admitted to the REPL protects its worker from expiry")))
+                   (let ((cl-mcp/src/pool::*worker-alive-function* (constantly nil)))
+                     (sweep)
+                     (ok (eq retired (cl-mcp/src/pool:find-session-worker session-id))
+                         "expiry leaves an already-dead process to crash recovery"))
+                   (let ((cleanup nil))
+                     (let ((cl-mcp/src/pool::*start-pool-thread-function*
+                             (lambda (thunk name)
+                               (declare (ignore name))
+                               (setf cleanup thunk))))
+                       (sweep))
+                     (unwind-protect
+                          (progn
+                            (ok (and retired
+                                     (null (cl-mcp/src/pool:find-session-worker session-id)))
+                                "an idle dedicated worker is removed")
+                            (ok (and cleanup (eq :released (worker-state retired)))
+                                "process cleanup is dispatched away from the pool monitor"))
+                       (when cleanup (funcall cleanup))))
+                   (ok (eq parent (cl-mcp/src/pool:find-session-worker *current-session-id*))
+                       "expiry leaves the default worker in place")
+                   (let* ((reply (evaluate "(defparameter *ttl-must-not-run* 1)"))
+                          (result (gethash "result" reply))
+                          (text (and result
+                                     (gethash "text" (aref (gethash "content" result) 0)))))
+                     (ok (and result (equal "not-executed" (gethash "execution_status" result))))
+                     (ok (and text (search "idle timeout" text))))
+                   (let* ((fresh (cl-mcp/src/pool:find-session-worker session-id))
+                          (reply (evaluate
+                                  "(if (or (boundp '*ttl-lost-value*)
+                                           (boundp '*ttl-must-not-run*)) 1 0)"))
+                          (result (gethash "result" reply)))
+                     (ok (and fresh (not (eq fresh retired)))
+                         "a new worker is bound to the same logical REPL")
+                     (ok (and result
+                              (equal "0"
+                                            (gethash "text"
+                                                     (aref (gethash "content" result) 0)))))
+                     (ok (equal (pathname root)
+                                (cl-mcp/src/project-root:session-project-root session-id))
+                         "retiring the worker preserves the dedicated REPL root")
+                     (let* ((code (format nil "(if (equal cl-mcp/src/project-root:*project-root* ~
+                                               (pathname ~S)) 1 0)" root))
+                            (answer (gethash "result" (evaluate code))))
+                       (ok (and answer
+                                (equal "1" (gethash "text" (aref (gethash "content" answer) 0))))))
+                     ;; Model a crash already recorded by the RPC path.
+                     (cl-mcp/src/worker-client:record-worker-termination fresh :crashed)
+                     (setf (worker-state fresh) :crashed)
+                     (sweep)
+                     (ok (not (find (worker-id fresh) (pool-worker-info)
+                                    :key (lambda (worker) (gethash "id" worker))))
+                         "an abandoned crashed worker also releases its slot")
+                     (ok (eq :crashed
+                             (cl-mcp/src/reset-events:termination-cause fresh))
+                         "retirement preserves the already-recorded crash"))
+                   (ok (gethash "result" (%call-repl-tool state "repl-close" agent)))
+                   (ok (null (cl-mcp/src/reset-events:claim-session-resets session-id))
+                       "closing after expiry discards the pending notice")
+                   (ok (gethash "error" (evaluate "42")) "a closed ID stays closed")))
+            (cl-mcp/src/tools/repl-session:close-repl-sessions state))))))
+
+(deftest idle-monitor-retires-only-repls-without-admitted-calls
+  (if (not (spawn-available-p))
+      (skip "SBCL launcher unavailable")
+      (let ((*use-worker-pool* t)
+            (*current-session-id* "ttl-monitor-parent")
+            (cl-mcp/src/pool::*dedicated-repl-idle-seconds* 1)
+            (state (make-state))
+            (started (sb-thread:make-semaphore))
+            (finish (sb-thread:make-semaphore))
+            (active-id nil)
+            (active-worker nil)
+            (thread nil))
+        (with-pool (:health-check-interval 0.05d0)
+          (unwind-protect
+               (progn
+                 (setf thread
+                       (bordeaux-threads:make-thread
+                        (lambda ()
+                          (let ((*use-worker-pool* t)
+                                (*current-session-id* "ttl-monitor-parent"))
+                            (cl-mcp/src/tools/repl-session:call-with-repl-session
+                             state 2 "repl-eval" (make-ht "agent_id" "active")
+                             (lambda ()
+                               (setf active-id *current-session-id*
+                                     active-worker (get-or-assign-worker active-id))
+                               (sb-thread:signal-semaphore started)
+                               (sb-thread:wait-on-semaphore finish :timeout 45)))))))
+                 (when (ok (sb-thread:wait-on-semaphore started :timeout 30))
+                   (ok (gethash "result" (%call-repl-tool state "repl-eval"
+                                                         (make-ht "agent_id" "idle" "code" "4"))))
+                   (let ((idle-id
+                           (cl-mcp/src/tools/repl-session::repl-session-id
+                            (gethash "idle" (cl-mcp/src/state:repl-sessions state)))))
+                     (ok (wait-until (lambda () (not (cl-mcp/src/pool:find-session-worker idle-id)))
+                                     :timeout 10)
+                         "the pool monitor retires a dedicated worker on its own"))
+                   (ok (eq active-worker (cl-mcp/src/pool:find-session-worker active-id))
+                       "the other worker is still held by the admitted call")
+                   (ok (gethash "result" (%call-repl-tool state "repl-close"
+                                                         (make-ht "agent_id" "active"))))
+                   (ok (eq active-worker (cl-mcp/src/pool:find-session-worker active-id))
+                       "close waits for the admitted call to finish")
+                   (sb-thread:signal-semaphore finish)
+                   (bordeaux-threads:join-thread thread)
+                   (setf thread nil)
+                   (ok (null (cl-mcp/src/pool:find-session-worker active-id)))
+                   (ok (null (cl-mcp/src/reset-events:claim-session-resets active-id)))
+                   (ok (gethash "error" (%call-repl-tool state "repl-eval"
+                                                        (make-ht "agent_id" "active"
+                                                                 "code" "5"))))))
+            (sb-thread:signal-semaphore finish)
+            (when thread (bordeaux-threads:join-thread thread))
+            (cl-mcp/src/tools/repl-session:close-repl-sessions state))))))
+
+(deftest shutdown-waits-for-idle-retirement-thread-to-exit
+  (if (not (spawn-available-p))
+      (skip "SBCL launcher unavailable")
+      (let ((*use-worker-pool* t)
+            (*current-session-id* "ttl-shutdown-parent")
+            (cl-mcp/src/pool::*dedicated-repl-idle-seconds* 600)
+            (state (make-state))
+            (worker-ended (sb-thread:make-semaphore))
+            (allow-cleanup-exit (sb-thread:make-semaphore))
+            (shutdown-returned (sb-thread:make-semaphore))
+            (cleanup-thread nil)
+            (shutdown-thread nil))
+        (with-pool ()
+          (unwind-protect
+               (progn
+                 (ok (gethash "result" (%call-repl-tool state "repl-eval"
+                                                         (make-ht "agent_id" "idle" "code" "4"))))
+                 (let ((cl-mcp/src/pool::*start-pool-thread-function*
+                         (lambda (thunk name)
+                           (setf cleanup-thread
+                                 (bordeaux-threads:make-thread
+                                  (lambda ()
+                                    (funcall thunk)
+                                    (sb-thread:signal-semaphore worker-ended)
+                                    (sb-thread:wait-on-semaphore allow-cleanup-exit :timeout 30))
+                                  :name name)))))
+                   (cl-mcp/src/pool::%expire-idle-dedicated-workers most-positive-fixnum))
+                 (when (ok (sb-thread:wait-on-semaphore worker-ended :timeout 10))
+                   (setf shutdown-thread
+                         (bordeaux-threads:make-thread
+                          (lambda ()
+                            (shutdown-pool)
+                            (sb-thread:signal-semaphore shutdown-returned))))
+                   (ok (wait-until (lambda () (not cl-mcp/src/pool::*pool-running*)))
+                       "shutdown has stopped the pool")
+                   (ok (not (sb-thread:wait-on-semaphore shutdown-returned :timeout 0.25))
+                       "shutdown waits even after the worker has ended")
+                   (sb-thread:signal-semaphore allow-cleanup-exit)
+                   (bordeaux-threads:join-thread shutdown-thread)
+                   (setf shutdown-thread nil)
+                   (ok (not (bordeaux-threads:thread-alive-p cleanup-thread)))))
+            (sb-thread:signal-semaphore allow-cleanup-exit)
+            (when cleanup-thread (bordeaux-threads:join-thread cleanup-thread))
+            (when shutdown-thread (bordeaux-threads:join-thread shutdown-thread))
+            (cl-mcp/src/tools/repl-session:close-repl-sessions state))))))
+
 (deftest repl-without-a-root-keeps-that-state-after-parent-changes-and-worker-replacement
   (unless (spawn-available-p)
     (skip "SBCL launcher unavailable"))

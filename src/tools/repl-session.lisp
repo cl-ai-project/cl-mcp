@@ -4,7 +4,7 @@
   (:use #:cl)
   (:import-from #:alexandria #:copy-hash-table)
   (:import-from #:bordeaux-threads #:with-lock-held)
-  (:import-from #:cl-mcp/src/pool #:release-session)
+  (:import-from #:cl-mcp/src/pool #:release-session #:set-dedicated-repl-idle)
   (:import-from #:cl-mcp/src/project-root
                 #:remember-session-project-root #:forget-session-project-root
                 #:with-session-project-root)
@@ -77,15 +77,19 @@
             (remember-session-project-root id)
             (setf entry (make-repl-session id)
                   (gethash agent-id sessions) entry)))
-        ;; The worker pool starts the process when the first call needs it.
+        (when (zerop (repl-session-active-requests entry))
+          (set-dedicated-repl-idle (repl-session-id entry) nil))
         (incf (repl-session-active-requests entry))
         entry))))
 
 (defun %finish-repl-request (state repl)
-  (when (with-lock-held ((repl-sessions-lock state))
-          (and (zerop (decf (repl-session-active-requests repl)))
-               (repl-session-closed-p repl)))
-    (%release-repl (repl-session-id repl))))
+  (let ((id (repl-session-id repl)))
+    (when (with-lock-held ((repl-sessions-lock state))
+            (when (zerop (decf (repl-session-active-requests repl)))
+              (if (repl-session-closed-p repl)
+                  t
+                  (progn (set-dedicated-repl-idle id t) nil))))
+      (%release-repl id))))
 
 (defun %repl-error (state id message)
   (tool-error id message :protocol-version (protocol-version state)))

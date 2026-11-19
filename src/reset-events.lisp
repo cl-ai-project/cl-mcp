@@ -44,7 +44,7 @@
 (in-package #:cl-mcp/src/reset-events)
 
 (defparameter *termination-causes*
-  '(:crashed :timeout :retired :cancelled :killed :released :shutdown :stopped)
+  '(:crashed :timeout :retired :cancelled :killed :idle-expired :released :shutdown :stopped)
   "Why a worker ended.
 
   :CRASHED    it died, or its connection failed, without being asked to;
@@ -53,6 +53,7 @@
               a thread an earlier deadline could not stop;
   :CANCELLED  it was stopped to cancel the request it was running;
   :KILLED     it was stopped by pool-kill-worker;
+  :IDLE-EXPIRED it was stopped after its dedicated REPL's idle timeout;
   :RELEASED   its session was released;
   :SHUTDOWN   the pool was shut down;
   :STOPPED    the pool ended it for any other reason.

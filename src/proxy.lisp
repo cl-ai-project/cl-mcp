@@ -186,6 +186,7 @@ cancellation stopped is that decision, not the EOF it produced."
                detail))
       (:cancelled "was stopped to cancel the request it was running")
       (:killed "was stopped by pool-kill-worker")
+      (:idle-expired "was stopped after the dedicated REPL idle timeout")
       (:released "was stopped when its session was released")
       (:shutdown "was stopped when the worker pool shut down")
       (:stopped "was stopped by the worker pool"))))

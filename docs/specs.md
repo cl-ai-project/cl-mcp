@@ -1591,7 +1591,8 @@ which worker, which session's state it held, why it ended, how its process
 exited, and whether the session has been told. Causes are `:crashed`,
 `:timeout` (the proxy's deadline abandoned it), `:retired` (it exited rather
 than serve a request while carrying a leaked thread), `:cancelled`, `:killed`
-(pool-kill-worker), `:released`, `:shutdown` and `:stopped` (the pool ended
+(pool-kill-worker), `:idle-expired` (dedicated REPL idle timeout), `:released`,
+`:shutdown` and `:stopped` (the pool ended
 it for any other reason -- a fallback nobody should need).
 
 - **The first cause recorded is kept.** A decision is recorded before the
@@ -1605,7 +1606,9 @@ it for any other reason -- a fallback nobody should need).
   was bound to when it ended. A standby's end, a released session's worker
   and a shutdown owe nobody. A release discards what its session was owed, so
   a session reusing the id is not told someone else's loss; a shutdown
-  discards everything.
+  discards everything. Idle expiry ends the worker while its logical REPL and
+  project root remain active, so the state-loss event is still owed to that
+  REPL. Closing the REPL discards any pending event just as a session release does.
 - **Told once, by whoever claims it.** `claim-session-resets` hands a
   session's pending events to one response and marks them delivered:
   the failed request that met the death (in band), the session's next
