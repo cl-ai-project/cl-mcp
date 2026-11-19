@@ -48,6 +48,18 @@
                 #:kill-worker)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*)
+  (:import-from #:cl-mcp/src/proxy
+                #:*use-worker-pool*)
+  (:import-from #:cl-mcp/src/reset-events
+                #:termination-cause)
+  (:import-from #:cl-mcp/src/state
+                #:*current-session-id*
+                #:make-state)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:make-ht)
+  (:import-from #:cl-mcp/src/tools/repl-session
+                #:call-with-repl-session
+                #:close-repl-sessions)
   (:import-from #:cl-mcp/src/log
                 #:*log-level*)
   (:import-from #:bordeaux-threads)
@@ -190,6 +202,7 @@ holding that stream."
     cl-mcp/src/pool:*worker-pool-warmup*
     cl-mcp/src/pool:*max-pool-size*
     cl-mcp/src/pool::*health-check-interval-seconds*
+    cl-mcp/src/pool::*dedicated-repl-idle-seconds*
     cl-mcp/src/pool::*shutdown-replenish-wait-seconds*
     cl-mcp/src/pool::*worker-init-config*
     cl-mcp/src/pool::*crash-breaker-threshold*
@@ -206,10 +219,12 @@ fake spawns and endings take a fraction of a second, and
 nothing near this.")
 
 (defun call-with-concurrent-pool (function &key (warmup 1) (max-size 4)
-                                             (spawn-delay 0) (end-delay 0))
+                                             (spawn-delay 0) (end-delay 0)
+                                             idle-repl-seconds)
   "Initialize the real pool with fake workers whose background work runs on
 real threads, call FUNCTION with the ledger, then shut the pool down and put
-everything back.  Returns FUNCTION's values.
+everything back.  Returns FUNCTION's values.  IDLE-REPL-SECONDS enables
+dedicated worker retirement and sets the monitor's polling interval.
 
 The teardown opens every gate, shuts the pool down if it is still running,
 and waits for the pool's threads; only then does it end, itself, any worker
@@ -234,7 +249,8 @@ would take it over.  Run it in a process with no pool."))
                  (lambda (worker) (%fake-signal ledger worker))
                  *worker-pool-warmup* warmup
                  *max-pool-size* max-size
-                 cl-mcp/src/pool::*health-check-interval-seconds* 3600
+                 cl-mcp/src/pool::*health-check-interval-seconds* (or idle-repl-seconds 3600)
+                 cl-mcp/src/pool::*dedicated-repl-idle-seconds* (or idle-repl-seconds 0)
                  cl-mcp/src/pool::*shutdown-replenish-wait-seconds* 0.01d0
                  cl-mcp/src/pool::*worker-init-config* nil
                  cl-mcp/src/pool::*crash-breaker-threshold* 1000
@@ -658,35 +674,42 @@ with nothing in flight would check nothing."
 (defun %random-concurrent-operation ()
   "Draw one operation with CL:RANDOM."
   (let ((session (nth (random (length +concurrent-sessions+)) +concurrent-sessions+))
-        (roll (random 100)))
+        (roll (random 135)))
     (cond ((< roll 40) (list :acquire session))
           ((< roll 55) (list :release session))
           ((< roll 65) (list :kill-session session))
           ((< roll 75) (list :die (random 16)))
           ((< roll 82) (list :rpc-crash (random 16)))
           ((< roll 92) (list :health-check))
-          (t (list :pause)))))
+          ((< roll 100) (list :pause))
+          ((< roll 115) (list :repl-call session))
+          ((< roll 125) (list :repl-close session))
+          (t (list :idle-check)))))
 
 (defun random-concurrent-plan ()
   "Draw a plan with CL:RANDOM: 2 to 4 clients of 5 to 25 operations each, a
-pool sizing, and after how many operations the shutdown begins."
-  (let ((clients (+ 2 (random 3))))
+pool sizing, and after how many operations the shutdown begins.  Some plans
+start with a dedicated worker whose idle retirement they must observe."
+  (let ((clients (+ 2 (random 3)))
+        (require-idle-retirement (zerop (random 4))))
     (list :clients (loop repeat clients
                          collect (loop repeat (+ 5 (random 21))
                                        collect (%random-concurrent-operation)))
-          :warmup (random 3)
+          :warmup (if require-idle-retirement 0 (random 3))
           :max-size (+ 2 (random 4))
-          :shutdown-after (random 40))))
+          :shutdown-after (random 40)
+          :idle-repl-seconds 0.005d0
+          :require-idle-retirement require-idle-retirement)))
 
-(defun %worker-at (ledger index)
-  "The INDEXth worker LEDGER saw, modulo how many, or NIL."
+(defun %worker-at (ledger index idle-probe)
+  "The INDEXth worker LEDGER saw besides IDLE-PROBE, modulo how many, or NIL."
   (with-ledger (ledger)
-    (let ((spawned (ledger-spawned ledger)))
+    (let ((spawned (remove idle-probe (ledger-spawned ledger))))
       (and spawned (nth (mod index (length spawned)) spawned)))))
 
-(defun %apply-concurrent (ledger lent operation)
+(defun %apply-concurrent (ledger repl-state lent operation &optional idle-probe)
   "Apply OPERATION from a client thread.  LENT is a function recording that a
-worker was lent to a session."
+worker was lent to a session.  Leave IDLE-PROBE alive for the monitor."
   (destructuring-bind (kind &optional argument) operation
     (ecase kind
       (:acquire
@@ -695,18 +718,41 @@ worker was lent to a session."
       (:release (release-session argument))
       (:kill-session (kill-session-worker argument))
       (:die
-       (let ((worker (%worker-at ledger argument)))
+       (let ((worker (%worker-at ledger argument idle-probe)))
          (when worker (with-ledger (ledger) (setf (gethash worker (ledger-dead ledger)) t)))))
       (:rpc-crash
        ;; As WORKER-RPC does it: with the worker's stream held.
-       (let ((worker (%worker-at ledger argument)))
+       (let ((worker (%worker-at ledger argument idle-probe)))
          (when (and worker (member (worker-state worker) '(:bound :standby)))
            (bt:with-lock-held ((worker-stream-lock worker))
              (cl-mcp/src/worker-client::%mark-worker-crashed worker "timeout")))))
       (:health-check
        (when cl-mcp/src/pool::*pool-running*
          (cl-mcp/src/pool::%check-worker-health)))
-      (:pause (sleep 0.005)))))
+      (:pause (sleep 0.005))
+      (:repl-call
+       (let ((*current-session-id* "concurrent-client")
+             (*use-worker-pool* t))
+         (call-with-repl-session
+          repl-state 1 "repl-eval" (make-ht "agent_id" argument)
+          (lambda ()
+            (let ((worker (get-or-assign-worker *current-session-id*)))
+              (funcall lent worker *current-session-id*)
+              worker)))))
+      (:repl-close
+       (let ((*current-session-id* "concurrent-client")
+             (*use-worker-pool* t))
+         (cl-mcp/src/tools/repl-session::repl-close-handler
+          repl-state 1 (make-ht "agent_id" argument))))
+      (:idle-check
+       ;; The monitor owns retirement and shutdown joins it before collecting
+       ;; the cleanup handles it publishes.
+       (bt:with-lock-held (cl-mcp/src/pool::*health-monitor-lock*)
+         (bt:condition-notify cl-mcp/src/pool::*health-monitor-condvar*))))))
+
+(defun %observed-idle-retirement-p (ledger worker)
+  "True when LEDGER saw WORKER finish ending because it was idle."
+  (and (ended-p ledger worker) (eq :idle-expired (termination-cause worker))))
 
 (defun run-concurrent-plan (plan)
   "Run PLAN and return every violation.  A spawn and an ending take up to
@@ -714,16 +760,22 @@ worker was lent to a session."
 
 The clients run their operations at once.  An observer checks
 MOMENT-VIOLATIONS continually, through the shutdown a separate thread makes
-once the clients have applied :SHUTDOWN-AFTER operations between them, with
-the clients still running.  Then: the pool owes nothing
-(AFTER-SHUTDOWN-VIOLATIONS); no worker was lent to two sessions; and none
-was lent after the shutdown returned."
+once the clients have applied :SHUTDOWN-AFTER operations between them or
+finished all their operations.  Then the pool owes nothing
+(AFTER-SHUTDOWN-VIOLATIONS), no worker was lent to two sessions, and none
+was lent after the shutdown returned.  If :REQUIRE-IDLE-RETIREMENT is true,
+admit a dedicated REPL before the other clients start and require the fake
+lifecycle to see its worker finish ending by idle retirement before shutdown."
   (destructuring-bind (&key clients warmup max-size shutdown-after
-                         (spawn-delay 0.003) (end-delay 0.003))
+                         (spawn-delay 0.003) (end-delay 0.003)
+                         idle-repl-seconds require-idle-retirement)
       plan
     (with-concurrent-pool (ledger :warmup warmup :max-size max-size
-                                  :spawn-delay spawn-delay :end-delay end-delay)
+                                  :spawn-delay spawn-delay :end-delay end-delay
+                                  :idle-repl-seconds idle-repl-seconds)
       (let* ((lock (bt:make-lock "concurrent-run"))
+             (repl-state (make-state))
+             (shutdown-threshold (min shutdown-after (reduce #'+ clients :key #'length)))
              (violations '())
              (lendings '())
              (applied 0)
@@ -742,6 +794,10 @@ was lent after the shutdown returned."
                                  (setf violations (append violations found)))))
                            (sleep 0.001)))
                 :name "concurrent-observer"))
+             (idle-probe
+               (when require-idle-retirement
+                 (ignore-errors
+                  (%apply-concurrent ledger repl-state lent '(:repl-call "idle-probe")))))
              (threads
                (loop for operations in clients
                      for index from 0
@@ -750,14 +806,23 @@ was lent after the shutdown returned."
                                 (lambda ()
                                   (dolist (operation operations)
                                     (ignore-errors
-                                     (%apply-concurrent ledger lent operation))
+                                     (%apply-concurrent ledger repl-state lent operation
+                                                        idle-probe))
                                     (bt:with-lock-held (lock) (incf applied))))
                                 :name (format nil "concurrent-client-~D" index)))))
              (shutdown
                (bt:make-thread
                 (lambda ()
-                  (%await (lambda () (bt:with-lock-held (lock) (>= applied shutdown-after)))
+                  (%await (lambda ()
+                            (bt:with-lock-held (lock) (>= applied shutdown-threshold)))
                           :within 20)
+                  (when (and require-idle-retirement
+                             (not (and idle-probe
+                                       (%await (lambda ()
+                                                 (%observed-idle-retirement-p ledger idle-probe))
+                                               :within 1))))
+                    (bt:with-lock-held (lock)
+                      (push (list :kind :idle-retirement-not-observed) violations)))
                   ;; The observer goes on checking while the shutdown runs:
                   ;; what must hold at every moment holds during it too.
                   (shutdown-pool)
@@ -772,6 +837,7 @@ was lent after the shutdown returned."
           (setf violations (append violations
                                    (after-shutdown-violations ledger returned-at))))
         (%join-threads (list shutdown observer) 10)
+        (close-repl-sessions repl-state)
         ;; What the clients were told.
         (let ((owners (make-hash-table :test 'eq)))
           (loop for (worker session at) in (reverse lendings)

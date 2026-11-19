@@ -54,6 +54,7 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/proxy:proxy-to-worker` | none (see *Request lifecycle*, *Reset events*) | `request-lifecycle-keeps-its-promises`, `resets-are-told-exactly-once`, `resets-are-told-exactly-once-when-the-pool-is-full` |
 | `cl-mcp/src/proxy:cancel-request` | none | `request-lifecycle-keeps-its-promises` |
 | `cl-mcp/src/pool:kill-session-worker`, `release-session`, `shutdown-pool` (resets) | none (see *Reset events*) | `resets-are-told-exactly-once`, `…-when-the-pool-is-full` |
+| `cl-mcp/src/pool::%expire-idle-dedicated-workers` (internal) | none (see *Reset events*, *Concurrency and shutdown*) | the same two, plus `pool-holds-while-operations-overlap` |
 | `cl-mcp/src/tools/pool-kill-worker::pool-kill-worker-handler` (internal; the tool) | none | the same two |
 | `cl-mcp/src/tools/pool-kill-worker::%with-resets` (internal) | none | the same two |
 | `cl-mcp/src/proxy:reset-notice` | none | the same two |
@@ -1656,7 +1657,8 @@ after the shutdown nothing left owed. 4A's ownership invariants are checked
 in the same runs.
 
 - Generated: `resets-are-told-exactly-once` (one standby, room for four) and
-  `…-when-the-pool-is-full` (two and two) draw pool operations, requests,
+  `…-when-the-pool-is-full` (two and two) start with a dedicated REPL and an
+  idle sweep. They draw further requests, idle sweeps, releases and shutdowns,
   requests whose worker dies under them, and RPC timeouts on the worker a
   session holds. `object-ids-never-outlive-their-image` draws registrations,
   lookups, clears and replaced images over two registries: an id is found
@@ -1815,7 +1817,10 @@ which processes died, every thread the pool started.
 - Generated: `pool-shutdown-leaves-nothing-behind` draws scenarios whose
   work finishes within the deadline -- its claim is conditional on that;
   `pool-late-work-stays-with-its-generation` draws work that does not; and
-  `pool-holds-while-operations-overlap` draws plans.
+  `pool-holds-while-operations-overlap` draws plans that include dedicated
+  REPL calls, explicit closes and idle checks driven by the real pool monitor.
+  Some plans also bind a dedicated worker before the clients start and require
+  the ledger to show that idle retirement ended that worker before shutdown.
 - Fixed (`tests/concurrency-test.lisp`, default suite): each in-flight kind
   alone and all together; the checks catching four wrong implementations;
   one ordering per defect below; the waits; the full pool. Real process

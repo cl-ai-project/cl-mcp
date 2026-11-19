@@ -130,7 +130,7 @@ with `agent_id` changes that REPL's root. Omit `agent_id` to use the default REP
 
 Dedicated REPLs close automatically when their MCP session ends. The pool
 monitor reclaims a dedicated worker after `CL_MCP_DEDICATED_REPL_IDLE_SECONDS`
-of inactivity (default 300 seconds, or 0 to disable). The timer starts when the
+of inactivity (default 900 seconds, or 0 to disable). The timer starts when the
 last admitted call finishes. The agent ID and project root are retained.
 The next call that needs a worker reports the state loss once with
 `execution_status: "not-executed"`. Reload any needed systems and definitions

@@ -165,7 +165,7 @@ be a positive integer).  Must be >= *worker-pool-warmup*.")
   "Seconds between health monitor iterations while the pool is running.")
 
 (defvar *dedicated-repl-idle-seconds*
-  (%env-int "CL_MCP_DEDICATED_REPL_IDLE_SECONDS" 300 :min 0)
+  (%env-int "CL_MCP_DEDICATED_REPL_IDLE_SECONDS" 900 :min 0)
   "Seconds a dedicated worker may sit idle before the pool retires it. Zero disables expiry.")
 
 (defvar *shutdown-replenish-wait-seconds* 0.05d0

@@ -158,6 +158,23 @@
                                             (run-concurrent-plan
                                              (append plan '(:end-delay 0.02))))))))))
 
+(deftest concurrent-plan-observes-idle-retirement
+  (let ((plan (list :clients (list '((:idle-check) (:repl-call "other") (:repl-close "other"))
+                                   (loop repeat 10
+                                         append '((:acquire "c0") (:pause) (:release "c0"))))
+                    :warmup 0 :max-size 3 :shutdown-after 3
+                    :idle-repl-seconds 0.005d0 :require-idle-retirement t)))
+    (testing "the monitor ends a dedicated worker before shutdown"
+      (let ((violations (run-concurrent-plan plan)))
+        (ok (null violations) (format nil "~S" violations))))
+    (testing "the check detects a monitor that skips retirement"
+      (ok (member :idle-retirement-not-observed
+                  (%with-replaced 'cl-mcp/src/pool::%expire-idle-dedicated-workers
+                                  (lambda (now) (declare (ignore now)))
+                                  (lambda ()
+                                    (concurrency-violation-kinds
+                                     (run-concurrent-plan plan)))))))))
+
 ;;; ------------------------------------------------------------------------
 ;;; One ordering per defect
 

@@ -312,6 +312,9 @@ fixture did not create, so the cleanup fails while the body unwinds."
                            cl-mcp/src/pool::%begin-ending
                            cl-mcp/src/pool::%end-worker
                            cl-mcp/src/pool::%check-worker-health
+                           cl-mcp/src/pool::%expire-idle-dedicated-workers
+                           cl-mcp/src/pool:set-dedicated-repl-idle
+                           cl-mcp/src/tools/repl-session:call-with-repl-session
                            cl-mcp/src/pool::%effective-pool-size
                            cl-mcp/src/pool::%schedule-replenish
                            cl-mcp/src/pool:initialize-pool
