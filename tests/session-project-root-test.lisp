@@ -309,7 +309,7 @@ scratch directories %SCRATCH-DIR made."
         (root (%scratch-dir "agent-first-root"))
         (spawn-root nil))
     (with-isolated-roots (id)
-      (with-fake-pool (ledger :warmup 1 :max-size 1)
+      (with-fake-pool (ledger :warmup 2 :max-size 2)
         (run-pending-work ledger)
         (setf cl-mcp/src/pool::*spawn-worker-function*
               (lambda ()

@@ -133,9 +133,80 @@ worker earlier, call `repl-close` with `{"agent_id":"review-2"}` when the agent
 is finished. That call can be repeated. Further calls with that ID are
 refused in the same MCP session, and previously admitted calls can finish before
 the worker is released. Dedicated workers count against `CL_MCP_MAX_POOL_SIZE`.
+Dedicated workers can use at most 15 slots in the default 16-slot pool, leaving
+one slot for a default REPL. In-flight spawns hold capacity until they finish,
+including cancelled spawns. A one-slot pool is for default REPLs only. The
+overall limit still applies during standby warmup and across default sessions.
+If the limit is reached, call `repl-close` for agents that have finished or end
+unused MCP sessions.
 The processes can still access the same project files.
 If a worker init hook is configured, its singleton runtime starts in a default
 REPL. Open and close dedicated REPLs independently of that app worker.
+
+### Claude Code hooks
+
+For a shared MCP connection named `cl-mcp`, use a `PreToolUse` hook to copy
+Claude Code's `agent_id` into the MCP tool input. Save this script as
+`.claude/hooks/cl-mcp-agent-id.py` in your project.
+
+```python
+import json
+import sys
+
+event = json.load(sys.stdin)
+agent_id = event.get("agent_id")
+if agent_id is None or event["tool_name"].endswith("__repl-close"):
+    sys.exit(0)
+if not isinstance(agent_id, str) or not agent_id:
+    sys.exit("Claude Code supplied an invalid agent_id")
+
+arguments = dict(event["tool_input"])
+arguments["agent_id"] = agent_id
+json.dump({"hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "updatedInput": arguments,
+}}, sys.stdout)
+```
+
+Add these hook entries to `.claude/settings.json`. Replace `cl-mcp` if your MCP
+server has a different name. The `SubagentStop` example assumes you configured
+an agent type named `one-shot-review` and treat each stop for that type as its
+final exit. The `onFailure: "block"` setting requires Claude Code v2.1.295 or
+later. [Claude Code hook failure handling](https://code.claude.com/docs/en/hooks#block-the-action-when-a-hook-fails)
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "mcp__cl-mcp__.*",
+      "hooks": [{
+        "type": "command",
+        "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/cl-mcp-agent-id.py\"",
+        "onFailure": "block"
+      }]
+    }],
+    "SubagentStop": [{
+      "matcher": "one-shot-review",
+      "hooks": [{
+        "type": "mcp_tool",
+        "server": "cl-mcp",
+        "tool": "repl-close",
+        "input": {"agent_id": "${agent_id}"}
+      }]
+    }]
+  }
+}
+```
+
+The injection hook uses Claude Code's actual subagent ID, including when the
+model supplied a different value. Main-conversation calls and explicit
+`repl-close` targets keep their original arguments. The stop hook invokes
+`repl-close` through Claude Code's configured server connection, including
+for stdio. For resumable agents, keep their REPL open across stops and close
+it when the harness retires the agent. [Claude Code MCP hooks](https://code.claude.com/docs/en/hooks#mcp-tool-hook-fields)
+
+Claude Code still evaluates permissions for the rewritten input. Auto mode
+can reject rewritten MCP arguments and ask for a new call. [Claude Code hook permissions](https://code.claude.com/docs/en/hooks#pretooluse-decision-control)
 
 ## `repl-eval`
 Evaluate one or more forms and return the last value as a text item.

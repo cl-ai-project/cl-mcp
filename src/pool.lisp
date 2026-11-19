@@ -92,10 +92,14 @@
              (format s "Worker pool is shutting down"))))
 
 (define-condition pool-capacity-exceeded (error)
-  ((limit :initarg :limit :reader pool-capacity-exceeded-limit))
+  ((limit :initarg :limit :reader pool-capacity-exceeded-limit)
+   (dedicated-p :initarg :dedicated-p :initform nil :reader pool-capacity-dedicated-p))
+  (:documentation "A worker assignment would exceed the applicable pool limit.")
   (:report (lambda (c s)
-             (format s "Pool size limit reached (~D workers). ~
-                       Release unused sessions before creating new ones."
+             (format s "~A limit reached (~D workers). ~
+                        Close finished agents' REPLs with repl-close ~
+                        or end unused MCP sessions."
+                     (if (pool-capacity-dedicated-p c) "Dedicated REPL" "Pool size")
                      (pool-capacity-exceeded-limit c)))))
 
 (define-condition pool-spawn-cancelled (error)
@@ -778,6 +782,18 @@ count to its worker in the critical section that registers it, so no worker
 is counted twice or missed.  A worker taken out of the lists to be ended is
 not counted: it is going.  Must be called with *pool-lock* held."
   (+ (length *all-workers*) (generation-spawns *generation*)))
+
+(defun %dedicated-pool-limit-reached-p ()
+  "Return true when another dedicated assignment would take the default REPL slot.
+Hold *POOL-LOCK*. Count unlinked spawns until they finish, including cancelled
+placeholders that still occupy capacity."
+  (loop for id being the hash-keys of *affinity-map* using (hash-value entry)
+        count (dedicated-repl-id-p id) into dedicated-affinities
+        count (worker-placeholder-p entry) into affinity-spawns
+        finally
+           (return (>= (+ dedicated-affinities
+                          (- (generation-spawns *generation*) affinity-spawns))
+                       (1- *max-pool-size*)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Internal -- spawn and bind
@@ -1627,11 +1643,15 @@ cannot be created."
       ;; Skip when circuit breaker tripped — the error is raised after
       ;; the lock, but we must not leave a placeholder that nobody resolves.
       (when (and (null entry) (not circuit-breaker-tripped))
+        ;; Affinities include pending spawns. Decide under the same lock as
+        ;; placeholder insertion so concurrent agents cannot take the default slot.
+        (when (and dedicated-p (%dedicated-pool-limit-reached-p))
+          (setf capacity-exceeded :dedicated))
         ;; Dedicated workers start under their agent's root before concurrent
         ;; calls can acquire them. An explicitly unset root also needs a fresh
         ;; worker, since a standby may already have a root and an ASDF registry.
         ;; If the standbys fill the pool, reclaim a slot for that spawn.
-        (when (and fresh-worker-p *standby-workers*
+        (when (and (not capacity-exceeded) fresh-worker-p *standby-workers*
                    (>= (%effective-pool-size) *max-pool-size*))
           (let ((standby (pop *standby-workers*)))
             (push (%begin-ending standby) standbys-to-kill)
@@ -1667,7 +1687,7 @@ cannot be created."
                                "state" (string-downcase
                                         (symbol-name (worker-state w)))))))
         ;; If no live standby found, spawn on demand
-        (when (and (null assigned-from-standby) (null entry))
+        (when (and (not capacity-exceeded) (null assigned-from-standby) (null entry))
           ;; Signalled after the lock, not here: a standby dropped above is
           ;; out of every list and not yet killed, and an exit from inside
           ;; the lock would leave its process to nobody.
@@ -1688,7 +1708,10 @@ cannot be created."
     (dolist (standby standbys-to-kill)
       (%end-worker standby))
     (when capacity-exceeded
-      (error 'pool-capacity-exceeded :limit *max-pool-size*))
+      (let ((dedicated-limit-p (eq capacity-exceeded :dedicated)))
+        (error 'pool-capacity-exceeded
+               :dedicated-p dedicated-limit-p
+               :limit (if dedicated-limit-p (1- *max-pool-size*) *max-pool-size*))))
     ;; Circuit breaker: halt recovery after too many crashes.
     ;; Checked outside the lock so the old worker is already cleaned up.
     (when circuit-breaker-tripped

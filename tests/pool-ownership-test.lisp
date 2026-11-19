@@ -58,6 +58,54 @@
   "Return the violation kinds of OPERATIONS run with the plist OPTIONS."
   (violation-kinds (apply #'run-operation-sequence operations options)))
 
+(deftest dedicated-spawns-leave-capacity-for-the-default-repl
+  (with-fake-pool (ledger :warmup 0 :max-size 2)
+    (let ((first-id (cl-mcp/src/state:make-dedicated-repl-id))
+          (other-id (cl-mcp/src/state:make-dedicated-repl-id))
+          (refusal nil)
+          (spawn cl-mcp/src/pool::*spawn-worker-function*))
+      (let ((cl-mcp/src/pool::*spawn-worker-function*
+              (lambda ()
+                ;; The first spawn has a placeholder while it is starting.
+                (let ((cl-mcp/src/pool::*spawn-worker-function* spawn))
+                  (setf refusal
+                        (handler-case (progn (get-or-assign-worker other-id) nil)
+                          (cl-mcp/src/pool:pool-capacity-exceeded (condition) condition)))
+                  (funcall spawn)))))
+        (ok (get-or-assign-worker first-id)))
+      (ok refusal "the reserved default slot is unavailable to the next dedicated spawn")
+      (when refusal
+        (ok (search "repl-close" (princ-to-string refusal)) "tell callers how to reclaim space")
+        (ok (= 1 (length (ledger-spawned ledger))) "refusal starts no worker")
+        (let ((default (get-or-assign-worker "default-mcp-session")))
+          (ok default "the default REPL can still acquire a worker")
+          (cl-mcp/src/pool:kill-session-worker "default-mcp-session")
+          (let ((replacement (get-or-assign-worker "default-mcp-session")))
+            (ok (and replacement (not (eq replacement default)))
+                "the default REPL can replace its worker")))
+        (release-session first-id)
+        (ok (get-or-assign-worker other-id) "repl-close makes the dedicated slot reusable")))))
+
+(deftest cancelled-dedicated-spawn-keeps-its-slot-until-it-ends
+  (with-fake-pool (ledger :warmup 0 :max-size 2)
+    (declare (ignore ledger))
+    (let ((first-id (cl-mcp/src/state:make-dedicated-repl-id))
+          (other-id (cl-mcp/src/state:make-dedicated-repl-id))
+          (refused nil)
+          (spawn cl-mcp/src/pool::*spawn-worker-function*))
+      (let ((cl-mcp/src/pool::*spawn-worker-function*
+              (lambda ()
+                (let ((cl-mcp/src/pool::*spawn-worker-function* spawn))
+                  (release-session first-id)
+                  (setf refused
+                        (handler-case (progn (get-or-assign-worker other-id) nil)
+                          (cl-mcp/src/pool:pool-capacity-exceeded () t)))
+                  (funcall spawn)))))
+        (ok (handler-case (progn (get-or-assign-worker first-id) nil)
+              (cl-mcp/src/pool:pool-spawn-cancelled () t))))
+      (ok refused "the cancelled spawn still occupies its slot")
+      (ok (get-or-assign-worker other-id) "the slot is reusable once the spawn ends"))))
+
 ;;; ------------------------------------------------------------------------
 ;;; The checks find what they claim to
 

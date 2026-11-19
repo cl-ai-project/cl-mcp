@@ -28,9 +28,10 @@
   (closed-p nil :type boolean))
 
 (defun %release-repl (repl-id)
-  (unwind-protect
-       (release-session repl-id)
-    (forget-session-project-root repl-id)))
+  (ignore-errors
+    (unwind-protect
+         (release-session repl-id)
+      (forget-session-project-root repl-id))))
 
 (defun %close-repl (state agent-id)
   (let (idle-repl closed)
@@ -103,8 +104,6 @@
     (cond
       ((equal name "repl-close")
        (funcall thunk))
-      ((and (hash-table-p args) (nth-value 1 (gethash "repl_id" args)))
-       (%repl-error state id "Use agent_id to select a dedicated REPL."))
       ((not supplied-p)
        (funcall thunk))
       ((not (and (stringp agent-id) (plusp (length agent-id))))

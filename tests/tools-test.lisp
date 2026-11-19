@@ -1563,6 +1563,29 @@
             (bordeaux-threads:destroy-thread thread)))
         (cl-mcp/src/tools/repl-session:close-repl-sessions state)))))
 
+(deftest repl-cleanup-continues-after-a-release-error
+  (let ((state (cl-mcp/src/protocol:make-state))
+        (*use-worker-pool* t)
+        (cl-mcp/src/state:*current-session-id* "repl-cleanup-test")
+        (cl-mcp/src/pool::*affinity-map* nil))
+    (flet ((register-agent (agent-id)
+             (cl-mcp/src/tools/repl-session:call-with-repl-session
+              state 1 "repl-eval" (make-ht "agent_id" agent-id)
+              (lambda () cl-mcp/src/state:*current-session-id*))))
+      (let ((ids (mapcar #'register-agent '("first" "second"))))
+        (unwind-protect
+             (progn
+               ;; Release signals on the unavailable affinity map.
+               (multiple-value-bind (result cleanup-error)
+                   (ignore-errors (cl-mcp/src/tools/repl-session:close-repl-sessions state))
+                 (declare (ignore result))
+                 (ok (null cleanup-error) "a release error stays inside cleanup"))
+               (dolist (id ids)
+                 (ok (not (nth-value 1 (cl-mcp/src/project-root:session-project-root id)))
+                     "cleanup forgets each root even when releasing a worker fails")))
+          (dolist (id ids)
+            (cl-mcp/src/project-root:forget-session-project-root id)))))))
+
 (deftest tools-list-accepts-registered-schema-without-properties
   (let* ((*use-worker-pool* t)
          (cl-mcp/src/tools/registry::*tool-registry* (make-ht))
