@@ -3,7 +3,8 @@
 (defpackage #:cl-mcp/src/tools/repl-session
   (:use #:cl)
   (:import-from #:alexandria #:copy-hash-table)
-  (:import-from #:bordeaux-threads #:with-lock-held)
+  (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
+  (:import-from #:cl-mcp/src/log #:log-event #:should-log-p)
   (:import-from #:cl-mcp/src/pool #:release-session #:set-dedicated-repl-idle)
   (:import-from #:cl-mcp/src/project-root
                 #:remember-session-project-root #:forget-session-project-root
@@ -13,13 +14,27 @@
                 #:*current-session-id* #:*transport-session-id*
                 #:make-dedicated-repl-id #:protocol-version #:repl-sessions #:repl-sessions-lock)
   (:import-from #:cl-mcp/src/tools/define-tool #:define-tool)
-  (:import-from #:cl-mcp/src/tools/helpers #:make-ht #:result #:text-content #:tool-error)
+  (:import-from #:cl-mcp/src/tools/helpers
+                #:extract-arg #:make-ht #:result #:text-content #:tool-error)
   (:import-from #:cl-mcp/src/utils/sanitize #:encode-json-line)
   (:export #:call-with-repl-session #:close-repl-sessions #:repl-tool-descriptor))
 
 (in-package #:cl-mcp/src/tools/repl-session)
 
 (declaim (ftype (function (string) *) %release-repl))
+
+(defvar *ignored-agent-id-warned-p* nil
+  "Whether this server process has reported ignoring an agent ID in inline mode.")
+
+(defvar *ignored-agent-id-warning-lock* (make-lock "ignored-agent-id-warning")
+  "Serializes the first inline-mode agent ID warning across connections.")
+
+(defun %warn-ignored-agent-id ()
+  (when (and (should-log-p :warn)
+             (with-lock-held (*ignored-agent-id-warning-lock*)
+               (unless *ignored-agent-id-warned-p*
+                 (setf *ignored-agent-id-warned-p* t))))
+    (log-event :warn "repl.agent-id-ignored" "reason" "worker pool disabled")))
 
 (defstruct (repl-session (:constructor make-repl-session (id)))
   (id "" :type string :read-only t)
@@ -102,18 +117,17 @@
     (result id response)))
 
 (defun call-with-repl-session (state id name args thunk)
-  "Call THUNK in AGENT_ID's dedicated REPL when supplied, or in the default session."
+  "Call THUNK in a dedicated REPL when the pool and AGENT_ID are available."
   (multiple-value-bind (agent-id supplied-p)
       (when (hash-table-p args) (gethash "agent_id" args))
     (cond
-      ((equal name "repl-close")
+      ((or (not supplied-p) (equal name "repl-close"))
        (funcall thunk))
-      ((not supplied-p)
+      ((not *use-worker-pool*)
+       (%warn-ignored-agent-id)
        (funcall thunk))
       ((not (and (stringp agent-id) (plusp (length agent-id))))
        (%repl-error state id "agent_id must be a non-empty string."))
-      ((not *use-worker-pool*)
-       (%repl-error state id "agent_id requires the worker pool."))
       ((null *current-session-id*)
        (%repl-error state id "agent_id requires an MCP session."))
       (t
@@ -128,10 +142,11 @@
            (%finish-repl-request state repl)))))))
 
 (defun repl-tool-descriptor (descriptor)
-  "Add the optional agent_id selector without modifying a registered descriptor."
-  (if (or (not *use-worker-pool*) (equal "repl-close" (gethash "name" descriptor)))
+  "Add the agent_id selector in pooled mode, required only for repl-close."
+  (if (not *use-worker-pool*)
       descriptor
-      (let* ((copy (copy-hash-table descriptor))
+      (let* ((close-p (equal "repl-close" (gethash "name" descriptor)))
+             (copy (copy-hash-table descriptor))
              (schema (copy-hash-table (gethash "inputSchema" descriptor)))
              (original-properties (gethash "properties" schema))
              (properties (if original-properties
@@ -141,23 +156,32 @@
               (gethash "properties" schema) properties
               (gethash "agent_id" properties)
               (make-ht "type" "string" "minLength" 1
-                       "description" "Stable caller agent ID. Omit for the default REPL."))
+                       "description" (if close-p
+                                         "The stable agent ID supplied on tool calls."
+                                         "Stable caller agent ID. Omit for the default REPL.")))
+        (when close-p
+          (setf (gethash "required" schema) (vector "agent_id")))
         copy)))
 
 (define-tool "repl-close"
   :description "End an agent's REPL in this MCP session and release its worker when admitted calls
-finish. This call can be repeated and closes the agent ID even before its first call."
-  :args ((agent-id :json-name "agent_id" :type :string :required t
-                   :description "The stable agent ID supplied on tool calls."))
+finish. This call can be repeated and closes the agent ID even before its first call.
+In inline mode this is a no-op."
+  :args ()
   :body
   (cond
-    ((not (plusp (length agent-id)))
-     (%repl-error state id "agent_id must be a non-empty string."))
     ((not *use-worker-pool*)
-     (%repl-error state id "repl-close requires the worker pool."))
-    ((null *current-session-id*)
-     (%repl-error state id "repl-close requires an MCP session."))
-    ((%close-repl state agent-id)
+     (when (and (hash-table-p args) (nth-value 1 (gethash "agent_id" args)))
+       (%warn-ignored-agent-id))
      (%repl-result state id (make-ht "closed" t)))
     (t
-     (%repl-error state id "The MCP session is closed."))))
+     (let ((agent-id (extract-arg args "agent_id" :type :string :required t)))
+       (cond
+         ((not (plusp (length agent-id)))
+          (%repl-error state id "agent_id must be a non-empty string."))
+         ((null *current-session-id*)
+          (%repl-error state id "repl-close requires an MCP session."))
+         ((%close-repl state agent-id)
+          (%repl-result state id (make-ht "closed" t)))
+         (t
+          (%repl-error state id "The MCP session is closed.")))))))

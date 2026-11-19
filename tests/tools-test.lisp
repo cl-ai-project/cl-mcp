@@ -1522,16 +1522,87 @@
       (ok (not (%find-tool-descriptor descriptors "repl-open")))
       (ok (and selector (equal "string" (gethash "type" selector))))
       (ok (not (find "agent_id" (gethash "required" eval-schema) :test #'equal)))
-      (ok (find "agent_id" (gethash "required" close-schema) :test #'equal))))
-  (let* ((request (concatenate 'string
-                               "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
-                               "\"params\":{\"name\":\"repl-eval\","
-                               "\"arguments\":{\"code\":\"nil\",\"agent_id\":\"review\"}}}"))
-         (response (parse (%pjl request)))
-         (error (gethash "error" response)))
-    (ok (and error (= -32602 (gethash "code" error))))
-    (when error
-      (ok (search "requires the worker pool" (gethash "message" error))))))
+      (ok (find "agent_id" (gethash "required" close-schema) :test #'equal)))))
+
+(deftest pooled-repl-tools-still-validate-agent-ids
+  (let ((*use-worker-pool* t)
+        (state (cl-mcp/src/protocol:make-state)))
+    (dolist (case '(("repl-eval" "" "non-empty string")
+                    ("repl-eval" 42 "non-empty string")
+                    ("repl-close" "" "non-empty string")
+                    ("repl-close" 42 "agent_id")
+                    ("repl-close" nil "agent_id is required")))
+      (destructuring-bind (name agent expected) case
+        (let* ((args (make-ht "code" "42"))
+               (params (make-ht "name" name "arguments" args)))
+          (when agent (setf (gethash "agent_id" args) agent))
+          (let ((reply (parse (process-json-line
+                               (cl-mcp/src/utils/sanitize:encode-json-line
+                                (make-ht "jsonrpc" "2.0" "id" 1 "method" "tools/call"
+                                         "params" params))
+                               state))))
+            (ok (%tool-call-failed-p reply))
+            (ok (search expected (%tool-call-message reply)))))))))
+
+(deftest inline-tools-ignore-agent-ids
+  (with-test-project-root
+    (let* ((session "inline-agent-root")
+           (cl-mcp/src/state:*current-session-id* session)
+           (state (cl-mcp/src/protocol:make-state))
+           (other-state (cl-mcp/src/protocol:make-state))
+           (root (merge-pathnames #P"tests/" test-root))
+           (logs (make-string-output-stream))
+           (cl-mcp/src/log:*log-stream* logs)
+           (cl-mcp/src/log:*log-level* :warn)
+           (cl-mcp/src/tools/repl-session::*ignored-agent-id-warned-p* nil))
+      (declare (special cl-mcp/src/tools/repl-session::*ignored-agent-id-warned-p*))
+      (flet ((call (name arguments &optional (state state))
+               (parse (%pjl (cl-mcp/src/utils/sanitize:encode-json-line
+                             (make-ht "jsonrpc" "2.0" "id" 1 "method" "tools/call"
+                                      "params" (make-ht "name" name "arguments" arguments)))
+                            state))))
+        (unwind-protect
+             (progn
+               (setf (cl-mcp/src/state:protocol-version state) "2025-11-25")
+               (let ((reply (call "repl-close" (make-ht))))
+                 (ok (equal "{\"closed\":true}" (%tool-call-message reply))))
+               (ok (equal "" (get-output-stream-string logs))
+                   "an omitted selector does not trigger the warning")
+               (let ((cl-mcp/src/log:*log-level* :error))
+                 (call "repl-eval" (make-ht "agent_id" "review" "code" "5")))
+               (dolist (agent '("review" "" 42))
+                 (let ((reply (call "repl-eval" (make-ht "agent_id" agent "code" "(+ 1 2)"))))
+                   (ok (equal "3" (%tool-call-message reply))))
+                 (let* ((reply (call "repl-close" (make-ht "agent_id" agent)))
+                        (payload (gethash "result" reply))
+                        (structured (and payload (gethash "structuredContent" payload))))
+                   (ok (and structured (gethash "closed" structured)))))
+               (let ((reply (call "fs-set-project-root"
+                                  (make-ht "agent_id" 42 "path" (uiop:native-namestring root)))))
+                 (ok (not (%tool-call-failed-p reply)))
+                 (ok (equal root (cl-mcp/src/project-root:session-project-root session))))
+               (let ((cl-mcp/src/state:*current-session-id* "inline-agent-other"))
+                 (ok (equal "5" (%tool-call-message
+                                 (call "repl-eval" (make-ht "agent_id" "review" "code" "5")
+                                       other-state)))))
+               (ok (zerop (hash-table-count (cl-mcp/src/state:repl-sessions state))))
+               (ok (zerop (hash-table-count (cl-mcp/src/state:repl-sessions other-state))))
+               (with-input-from-string (stream (get-output-stream-string logs))
+                 (ok (= 1 (loop for line = (read-line stream nil)
+                                while line
+                                count (equal "repl.agent-id-ignored"
+                                             (gethash "event" (parse line))))))))
+          (cl-mcp/src/project-root:forget-session-project-root session))))))
+
+(deftest inline-tools-list-has-no-agent-id-selector
+  (multiple-value-bind (obj result descriptors)
+      (%tools-list)
+    (declare (ignore obj result))
+    (dolist (name '("repl-eval" "repl-close"))
+      (let* ((descriptor (%find-tool-descriptor descriptors name))
+             (schema (gethash "inputSchema" descriptor)))
+        (ok (not (gethash "agent_id" (gethash "properties" schema))))
+        (ok (not (find "agent_id" (gethash "required" schema) :test #'equal)))))))
 
 (deftest concurrent-first-agent-calls-share-a-repl
   (let ((state (cl-mcp/src/protocol:make-state))

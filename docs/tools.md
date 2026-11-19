@@ -128,6 +128,12 @@ Use the same `agent_id` for calls that share Lisp state, including `load-system`
 The REPL inherits the session's project root at first use. `fs-set-project-root`
 with `agent_id` changes that REPL's root. Omit `agent_id` to use the default REPL.
 
+With the worker pool disabled (`MCP_NO_WORKER_POOL=1` or `:worker-pool nil`),
+cl-mcp ignores `agent_id` and logs a warning once per server process. Calls
+run in the shared Lisp image. The parent and subagents on one MCP session
+share its project root, so `fs-set-project-root` changes that session's root.
+In this mode, `repl-close` succeeds as a no-op.
+
 Dedicated REPLs close automatically when their MCP session ends. The pool
 monitor reclaims a dedicated worker after `CL_MCP_DEDICATED_REPL_IDLE_SECONDS`
 of inactivity (default 900 seconds, or 0 to disable). The timer starts when the
@@ -141,9 +147,12 @@ That call can be repeated. Further calls with that ID are
 refused in the same MCP session, and previously admitted calls can finish before
 the worker is released. Dedicated workers count against `CL_MCP_MAX_POOL_SIZE`.
 Dedicated workers can use at most 15 slots in the default 16-slot pool, leaving
-one slot for a default REPL. In-flight spawns hold capacity until they finish,
-including cancelled spawns. A one-slot pool is for default REPLs only. The
-overall limit still applies during standby warmup and across default sessions.
+one slot for a default REPL across the whole server. TCP and HTTP connections
+share that pool. After one default REPL uses the remaining slot, another
+connection may hit the capacity limit. A dedicated assignment can retire a
+standby to make room for a worker that starts with its own project root.
+In-flight spawns hold capacity until they finish, including cancelled spawns.
+A one-slot pool is for default REPLs only.
 If the limit is reached, call `repl-close` for agents that have finished or end
 unused MCP sessions.
 The processes can still access the same project files.
@@ -211,6 +220,10 @@ model supplied a different value. Main-conversation calls and explicit
 `repl-close` through Claude Code's configured server connection, including
 for stdio. For resumable agents, keep their REPL open across stops and close
 it when the harness retires the agent. [Claude Code MCP hooks](https://code.claude.com/docs/en/hooks#mcp-tool-hook-fields)
+
+With a cl-mcp version that predates dedicated REPLs, use the `PreToolUse`
+example on its own. Those versions ignore the extra argument on ordinary
+tools. The `SubagentStop` example requires the `repl-close` tool.
 
 Claude Code still evaluates permissions for the rewritten input. Auto mode
 can reject rewritten MCP arguments and ask for a new call. [Claude Code hook permissions](https://code.claude.com/docs/en/hooks#pretooluse-decision-control)
