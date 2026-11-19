@@ -735,6 +735,26 @@ worker held a session's state, and only its end is owed to anyone."
                       :exit-status (worker-last-exit-status worker)
                       :exit-code (worker-last-exit-code worker)))
 
+(defun %await-process-exit (process seconds)
+  "Wait up to SECONDS for PROCESS to stop running.  Return true once it has;
+it has then been reaped as well, because each look goes through
+SB-EXT:PROCESS-ALIVE-P, whose status update collects a child that exited.
+Return NIL when it is still running, or stopped, at the deadline, or when its
+status cannot be read.
+
+Bounded where SB-EXT:PROCESS-WAIT is not: the reaper waits here after its
+signals, and a child that outlived them must not hold the thread, which
+SHUTDOWN-POOL waits for."
+  (loop with deadline = (+ (get-internal-real-time)
+                           (round (* seconds internal-time-units-per-second)))
+        do (multiple-value-bind (alive failure)
+               (ignore-errors (sb-ext:process-alive-p process))
+             (cond (failure (return nil))
+                   ((not alive) (return t))))
+           (when (>= (get-internal-real-time) deadline)
+             (return nil))
+           (sleep 0.05)))
+
 (defun %mark-worker-crashed (worker reason)
   "Mark WORKER as crashed, record its end in the reset ledger unless it was
 already decided, close its stream to prevent further use, and log the event.
@@ -827,8 +847,10 @@ Returns nothing."
         (exit-status (worker-last-exit-status worker)))
     (when process
       ;; Reap the OS process in a background thread to avoid blocking
-      ;; the caller.  process-close calls waitpid internally, which
-      ;; blocks if the worker process is still alive.
+      ;; the caller: the signals and the wait for the child to go take
+      ;; seconds.  SB-EXT:PROCESS-CLOSE does not reap; it only stops
+      ;; tracking the process, so a child it closes before it has gone
+      ;; is left a zombie.
       (let ((reaper-thread nil))
         (setf reaper-thread
               (bt:make-thread
@@ -847,7 +869,13 @@ Returns nothing."
                              (log-event :warn "worker.reaper.sigkill" "id" wid)
                              (sb-ext:process-kill process 9)
                              (sleep 0.2))))
-                       (ignore-errors (sb-ext:process-wait process nil nil))
+                       ;; Until the child has gone and been reaped.  This was
+                       ;; (sb-ext:process-wait process nil nil), one argument
+                       ;; too many in every SBCL: IGNORE-ERRORS swallowed the
+                       ;; error and nothing waited.
+                       (unless (%await-process-exit process 2)
+                         (log-event :warn "worker.reaper.still-running"
+                                    "id" wid "pid" (worker-pid worker)))
                        ;; EOF only says the transport closed.  A child that
                        ;; was still alive at that moment is terminated here.
                        ;; Keep the EOF-time crash snapshot immutable: pool and

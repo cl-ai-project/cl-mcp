@@ -671,6 +671,44 @@ initialization pool-wide for")
       (ignore-errors (sb-ext:process-kill process 9))
       (ignore-errors (sb-ext:process-wait process)))))
 
+(deftest awaiting-a-process-exit-reaps-a-child-that-ends
+  ;; The reaper's wait after its signals.  It used to be
+  ;; (sb-ext:process-wait process nil nil): one argument too many in every
+  ;; SBCL, so IGNORE-ERRORS swallowed the program-error and the wait never
+  ;; happened.
+  (let ((process (sb-ext:run-program "/bin/sh" '("-c" "sleep 0.3")
+                                     :wait nil :search nil)))
+    (unwind-protect
+         (let* ((start (get-internal-real-time))
+                (gone (cl-mcp/src/worker-client::%await-process-exit process 10))
+                (elapsed (/ (- (get-internal-real-time) start)
+                            internal-time-units-per-second)))
+           (ok gone "a child that ends within the wait is reported gone")
+           (ok (eq :exited (sb-ext:process-status process))
+               "and was reaped: its status is final, not :running")
+           (ok (< elapsed 5)
+               (format nil "the wait ends when the child does, not at the deadline (~,2Fs)"
+                       elapsed)))
+      (ignore-errors (sb-ext:process-kill process 9))
+      (ignore-errors (sb-ext:process-close process)))))
+
+(deftest awaiting-a-process-exit-gives-up-at-its-deadline
+  ;; A child that outlives its signals must not hold the reaper: shutdown
+  ;; joins the reaper threads.
+  (let ((process (sb-ext:run-program "/bin/sh" '("-c" "exec sleep 30")
+                                     :wait nil :search nil)))
+    (unwind-protect
+         (let* ((start (get-internal-real-time))
+                (gone (cl-mcp/src/worker-client::%await-process-exit process 0.3))
+                (elapsed (/ (- (get-internal-real-time) start)
+                            internal-time-units-per-second)))
+           (ok (not gone) "a child still running at the deadline is not reported gone")
+           (ok (<= 0.3 elapsed 3)
+               (format nil "the wait returns at its deadline (~,2Fs)" elapsed)))
+      (ignore-errors (sb-ext:process-kill process 9))
+      (ignore-errors (sb-ext:process-wait process))
+      (ignore-errors (sb-ext:process-close process)))))
+
 (deftest killing-a-worker-lets-its-last-words-through
   ;; KILL-WORKER closes the worker's pipe by killing it, so the drain thread
   ;; ends on its own with whatever the worker said last -- after a SIGKILL,
