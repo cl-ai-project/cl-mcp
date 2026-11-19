@@ -189,3 +189,11 @@
         (let ((result (%initialize-result version)))
           (ok (equal (server-instructions) (gethash "instructions" result))
               (format nil "~A with groups ~S" version groups)))))))
+
+(deftest initialize-explains-when-to-close-a-subagent-repl
+  (let* ((result (%initialize-result (first +supported-protocol-versions+)))
+         (instructions (gethash "instructions" result)))
+    (ok (search "Use repl-close only for permanent retirement." instructions)
+        "Explicit close requires permanent retirement")
+    (ok (search "Let idle timeout handle resumable agents." instructions)
+        "Agents that can resume rely on the idle timeout")))
