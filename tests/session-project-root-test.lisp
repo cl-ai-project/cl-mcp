@@ -31,6 +31,7 @@
   ;; A bare :import-from declares the dependency; the session table it clears
   ;; is internal and found by name where it is used.
   (:import-from #:cl-mcp/src/http)
+  (:import-from #:cl-mcp/src/run)
   (:import-from #:yason #:parse))
 
 (in-package #:cl-mcp/tests/session-project-root-test)
@@ -200,16 +201,18 @@ scratch directories %SCRATCH-DIR made."
 
 (deftest an-ended-session-forgets-its-root
   (testing "deleting an HTTP session drops its root, so a reused id starts from the default"
-    (with-isolated-roots ("tA")
-      (let ((default (%scratch-dir "forget-default"))
-            (a (%scratch-dir "forget-a")))
-        (setf *project-root* default)
-        (%tool "tA" "fs-set-project-root" "path" (%native a))
-        (ok (session-project-root "tA") "the session has a root")
-        (cl-mcp/src/http::delete-session "tA")
-        (ok (null (session-project-root "tA")) "the ended session's root is gone")
-        (ok (equal (%root-of "tA") (%native default))
-            "the id now resolves against the default")))))
+    (let* ((session (cl-mcp/src/http::create-session))
+           (id (cl-mcp/src/http::http-session-id session)))
+      (with-isolated-roots (id)
+        (let ((default (%scratch-dir "forget-default"))
+              (a (%scratch-dir "forget-a")))
+          (setf *project-root* default)
+          (%tool id "fs-set-project-root" "path" (%native a))
+          (ok (session-project-root id) "the session has a root")
+          (cl-mcp/src/http::delete-session id)
+          (ok (null (session-project-root id)) "the ended session's root is gone")
+          (ok (equal (%root-of id) (%native default))
+              "the id now resolves against the default"))))))
 
 (deftest a-deleted-session-keeps-its-root-for-requests-in-flight
   (testing "DELETE during a POST: the root goes when the last request finishes"
@@ -226,6 +229,9 @@ scratch directories %SCRATCH-DIR made."
           (cl-mcp/src/http::delete-session id)
           (ok (equal (session-project-root id) a)
               "the delete leaves the root to the request in flight")
+          (cl-mcp/src/http::delete-session id)
+          (ok (equal (session-project-root id) a)
+              "a repeated delete also leaves the root to the request in flight")
           (cl-mcp/src/http::%release-session-request session)
           (ok (null (session-project-root id))
               "the last request to finish forgets it"))))))
@@ -297,3 +303,19 @@ scratch directories %SCRATCH-DIR made."
               (ok (every (lambda (root) (equal root a)) seen)
                   (format nil "every spawn for the session saw its root; saw ~S"
                           seen)))))))))
+
+(deftest an-agents-first-worker-starts-with-its-root-before-publication
+  (let ((id (cl-mcp/src/state:make-dedicated-repl-id))
+        (root (%scratch-dir "agent-first-root"))
+        (spawn-root nil))
+    (with-isolated-roots (id)
+      (with-fake-pool (ledger :warmup 2 :max-size 2)
+        (run-pending-work ledger)
+        (setf cl-mcp/src/pool::*spawn-worker-function*
+              (lambda ()
+                (setf spawn-root *project-root*)
+                (fake-spawn ledger)))
+        (set-project-root root :session-id id)
+        (ok (get-or-assign-worker id))
+        (ok (equal spawn-root root)
+            "a dedicated worker starts with its recorded root even when a standby is available")))))

@@ -41,8 +41,9 @@ Run tests and evaluate code with run-tests and repl-eval, not ros or sbcl from a
 
 With the worker pool (default), repl-eval, load-system, run-tests, code-*,
 clos-describe, lisp-macroexpand and inspect-object run in this session's own worker
-image. Definitions made in repl-eval live only there. When a response says the worker
-was lost, its state is gone: load-system again; old object ids are refused."
+image. If the worker is lost, reload systems and discard its object ids.
+With the pool on, agent_id selects a subagent's REPL.
+Use repl-close only for permanent retirement. Let idle timeout handle resumable agents."
   "Instructions every client gets, whatever groups are on.  The three numbered
 rules come first because a client may read only the opening.")
 

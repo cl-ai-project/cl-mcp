@@ -24,6 +24,8 @@
   ;; Import tools/all to trigger loading of all tool modules.
   ;; Tool modules register themselves with the registry at load time.
   (:import-from #:cl-mcp/src/tools/all)
+  (:import-from #:cl-mcp/src/tools/repl-session
+                #:call-with-repl-session #:repl-tool-descriptor)
   (:import-from #:cl-mcp/src/project-root
                 #:set-project-root
                 #:with-session-project-root)
@@ -314,7 +316,8 @@ Dispatches notifications/initialized and notifications/cancelled."
 
 (defun handle-tools-list (id)
   "Return the list of available tools from the registry."
-  (result id (make-ht "tools" (get-all-tool-descriptors))))
+  (result id (make-ht "tools" (map 'vector #'repl-tool-descriptor
+                                  (get-all-tool-descriptors)))))
 
 (defun %normalize-tool-name (name)
   "Normalize a tool NAME possibly namespaced like 'ns.tool' or 'ns/tool'.
@@ -354,7 +357,9 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
     (when name (log-event :debug "tools.call" "name" name "local" local))
     (let ((handler (and local (get-tool-handler local))))
       (cond
-        (handler (funcall handler state id args))
+        (handler
+          (call-with-repl-session state id local args
+                                  (lambda () (funcall handler state id args))))
         ;; A tool that exists but is switched off is a setting to change, not
         ;; a name to correct, and saying "not found" sends the caller looking
         ;; for a spelling mistake that is not there.

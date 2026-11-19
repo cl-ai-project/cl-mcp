@@ -25,6 +25,7 @@
                 #:record-worker-termination
                 #:worker-state)
   (:import-from #:cl-mcp/specs/reset-fixtures
+                #:+idle-session+
                 #:run-reset-sequence
                 #:reset-violation-kinds
                 #:told-in
@@ -153,6 +154,20 @@
 
 ;;; ------------------------------------------------------------------------
 ;;; The sequences behind each defect
+
+(deftest idle-retirement-participates-in-the-reset-model
+  (let ((session +idle-session+))
+    (dolist (sequence '((:request :idle-expire :request :request)
+                        (:request :idle-expire :kill-session :request)
+                        (:request :idle-expire :release :request)
+                        (:request :idle-expire :shutdown)
+                        (:request :session-rpc-crash :idle-expire :request :request)))
+      (let* ((operations (loop for kind in sequence
+                               collect (if (eq kind :shutdown)
+                                           (list kind)
+                                           (list kind session))))
+             (violations (run-reset-sequence operations)))
+        (ok (null violations) (format nil "~S: ~S" sequence violations))))))
 
 (defparameter +regressions+
   '(;; A1: a cancellation's worker was told twice -- by the request and, as a
@@ -388,6 +403,41 @@ return it: a reset the session is owed and has not been told."
                                 (declare (ignore events worker-in-place))
                                 text)
                               operations)))))
+
+(deftest the-reset-checks-catch-wrong-idle-retirement
+  (let* ((session +idle-session+)
+         (operations (loop for kind in '(:request :idle-expire :request :request)
+                           collect (list kind session)))
+         (record (fdefinition 'record-termination)))
+    (ok (member :idle-worker-not-reclaimed
+                (%kinds-under 'cl-mcp/src/pool::%expire-idle-dedicated-workers
+                              (constantly nil) operations)))
+    (let* ((expiry 'cl-mcp/src/pool::%expire-idle-dedicated-workers)
+           (sweep (fdefinition expiry)))
+      (ok (member :idle-worker-not-reclaimed
+                  (%kinds-under expiry
+                                (lambda (now)
+                                  (funcall sweep now)
+                                  (cl-mcp/src/pool:get-or-assign-worker session))
+                                operations))))
+    (ok (member :never-told
+                (%kinds-under 'record-termination
+                              (lambda (worker cause &rest arguments)
+                                (if (eq cause :idle-expired)
+                                    (apply record worker cause :owed nil arguments)
+                                    (apply record worker cause arguments)))
+                              operations)))
+    (let* ((proxy 'cl-mcp/src/proxy:proxy-to-worker)
+           (call (fdefinition proxy)))
+      (ok (member :idle-notice-wrong-execution-status
+                  (%kinds-under proxy
+                                (lambda (&rest args)
+                                  (let ((result (apply call args)))
+                                    (when (equal "not-executed" (gethash "execution_status" result))
+                                      (setf (gethash "execution_status" result)
+                                            "execution-unknown"))
+                                    result))
+                                operations))))))
 
 (deftest the-reset-checks-catch-a-notice-claiming-a-worker
   ;; A notice that says the session is using another worker when the pool

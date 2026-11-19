@@ -60,12 +60,14 @@
                 #:killed-p
                 #:with-fake-pool
                 #:run-operation
+                #:run-pending-work
                 #:random-operation
                 #:pool-snapshot
                 #:ownership-violations)
   ;; Bare: the pool's lock is read through the BT nickname.
   (:import-from #:bordeaux-threads)
-  (:export #:run-reset-sequence
+  (:export #:+idle-session+
+           #:run-reset-sequence
            #:random-reset-sequence
            #:reset-violation-kinds
            #:told-in
@@ -83,6 +85,7 @@
     ("retired itself" . :retired)
     ("was stopped to cancel" . :cancelled)
     ("was stopped by pool-kill-worker" . :killed)
+    ("was stopped after the dedicated REPL idle timeout" . :idle-expired)
     ("was stopped when its session was released" . :released)
     ("was stopped when the worker pool shut down" . :shutdown)
     ("was stopped by the worker pool" . :stopped))
@@ -244,15 +247,19 @@ the violations of what it said about itself."
          (result (proxy-to-worker (account-next-request account) "worker/eval"
                                   (make-ht)))
          (reached (> (length (account-received account)) before))
+         (text (%result-text result))
+         (told (told-in text))
+         (not-executed (equal "not-executed" (gethash "execution_status" result)))
          (violations '()))
     ;; Bound for PROXY-TO-WORKER to find: the proxy's own cached binding.
     (declare (ignorable cl-mcp/src/proxy::%cached-worker-rpc%))
-    (when (and (equal "not-executed" (gethash "execution_status" result)) reached)
+    (when (and not-executed reached)
       (push (list :kind :not-executed-but-received :session session) violations))
-    (dolist (pair (told-in (%result-text result)))
+    (when (and (rassoc :idle-expired told) (not not-executed))
+      (push (list :kind :idle-notice-wrong-execution-status :session session) violations))
+    (dolist (pair told)
       (%note-told account session (car pair) (cdr pair)))
-    (values result (append violations
-                           (%in-place-violations session (%result-text result))))))
+    (values result (append violations (%in-place-violations session text)))))
 
 (defun %in-place-violations (session text)
   "Return a violation when TEXT says SESSION is now using another worker and
@@ -341,17 +348,38 @@ its response told.  Returns its violations."
   (let ((entry (cdr (assoc session (getf (pool-snapshot) :map) :test #'equal))))
     (and (typep entry 'worker) entry)))
 
+(defparameter +idle-session+ "repl-00000000000000000000000000000001"
+  "The dedicated logical REPL used for generated idle retirement.")
+
+(defun %expire-idle-worker (ledger account session)
+  "Mark SESSION idle, run the real expiry and check against the fake worker ledger."
+  (let* ((worker (%bound-worker session))
+         (live (and worker (eq :bound (worker-state worker))
+                    (not (%gone-p ledger worker))))
+         (reclaimable (or live (and worker (member (worker-state worker) '(:crashed :dead))))))
+    (when live (%apply-cause account worker :idle-expired))
+    (let ((cl-mcp/src/pool::*dedicated-repl-idle-seconds* 1))
+      (cl-mcp/src/pool:set-dedicated-repl-idle session t))
+    (cl-mcp/src/pool::%expire-idle-dedicated-workers most-positive-fixnum)
+    (run-pending-work ledger)
+    (when (and reclaimable
+               (or (assoc session (getf (pool-snapshot) :map) :test #'equal)
+                   (not (killed-p ledger worker))))
+      (list (list :kind :idle-worker-not-reclaimed :session session
+                  :worker (worker-id worker))))))
+
 (defun %run-reset-operation (ledger model account operation)
   "Apply OPERATION and return the violations it produced.  The pool's own
 operations are those of specs/pool-fixtures.lisp, with the causes they apply
-recorded; two are this file's:
+recorded, along with these request and retirement operations:
 
   (:request SESSION)            a request through the real proxy
   (:request-crash SESSION)      a request whose worker dies while running it
   (:session-rpc-crash SESSION)  an RPC to SESSION's worker times out
+  (:idle-expire SESSION [REQUIRED]) the monitor reclaims an idle dedicated worker
   (:kill-session SESSION)       the pool-kill-worker tool, as it is called
   (:kill-session-reset SESSION) the same with reset=true"
-  (destructuring-bind (kind &optional argument) operation
+  (destructuring-bind (kind &optional argument required) operation
     (case kind
       (:request
        (nth-value 1 (%request ledger account argument)))
@@ -366,6 +394,10 @@ recorded; two are this file's:
            (cl-mcp/src/worker-client::%mark-worker-crashed worker "timeout")
            (setf (gethash worker (cl-mcp/specs/pool-fixtures::model-unusable model)) t)))
        '())
+      (:idle-expire
+       (if (and required (null (%bound-worker argument)))
+           (list (list :kind :idle-worker-never-bound :session argument))
+           (%expire-idle-worker ledger account argument)))
       ((:kill-session :kill-session-reset)
        (let ((target (%bound-worker argument)))
          (when target (%apply-cause account target :killed))
@@ -419,7 +451,10 @@ ends every sequence."
   (discard-all-resets)
   (let ((violations '())
         (model (cl-mcp/specs/pool-fixtures::make-model))
-        (account (make-account)))
+        (account (make-account))
+        (sessions (if (find +idle-session+ operations :key #'second :test #'equal)
+                      (cons +idle-session+ +sessions+)
+                      +sessions+)))
     (flet ((note (index operation found)
              (dolist (violation found)
                (push (list* :index index :operation operation violation)
@@ -451,14 +486,14 @@ ends every sequence."
               ;; tells a reset in its own place is not sent, so it cannot find
               ;; a death nobody has discovered yet; the session asks again,
               ;; until a request reaches its worker.
-              (dolist (session +sessions+)
+              (dolist (session sessions)
                 (loop repeat 3
                       for sent-before = (length (account-received account))
                       do (run-step index (list :request session))
                       until (> (length (account-received account)) sent-before)))
               (%note-losses ledger account)
               (note index '(:drain) (%telling-violations ledger account :final t))
-              (let ((untold (loop for session in +sessions+
+              (let ((untold (loop for session in sessions
                                   when (pending-session-resets session)
                                     collect session)))
                 (when untold
@@ -467,7 +502,7 @@ ends every sequence."
             (run-step index '(:shutdown)))))
       ;; After the teardown too: a shutdown owes nobody anything, and a reset
       ;; left pending now would greet whoever next uses the session's id.
-      (let ((left (loop for session in +sessions+
+      (let ((left (loop for session in sessions
                         when (pending-session-resets session)
                           collect session)))
         (when left
@@ -477,17 +512,21 @@ ends every sequence."
     (remove-duplicates (nreverse violations) :test #'equal)))
 
 (defun random-reset-sequence (&optional (length (+ 5 (random 26))))
-  "Return LENGTH operations: the pool's (RANDOM-OPERATION), requests, some
-of them meeting their worker's death, and deaths of the worker a session
-holds."
-  (loop repeat length
-        collect (let ((roll (random 100))
-                      (session (nth (random (length +sessions+)) +sessions+)))
-                  (cond ((< roll 25) (list :request session))
-                        ((< roll 32) (list :request-crash session))
-                        ((< roll 42) (list :session-rpc-crash session))
-                        ((< roll 46) (list :kill-session-reset session))
-                        (t (random-operation))))))
+  "Return LENGTH operations, beginning with a dedicated worker and its idle expiry."
+  (let ((sessions (cons +idle-session+ +sessions+)))
+    (loop for index below length
+          collect (case index
+                    (0 (list :request +idle-session+))
+                    (1 (list :idle-expire +idle-session+ :required))
+                    (t (let ((roll (random 100))
+                             (session (nth (random (length sessions)) sessions)))
+                         (cond ((< roll 23) (list :request session))
+                               ((< roll 30) (list :request-crash session))
+                               ((< roll 39) (list :session-rpc-crash session))
+                               ((< roll 43) (list :kill-session-reset session))
+                               ((< roll 50) (list :idle-expire +idle-session+))
+                               ((< roll 55) (list :release +idle-session+))
+                               (t (random-operation)))))))))
 
 (defun reset-violation-kinds (violations)
   "Return the distinct kinds of VIOLATIONS."

@@ -54,6 +54,7 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/proxy:proxy-to-worker` | none (see *Request lifecycle*, *Reset events*) | `request-lifecycle-keeps-its-promises`, `resets-are-told-exactly-once`, `resets-are-told-exactly-once-when-the-pool-is-full` |
 | `cl-mcp/src/proxy:cancel-request` | none | `request-lifecycle-keeps-its-promises` |
 | `cl-mcp/src/pool:kill-session-worker`, `release-session`, `shutdown-pool` (resets) | none (see *Reset events*) | `resets-are-told-exactly-once`, `…-when-the-pool-is-full` |
+| `cl-mcp/src/pool::%expire-idle-dedicated-workers` (internal) | none (see *Reset events*, *Concurrency and shutdown*) | the same two, plus `pool-holds-while-operations-overlap` |
 | `cl-mcp/src/tools/pool-kill-worker::pool-kill-worker-handler` (internal; the tool) | none | the same two |
 | `cl-mcp/src/tools/pool-kill-worker::%with-resets` (internal) | none | the same two |
 | `cl-mcp/src/proxy:reset-notice` | none | the same two |
@@ -1591,7 +1592,8 @@ which worker, which session's state it held, why it ended, how its process
 exited, and whether the session has been told. Causes are `:crashed`,
 `:timeout` (the proxy's deadline abandoned it), `:retired` (it exited rather
 than serve a request while carrying a leaked thread), `:cancelled`, `:killed`
-(pool-kill-worker), `:released`, `:shutdown` and `:stopped` (the pool ended
+(pool-kill-worker), `:idle-expired` (dedicated REPL idle timeout), `:released`,
+`:shutdown` and `:stopped` (the pool ended
 it for any other reason -- a fallback nobody should need).
 
 - **The first cause recorded is kept.** A decision is recorded before the
@@ -1605,7 +1607,9 @@ it for any other reason -- a fallback nobody should need).
   was bound to when it ended. A standby's end, a released session's worker
   and a shutdown owe nobody. A release discards what its session was owed, so
   a session reusing the id is not told someone else's loss; a shutdown
-  discards everything.
+  discards everything. Idle expiry ends the worker while its logical REPL and
+  project root remain active, so the state-loss event is still owed to that
+  REPL. Closing the REPL discards any pending event just as a session release does.
 - **Told once, by whoever claims it.** `claim-session-resets` hands a
   session's pending events to one response and marks them delivered:
   the failed request that met the death (in band), the session's next
@@ -1653,7 +1657,8 @@ after the shutdown nothing left owed. 4A's ownership invariants are checked
 in the same runs.
 
 - Generated: `resets-are-told-exactly-once` (one standby, room for four) and
-  `…-when-the-pool-is-full` (two and two) draw pool operations, requests,
+  `…-when-the-pool-is-full` (two and two) start with a dedicated REPL and an
+  idle sweep. They draw further requests, idle sweeps, releases and shutdowns,
   requests whose worker dies under them, and RPC timeouts on the worker a
   session holds. `object-ids-never-outlive-their-image` draws registrations,
   lookups, clears and replaced images over two registries: an id is found
@@ -1812,7 +1817,10 @@ which processes died, every thread the pool started.
 - Generated: `pool-shutdown-leaves-nothing-behind` draws scenarios whose
   work finishes within the deadline -- its claim is conditional on that;
   `pool-late-work-stays-with-its-generation` draws work that does not; and
-  `pool-holds-while-operations-overlap` draws plans.
+  `pool-holds-while-operations-overlap` draws plans that include dedicated
+  REPL calls, explicit closes and idle checks driven by the real pool monitor.
+  Some plans also bind a dedicated worker before the clients start and require
+  the ledger to show that idle retirement ended that worker before shutdown.
 - Fixed (`tests/concurrency-test.lisp`, default suite): each in-flight kind
   alone and all together; the checks catching four wrong implementations;
   one ordering per defect below; the waits; the full pool. Real process

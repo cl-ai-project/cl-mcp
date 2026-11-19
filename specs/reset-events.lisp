@@ -87,7 +87,7 @@ are the Rove tests of tests/reset-events-test.lisp."
   "Install this file's generators, specs and properties in CL-SPEC:*REGISTRY*.
 Registering again replaces each definition by name.  Registering runs nothing."
   (defgenerator reset-operations-generator ()
-    "Draw 5 to 30 pool operations and requests (RANDOM-RESET-SEQUENCE)."
+    "Draw 5 to 30 operations including an initial dedicated REPL idle timeout."
     (random-reset-sequence))
   (defspec reset-operations list (:generator reset-operations-generator))
   (defgenerator handle-operations-generator ()
@@ -112,7 +112,8 @@ ownership invariants hold throughout.  One standby, room for four."
     ;; through, the notice, and the ledger's record and claim.  Discarding
     ;; what a released session or a stopped pool was owed is claimed too,
     ;; through the pool's release and shutdown.
-    (:about proxy-to-worker
+    (:about cl-mcp/src/pool::%expire-idle-dedicated-workers
+            proxy-to-worker
             cl-mcp/src/tools/pool-kill-worker::pool-kill-worker-handler
             cl-mcp/src/tools/pool-kill-worker::%with-resets
             reset-notice
@@ -132,7 +133,8 @@ ownership invariants hold throughout.  One standby, room for four."
     "The same, with two standbys and room for two: requests are refused for
 want of room, and a refusal tells what the session is owed as well."
     ;; The same surfaces as RESETS-ARE-TOLD-EXACTLY-ONCE.
-    (:about proxy-to-worker
+    (:about cl-mcp/src/pool::%expire-idle-dedicated-workers
+            proxy-to-worker
             cl-mcp/src/tools/pool-kill-worker::pool-kill-worker-handler
             cl-mcp/src/tools/pool-kill-worker::%with-resets
             reset-notice

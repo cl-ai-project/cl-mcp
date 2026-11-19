@@ -12,6 +12,10 @@
                 #:tcp-server-running-p
                 #:*tcp-read-timeout*)
   (:import-from #:bordeaux-threads #:make-thread #:join-thread)
+  (:import-from #:cl-mcp/src/tools/helpers #:make-ht)
+  (:import-from #:cl-mcp/src/utils/sanitize #:encode-json-line)
+  (:import-from #:cl-mcp/tests/test-helpers #:spawn-available-p)
+  (:import-from #:yason #:parse)
   (:import-from #:usocket))
 
 (in-package #:cl-mcp/tests/tcp-test)
@@ -240,20 +244,19 @@ returns."
   (when (bordeaux-threads:thread-alive-p thread)
     (ignore-errors (bordeaux-threads:destroy-thread thread))))
 
-(defun %call-with-one-shot-server (function)
+(defun %call-with-one-shot-server (function &key worker-pool)
   "Run SERVE-TCP for one connection on a thread and call FUNCTION with its port.
 Return the server thread once FUNCTION returns; the caller decides how long to
 wait for it to finish.  When the server does not come up, or FUNCTION does not
 return normally, the server is stopped here (see %STOP-ONE-SHOT-SERVER), so no
 thread is left listening.
-The server runs without a worker pool, bound on its own thread: these tests
-use no worker, and starting and stopping a pool would add seconds to the
-server's return on a loaded machine."
+The server starts workers only when WORKER-POOL is set."
   (let* ((port nil)
          (returned nil)
          (thread (make-thread
                   (lambda ()
-                    (let ((cl-mcp/src/proxy:*use-worker-pool* nil))
+                    (let ((cl-mcp/src/proxy:*use-worker-pool* worker-pool)
+                           (cl-mcp/src/pool:*worker-pool-warmup* 0))
                       (serve-tcp :host "127.0.0.1" :port 0
                                  :on-listening (lambda (p) (setf port p))
                                  :accept-once t)))
@@ -525,3 +528,56 @@ and SB-EXT:TIMEOUT are not."))
             (setf (fdefinition name) original)
             (ignore-errors (usocket:socket-close client))
             (ignore-errors (usocket:socket-close listener)))))))
+
+(deftest tcp-legacy-client-routes-agents-using-only-mcp-content
+  (when (and (socket-available-p) (spawn-available-p))
+    (let ((server-thread
+            (%call-with-one-shot-server
+             (lambda (port)
+               (let* ((socket (usocket:socket-connect "127.0.0.1" port
+                                                       :element-type 'character))
+                      (stream (usocket:socket-stream socket))
+                      (id 0))
+                 (unwind-protect
+                      (labels ((request (method params)
+                                 (write-line
+                                  (encode-json-line
+                                   (make-ht "jsonrpc" "2.0" "id" (incf id)
+                                            "method" method "params" params))
+                                  stream)
+                                 (finish-output stream)
+                                 (parse (read-line stream)))
+                               (tool (name &rest args)
+                                 (request "tools/call"
+                                          (make-ht "name" name "arguments" (apply #'make-ht args))))
+                               (content-text (response)
+                                 (let ((result (gethash "result" response)))
+                                   (gethash "text" (aref (gethash "content" result) 0)))))
+                        (let* ((initialized (gethash "result"
+                                                    (request "initialize"
+                                                             (make-ht "protocolVersion"
+                                                                      "2024-11-05"))))
+                               (tools (gethash "tools"
+                                               (gethash "result" (request "tools/list" (make-ht)))))
+                               (eval-tool (find "repl-eval" tools :test #'equal
+                                                :key (lambda (tool) (gethash "name" tool))))
+                               (props (gethash "properties" (gethash "inputSchema" eval-tool)))
+                               (left "review")
+                               (right "implementation"))
+                          (ok (equal "2024-11-05" (gethash "protocolVersion" initialized)))
+                          (ok (equal "string" (gethash "type" (gethash "agent_id" props))))
+                          (tool "repl-eval" "agent_id" left "code" "(defparameter *wire-value* 11)")
+                          (tool "repl-eval" "agent_id" right
+                                "code" "(defparameter *wire-value* 22)")
+                          (ok (equal "11" (content-text (tool "repl-eval" "agent_id" left
+                                                             "code" "*wire-value*"))))
+                          (let ((close-reply (tool "repl-close" "agent_id" left)))
+                            (ok (not (gethash "structuredContent"
+                                              (gethash "result" close-reply))))
+                            (ok (gethash "closed" (parse (content-text close-reply)))))
+                          (ok (gethash "error" (tool "repl-eval" "agent_id" left "code" "nil")))
+                          (ok (equal "22" (content-text (tool "repl-eval" "agent_id" right
+                                                             "code" "*wire-value*"))))))
+                   (usocket:socket-close socket))))
+             :worker-pool t)))
+      (ok (%thread-ends-within-p server-thread 10) "EOF releases REPL workers and the listener"))))

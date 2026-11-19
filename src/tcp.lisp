@@ -13,6 +13,7 @@
   (:import-from #:cl-mcp/src/pool
                 #:initialize-pool #:shutdown-pool #:release-session)
   (:import-from #:cl-mcp/src/project-root #:forget-session-project-root)
+  (:import-from #:cl-mcp/src/tools/repl-session #:close-repl-sessions)
   (:import-from #:bordeaux-threads #:thread-alive-p #:make-thread #:destroy-thread #:join-thread)
   (:import-from #:cl-mcp/src/worker-client
                 #:%read-line-limited #:+max-json-line-bytes+
@@ -243,9 +244,8 @@ Return T, or NIL when the stream failed (the client is gone)."
                  "error" (princ-to-string e))
       nil)))
 
-(defun %process-stream (stream socket conn-id remote)
-  (let ((state (make-state))
-        (log-context (list "conn" conn-id "remote" remote)))
+(defun %process-stream (stream socket conn-id remote state)
+  (let ((log-context (list "conn" conn-id "remote" remote)))
     (let ((cl-mcp/src/log:*log-context* log-context)
           (cl-mcp/src/protocol:*current-session-id*
             (format nil "tcp-~A" conn-id)))
@@ -312,7 +312,8 @@ Return T, or NIL when the stream failed (the client is gone)."
       nil)))
 
 (defun %tcp-handle-client (client conn-id)
-  (let ((stream nil))
+  (let ((stream nil)
+        (state (make-state)))
     (unwind-protect
          (progn
            (when client
@@ -325,7 +326,7 @@ Return T, or NIL when the stream failed (the client is gone)."
                ;; every serious condition (a STORAGE-CONDITION or an
                ;; SB-EXT:TIMEOUT is not an ERROR) ends the connection, and
                ;; nothing the report signals can escape the handler.
-               (handler-case (%process-stream stream client conn-id remote)
+               (handler-case (%process-stream stream client conn-id remote state)
                  (serious-condition (e)
                    (handler-case
                        (log-event :warn "tcp.conn.error"
@@ -335,6 +336,7 @@ Return T, or NIL when the stream failed (the client is gone)."
            t)
       (when stream (ignore-errors (close stream)))
       (when client (ignore-errors (usocket:socket-close client)))
+      (close-repl-sessions state)
       (forget-session-project-root (format nil "tcp-~A" conn-id))
       (when *use-worker-pool*
         (ignore-errors

@@ -138,6 +138,34 @@ the warmup target within a generous bound"
                 while (cl-mcp/src/pool::%replenish-running-p)
                 do (sleep 0.1)))))))
 
+(deftest stdio-agent-repl-returns-standard-content-and-closes-on-eof
+  (if (not (spawn-available-p))
+      (skip "SBCL launcher unavailable")
+      (%with-fast-pool-defaults (:warmup 0)
+        (let ((cl-mcp/src/proxy:*use-worker-pool* t)
+              (cl-mcp/src/project-root::*session-project-roots* (make-hash-table :test 'equal))
+              (in (make-string-input-stream
+                   (format nil "~A~%~A~%"
+                           (concatenate 'string
+                                        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\","
+                                        "\"params\":{\"protocolVersion\":\"2025-06-18\"}}")
+                           (concatenate 'string
+                                        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
+                                        "\"params\":{\"name\":\"repl-eval\","
+                                        "\"arguments\":{\"agent_id\":\"review\","
+                                        "\"code\":\"(+ 1 2)\"}}}"))))
+              (out (make-string-output-stream)))
+          (run :transport :stdio :in in :out out)
+          (with-input-from-string (replies (get-output-stream-string out))
+            (let* ((handshake (gethash "result" (yason:parse (read-line replies))))
+                   (result (gethash "result" (yason:parse (read-line replies))))
+                   (text (gethash "text" (aref (gethash "content" result) 0))))
+              (ok (equal "2025-06-18" (gethash "protocolVersion" handshake)))
+              (ok (equal "3" text))
+              (ok (null (read-line replies nil nil)) "stdout contains only MCP responses")))
+          (ok (zerop (hash-table-count cl-mcp/src/project-root::*session-project-roots*))
+              "stdio EOF forgets the dedicated REPL's project root")))))
+
 (deftest first-tools-call-with-no-standby-completes-within-deadline
   (testing "with warmup=0, the first get-or-assign-worker call must
 complete within *worker-startup-timeout* + buffer.  Pins the on-demand

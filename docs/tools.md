@@ -111,6 +111,121 @@ told after the session is released, or after the server's pool shuts down.
 Object ids (`result_object_id`, `[object-id: ...]`) belong to the worker that
 issued them; see `inspect-object`.
 
+## Dedicated REPLs for subagents
+
+With the worker pool enabled, the harness can pass its own stable `agent_id`
+in tool `arguments` for a subagent sharing an MCP session. Use a non-empty
+string that identifies one subagent instance within the session. cl-mcp creates
+the REPL on first use and starts a dedicated SBCL process when a call needs one.
+For example:
+
+```json
+{"name":"repl-eval","arguments":{"agent_id":"review-2","code":"(+ 1 2)"}}
+```
+
+Use the same `agent_id` for calls that share Lisp state, including `load-system`,
+`run-tests`, and `inspect-object`. Each MCP session has its own agent IDs.
+The REPL inherits the session's project root at first use. `fs-set-project-root`
+with `agent_id` changes that REPL's root. Omit `agent_id` to use the default REPL.
+
+With the worker pool disabled (`MCP_NO_WORKER_POOL=1` or `:worker-pool nil`),
+cl-mcp ignores `agent_id` and logs a warning once per server process. Calls
+run in the shared Lisp image. The parent and subagents on one MCP session
+share its project root, so `fs-set-project-root` changes that session's root.
+In this mode, `repl-close` succeeds as a no-op.
+
+Dedicated REPLs close automatically when their MCP session ends. The pool
+monitor reclaims a dedicated worker after `CL_MCP_DEDICATED_REPL_IDLE_SECONDS`
+of inactivity (default 900 seconds, or 0 to disable). The timer starts when the
+last admitted call finishes. The agent ID and project root are retained.
+The next call that needs a worker reports the state loss once with
+`execution_status: "not-executed"`. Reload any needed systems and definitions
+before continuing.
+
+Call `repl-close` with `{"agent_id":"review-2"}` when the harness permanently
+retires the agent. That call can be repeated. Further calls with that ID,
+including file tools, are refused in the same MCP session. Previously admitted
+calls can finish before the worker is released. Dedicated workers count against
+`CL_MCP_MAX_POOL_SIZE`.
+Dedicated workers can use at most 15 slots in the default 16-slot pool, leaving
+one slot for a default REPL across the whole server. TCP and HTTP connections
+share that pool. After one default REPL uses the remaining slot, another
+connection may hit the capacity limit. A dedicated assignment can retire a
+standby to make room for a worker that starts with its own project root.
+In-flight spawns hold capacity until they finish, including cancelled spawns.
+A one-slot pool is for default REPLs only.
+If the limit is reached, call `repl-close` for permanently retired agents or
+end unused MCP sessions.
+The processes can still access the same project files.
+If a worker init hook is configured, its singleton runtime starts in a default
+REPL. Open and close dedicated REPLs independently of that app worker.
+
+### Claude Code hooks
+
+For a shared MCP connection named `cl-mcp`, use a `PreToolUse` hook to copy
+Claude Code's `agent_id` into the MCP tool input. Save this script as
+`.claude/hooks/cl-mcp-agent-id.py` in your project.
+
+```python
+import json
+import sys
+
+event = json.load(sys.stdin)
+agent_id = event.get("agent_id")
+if agent_id is None or event["tool_name"].endswith("__repl-close"):
+    sys.exit(0)
+if not isinstance(agent_id, str) or not agent_id:
+    sys.exit("Claude Code supplied an invalid agent_id")
+
+arguments = dict(event["tool_input"])
+arguments["agent_id"] = agent_id
+json.dump({"hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "updatedInput": arguments,
+}}, sys.stdout)
+```
+
+Add this hook to `.claude/settings.json`. Replace `cl-mcp` if your MCP server
+has a different name. The `onFailure: "block"` setting requires Claude Code
+v2.1.295 or later. [Claude Code hook failure handling](https://code.claude.com/docs/en/hooks#block-the-action-when-a-hook-fails)
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "mcp__cl-mcp__.*",
+      "hooks": [{
+        "type": "command",
+        "command": "python3 \"${CLAUDE_PROJECT_DIR}/.claude/hooks/cl-mcp-agent-id.py\"",
+        "onFailure": "block"
+      }]
+    }]
+  }
+}
+```
+
+The injection hook uses Claude Code's actual subagent ID, including when the
+model supplied a different value. Main-conversation calls and explicit
+`repl-close` targets keep their original arguments.
+
+Claude Code can resume a completed subagent under the same ID with
+`SendMessage`. Let the pool's idle timeout reclaim its worker between runs.
+Remove any `SubagentStop` hook that calls `repl-close` for these agents.
+If a hook already closed the ID, start a new subagent. A new MCP session can
+also accept the original ID. [Claude Code subagent resumption](https://code.claude.com/docs/en/sub-agents#resume-subagents)
+
+Set an absolute project root before starting the subagents. A dedicated REPL that
+already exists keeps its own root when you change the parent's root. To set
+it, call `fs-set-project-root` from that agent or pass its `agent_id`
+explicitly. A new MCP session starts with the server's configured default
+root, if any.
+
+cl-mcp versions that predate dedicated REPLs ignore the extra argument on
+ordinary tools.
+
+Claude Code still evaluates permissions for the rewritten input. Auto mode
+can reject rewritten MCP arguments and ask for a new call. [Claude Code hook permissions](https://code.claude.com/docs/en/hooks#pretooluse-decision-control)
+
 ## `repl-eval`
 Evaluate one or more forms and return the last value as a text item.
 

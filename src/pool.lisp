@@ -59,7 +59,8 @@
                 #:discard-all-resets)
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*
-                #:session-project-root)
+                #:session-project-root #:with-session-project-root)
+  (:import-from #:cl-mcp/src/state #:dedicated-repl-id-p)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:export #:*worker-pool-warmup*
            #:*max-pool-size*
@@ -70,6 +71,7 @@
            #:initialize-pool
            #:shutdown-pool
            #:get-or-assign-worker
+           #:set-dedicated-repl-idle
            #:release-session
            #:kill-session-worker
            #:broadcast-root-to-workers
@@ -91,10 +93,14 @@
              (format s "Worker pool is shutting down"))))
 
 (define-condition pool-capacity-exceeded (error)
-  ((limit :initarg :limit :reader pool-capacity-exceeded-limit))
+  ((limit :initarg :limit :reader pool-capacity-exceeded-limit)
+   (dedicated-p :initarg :dedicated-p :initform nil :reader pool-capacity-dedicated-p))
+  (:documentation "A worker assignment would exceed the applicable pool limit.")
   (:report (lambda (c s)
-             (format s "Pool size limit reached (~D workers). ~
-                       Release unused sessions before creating new ones."
+             (format s "~A limit reached (~D workers). ~
+                        Close finished agents' REPLs with repl-close ~
+                        or end unused MCP sessions."
+                     (if (pool-capacity-dedicated-p c) "Dedicated REPL" "Pool size")
                      (pool-capacity-exceeded-limit c)))))
 
 (define-condition pool-spawn-cancelled (error)
@@ -158,6 +164,10 @@ be a positive integer).  Must be >= *worker-pool-warmup*.")
 (defvar *health-check-interval-seconds* 10.0d0
   "Seconds between health monitor iterations while the pool is running.")
 
+(defvar *dedicated-repl-idle-seconds*
+  (%env-int "CL_MCP_DEDICATED_REPL_IDLE_SECONDS" 900 :min 0)
+  "Seconds a dedicated worker may sit idle before the pool retires it. Zero disables expiry.")
+
 (defvar *shutdown-replenish-wait-seconds* 0.05d0
   "Polling interval (seconds) while waiting for replenish thread shutdown.")
 
@@ -199,6 +209,9 @@ Enable the pool to use it.")))
 
 (defvar *affinity-map* (make-hash-table :test 'equal)
   "Maps session-id (string) to worker or worker-placeholder.")
+
+(defvar *dedicated-repl-deadlines* (make-hash-table :test 'equal)
+  "Idle dedicated REPL deadlines in internal real-time units, guarded by *POOL-LOCK*.")
 
 (defvar *standby-workers* nil
   "List of workers in :standby state ready for assignment.")
@@ -349,7 +362,8 @@ decided, and whether it is still owed.  Every slot is guarded by
   (replenish-running nil)
   ;; The replenishment's handle, published in the critical section that
   ;; decides it.
-  (replenish-thread nil))
+  (replenish-thread nil)
+  (idle-retirement-threads nil))
 
 ;;; A DEFSTRUCT slot takes no documentation, so the readers get theirs here.
 (progn
@@ -712,7 +726,7 @@ worker before the init monitor does."
   (let ((config nil) (granted nil))
     (bt:with-lock-held (*pool-lock*)
       (setf config *worker-init-config*)
-      (when (and config (not *runtime-init-disabled*))
+      (when (and config (not *runtime-init-disabled*) (not (dedicated-repl-id-p session-id)))
         (setf granted (%elect-runtime-owner worker session-id))
         (when granted
           (setf (gethash (worker-id worker) *init-attributable-crashes*) t))))
@@ -778,6 +792,18 @@ is counted twice or missed.  A worker taken out of the lists to be ended is
 not counted: it is going.  Must be called with *pool-lock* held."
   (+ (length *all-workers*) (generation-spawns *generation*)))
 
+(defun %dedicated-pool-limit-reached-p ()
+  "Return true when another dedicated assignment would take the default REPL slot.
+Hold *POOL-LOCK*. Count unlinked spawns until they finish, including cancelled
+placeholders that still occupy capacity."
+  (loop for id being the hash-keys of *affinity-map* using (hash-value entry)
+        count (dedicated-repl-id-p id) into dedicated-affinities
+        count (worker-placeholder-p entry) into affinity-spawns
+        finally
+           (return (>= (+ dedicated-affinities
+                          (- (generation-spawns *generation*) affinity-spawns))
+                       (1- *max-pool-size*)))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; Internal -- spawn and bind
 ;;; ---------------------------------------------------------------------------
@@ -806,8 +832,7 @@ in its place, or once the worker is ended."
               ;; root -- the replacement would start under the server default
               ;; while the parent kept editing under the session's (#129).
               (setf new-worker
-                    (let ((*project-root* (or (session-project-root session-id)
-                                              *project-root*)))
+                    (with-session-project-root (:session-id session-id)
                       (%spawn-worker)))
               (setf (worker-state new-worker) :bound)
               (setf (worker-session-id new-worker) session-id)
@@ -1278,29 +1303,87 @@ monitor, separated so the ownership contracts can run it at a chosen point."
           (dolist (sid stale)
             (remhash sid *crash-history*)))))))
 
+(defun set-dedicated-repl-idle (session-id idle-p)
+  "Update the idle deadline of a dedicated REPL after admission or completion.
+The caller serializes these transitions with admission and close for SESSION-ID."
+  (bt:with-lock-held (*pool-lock*)
+    (if (and idle-p *pool-running* (plusp *dedicated-repl-idle-seconds*)
+             (gethash session-id *affinity-map*))
+        (setf (gethash session-id *dedicated-repl-deadlines*)
+              (+ (get-internal-real-time)
+                 (* *dedicated-repl-idle-seconds* internal-time-units-per-second)))
+        (remhash session-id *dedicated-repl-deadlines*))))
+
+(defun %expire-idle-dedicated-workers (now)
+  "Detach dedicated workers past their idle deadlines, keeping their REPLs and roots."
+  (let ((expired nil)
+        (generation nil))
+    (bt:with-lock-held (*pool-lock*)
+      (when *pool-running*
+        (setf generation *generation*)
+        (maphash (lambda (session-id deadline)
+                   (let ((worker (gethash session-id *affinity-map*)))
+                     (cond
+                       ((null worker)
+                        (remhash session-id *dedicated-repl-deadlines*))
+                       ((and (<= deadline now) (typep worker 'worker)
+                             (case (worker-state worker)
+                               (:bound (%worker-alive-p worker))
+                               ((:crashed :dead) t)))
+                        (when (eq :bound (worker-state worker))
+                          (record-worker-termination worker :idle-expired))
+                        (setf (worker-state worker) :released
+                              *all-workers* (remove worker *all-workers*))
+                        (remhash session-id *affinity-map*)
+                        (remhash session-id *dedicated-repl-deadlines*)
+                        (push (%begin-ending worker) expired)))))
+                 *dedicated-repl-deadlines*)))
+    (when expired
+      (flet ((finish ()
+               (dolist (worker expired)
+                 (ignore-errors (%signal-worker worker)))
+               (dolist (worker expired)
+                 (%end-worker worker))))
+        ;; The generation tracks each ending before we dispatch. Keep the
+        ;; monitor available even when a worker takes time to terminate.
+        (let ((thread (handler-case (%start-pool-work #'finish "pool-expire-idle-repls")
+                        (error () (finish) nil))))
+          (when (bt:threadp thread)
+            ;; Shutdown joins the monitor before collecting these handles.
+            (bt:with-lock-held (*pool-lock*)
+              (setf (generation-idle-retirement-threads generation)
+                    (cons thread
+                          (remove-if-not #'bt:thread-alive-p
+                                         (generation-idle-retirement-threads generation))))))))
+      (%schedule-replenish))))
+
 (defun %health-monitor-loop ()
-  "Run %CHECK-WORKER-HEALTH every health check interval until *pool-running*
-becomes NIL.  The body is wrapped in handler-case to prevent transient errors
-from killing the monitor thread."
+  "Check worker health and reclaim idle dedicated workers until *POOL-RUNNING* is NIL.
+Catch transient errors so the next monitor iteration can run."
   (loop while *pool-running*
         do (%wait-for-next-health-check)
            (when *pool-running*
-             (handler-case (%check-worker-health)
+             (handler-case
+                 (progn
+                   (%check-worker-health)
+                   (%expire-idle-dedicated-workers (get-internal-real-time)))
                (error (e)
                  (log-event :error "pool.monitor.loop-error"
                             "error" (princ-to-string e)))))))
 
 (defun %start-health-monitor ()
   "Start the background health monitor thread.
-Captures the current value of *health-check-interval-seconds* so the
-caller's dynamic binding (e.g. from with-pool in tests) is honoured
-by the spawned thread."
+Capture the caller's health interval and pool limits for monitor work."
   (setf *pool-running* t)
-  (let ((interval *health-check-interval-seconds*))
+  (let ((interval *health-check-interval-seconds*)
+        (warmup *worker-pool-warmup*)
+        (max-size *max-pool-size*))
     (setf *health-thread*
           (bt:make-thread
            (lambda ()
-             (let ((*health-check-interval-seconds* interval))
+             (let ((*health-check-interval-seconds* interval)
+                   (*worker-pool-warmup* warmup)
+                   (*max-pool-size* max-size))
                (%health-monitor-loop)))
            :name "pool-health-monitor"))))
 
@@ -1363,6 +1446,7 @@ Serialized by *init-lock* to prevent concurrent initialization."
             *runtime-init-disabled* nil)
       (clrhash *init-attributable-crashes*)
       (clrhash *crash-history*)
+      (clrhash *dedicated-repl-deadlines*)
       ;; A new pool, with an account of its own: background work an earlier
       ;; one still owes -- a spawn its shutdown gave up waiting for -- counts
       ;; against that one's cap and flags, and adds nothing to this one.
@@ -1456,7 +1540,7 @@ whose work it waits for and whose workers it ends."
         (unless quiet
           (log-event :warn "pool.shutdown.work-still-in-flight"
                      "spawns" spawns "ending" ending)))
-      ;; The replenishment and recovery threads, within the same deadline:
+      ;; Replenishment, recovery and idle retirement threads share the deadline.
       ;; their spawns are done, so they leave at their next look at the
       ;; pool.  A recovery still spawning past the deadline is left to end
       ;; its own worker, as a spawn is -- joining it without a deadline
@@ -1467,7 +1551,8 @@ whose work it waits for and whose workers it ends."
                       #'bordeaux-threads:threadp
                       (bordeaux-threads:with-lock-held (*pool-lock*)
                         (cons (generation-replenish-thread generation)
-                              (copy-list *recovery-threads*))))))
+                              (append *recovery-threads*
+                                      (generation-idle-retirement-threads generation)))))))
         (loop while (and (plusp (remaining))
                          (some #'bordeaux-threads:thread-alive-p threads))
               do (sleep *shutdown-replenish-wait-seconds*))
@@ -1487,6 +1572,7 @@ whose work it waits for and whose workers it ends."
           (setf *all-workers* nil
                 *standby-workers* nil)
           (clrhash *affinity-map*)
+          (clrhash *dedicated-repl-deadlines*)
           ;; No worker survives a shutdown to be the runtime's owner.
           (setf *runtime-owner* nil)
           ;; Recorded before any is signalled, so the EOF each in-flight request
@@ -1557,9 +1643,14 @@ slip through.
 
 Signals an error if the pool is shutting down or if the worker
 cannot be created."
-  (let ((entry nil) (need-spawn nil) (assigned-from-standby nil)
-        (old-worker-to-kill nil) (standbys-to-kill '()) (spawn-generation nil)
-        (capacity-exceeded nil) (circuit-breaker-tripped nil))
+  (let* ((entry nil) (need-spawn nil) (assigned-from-standby nil)
+         (old-worker-to-kill nil) (standbys-to-kill '()) (spawn-generation nil)
+         (capacity-exceeded nil) (circuit-breaker-tripped nil)
+         (dedicated-p (dedicated-repl-id-p session-id))
+         (fresh-worker-p
+           (or dedicated-p
+               (multiple-value-bind (root recorded-p) (session-project-root session-id)
+                 (and recorded-p (null root))))))
     (bordeaux-threads:with-lock-held (*pool-lock*)
       (unless *pool-running*
         (error 'pool-shutting-down))
@@ -1622,9 +1713,21 @@ cannot be created."
       ;; Skip when circuit breaker tripped — the error is raised after
       ;; the lock, but we must not leave a placeholder that nobody resolves.
       (when (and (null entry) (not circuit-breaker-tripped))
-        ;; Try to assign a standby worker, skipping any that have died
-        ;; between the last health check and now.
-        (loop while *standby-workers*
+        ;; Affinities include pending spawns. Decide under the same lock as
+        ;; placeholder insertion so concurrent agents cannot take the default slot.
+        (when (and dedicated-p (%dedicated-pool-limit-reached-p))
+          (setf capacity-exceeded :dedicated))
+        ;; Dedicated workers start under their agent's root before concurrent
+        ;; calls can acquire them. An explicitly unset root also needs a fresh
+        ;; worker, since a standby may already have a root and an ASDF registry.
+        ;; If the standbys fill the pool, reclaim a slot for that spawn.
+        (when (and (not capacity-exceeded) fresh-worker-p *standby-workers*
+                   (>= (%effective-pool-size) *max-pool-size*))
+          (let ((standby (pop *standby-workers*)))
+            (push (%begin-ending standby) standbys-to-kill)
+            (setf *all-workers* (remove standby *all-workers*))))
+        ;; Skip standbys that died since the last health check.
+        (loop while (and (not fresh-worker-p) *standby-workers*)
               for w = (pop *standby-workers*)
               do (cond
                    ;; Its state as well as its process.  An RPC that timed out
@@ -1654,7 +1757,7 @@ cannot be created."
                                "state" (string-downcase
                                         (symbol-name (worker-state w)))))))
         ;; If no live standby found, spawn on demand
-        (when (and (null assigned-from-standby) (null entry))
+        (when (and (not capacity-exceeded) (null assigned-from-standby) (null entry))
           ;; Signalled after the lock, not here: a standby dropped above is
           ;; out of every list and not yet killed, and an exit from inside
           ;; the lock would leave its process to nobody.
@@ -1675,7 +1778,10 @@ cannot be created."
     (dolist (standby standbys-to-kill)
       (%end-worker standby))
     (when capacity-exceeded
-      (error 'pool-capacity-exceeded :limit *max-pool-size*))
+      (let ((dedicated-limit-p (eq capacity-exceeded :dedicated)))
+        (error 'pool-capacity-exceeded
+               :dedicated-p dedicated-limit-p
+               :limit (if dedicated-limit-p (1- *max-pool-size*) *max-pool-size*))))
     ;; Circuit breaker: halt recovery after too many crashes.
     ;; Checked outside the lock so the old worker is already cleaned up.
     (when circuit-breaker-tripped
@@ -1703,7 +1809,9 @@ cannot be created."
       ;; stream/connection error.  If this happens, the worker's state
       ;; becomes :crashed and its socket is closed — the worker is
       ;; unusable.  We MUST detect this and not return a corrupted worker.
-      (when (and (or assigned-from-standby need-spawn) *project-root*)
+      ;; A dedicated worker started under its recorded root. Sending the
+      ;; caller's binding now could overwrite a concurrent root change.
+      (when (and (not dedicated-p) (or assigned-from-standby need-spawn) *project-root*)
         (ignore-errors
           (send-root-to-session-worker session-id *project-root*))
         ;; Check if send-root corrupted the worker.  If so, clean up
@@ -1756,6 +1864,7 @@ then checks state outside it) will skip it and not treat the
 impending kill as a crash."
   (let ((worker-to-kill nil))
     (bt:with-lock-held (*pool-lock*)
+      (remhash session-id *dedicated-repl-deadlines*)
       ;; Outside the branches below, because a reset can be owed with no
       ;; worker in the map: recovery that dropped the worker, or a
       ;; replacement spawn that failed, leaves one behind.  The session is
@@ -1837,8 +1946,8 @@ taken for a crash, and is told the worker was killed."
         ;; It must fire even when the crashed owner worker was already reaped
         ;; from the affinity map (so kill found :no-worker).  disabled=t implies
         ;; owner=nil, so clearing the latch unconditionally (feature on) cannot
-        ;; disturb a live healthy owner.
-        (when *worker-init-config*
+        ;; disturb a live healthy owner. Dedicated REPLs do not own the runtime.
+        (when (and *worker-init-config* (not (dedicated-repl-id-p session-id)))
           (setf *runtime-init-disabled* nil
                 *runtime-init-failures* 0))
         ;; Under the pool lock, so no request can be handed a worker between
@@ -1905,33 +2014,39 @@ individual workers are logged but do not propagate."
 
 (defun send-root-to-session-worker (session-id path)
   "Send worker/set-project-root RPC to the worker bound to SESSION-ID.
-Only targets the calling session's worker, preserving per-session
-isolation (unlike broadcast-root-to-workers which updates all workers).
-No-op when SESSION-ID is NIL or no worker is bound to the session.
-Failures are logged but do not propagate."
+Wait for a dedicated worker whose spawn is already in flight. With no
+worker or pending dedicated spawn, the worker will read the session's
+recorded root when it starts. Failures are logged."
   (when session-id
-    (let ((worker nil))
-      (bt:with-lock-held (*pool-lock*)
-        (let ((entry (gethash session-id *affinity-map*)))
-          (when (and entry (typep entry 'worker)
-                     (eq :bound (worker-state entry)))
-            (setf worker entry))))
-      (when worker
-        ;; NATIVE-NAMESTRING: see BROADCAST-ROOT-TO-WORKERS above -- the
-        ;; worker parses this natively, so it must not be reader-escaped.
-        (let ((path-string (if (pathnamep path)
-                               (uiop:native-namestring path)
-                               path)))
-          (let ((params (make-hash-table :test 'equal)))
-            (setf (gethash "path" params) path-string)
-            (handler-case
-                (worker-rpc worker "worker/set-project-root" params
-                            :timeout 5)
-              (error (e)
-                (log-event :warn "pool.send-root.failed"
-                           "session" session-id
-                           "worker_id" (worker-id worker)
-                           "error" (princ-to-string e))))))))))
+    (let ((entry (bt:with-lock-held (*pool-lock*) (gethash session-id *affinity-map*)))
+          (worker nil))
+      (handler-case
+          (progn
+            (setf worker
+                  (typecase entry
+                    (worker (when (eq :bound (worker-state entry)) entry))
+                    (worker-placeholder
+                     (when (dedicated-repl-id-p session-id)
+                       (%wait-for-placeholder entry)))))
+            (when worker
+              (let ((params (make-hash-table :test 'equal)))
+                (flet ((set-path (root)
+                         ;; The worker parses the pathname natively.
+                         (setf (gethash "path" params)
+                               (if (pathnamep root) (uiop:native-namestring root) root))))
+                  (set-path path)
+                  (worker-rpc worker "worker/set-project-root" params :timeout 5
+                              :before-send
+                              (when (dedicated-repl-id-p session-id)
+                                (lambda ()
+                                  ;; Root writes can reach the stream in a different order.
+                                  (set-path (or (session-project-root session-id) path))
+                                  :send)))))))
+        (error (e)
+          (log-event :warn "pool.send-root.failed"
+                     "session" session-id
+                     "worker_id" (and worker (worker-id worker))
+                     "error" (princ-to-string e)))))))
 
 (defun pool-worker-info ()
   "Return a vector of worker info hash-tables suitable for inclusion

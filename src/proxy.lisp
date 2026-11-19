@@ -14,7 +14,7 @@
 (defpackage #:cl-mcp/src/proxy
   (:use #:cl)
   (:import-from #:cl-mcp/src/state
-                #:*current-session-id*)
+                #:*current-session-id* #:*transport-session-id*)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:text-content #:result)
   (:import-from #:cl-mcp/src/log #:log-event)
@@ -186,6 +186,7 @@ cancellation stopped is that decision, not the EOF it produced."
                detail))
       (:cancelled "was stopped to cancel the request it was running")
       (:killed "was stopped by pool-kill-worker")
+      (:idle-expired "was stopped after the dedicated REPL idle timeout")
       (:released "was stopped when its session was released")
       (:shutdown "was stopped when the worker pool shut down")
       (:stopped "was stopped by the worker pool"))))
@@ -536,7 +537,7 @@ JSON the worker wrote -- what a caller relaying it to the client needs.  A
 caller that reads the result itself (clos-describe) leaves it off and gets
 yason's defaults, which it was written against.
 
-The request is registered under its session and ID for its whole life, first
+The request is registered under its transport session and ID for its whole life, first
 of all -- before a worker is found for it -- so a cancellation that arrives
 at any point finds it (src/request-lifecycle.lisp).  An error result this
 builds carries execution_status: \"not-executed\" when the request never
@@ -549,7 +550,7 @@ it from the reset ledger (src/reset-events.lisp)."
     (unless (and (stringp session-id) (plusp (length session-id)))
       (error "Cannot proxy tool call: no session ID bound."))
     (%ensure-cached-bindings)
-    (let ((record (register-request session-id id)))
+    (let ((record (register-request (or *transport-session-id* session-id) id)))
       (unwind-protect
            (%run-proxied-request record session-id method params
                                  preserve-json-types)

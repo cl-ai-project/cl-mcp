@@ -145,19 +145,24 @@ it returns.  The new pool, shut down in turn, owes nothing."
 
   (defproperty pool-holds-while-operations-overlap
       ((plan concurrent-plan))
-    "While clients acquire, release, kill and crash workers at once, at every
-moment no worker is held or tracked twice, none ended is held, the pool
-counts no more than its cap, and every live worker is tracked, being
-spawned or being ended; no worker is lent to two sessions; and a shutdown
-made while they run leaves nothing behind.  The interleaving is the
-scheduler's: a seed replays the operations, not the run."
+    "While clients acquire, release, kill and crash workers, make and close
+dedicated REPL calls, and wake the monitor to retire idle REPL workers,
+no worker is held or tracked twice, none ended is held, the pool counts
+no more than its cap, and every live worker is tracked, being spawned or
+being ended.  No worker is lent to two sessions, and a shutdown made while
+the clients run leaves nothing behind.  Some plans require the monitor to
+retire a reserved dedicated worker before shutdown.  The scheduler decides
+how the operations interleave, so a seed replays the operations alone."
     (:about get-or-assign-worker
             release-session
             kill-session-worker
             shutdown-pool
             cl-mcp/src/pool::%check-worker-health
             cl-mcp/src/pool::%handle-worker-crash
-            cl-mcp/src/pool::%effective-pool-size)
+            cl-mcp/src/pool::%effective-pool-size
+            cl-mcp/src/pool::%expire-idle-dedicated-workers
+            cl-mcp/src/pool:set-dedicated-repl-idle
+            cl-mcp/src/tools/repl-session:call-with-repl-session)
     (:kind :invariant)
     (:trials (:smoke 5 :normal 20))
     (null (run-concurrent-plan plan))))
