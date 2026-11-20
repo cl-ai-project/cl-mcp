@@ -53,6 +53,7 @@
            #:worker-crash-history-pushed-p
            #:*reaper-threads*
            #:*reaper-threads-lock*
+           #:*defer-reaper-joins*
            #:signal-worker-terminate
            #:worker-last-crash-reason
            #:worker-last-exit-status
@@ -86,6 +87,10 @@ Each thread terminates and self-removes after reaping its process.")
 
 (defvar *reaper-threads-lock* (bt:make-lock "reaper-threads-lock")
   "Lock protecting *reaper-threads*.")
+
+(defvar *defer-reaper-joins* nil
+  "When true, KILL-WORKER leaves joining crash reapers to its caller.
+Pool shutdown waits for them together under one deadline.")
 
 ;;; ---------------------------------------------------------------------------
 ;;; Conditions
@@ -1240,10 +1245,9 @@ Robust against already-dead processes."
       (sb-thread:barrier (:write))
       (setf reaper (worker-reaper-thread worker)
             (worker-state worker) :dead))
-    ;; Terminate the OS process outside the lock (may block up to ~2.2s)
-    ;; Crash cleanup already owns this process. Wait outside the stream lock,
-    ;; within the same bound shutdown uses for reapers.
-    (when reaper
+    ;; A single-worker kill waits for the owner outside the stream lock.
+    ;; Pool shutdown joins its reapers together after ending all workers.
+    (when (and reaper (not *defer-reaper-joins*))
       (sb-thread:join-thread reaper :timeout 5 :default nil))
     (when (and process (null reaper))
       (handler-case

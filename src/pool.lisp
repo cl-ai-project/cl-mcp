@@ -43,7 +43,7 @@
                 #:worker-retired-p
                 #:worker-retirement-recorded
                 #:exit-code-says-retired-p
-                #:*reaper-threads* #:*reaper-threads-lock*
+                #:*reaper-threads* #:*reaper-threads-lock* #:*defer-reaper-joins*
                 #:*worker-startup-timeout*)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:*retired-leaked-thread-reason*)
@@ -1578,7 +1578,8 @@ whose work it waits for and whose workers it ends."
         ;; takes its stream, which an RPC running on it holds for as long as the
         ;; request takes -- a shutdown behind a long load waited for all of it.
         (dolist (w workers) (ignore-errors (%signal-worker w)))
-        (dolist (w workers) (%end-worker w)))
+        (let ((*defer-reaper-joins* t))
+          (dolist (w workers) (%end-worker w))))
       ;; An ending begun after the wait above and before the snapshot --
       ;; RELEASE-SESSION or KILL-SESSION-WORKER took the worker out of the lists
       ;; and is ending it outside the lock -- is on this generation too, and
