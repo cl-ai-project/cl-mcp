@@ -671,6 +671,59 @@ initialization pool-wide for")
       (ignore-errors (sb-ext:process-kill process 9))
       (ignore-errors (sb-ext:process-wait process)))))
 
+(deftest reaper-times-out-without-logging-a-terminal-event
+  ;; The child waits on its stdin until PROCESS-CLOSE closes the pipe.
+  (let* ((process (sb-ext:run-program "/bin/sh" '("-c" "read -r line")
+                                      :input :stream :wait nil :search nil))
+         (pid (sb-ext:process-pid process))
+         (worker (cl-mcp/src/worker-client::make-worker
+                  :id pid :pid pid :state :bound :process-info process))
+         (signal-process #'sb-ext:process-kill)
+         (sink (make-string-output-stream))
+         (old-log-stream cl-mcp/src/log:*log-stream*)
+         (old-log-level cl-mcp/src/log:*log-level*))
+    (unwind-protect
+         (progn
+           (bordeaux-threads:with-lock-held (cl-mcp/src/log:*log-lock*)
+             (setf cl-mcp/src/log:*log-stream* sink
+                   cl-mcp/src/log:*log-level* :debug))
+           ;; Simulate undelivered signals for this test child.
+           (sb-ext:without-package-locks
+             (setf (symbol-function 'sb-ext:process-kill)
+                   (lambda (target signal &optional (whom :pid))
+                     (unless (eq target process)
+                       (funcall signal-process target signal whom)))))
+           (cl-mcp/src/worker-client::%mark-worker-crashed worker "timeout")
+           (let ((reaper
+                   (bordeaux-threads:with-lock-held
+                       (cl-mcp/src/worker-client::*reaper-threads-lock*)
+                     (find (format nil "reap-worker-~A" pid)
+                           cl-mcp/src/worker-client::*reaper-threads*
+                           :key #'bt:thread-name :test #'equal))))
+             (when reaper
+               (sb-thread:join-thread reaper :timeout 10 :default nil)
+               (ok (not (bt:thread-alive-p reaper))
+                   "the reaper finishes before inspecting its logs")))
+           (let* ((output (bordeaux-threads:with-lock-held (cl-mcp/src/log:*log-lock*)
+                            (get-output-stream-string sink)))
+                  (events (with-input-from-string (input output)
+                            (loop for line = (read-line input nil)
+                                  while line
+                                  for event = (yason:parse line)
+                                  when (eql pid (gethash "pid" event))
+                                    collect (gethash "event" event)))))
+             (ok (= 1 (count "worker.reaper.still-running" events :test #'equal))
+                 "the reaper warns once when its wait expires")
+             (ok (not (member "worker.reaped" events :test #'equal))
+                 "the reaper leaves the terminal event absent")))
+      (sb-ext:without-package-locks
+        (setf (symbol-function 'sb-ext:process-kill) signal-process))
+      (bordeaux-threads:with-lock-held (cl-mcp/src/log:*log-lock*)
+        (setf cl-mcp/src/log:*log-stream* old-log-stream
+              cl-mcp/src/log:*log-level* old-log-level))
+      (sb-ext:process-close process)
+      (wait-until (lambda () (not (funcall signal-process process 0))) :timeout 5))))
+
 (deftest awaiting-a-process-exit-reaps-a-child-that-ends
   ;; The reaper's wait after its signals.  It used to be
   ;; (sb-ext:process-wait process nil nil): one argument too many in every
