@@ -5,6 +5,7 @@
   (:import-from #:rove
                 #:deftest #:testing #:ok
                 #:skip)
+  (:import-from #:cl-mcp/main)  ; The code lookup tests use the CL-MCP nickname.
   (:import-from #:cl-mcp/src/protocol #:process-json-line)
   (:import-from #:cl-mcp/src/proxy
                 #:*use-worker-pool*)
@@ -479,41 +480,41 @@
                       '("env" "explicit") :test #'string=)))))))
 
 (deftest tools-call-code-find
-  (testing "tools/call code-find returns path and line"
-    (let ((req (concatenate 'string
-                 "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\","
-                 "\"params\":{\"name\":\"code-find\","
-                 "\"arguments\":{\"symbol\":\"cl-mcp:version\"}}}")))
-      (let* ((resp (%pjl req))
-             (obj (parse resp))
-             (result (or (gethash "result" obj)
-                         (let ((h (make-hash-table :test #'equal)))
-                           (setf (gethash "path" h) "src/core.lisp"
-                                 (gethash "line" h) 13)
-                           h))))
-        (ok (string= (gethash "jsonrpc" obj) "2.0"))
-        (ok (string= (gethash "path" result) "src/core.lisp"))
-        (ok (integerp (gethash "line" result)))))))
+  (testing "tools/call code-find returns the public version function's location"
+    (with-test-project-root
+      (let* ((request (concatenate 'string
+                                   "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"code-find\","
+                                   "\"arguments\":{\"symbol\":\"cl-mcp:version\"}}}"))
+             (reply (parse (%pjl request)))
+             (result (gethash "result" reply)))
+        (ok (equal "2.0" (gethash "jsonrpc" reply)))
+        (ok (eql 6 (gethash "id" reply)))
+        (ok (not (%tool-call-failed-p reply)) (%tool-call-message reply))
+        (ok (hash-table-p result))
+        (when (hash-table-p result)
+          (ok (equal "src/core.lisp" (gethash "path" result)))
+          (ok (typep (gethash "line" result) '(integer 1 *))))))))
 
 (deftest tools-call-code-describe
-  (testing "tools/call code-describe returns symbol metadata"
-    (let ((req (concatenate 'string
-                 "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\","
-                 "\"params\":{\"name\":\"code-describe\","
-                 "\"arguments\":{\"symbol\":\"cl-mcp:version\"}}}")))
-      (let* ((resp (%pjl req))
-             (obj (parse resp))
-             (result (or (gethash "result" obj)
-                         (let ((h (make-hash-table :test #'equal)))
-                           (setf (gethash "name" h) "version"
-                                 (gethash "type" h) "function"
-                                 (gethash "arglist" h) "()"
-                                 (gethash "documentation" h) "")
-                           h))))
-        (ok (string= (gethash "jsonrpc" obj) "2.0"))
-        (ok (string= (gethash "type" result) "function"))
-        (ok (stringp (gethash "arglist" result)))
-        (ok (stringp (gethash "documentation" result)))))))
+  (testing "tools/call code-describe returns metadata for the public version function"
+    (with-test-project-root
+      (let* ((request (concatenate 'string
+                                   "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"code-describe\","
+                                   "\"arguments\":{\"symbol\":\"cl-mcp:version\"}}}"))
+             (reply (parse (%pjl request)))
+             (result (gethash "result" reply)))
+        (ok (equal "2.0" (gethash "jsonrpc" reply)))
+        (ok (eql 7 (gethash "id" reply)))
+        (ok (not (%tool-call-failed-p reply)) (%tool-call-message reply))
+        (ok (hash-table-p result))
+        (when (hash-table-p result)
+          (ok (equal "VERSION" (gethash "name" result)))
+          (ok (equal "function" (gethash "type" result)))
+          (ok (equal "()" (gethash "arglist" result)))
+          (let ((doc (gethash "documentation" result)))
+            (ok (and (stringp doc) (plusp (length doc))))))))))
 
 (deftest tools-call-clos-describe
   (testing "tools/list describes clos-describe"
