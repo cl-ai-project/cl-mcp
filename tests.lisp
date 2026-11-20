@@ -135,18 +135,22 @@ sets the variable to run everything."
     ;; is caught by a quick run too.
     (dolist (suite *process-tier-suites*)
       (asdf:load-system suite))
-    (if (eq (test-tier) :full)
-        (rove:run (append quick *process-tier-suites*))
-        ;; Said before the run and again after it, so neither the top nor the
-        ;; tail of the output reads as a full pass.  On *ERROR-OUTPUT*: the
-        ;; rove command discards *STANDARD-OUTPUT* while tests run.
-        (flet ((notice ()
-                 (format *error-output* "~&;; Quick tier: ~D of ~D suites; the ~D that ~
-                            start worker processes or servers were skipped.~%;; Run ~
-                            them all with CL_MCP_TEST_TIER=full (as CI does).~%"
-                         (length quick)
-                         (+ (length quick) (length *process-tier-suites*))
-                         (length *process-tier-suites*))))
-          (notice)
-          (prog1 (rove:run quick)
-            (notice))))))
+    (let* ((tier (test-tier))
+           (passed
+             (if (eq tier :full)
+                 (rove:run (append quick *process-tier-suites*))
+                 ;; Keep both notices on *ERROR-OUTPUT*: the rove command
+                 ;; discards *STANDARD-OUTPUT* while tests run.
+                 (flet ((notice ()
+                          (format *error-output* "~&;; Quick tier: ~D of ~D suites; the ~D that ~
+                                     start worker processes or servers were skipped.~%;; Run ~
+                                     them all with CL_MCP_TEST_TIER=full (as CI does).~%"
+                                  (length quick)
+                                  (+ (length quick) (length *process-tier-suites*))
+                                  (length *process-tier-suites*))))
+                   (notice)
+                   (prog1 (rove:run quick)
+                     (notice))))))
+      (unless passed
+        (error "Rove reported failures in the ~(~A~) test tier for ~A."
+               tier (asdf:component-name system))))))

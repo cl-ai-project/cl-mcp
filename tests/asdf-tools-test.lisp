@@ -78,3 +78,35 @@
                (ok (string= "" out))
                (ok (string= "" (get-output-stream-string err)))))
         (setf (symbol-function 'asdf:find-system) orig)))))
+
+(deftest asdf-test-system-propagates-rove-failures
+  ;; The enclosing Rove run may already be inside this ASDF test operation.
+  (let* ((asdf/session:*asdf-session* nil)
+         (run (symbol-function 'rove:run))
+         (report (make-string-output-stream))
+         (*error-output* (make-string-output-stream))
+         (rove:*rove-error-output* *error-output*)
+         (rove:*default-reporter* :spec)
+         (rove:*last-suite-report* nil)
+         (rove:*report-stream* report))
+    (flet ((test-fixture (fixture)
+             ;; Run one real Rove suite to avoid recursively running this test
+             ;; or starting the full tier's worker processes.
+             (unwind-protect
+                  (progn
+                    (setf (symbol-function 'rove:run)
+                          (lambda (suites)
+                            (declare (ignore suites))
+                            (funcall run fixture)))
+                    (handler-case
+                        (progn (asdf:test-system "cl-mcp") nil)
+                      (error (condition) condition)))
+               (setf (symbol-function 'rove:run) run))))
+      (testing "ASDF reports a Rove failure after Rove names the failing assertion"
+        (let ((failure (test-fixture "cl-mcp/tests/test-runner-test-failures")))
+          (ok (typep failure 'error))
+          (ok (search "1 should equal 2" (get-output-stream-string report)))))
+      (testing "A passing Rove suite lets ASDF finish normally"
+        (ok (null (test-fixture "cl-mcp/tests/utils-strings-test")))
+        (ok (search "CL-MCP/TESTS/UTILS-STRINGS-TEST"
+                    (get-output-stream-string report) :test #'char-equal))))))
