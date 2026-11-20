@@ -922,7 +922,10 @@ Rove's suite for PACKAGE-NAME, or :NO-SUITE when Rove holds no suite for it."
      (let ((asdf/session:*asdf-session* nil))
        (cl-mcp/src/test-runner-core::%ensure-system-loaded "clmcp-sib-other"))
      (ok (equal '("KEPT") (%rove-suite-test-names "CLMCP-SIB/TESTS/A"))
-         "the test deleted from the reloaded dependency is gone from its suite"))))
+         "the test deleted from the reloaded dependency is gone from its suite")
+     (let ((result (run-tests "clmcp-sib-other" :test "clmcp-sib/tests/a::doomed")))
+       (ok (equal "unresolved" (gethash "framework" result))
+           "its old Rove function cannot run by name either")))))
 
 (deftest rove-purge-clears-nothing-when-asdf-cannot-plan-the-load
   ;; The load after it fails the same way; the purge must neither signal nor
@@ -2160,6 +2163,65 @@ in ASDF and as left by a root change --, their packages and the directory."
             (remhash package (symbol-value suites)))
           (ignore-errors (delete-package package))))
       (ignore-errors (uiop:delete-directory-tree dir :validate t)))))
+
+(deftest run-tests-preflights-rove-selection
+  (%call-with-inferred-test-fixture
+   "clmcp-selection" "rove"
+   "(defpackage #:clmcp-selection/tests/a (:use #:cl #:rove))
+(in-package #:clmcp-selection/tests/a)
+(defvar *runs* 0)
+(deftest known (incf *runs*) (ok t))
+"
+   (lambda (dir)
+     (declare (ignore dir))
+     (let* ((system "clmcp-selection/tests/a")
+            (known "clmcp-selection/tests/a::known")
+            (unknown "clmcp-selection/tests/a::absent")
+            (control (run-tests system :test known))
+            (package (find-package (string-upcase system)))
+            (runs (find-symbol "*RUNS*" package)))
+       (ok (= 1 (gethash "passed" control)))
+       (ok (= 1 (symbol-value runs)))
+       (dolist (result (list (run-tests system :test unknown)
+                             (run-tests system :tests (vector known unknown))
+                             ;; A symbol in the package need not name a test.
+                             (run-tests system :test "clmcp-selection/tests/a::*runs*")))
+         (ok (equal "✗ UNRESOLVED" (%headline result)))
+         (ok (equal "unresolved" (gethash "framework" result)))
+         (ok (zerop (gethash "passed" result)))
+         (ok (= 1 (gethash "failed" result)))
+         (let ((failures (gethash "failed_tests" result)))
+           (ok (= 1 (length failures)))
+           (ok (equal "TEST-RESOLUTION" (gethash "test_name" (aref failures 0)))))
+         (let ((reason (%first-failure-reason result)))
+           (ok (search "reloaded" reason :test #'char-equal))
+           (ok (search "KNOWN" reason :test #'char-equal))))
+       (ok (= 1 (symbol-value runs)) "no test from the mixed selection ran")
+       (ok (null (find-symbol "ABSENT" package)))))))
+
+(deftest run-tests-suggests-registered-fiveam-targets
+  (%call-with-fiveam-fixture
+   "clmcp-fiveam-selection"
+   (list (cons "main.lisp" (%fiveam-fixture-file "clmcp-fiveam-selection" "suite"
+                                                '(("known" "(= 1 1)")))))
+   (lambda (dir)
+     (declare (ignore dir))
+     (let* ((system "clmcp-fiveam-selection")
+            (known "clmcp-fiveam-selection::known")
+            (absent (symbol-name (gensym "ABSENT-")))
+            (selection (vector known (format nil "~A::~A" system absent)))
+            (result (run-tests system :tests selection))
+            (reason (%first-failure-reason result)))
+       (ok (equal "✗ UNRESOLVED" (%headline result)))
+       (ok (equal "unresolved" (gethash "framework" result)))
+       (ok (zerop (gethash "passed" result)))
+       (ok (= 1 (gethash "failed" result)))
+       (ok (search absent reason :test #'char-equal))
+       (ok (search "reloaded" reason :test #'char-equal))
+       (ok (search "KNOWN" reason :test #'char-equal))
+       (ok (null (find-symbol absent (string-upcase system))))
+       (ok (= 1 (gethash "passed" (run-tests system :test known))))
+       (ok (= 1 (gethash "passed" (run-tests system :test "clmcp-fiveam-selection::suite"))))))))
 
 (deftest rove-purge-ghost-suites-reaches-systems-a-root-change-unregistered
   ;; A root change unregisters the systems under the old root while their
