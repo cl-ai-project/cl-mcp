@@ -35,26 +35,20 @@
     (when pkg (package-name pkg))))
 
 (defun %primitive-value-repr (object)
-  "Return a hash-table representation of a primitive value."
-  (cond
-    ((numberp object)
-     (make-ht "value" object
-              "type" (%type-name object)))
-    ((stringp object)
-     (make-ht "value" object
-              "type" (%type-name object)))
-    ((characterp object)
-     (make-ht "value" (string object)
-              "type" "CHARACTER"))
-    ((symbolp object)
-     (let ((ht (make-ht "value" (symbol-name object)
-                        "type" "SYMBOL")))
-       (when (symbol-package object)
-         (setf (gethash "package" ht) (package-name (symbol-package object))))
-       ht))
-    (t
-     (make-ht "value" (safe-prin1 object)
-              "type" (%type-name object)))))
+  "Return OBJECT's data value and the Lisp spelling used in inspection text."
+  (let ((printed (safe-prin1 object)))
+    (flet ((repr (value type)
+             (make-ht "value" value "type" type "printed" printed)))
+      (typecase object
+        ((or number string) (repr object (%type-name object)))
+        (character (repr (string object) "CHARACTER"))
+        (symbol
+         (let ((node (repr (symbol-name object) "SYMBOL"))
+               (package (%package-name-or-nil object)))
+           (when package
+             (setf (gethash "package" node) package))
+           node))
+        (t (repr printed (%type-name object)))))))
 
 (defun %ensure-object-id (object seen-table)
   "Return OBJECT's ID from SEEN-TABLE, registering it if needed."
@@ -339,19 +333,12 @@ you could not drill into."
           (when (and class-slots-fn slot-def-name-fn
                      (fboundp class-slots-fn) (fboundp slot-def-name-fn))
             (dolist (slot (funcall class-slots-fn class))
-              (let* ((slot-def-name (funcall slot-def-name-fn slot))
-                     (slot-name (symbol-name slot-def-name))
-                     (bound-p (slot-boundp object slot-def-name))
-                     (value (if bound-p
-                                (slot-value object slot-def-name)
-                                :unbound)))
-                (push (make-ht "name" slot-name
-                               "value" (if (eq value :unbound)
-                                           (make-ht "kind" "unbound"
-                                                    "summary" "#<unbound-slot>")
-                                           (%value-repr value seen-table active-table
-                                                        depth max-depth max-elements)))
-                      slots)))))
+              (let* ((name (funcall slot-def-name-fn slot))
+                     (repr (if (slot-boundp object name)
+                               (%value-repr (slot-value object name) seen-table active-table
+                                            depth max-depth max-elements)
+                               (make-ht "kind" "unbound" "summary" "#<unbound-slot>"))))
+                (push (make-ht "name" (symbol-name name) "value" repr) slots)))))
       (error () nil))
     #-sbcl
     nil  ; Non-SBCL fallback: no slot introspection
@@ -501,15 +488,14 @@ handed data decoded from a worker's JSON, where nothing in this process
 produced the shape.")
 
 (defun %inspect-repr-text (repr)
-  "Return readable text for REPR, a value representation from %VALUE-REPR.
-A primitive carries its printed form under \"value\"; anything else -- an
-expanded node, an object-ref, a circular-ref -- is named by its \"summary\".
-A REPR that is not a hash-table at all is printed as it stands."
+  "Return a primitive's Lisp spelling or a composite's summary.
+Representations made before the printed field was added use their value."
   (if (hash-table-p repr)
-      (let ((v (gethash "value" repr)))
-        (if (and v (not (hash-table-p v)))
-            (princ-to-string v)
-            (or (gethash "summary" repr) "?")))
+      (or (gethash "printed" repr)
+          (let ((value (gethash "value" repr)))
+            (if (and value (not (hash-table-p value)))
+                (princ-to-string value)
+                (or (gethash "summary" repr) "?"))))
       (princ-to-string repr)))
 
 (defun %inspect-expandable-p (repr)
@@ -546,19 +532,16 @@ its structure under the row it keys reads as the value's."
       (let ((elements (gethash "elements" node)))
         (when (and elements (plusp (length elements)))
           (format stream "~&~AElements:" pad)
-          (loop for el in (coerce elements 'list)
+          (loop for element in (coerce elements 'list)
                 for i from 0
-                do (if (hash-table-p el)
-                       ;; REF_ID as well as ID: a circular-ref carries its
-                       ;; handle under "ref_id", and it is the one nested kind
-                       ;; that would otherwise render with no marker at all --
-                       ;; conspicuous now that its siblings have one.
-                       (progn
-                         (format stream "~&~A[~D] ~A~@[ [object-id: ~A]~]"
-                                 item-pad i (%inspect-repr-text el)
-                                 (or (gethash "id" el) (gethash "ref_id" el)))
-                         (nested el))
-                       (format stream "~&~A[~D] ~A" item-pad i el)))))
+                for tail-p = (and (hash-table-p element)
+                                  (equal "dotted-tail" (gethash "kind" element)))
+                for value = (if tail-p (gethash "value" element) element)
+                for id = (when (hash-table-p value)
+                           (or (gethash "id" value) (gethash "ref_id" value)))
+                do (format stream "~&~A[~D] ~A~A~@[ [object-id: ~A]~]"
+                           item-pad i (if tail-p ". " "") (%inspect-repr-text value) id)
+                   (nested value))))
       (let ((entries (gethash "entries" node)))
         (when (and entries (plusp (length entries)))
           (format stream "~&~AEntries (~A test):" pad
