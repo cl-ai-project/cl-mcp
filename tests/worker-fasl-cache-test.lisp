@@ -334,21 +334,28 @@ machine, so this deletes every ended worker's, as a starting worker would."
          (registry (format nil "CL_SOURCE_REGISTRY=(:source-registry (:directory ~S) ~
                                ~{(:directory ~S) ~}:inherit-configuration)"
                            (namestring dir) directories))
-         (env (append (list "env" registry (format nil "CL_MCP_TEST_INSTALL=~A"
-                                                   (uiop:native-namestring dir)))
+         (cache (merge-pathnames "fasls/" (uiop:pathname-parent-directory-pathname dir)))
+         ;; Add just the copied installation to the child's existing configuration,
+         ;; including an ASDF_OUTPUT_TRANSLATIONS supplied by the caller.
+         (inherited (asdf/output-translations:parse-output-translations-string
+                     (uiop:getenv "ASDF_OUTPUT_TRANSLATIONS")))
+         (translations (list* :output-translations (list (namestring dir) (namestring cache))
+                              (cdr inherited)))
+         (env (append (list "env" registry (format nil "ASDF_OUTPUT_TRANSLATIONS=~S" translations)
+                            (format nil "CL_MCP_TEST_INSTALL=~A" (uiop:native-namestring dir)))
                       (when clean-sbcl
                         (list (format nil "CL_MCP_TEST_CLEAN_SBCL=~A" clean-sbcl))))))
     (multiple-value-bind (output stderr code)
         (uiop:run-program (append env command) :output :string :error-output :output
                                                :ignore-error-status t)
       (declare (ignore stderr))
-      (let* ((expected (if clean-sbcl "AUTHENTICATED :ASDF-CHILD" "AUTHENTICATED :"))
-             (passed (and (zerop code) (search expected output :test #'char-equal))))
-        (ok passed
-            (if passed
-                "the installed worker authenticated and answered a request"
-                (let ((start (or (search "Unhandled " output) (max 0 (- (length output) 2400)))))
-                  (subseq output start (min (length output) (+ start 2400))))))))))
+      ;; The driver exits with the numeric result returned by the authenticated
+      ;; worker. A launcher that exits zero before running it cannot pass.
+      (ok (eql code 42)
+          (if (eql code 42)
+              "the installed worker authenticated and answered 42"
+              (let ((start (or (search "Unhandled " output) (max 0 (- (length output) 2400)))))
+                (subseq output start (min (length output) (+ start 2400)))))))))
 
 (deftest workers-start-from-a-bracketed-install-with-plain-asdf-or-roswell
   (let* ((root (%scratch-directory "worker-install"))
@@ -376,8 +383,11 @@ machine, so this deletes every ended worker's, as a starting worker would."
                             "run" "-e" "(sb-ext:disable-debugger)"
                             "-e" (format nil "(load (uiop:parse-native-namestring ~S))" driver)
                             "-q"))
-                 (skip "Roswell is not the current launcher"))))
-      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+                 (skip "Roswell is not the current launcher")))
+           (ok (probe-file (merge-pathnames "fasls/src/worker/main.fasl" root))
+               "the installed worker compiled into this test's scratch directory"))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))
+    (ok (not (probe-file root)) "the temporary installation and its FASLs were removed")))
 
 (defun %bootstrap-test-launcher (dir)
   "Return a launcher for a copy of this worker system with a cold ASDF output directory."
