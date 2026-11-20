@@ -2,6 +2,8 @@
 
 (defpackage #:cl-mcp/tests/lisp-edit-form-test
   (:use #:cl)
+  (:import-from #:cl-mcp/tests/readtable-fixture
+                #:call-with-qualified-readtable #:call-readtable-tool)
     (:import-from #:rove
                 #:deftest
                 #:testing
@@ -2094,52 +2096,24 @@ handling and return the file's text afterwards."
             (ok (search (format nil "(deftest \"adds two\"~%  (ok t))") updated))))))))
 
 (deftest lisp-edit-form-with-package-qualified-readtable
-  (testing "readtable parameter supports package-qualified symbol names (pkg:sym format)"
-    (handler-case
-        (progn
-          (unless (%try-load :named-readtables) (error "not available"))
-          (unless (%try-load :cl-interpol) (error "not available"))
-          ;; Create a test package with a named readtable at runtime
-          (let ((test-pkg-name "CL-MCP-EDIT-TEST-PKG-QUALIFIED-RT"))
-            (when (find-package test-pkg-name)
-              (delete-package test-pkg-name))
-            (unwind-protect
-                 (progn
-                   ;; Create package and register readtable dynamically
-                   (eval `(defpackage ,test-pkg-name
-                            (:use :cl)))
-                   (eval `(in-package ,test-pkg-name))
-                   ;; Copy interpol-syntax to our test package's readtable
-                   ;; Use find-symbol to avoid read-time package resolution
-                   (let ((defreadtable-fn (find-symbol "DEFREADTABLE" :named-readtables)))
-                     (eval `(,defreadtable-fn
-                                ,(intern "TEST-INTERPOL" test-pkg-name)
-                              (:merge :interpol-syntax))))
-                   (in-package :cl-mcp/tests/lisp-edit-form-test)
-                   ;; Now test editing with package-qualified readtable string
-                   (with-temp-file "tests/tmp/edit-form-pkg-qualified-rt.lisp"
-                       (format nil "(in-package :cl-user)~%~%(defun greet-pkg (name)~%  #?\"Hello, ${name}!\")~%")
-                     (lambda (path)
-                       ;; Use the package-qualified format: "pkg:sym"
-                       (let ((rt-string (format nil "~A:~A" test-pkg-name "TEST-INTERPOL")))
-                         (lisp-edit-form :file-path path
-                                         :form-type "defun"
-                                         :form-name "greet-pkg"
-                                         :operation "replace"
-                                         :content (format nil "(defun greet-pkg (name)~%  #?\"Hi, ${name}!\")")
-                                         :readtable rt-string)
-                         (let ((updated (fs-read-file path)))
-                           (ok (search "#?\"Hi, ${name}!\"" updated))
-                           (ok (null (search "#?\"Hello, ${name}!\"" updated))))))))
-              ;; Cleanup: unregister readtable and delete package
-              (ignore-errors
-               (let ((rt-sym (find-symbol "TEST-INTERPOL" test-pkg-name))
-                     (unregister-fn (find-symbol "UNREGISTER-READTABLE" :named-readtables)))
-                 (when (and rt-sym unregister-fn)
-                   (funcall unregister-fn rt-sym))))
-              (ignore-errors (delete-package test-pkg-name)))))
-      (error (e)
-        (skip (format nil "Test dependencies not available: ~A" e))))))
+  (call-with-qualified-readtable
+   (lambda (name client-name)
+     (with-temp-file "tests/tmp/edit-form-pkg-qualified-rt.lisp"
+         (format nil "(defun target () #?:before)~%")
+       (lambda (path)
+         (testing "The Lisp API accepts the readtable's symbol"
+           (lisp-edit-form :file-path path :form-type "defun" :form-name "target"
+                           :operation "replace" :content "(defun target () #?:direct)"
+                           :readtable name)
+           (ok (search "(defun target () #?:direct)" (fs-read-file path))))
+         (testing "A JSON tool call accepts its package-qualified name"
+           (let ((result (call-readtable-tool
+                          "lisp-edit-form"
+                          (make-ht "file_path" path "form_type" "defun" "form_name" "target"
+                                   "operation" "replace" "content" "(defun target () #?:client)"
+                                   "readtable" client-name))))
+             (ok (string= "target" (gethash "form_name" result)))
+             (ok (search "(defun target () #?:client)" (fs-read-file path))))))))))
 
 (deftest lisp-edit-form-multiple-matches-error
   (testing "multiple matches without index signals descriptive error"
