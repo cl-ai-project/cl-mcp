@@ -2537,6 +2537,29 @@ SUBTEST and, when FAILING, one wrong assertion -- then call THUNK with its name.
         (ignore-errors (asdf:clear-system system))
         (ignore-errors (uiop:delete-directory-tree tmp-dir :validate t))))))
 
+(deftest run-tests-auto-selects-asdf-without-a-declared-framework
+  (testing "a registered system with its own test-op runs in a warm Rove image"
+    (uiop:with-temporary-file (:stream stream :pathname asd-path
+                               :prefix "cl-mcp-plain-asdf-" :type "asd")
+      (format stream "(asdf:defsystem ~S~%  :perform (asdf:test-op (o c) ~
+                      (format t \"plain ASDF test-op ran~~%\")))~%"
+              (pathname-name asd-path))
+      :close-stream
+      (let ((system (pathname-name asd-path))
+            (marker "plain ASDF test-op ran"))
+        (unwind-protect
+             (progn
+               (asdf:load-asd asd-path)
+               (ok (asdf:registered-system system))
+               (ok (find-package :rove))
+               (let* ((result (run-tests system))
+                      (response (build-run-tests-response result)))
+                 (ok (string= "asdf" (gethash "framework" response)))
+                 (ok (search marker (gethash "stdout" response "")))
+                 (ok (search "RAN, RESULT UNKNOWN" (%headline result)))
+                 (ok (eq 'yason:false (gethash "counts_available" response)))))
+          (asdf:clear-system system))))))
+
 (deftest run-tests-finds-an-unregistered-asd-under-the-project-root
   (testing "a test system whose .asd nobody registered yet is found, as load-system finds it"
     ;; Found dogfooding v3.0.1: a freshly written .asd made run-tests stop at
