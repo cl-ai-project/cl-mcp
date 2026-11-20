@@ -56,7 +56,8 @@
                 #:enough-pathname
                 #:native-namestring
                 #:subpathp)
-  (:export #:%skip-blank-and-comments
+  (:export #:source-newline
+           #:%skip-blank-and-comments
            #:%feature-prefix-end
            #:%skipped-feature-node-p
            #:%wrapper-head-p
@@ -276,6 +277,16 @@ than a symbol, a string, a method signature or a DEFSTRUCT's (NAME OPTIONS...)."
 
 (defun %whitespace-char-p (ch)
   (member ch '(#\Space #\Tab #\Newline #\Return)))
+
+(defun source-newline (text)
+  "Return the dominant line ending in TEXT, choosing LF on a tie or without lines."
+  (loop for i = (position #\Newline text) then (position #\Newline text :start (1+ i))
+        while i
+        if (and (plusp i) (char= (char text (1- i)) #\Return)) count 1 into crlf
+        else count 1 into lf
+        finally (return (if (> crlf lf)
+                            (coerce '(#\Return #\Newline) 'string)
+                            (string #\Newline)))))
 
 (defun %skip-blank-and-comments (text start)
   "Return the index of the first character at or after START in TEXT that is

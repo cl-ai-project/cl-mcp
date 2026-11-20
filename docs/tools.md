@@ -979,7 +979,11 @@ Input:
   replacement's last line. If that line already has a `;` comment, the file's original comment
   goes on the next line. `insert_after` goes below the comment, and `delete` removes it with
   the form. The active readtable determines which characters count as whitespace around
-  the target. New line breaks around the target follow the file's (CRLF in a CRLF file).
+  the target. Generated separators and formatting line breaks in submitted standard Lisp use
+  the file's dominant ending (CRLF or LF, with LF on a tie). Strings, escaped symbols and
+  character literals retain their submitted characters. With a named readtable other than
+  `:standard`, submitted form text keeps its line endings because reader macros may consume
+  newlines as data.
   Every summary names the line the matched form
   starts on, its `#+` line when it has one (`Applied replace to defun beta (line 4) in …`, also
   the result's `line`), and a "Multiple matches" error lists each candidate with its line
@@ -1186,8 +1190,12 @@ Input:
   when those two readings name different forms the call is refused as ambiguous. When nothing
   matches, the error lists the file's forms of that type (or all its top-level forms when it has none)
 - `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`; `"#+ecl impl"` names a form under a feature expression false in the server, as in `lisp-edit-form`
-- `old_text` (string, required): exact text to find within the matched form (whitespace-sensitive, must match exactly once)
-- `new_text` (string, required): replacement text
+- `old_text` (string, required): whitespace-sensitive text to find exactly once in the form.
+  A bare LF matches either LF or CRLF, so multiline text copied from `lisp-read-file` works.
+  An explicit CR matches literally. All matches count, including both line endings in a mixed file.
+- `new_text` (string, required): replacement text. Formatting line breaks follow the file's
+  dominant ending under the standard readtable, with the same literal and readtable handling
+  as `lisp-edit-form`. The rest of the form and file keep their original text.
 - `dry_run` (boolean, default `false`): preview changes without writing to disk
 - `readtable` (string, optional): named-readtable designator for files using custom reader macros
 
@@ -1215,7 +1223,8 @@ Output:
 - `path`, `form_type`, `form_name`
 - `would_change` (boolean): whether the file was modified
 - `bytes`: size of the updated file content, in characters
-- `delta` (integer, present only when `would_change` is true): character count difference (`new_text` length minus `old_text` length)
+- `delta` (integer, present only when `would_change` is true): change in the file's character
+  count, including any CRs in the matched and written line endings
 - `bracket_warning` (string, optional): set when the patched form reads but its
   delimiter scan stops at a `]` or `}` where `)` was expected (in standard
   syntax the bracket is part of a symbol, so a `)` typo survives silently); the

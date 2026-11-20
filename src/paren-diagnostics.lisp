@@ -17,6 +17,7 @@
            #:diagnose-delimiters
            #:count-delimiter-depth
            #:lexical-state-at
+           #:format-source-line-endings
            #:repair-line-differences
            #:format-repair-lines
            #:format-delimiter-diagnosis
@@ -519,6 +520,35 @@ The final element is the state at the end of TEXT."
                             nil)
                           :state-fn (lambda (idx state) (setf (svref mask idx) state)))
     mask))
+
+(defun format-source-line-endings (text newline &key (start 0) (end (length text)))
+  "Use NEWLINE for formatting line breaks within [START, END) of Lisp source TEXT.
+Scan from the beginning so a patch inside a literal preserves its characters.
+Return the full string and the change in its length."
+  (let ((crlf-p (= (length newline) 2)))
+    (labels ((paired-p (i)
+               (and (> i start) (char= (char text (1- i)) #\Return)))
+             (formatting-p (state)
+               (member state '(:code :line-comment :block-comment))))
+      (unless (loop for i = (position #\Newline text :start start :end end)
+                    then (position #\Newline text :start (1+ i) :end end)
+                    while i thereis (not (eql crlf-p (paired-p i))))
+        (return-from format-source-line-endings (values text 0)))
+      (let* ((states (%code-state-mask text))
+             (updated
+               (with-output-to-string (out)
+                 (loop with from = 0
+                       for i = (position #\Newline text :start start :end end)
+                         then (position #\Newline text :start (1+ i) :end end)
+                       while i
+                       when (and (formatting-p (svref states i))
+                                 (not (eql crlf-p (paired-p i)))
+                                 (or crlf-p (formatting-p (svref states (1- i)))))
+                         do (write-string text out :start from :end (if crlf-p i (1- i)))
+                            (write-string newline out)
+                            (setf from (1+ i))
+                       finally (write-string text out :start from)))))
+        (values updated (- (length updated) (length text)))))))
 
 (defun %any-fix-outside-code-p (text repaired fixes)
   "Return T when any of FIXES (from REPAIR-LINE-DIFFERENCES on TEXT and

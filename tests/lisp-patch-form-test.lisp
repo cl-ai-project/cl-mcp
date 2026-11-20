@@ -153,6 +153,76 @@ running as root), THUNK is skipped instead."
             (ok (search "(log-info data)" updated))
             (ok (null (search "(print data)" updated)))))))))
 
+(deftest lisp-patch-form-matches-copied-lines-and-formats-only-the-replacement
+  (let* ((crlf (coerce '(#\Return #\Newline) 'string))
+         (before (format nil ";; retained~A(defvar *literal* \"x~%y\")~A" crlf crlf))
+         (after (format nil "~A~A(defun last-one () :keep)~A" crlf crlf crlf))
+         (source (format nil "~A(defun target ()~A  1)~A" before crlf after))
+         (wanted (format nil "(defun target ()~A  \"x~%y\"~A  2)" crlf crlf)))
+    (with-temp-file "tests/tmp/patch-line-endings.lisp" source
+      (lambda (path)
+        (flet ((patch (dry)
+                 (lisp-patch-form :file-path path :form-type "defun" :form-name "target"
+                                  :old-text (format nil "()~%  1")
+                                  :new-text (format nil "()~%  \"x~%y\"~%  2")
+                                  :dry-run dry)))
+          (ok (string= wanted (gethash "preview" (patch t))))
+          (ok (string= source (fs-read-file path)))
+          (patch nil)
+          (ok (string= (concatenate 'string before wanted after) (fs-read-file path))))))))
+
+(deftest lisp-patch-form-keeps-explicit-returns-in-copied-lines
+  (let* ((crlf (coerce '(#\Return #\Newline) 'string))
+         (literal (format nil "\"a~Cb\"" #\Return))
+         (source (format nil "(defun target ()~A  (list ~A~A        1))~A"
+                         crlf literal crlf crlf)))
+    (with-temp-file "tests/tmp/patch-explicit-returns.lisp" source
+      (lambda (path)
+        (lisp-patch-form :file-path path :form-type "defun" :form-name "target"
+                         :old-text (format nil "~A~%        1" literal)
+                         :new-text (format nil "~A~%        2" literal))
+        (ok (string= (substitute #\2 #\1 source) (fs-read-file path)))))))
+
+(deftest lisp-patch-form-keeps-a-character-literal-before-a-copied-line
+  (let* ((prefix (format nil "(defun target () (list #\\~C" #\Return))
+         (source (format nil "~A~%  :old))~%" prefix)))
+    (with-temp-file "tests/tmp/patch-return-literal.lisp" source
+      (lambda (path)
+        (lisp-patch-form :file-path path :form-type "defun" :form-name "target"
+                         :old-text (format nil "~%  :old") :new-text " :new")
+        (ok (string= (format nil "~A :new))~%" prefix) (fs-read-file path)))))))
+
+(deftest lisp-patch-form-reports-the-size-of-the-applied-replacement
+  (let* ((crlf (coerce '(#\Return #\Newline) 'string))
+         (source (format nil "(defun target ()~A  1)~A" crlf crlf)))
+    (with-temp-file "tests/tmp/patch-line-ending-delta.lisp" source
+      (lambda (path)
+        (let* ((args (cl-mcp/src/tools/helpers:make-ht
+                      "file_path" path "form_type" "defun" "form_name" "target"
+                      "old_text" "1" "new_text" (format nil "1~%  2")))
+               (response (cl-mcp/src/lisp-patch-form::lisp-patch-form-handler
+                          (cl-mcp/src/state:make-state) 1 args))
+               (payload (gethash "result" response))
+               (written (fs-read-file path)))
+          (ok (= (gethash "bytes" payload) (length written)))
+          (ok (= (gethash "delta" payload) (- (length written) (length source)))))))))
+
+(deftest lisp-patch-form-refuses-an-ambiguous-copied-line-ending
+  (let* ((crlf (coerce '(#\Return #\Newline) 'string))
+         (source (format nil "(defun target ()~A  (x~A y)~A  (x~% y))~A"
+                         crlf crlf crlf crlf)))
+    (with-temp-file "tests/tmp/patch-ambiguous-lines.lisp" source
+      (lambda (path)
+        (let ((message (handler-case
+                           (progn
+                             (lisp-patch-form :file-path path :form-type "defun"
+                                              :form-name "target" :old-text (format nil "x~% y")
+                                              :new-text "z")
+                             nil)
+                         (error (e) (princ-to-string e)))))
+          (ok (and message (search "matches 2 times" message)))
+          (ok (string= source (fs-read-file path))))))))
+
 ;;; ============================================================
 ;;; Error handling
 ;;; ============================================================

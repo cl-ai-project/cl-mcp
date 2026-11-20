@@ -44,6 +44,7 @@
                 #:lisp-too-deep-p
                 #:+max-lisp-nesting+)
   (:import-from #:cl-mcp/src/paren-diagnostics
+                #:format-source-line-endings
                 #:count-delimiter-depth
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis
@@ -52,6 +53,7 @@
                 #:bracket-ambiguous-p
                 #:format-bracket-warning)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:source-newline
                 #:%resolve-named-readtable
                 #:%nonstandard-readtable-p
                 #:%parse-readtable-designator
@@ -90,10 +92,10 @@ mistyped bracket."
     (and (equal (getf scan :kind) "mismatch")
          (bracket-ambiguous-p scan))))
 
-(defun %check-depth-balance (form-text modified-form match-pos old-text new-text)
+(defun %check-depth-balance (form-text modified-form match-pos old-end new-end)
   "Return a message describing the net parenthesis difference the patch makes,
-or NIL when it makes none. OLD-TEXT occupies FORM-TEXT from MATCH-POS and
-NEW-TEXT occupies MODIFIED-FORM from the same position; each region is
+or NIL when it makes none. OLD-END and NEW-END bound the regions in FORM-TEXT
+and MODIFIED-FORM starting at MATCH-POS. Each region is
 counted in its real lexical context, so a parenthesis inside a string or a
 comment is not mistaken for code. The message is also withheld when the
 lexical state at the end of the replacement differs between the two texts
@@ -102,92 +104,121 @@ the region counts would then describe a reclassified suffix, not a real
 parenthesis difference, and the reader's own failure is the better report.
 A net difference in code guarantees the form will not parse, but the caller
 still uses this message only when the patched form actually fails to parse."
-  (let ((old-end (+ match-pos (length old-text)))
-        (new-end (+ match-pos (length new-text))))
-    ;; Both values matter: the state keyword and, for block comments, the
-    ;; nesting depth -- one open #| more or less reclassifies the suffix. A
-    ;; :pending boundary is never trusted either: different unfinished
-    ;; constructs (a trailing | versus a trailing #, say) all report
-    ;; :pending yet combine differently with the unchanged suffix.
-    (multiple-value-bind (old-state old-depth) (lexical-state-at form-text old-end)
-      (multiple-value-bind (new-state new-depth) (lexical-state-at modified-form new-end)
-        (unless (and (eq old-state new-state)
-                     (eql old-depth new-depth)
-                     (not (eq old-state :pending)))
-          (return-from %check-depth-balance nil))))
-    (multiple-value-bind (old-open old-close)
-        (count-delimiter-depth form-text :start match-pos :end old-end)
-      (multiple-value-bind (new-open new-close)
-          (count-delimiter-depth modified-form :start match-pos :end new-end)
-        (let ((diff (- (- new-open new-close) (- old-open old-close))))
-          (unless (zerop diff)
-            (let ((n (abs diff)))
-              (if (plusp diff)
-                  (format nil "new_text closes ~D fewer \")\" than old_text ~
-                               (old_text: ~D open / ~D close, new_text: ~D open / ~D close). ~
-                               The patch would leave the form unclosed. ~
-                               Add ~D \")\" to new_text, or remove ~D \"(\". ~
-                               No changes were written to disk."
-                          n old-open old-close new-open new-close n n)
-                  (format nil "new_text closes ~D more \")\" than old_text ~
-                               (old_text: ~D open / ~D close, new_text: ~D open / ~D close). ~
-                               The patch would add an extra closing parenthesis. ~
-                               Remove ~D \")\" from new_text, or add ~D \"(\". ~
-                               No changes were written to disk."
-                          n old-open old-close new-open new-close n n)))))))))
+  ;; Both values matter: the state keyword and, for block comments, the
+  ;; nesting depth -- one open #| more or less reclassifies the suffix. A
+  ;; :pending boundary is never trusted either: different unfinished
+  ;; constructs (a trailing | versus a trailing #, say) all report
+  ;; :pending yet combine differently with the unchanged suffix.
+  (multiple-value-bind (old-state old-depth) (lexical-state-at form-text old-end)
+    (multiple-value-bind (new-state new-depth) (lexical-state-at modified-form new-end)
+      (unless (and (eq old-state new-state)
+                   (eql old-depth new-depth)
+                   (not (eq old-state :pending)))
+        (return-from %check-depth-balance nil))))
+  (multiple-value-bind (old-open old-close)
+      (count-delimiter-depth form-text :start match-pos :end old-end)
+    (multiple-value-bind (new-open new-close)
+        (count-delimiter-depth modified-form :start match-pos :end new-end)
+      (let ((diff (- (- new-open new-close) (- old-open old-close))))
+        (unless (zerop diff)
+          (let ((n (abs diff)))
+            (if (plusp diff)
+                (format nil "new_text closes ~D fewer \")\" than old_text ~
+                             (old_text: ~D open / ~D close, new_text: ~D open / ~D close). ~
+                             The patch would leave the form unclosed. ~
+                             Add ~D \")\" to new_text, or remove ~D \"(\". ~
+                             No changes were written to disk."
+                        n old-open old-close new-open new-close n n)
+                (format nil "new_text closes ~D more \")\" than old_text ~
+                             (old_text: ~D open / ~D close, new_text: ~D open / ~D close). ~
+                             The patch would add an extra closing parenthesis. ~
+                             Remove ~D \")\" from new_text, or add ~D \"(\". ~
+                             No changes were written to disk."
+                        n old-open old-close new-open new-close n n))))))))
 
-(defun %apply-patch-operation (text node old-text new-text)
-  "Replace OLD-TEXT with NEW-TEXT within the form at NODE in TEXT.
-Returns four values: the modified full file text, the modified form text,
-the original form text, and the position of OLD-TEXT within the form (which
-is also the position of NEW-TEXT within the modified form).
-Signals PATCH-OPERATION-ERROR if OLD-TEXT is not found or occurs multiple times."
+(defun %patch-matches (form-text old-text)
+  "Return the first raw match's bounds and the count, including overlapping matches.
+A bare LF in OLD-TEXT can stand for CRLF in the file. Explicit CRs are literal."
+  (let ((first-break (position #\Newline old-text))
+        (size (length form-text))
+        (from nil) (to nil) (matches 0))
+    (labels ((crlf-at-p (i)
+               (and (< (1+ i) size)
+                    (char= (char form-text i) #\Return)
+                    (char= (char form-text (1+ i)) #\Newline)
+                    ;; An escaped Return or #\<Return> is part of the preceding
+                    ;; token. Only the LF after it belongs to the line break.
+                    (not (and (plusp i) (char= (char form-text (1- i)) #\\)
+                              (member (lexical-state-at form-text i)
+                                      '(:pending :string-escape :symbol-escape))))))
+             (match-end (pos)
+               (loop with i = (+ pos first-break)
+                     for j from first-break below (length old-text)
+                     for ch = (char old-text j)
+                     do (when (and (char= ch #\Newline)
+                                   (or (zerop j) (char/= (char old-text (1- j)) #\Return)))
+                          (cond ((crlf-at-p i)
+                                 (incf i))
+                                ;; A match cannot begin halfway through CRLF.
+                                ((and (plusp i) (crlf-at-p (1- i)))
+                                 (return nil))))
+                        (unless (and (< i size) (char= ch (char form-text i)))
+                          (return nil))
+                        (incf i)
+                     finally (return i))))
+      ;; Search for the literal first line (the entire needle on the usual
+      ;; single-line path), then check each candidate's remaining lines.
+      (loop for cursor = 0 then (1+ pos)
+            while (< cursor size)
+            for pos = (search old-text form-text :end1 first-break :start2 cursor)
+            while pos
+            for end = (if first-break (match-end pos) (+ pos (length old-text)))
+            when end
+              do (unless from (setf from pos to end))
+                 (incf matches)))
+    (values from to matches)))
+
+(defun %apply-patch-operation (text node old-text new-text format-lines-p)
+  "Patch NODE in TEXT. Return the updated file, updated and original form, and
+the raw start, original end and updated end of the matched span in the form."
   (when (zerop (length old-text))
     (error 'arg-validation-error :arg-name "old_text"
            :message "old_text must not be empty"))
   (let* ((start (cst-node-start node))
          (end (cst-node-end node))
-         (form-text (subseq text start end))
-         (match-pos (search old-text form-text)))
-    (unless match-pos
-      (let* ((form-value (cst-node-value node))
-             (form-id
-              (if (consp form-value)
-                  ;; The name can be circular: #1=(a . #1#) reads.
-                  (let ((*print-circle* (circular-p (second form-value))))
-                    (format nil "~A ~A" (car form-value) (second form-value)))
-                  "matched")))
-        (error 'patch-operation-error
-               :reason (format nil "old_text not found in ~A form. ~
-                Note: matching is exact and whitespace-sensitive. ~
-                If the file may have different line endings (CRLF vs LF), ~
-                ensure old_text uses matching line endings. ~
-                Use lisp-read-file with name_pattern to see the exact form text. ~
-                old_text begins with: ~S~:[~;...~]"
-                       form-id (subseq old-text 0 (min (length old-text) 60))
-                       (> (length old-text) 60)))))
-    (let ((second-match
-           (search old-text form-text :start2 (1+ match-pos))))
-      (when second-match
-        (let ((count
-               (loop for pos = (search old-text form-text) then (search
-                                                                  old-text
-                                                                  form-text
-                                                                  :start2
-                                                                  (1+ pos))
-                     while pos
-                     count 1)))
+         (form-text (subseq text start end)))
+    (multiple-value-bind (from to matches) (%patch-matches form-text old-text)
+      (unless from
+        (let* ((form-value (cst-node-value node))
+               (form-id
+                 (if (consp form-value)
+                     (let ((*print-circle* (circular-p (second form-value))))
+                       (format nil "~A ~A" (car form-value) (second form-value)))
+                     "matched")))
           (error 'patch-operation-error
-                 :reason (format nil "old_text matches ~D times in the form; ~
-                  provide more surrounding context to match exactly once"
-                                 count)))))
-    (let* ((modified-form
-            (concatenate 'string (subseq form-text 0 match-pos) new-text
-                         (subseq form-text (+ match-pos (length old-text)))))
-           (modified-file
-            (concatenate 'string (subseq text 0 start) modified-form
-                         (subseq text end))))
-      (values modified-file modified-form form-text match-pos))))
+                 :reason (format nil "old_text not found in ~A form. ~
+                            Note: matching is exact and whitespace-sensitive. ~
+                            Use lisp-read-file with name_pattern to see the exact form text. ~
+                            old_text begins with: ~S~:[~;...~]"
+                                 form-id (subseq old-text 0 (min (length old-text) 60))
+                                 (> (length old-text) 60)))))
+      (when (> matches 1)
+        (error 'patch-operation-error
+               :reason (format nil "old_text matches ~D times in the form; ~
+                                    provide more surrounding context to match exactly once"
+                               matches)))
+      (let ((new-end (+ from (length new-text))))
+        (when (string= old-text new-text)
+          (return-from %apply-patch-operation (values text form-text form-text from to to)))
+        (let ((raw (concatenate 'string (subseq form-text 0 from) new-text
+                                (subseq form-text to))))
+          (multiple-value-bind (modified delta)
+              (if (or (not format-lines-p) (not (find #\Newline new-text)))
+                  (values raw 0)
+                  (format-source-line-endings raw (source-newline text)
+                                              :start from :end new-end))
+            (values (concatenate 'string (subseq text 0 start) modified (subseq text end))
+                    modified form-text from to (+ new-end delta))))))))
 
 (defun %diagnosed-reason (form-text fallback &optional reader-text)
   "Return the patch failure reason for FORM-TEXT. When the delimiter scan
@@ -290,58 +321,57 @@ deep, which is deeper than cl-mcp will read"
                        &optional inactive-p)
   "Replace OLD-TEXT by NEW-TEXT within TARGET, a form of NODES parsed from TEXT
 (the contents of ABS), and check the patched form still reads.  Returns
-(values UPDATED WOULD-CHANGE BRACKET-WARNING MODIFIED-FORM); signals
+(values UPDATED WOULD-CHANGE BRACKET-WARNING MODIFIED-FORM OLD-SIZE NEW-SIZE); signals
 PATCH-OPERATION-ERROR when OLD-TEXT is not found exactly once or the patched
 form does not read.  Nothing is written.  INACTIVE-P says TARGET is a form under
 a feature expression false here (issue #321): it is then checked past its
 expressions (%INACTIVE-FORM-TEXT), which would otherwise skip it again."
-  (multiple-value-bind (updated modified-form form-text match-pos)
-      (%apply-patch-operation text target old-text new-text)
-    (let* ((would-change (not (string= text updated)))
-           (readtable-designator
-             (or readtable (%detect-readtable-before-node nodes target)))
-           ;; Computed once: the readtable comparison probes 256 characters.
-           (nonstandard-rt (%nonstandard-readtable-p readtable-designator))
-           ;; Counted in the form's lexical context: a ")" inside a string
-           ;; or comment is not code and must not produce a depth message.
-           ;; Under a readtable that changes the syntax the standard lexical
-           ;; rules cannot be trusted (a reader macro may consume raw
-           ;; parentheses as data), so no depth message is offered at all;
-           ;; the reader's own failure is reported through the normal
-           ;; diagnosis path.
-           ;; A ] or } typed for ) changes the net count too, but "add 1 )"
-           ;; would then write code that reads (as a symbol ending in ]);
-           ;; let the bracket diagnosis speak instead.
-           ;; Deferred: the scans behind it run only once the patched form
-           ;; has failed to parse, so a successful patch pays nothing.
-           (depth-reason
-             (lambda ()
-               (and (not nonstandard-rt)
-                    (not (%bracket-mismatch-p modified-form))
-                    (%check-depth-balance form-text modified-form
-                                          match-pos old-text new-text)))))
-      (when would-change
-        (%validate-form-parseable
-         (if inactive-p
-             (%inactive-form-text modified-form)
-             modified-form)
-         :readtable-designator readtable-designator
-         :package-name file-package-name
-         :source-path abs
-         :depth-reason depth-reason
-         :nonstandard-rt nonstandard-rt))
-      ;; The form reads, but a ] or } where ) was meant reads too (as part
-      ;; of a symbol). Written as asked -- the caller may mean it -- but
-      ;; flagged, since silently accepting it is how such typos survive.
-      ;; Only the found side: an unmatched [ or { opener is a symbol
-      ;; character in standard syntax and carries no ) typo to flag.
-      (values updated
-              would-change
-              (and would-change
-                   (not nonstandard-rt)
-                   (format-bracket-warning modified-form
-                                           :target "the patched form"))
-              modified-form))))
+  (let* ((readtable-designator (or readtable (%detect-readtable-before-node nodes target)))
+         (nonstandard-rt (%nonstandard-readtable-p readtable-designator)))
+    (multiple-value-bind (updated modified-form form-text match-pos old-end new-end)
+        (%apply-patch-operation text target old-text new-text
+                                (member readtable-designator '(nil :standard)))
+      (let ((would-change (not (string= text updated)))
+             ;; Counted in the form's lexical context: a ")" inside a string
+             ;; or comment is not code and must not produce a depth message.
+             ;; Under a readtable that changes the syntax the standard lexical
+             ;; rules cannot be trusted (a reader macro may consume raw
+             ;; parentheses as data), so no depth message is offered at all;
+             ;; the reader's own failure is reported through the normal
+             ;; diagnosis path.
+             ;; A ] or } typed for ) changes the net count too, but "add 1 )"
+             ;; would then write code that reads (as a symbol ending in ]);
+             ;; let the bracket diagnosis speak instead.
+             ;; Deferred: the scans behind it run only once the patched form
+             ;; has failed to parse, so a successful patch pays nothing.
+             (depth-reason
+               (lambda ()
+                 (and (not nonstandard-rt)
+                      (not (%bracket-mismatch-p modified-form))
+                      (%check-depth-balance form-text modified-form
+                                            match-pos old-end new-end)))))
+        (when would-change
+          (%validate-form-parseable
+           (if inactive-p
+               (%inactive-form-text modified-form)
+               modified-form)
+           :readtable-designator readtable-designator
+           :package-name file-package-name
+           :source-path abs
+           :depth-reason depth-reason
+           :nonstandard-rt nonstandard-rt))
+        ;; The form reads, but a ] or } where ) was meant reads too (as part
+        ;; of a symbol). Written as asked -- the caller may mean it -- but
+        ;; flagged, since silently accepting it is how such typos survive.
+        ;; Only the found side: an unmatched [ or { opener is a symbol
+        ;; character in standard syntax and carries no ) typo to flag.
+        (values updated
+                would-change
+                (and would-change
+                     (not nonstandard-rt)
+                     (format-bracket-warning modified-form
+                                             :target "the patched form"))
+                modified-form (- old-end match-pos) (- new-end match-pos))))))
 (defun %inactive-form-text (modified-form)
   "Return MODIFIED-FORM, the patched text of a form under a feature expression
 false here (issue #321), past its expressions, for the reader to check -- read
@@ -418,10 +448,11 @@ checkout, is not coordinated by it.
 READTABLE, if provided, specifies a named-readtable designator (e.g., :interpol-syntax)
 to use for parsing the file.
 
-Returns three values: the updated file text, whether the file changed, and a
+Returns the updated file text, whether the file changed, and a
 bracket warning or NIL. The warning is set when the patched form reads but
 its delimiter scan stops at a ] or } (a possible ) typo that standard syntax
-silently accepts as part of a symbol), so the caller can check it."
+silently accepts as part of a symbol), so the caller can check it. When the
+file changed, two further values give the old and new span sizes in characters."
   (unless (and (stringp file-path) (stringp form-type) (stringp form-name))
     (error "file_path, form_type, and form_name must be strings"))
   (unless (and (stringp old-text) (stringp new-text))
@@ -436,7 +467,7 @@ silently accepts as part of a symbol), so the caller can check it."
                           file-package-name inactive-p)
         (%locate-target-form file-path form-type form-name readtable)
       (declare (ignore _))
-      (multiple-value-bind (updated would-change bracket-warning modified-form)
+      (multiple-value-bind (updated would-change bracket-warning modified-form old-size new-size)
           (%patch-located abs original nodes target old-text new-text readtable
                           file-package-name inactive-p)
         (log-event :debug "lisp.patch.form"
@@ -458,7 +489,7 @@ silently accepts as part of a symbol), so the caller can check it."
              result))
           (would-change
            (fs-write-file rel updated)
-           (values updated t bracket-warning))
+           (values updated t bracket-warning old-size new-size))
           (t
            (values updated nil nil)))))))
 
@@ -650,7 +681,7 @@ values, for COUNT patches on FILE-PATH."
   :description "Scoped text replacement within a matched top-level Lisp form.
 Finds old_text (exact, whitespace-sensitive match) within the form identified
 by form_type and form_name, and replaces it with new_text. old_text must match
-exactly once within the form.
+exactly once within the form. An LF in old_text can match a CRLF line ending.
 Most token-efficient way to make small changes to large forms.
 Does NOT auto-repair parentheses — if the patch breaks form structure, it fails
 immediately and no changes are written to disk.
@@ -678,9 +709,11 @@ branch) is named by its expressions in front of the name, as the file writes the
 skipped one only when no read form has that name.")
          (old_text :type :string
                    :description "Text to find within the matched form.
-Performs exact raw text matching (whitespace-sensitive). Must occur exactly once in the form.")
+Whitespace-sensitive and unique within the form. A bare LF matches LF or CRLF. Other
+characters, including an explicit CR, must match exactly.")
          (new_text :type :string
-                   :description "Replacement text.
+                   :description "Replacement text. With the standard readtable, formatting line breaks use
+the file's dominant LF or CRLF ending. Newlines in literal data are kept as supplied.
 If new_text opens and closes a different net number of parentheses than old_text
 and the patched form no longer parses, the error says exactly how many \")\" to
 add or remove.")
@@ -716,7 +749,7 @@ The patch replaces text in place, so comments are kept."))
                                                     :patches (%patch-plists patches)
                                                     :dry-run dry_run
                                                     :readtable readtable-designator)))
-        (multiple-value-bind (updated changed-p bracket-warning)
+        (multiple-value-bind (updated changed-p bracket-warning old-size new-size)
             (lisp-patch-form :file-path file_path
                              :form-type form_type
                              :form-name form_name
@@ -755,7 +788,7 @@ The patch replaces text in place, so comments are kept."))
                          (format nil "Applied patch to ~A ~A in ~A (~D chars → ~D chars)~
                                       ~@[~%WARNING: ~A~]"
                                  form_type form_name file_path
-                                 (length old_text) (length new_text)
+                                 old-size new-size
                                  bracket-warning))))
                 (result id
                         (apply #'make-ht
@@ -767,7 +800,7 @@ The patch replaces text in place, so comments are kept."))
                                "content" (text-content summary)
                                (append
                                 (when changed-p
-                                  (list "delta" (- (length new_text) (length old_text))))
+                                  (list "delta" (- new-size old-size)))
                                 (when bracket-warning
                                   (list "bracket_warning" bracket-warning)))))))))
       ;; CLAUSE ORDER IS LOAD-BEARING. PATCH-OPERATION-ERROR and
