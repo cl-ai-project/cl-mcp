@@ -192,6 +192,39 @@ running as root), THUNK is skipped instead."
                          :old-text (format nil "~%  :old") :new-text " :new")
         (ok (string= (format nil "~A :new))~%" prefix) (fs-read-file path)))))))
 
+(deftest lisp-patch-form-matches-custom-reader-data-verbatim
+  (let* ((name :cl-mcp-patch-test-line-ending-escape)
+         (table (copy-readtable nil))
+         (prefix (format nil "(defun target () (list 'pre!~C" #\Return))
+         (source (format nil "~A~%  :old))~%" prefix)))
+    (set-syntax-from-char #\! #\\ table)
+    (named-readtables:register-readtable name table)
+    (unwind-protect
+         (with-temp-file "tests/tmp/patch-custom-line-ending.lisp" source
+           (lambda (path)
+             (lisp-patch-form :file-path path :form-type "defun" :form-name "target"
+                              :readtable name :old-text (format nil "~%  :old")
+                              :new-text "  :new")
+             (let ((updated (fs-read-file path))
+                   (*readtable* table))
+               (ok (string= (format nil "~A  :new))~%" prefix) updated))
+               (ok (equal (second (fourth (read-from-string source)))
+                          (second (fourth (read-from-string updated))))))))
+      (named-readtables:unregister-readtable name))))
+
+(deftest lisp-patch-form-keeps-literal-returns-in-strings-and-escaped-symbols
+  (dolist (template '("(defun target () \"a~C~%  old\")~%"
+                      "(defun target () 'pre#|a~C~%  old|)~%"))
+    (let* ((source (format nil template #\Return))
+           (start (position #\Newline source))
+           (expected (concatenate 'string (subseq source 0 start) "new"
+                                  (subseq source (+ start (length (format nil "~%  old")))))))
+      (with-temp-file "tests/tmp/patch-literal-line-endings.lisp" source
+        (lambda (path)
+          (lisp-patch-form :file-path path :form-type "defun" :form-name "target"
+                           :old-text (format nil "~%  old") :new-text "new")
+          (ok (string= expected (fs-read-file path))))))))
+
 (deftest lisp-patch-form-reports-the-size-of-the-applied-replacement
   (let* ((crlf (coerce '(#\Return #\Newline) 'string))
          (source (format nil "(defun target ()~A  1)~A" crlf crlf)))

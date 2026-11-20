@@ -45,6 +45,7 @@
                 #:+max-lisp-nesting+)
   (:import-from #:cl-mcp/src/paren-diagnostics
                 #:format-source-line-endings
+                #:source-line-break-mask
                 #:count-delimiter-depth
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis
@@ -136,21 +137,19 @@ still uses this message only when the patched form actually fails to parse."
                              No changes were written to disk."
                         n old-open old-close new-open new-close n n))))))))
 
-(defun %patch-matches (form-text old-text)
+(defun %patch-matches (form-text old-text standard-syntax-p)
   "Return the first raw match's bounds and the count, including overlapping matches.
-A bare LF in OLD-TEXT can stand for CRLF in the file. Explicit CRs are literal."
-  (let ((first-break (position #\Newline old-text))
-        (size (length form-text))
-        (from nil) (to nil) (matches 0))
+In standard Lisp a bare LF can stand for a formatting CRLF. Other readtables
+match raw source. Explicit CRs always match literally."
+  (let* ((first-break (and standard-syntax-p (position #\Newline old-text)))
+         (breaks (and first-break (find #\Return form-text) (source-line-break-mask form-text)))
+         (size (length form-text))
+         (from nil) (to nil) (matches 0))
     (labels ((crlf-at-p (i)
-               (and (< (1+ i) size)
+               (and breaks (< (1+ i) size)
                     (char= (char form-text i) #\Return)
                     (char= (char form-text (1+ i)) #\Newline)
-                    ;; An escaped Return or #\<Return> is part of the preceding
-                    ;; token. Only the LF after it belongs to the line break.
-                    (not (and (plusp i) (char= (char form-text (1- i)) #\\)
-                              (member (lexical-state-at form-text i)
-                                      '(:pending :string-escape :symbol-escape))))))
+                    (plusp (sbit breaks i)) (plusp (sbit breaks (1+ i)))))
              (match-end (pos)
                (loop with i = (+ pos first-break)
                      for j from first-break below (length old-text)
@@ -187,7 +186,7 @@ the raw start, original end and updated end of the matched span in the form."
   (let* ((start (cst-node-start node))
          (end (cst-node-end node))
          (form-text (subseq text start end)))
-    (multiple-value-bind (from to matches) (%patch-matches form-text old-text)
+    (multiple-value-bind (from to matches) (%patch-matches form-text old-text format-lines-p)
       (unless from
         (let* ((form-value (cst-node-value node))
                (form-id
@@ -681,7 +680,7 @@ values, for COUNT patches on FILE-PATH."
   :description "Scoped text replacement within a matched top-level Lisp form.
 Finds old_text (exact, whitespace-sensitive match) within the form identified
 by form_type and form_name, and replaces it with new_text. old_text must match
-exactly once within the form. An LF in old_text can match a CRLF line ending.
+exactly once within the form. Under the standard readtable, an LF in old_text can match a formatting CRLF.
 Most token-efficient way to make small changes to large forms.
 Does NOT auto-repair parentheses — if the patch breaks form structure, it fails
 immediately and no changes are written to disk.
@@ -709,8 +708,8 @@ branch) is named by its expressions in front of the name, as the file writes the
 skipped one only when no read form has that name.")
          (old_text :type :string
                    :description "Text to find within the matched form.
-Whitespace-sensitive and unique within the form. A bare LF matches LF or CRLF. Other
-characters, including an explicit CR, must match exactly.")
+Whitespace-sensitive and unique within the form. A bare LF also matches a formatting CRLF under the standard
+readtable. Literal data and text under other named readtables match exactly.")
          (new_text :type :string
                    :description "Replacement text. With the standard readtable, formatting line breaks use
 the file's dominant LF or CRLF ending. Newlines in literal data are kept as supplied.

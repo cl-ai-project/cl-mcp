@@ -18,6 +18,7 @@
            #:count-delimiter-depth
            #:lexical-state-at
            #:format-source-line-endings
+           #:source-line-break-mask
            #:repair-line-differences
            #:format-repair-lines
            #:format-delimiter-diagnosis
@@ -362,7 +363,7 @@ need the character at END (\\x, #\\x, #|, |#, or a reader prefix such as
   (let ((len (min (length text) (or end (length text))))
         (idx 0) (line 1) (col 1)
         (in-string nil) (in-symbol nil) (escape nil) (line-comment nil)
-        (block-depth 0) (pending nil))
+        (block-depth 0) (pending nil) (in-token nil) (prefix-end nil))
     (flet ((state ()
              (cond (pending :pending)
                    (line-comment :line-comment)
@@ -400,8 +401,20 @@ need the character at END (\\x, #\\x, #|, |#, or a reader prefix such as
                            (decf block-depth) (incf idx) (incf col))
                           ((and (char= ch #\#) next (char= next #\|))
                            (incf block-depth) (incf idx) (incf col))))
+                   (prefix-end
+                    ;; The numeric argument and sub-character of a dispatch macro
+                    ;; (or the @ or . after comma) belong to the reader prefix.
+                    (when (= idx prefix-end)
+                      (when (and last-p (%prefix-needs-object-p ch (char text (1- idx))))
+                        (setf pending t)
+                        (return))
+                      (setf prefix-end nil
+                            in-token (find ch ":*bBoOxXrR")))
+                    (funcall function ch idx line col))
                    ((and last-p
-                         (%prefix-needs-object-p ch (and (plusp idx) (char text (1- idx)))))
+                         (if (char= ch #\#)
+                             (not in-token)
+                             (%prefix-needs-object-p ch (and (plusp idx) (char text (1- idx))))))
                     ;; A two-character construct or a reader prefix would reach
                     ;; past END: stop here and report the token as pending
                     ;; instead of consulting text the caller asked us not to.
@@ -409,38 +422,51 @@ need the character at END (\\x, #\\x, #|, |#, or a reader prefix such as
                     ;; so bar@ and bar# at END stay symbols, not prefixes.
                     (setf pending t)
                     (return))
-                   ((char= ch #\;) (setf line-comment t))
-                   ((char= ch #\") (setf in-string t))
+                   ((char= ch #\;) (setf line-comment t in-token nil))
+                   ((char= ch #\") (setf in-string t in-token nil))
                    ((char= ch #\\)
-                    ;; Single escape outside a string: skip the escaped character.
+                    ;; The escaped character is part of a token, even when it is whitespace.
+                    (setf in-token t)
                     (incf idx)
                     (if (char= next #\Newline)
                         (setf line (1+ line) col 0)
                         (incf col)))
-                   ((and (char= ch #\#) next (char= next #\|))
-                    (incf block-depth) (incf idx) (incf col))
-                   ((and (char= ch #\#) next (char= next #\\))
-                    ;; #\x or #\Name: skip the backslash and the literal itself,
-                    ;; but never past END -- a literal cut off by the scan limit
-                    ;; is reported as pending, like a lone \ or # would be.
-                    (when (>= (+ idx 2) len)
-                      (setf pending t)
-                      (return))
-                    (if (char= (char text (+ idx 2)) #\Newline)
-                        ;; #\<Newline>: the literal itself ends the line.
-                        (progn (incf idx 2)
-                               (setf line (1+ line) col 0))
-                        (let ((skip 2))
-                          (when (alpha-char-p (char text (+ idx 2)))
-                            (loop for k from (+ idx 3) below len
-                                  while (alpha-char-p (char text k))
-                                  do (incf skip)))
-                          (incf idx skip)
-                          (incf col skip))))
+                   ((and (char= ch #\#) (not in-token))
+                    ;; # is nonterminating inside a token: in pre#|a| the
+                    ;; bars escape symbol characters. Only an initial # dispatches.
+                    (let* ((sub (position-if-not #'digit-char-p text :start (1+ idx) :end len))
+                           (sub-char (and sub (char text sub))))
+                      (case sub-char
+                        ((nil) (setf pending t) (return))
+                        (#\|
+                         (incf block-depth)
+                         (incf col (- sub idx))
+                         (setf idx sub))
+                        (#\\
+                         (let ((literal (1+ sub)))
+                           (when (>= literal len) (setf pending t) (return))
+                           (let* ((ch (char text literal))
+                                  (last (if (alpha-char-p ch)
+                                            (1- (or (position-if-not #'alpha-char-p text
+                                                                     :start literal :end len)
+                                                    len))
+                                            literal)))
+                             (if (char= ch #\Newline)
+                                 (setf line (1+ line) col 0)
+                                 (incf col (- last idx)))
+                             (setf idx last))))
+                        (otherwise
+                         (setf prefix-end sub)
+                         (funcall function ch idx line col)))))
                    ((char= ch #\|)
                     ;; Multiple escape (checked after #| above).
-                    (setf in-symbol t))
-                   (t (funcall function ch idx line col)))
+                    (setf in-symbol t in-token t))
+                   (t
+                    (setf in-token (not (member ch '(#\Space #\Tab #\Newline #\Return #\Page
+                                                     #\( #\) #\' #\` #\,))))
+                    (when (and (char= ch #\,) (member next '(#\@ #\.)))
+                      (setf prefix-end (1+ idx)))
+                    (funcall function ch idx line col)))
                  (if (char= ch #\Newline)
                      (setf line (1+ line) col 1)
                      (incf col))
@@ -521,34 +547,45 @@ The final element is the state at the end of TEXT."
                           :state-fn (lambda (idx state) (setf (svref mask idx) state)))
     mask))
 
+(defun source-line-break-mask (text)
+  "Return a bit vector marking CR and LF characters used as formatting in standard Lisp TEXT.
+A literal newline and an escaped Return before a newline are data, not formatting."
+  (let* ((size (length text))
+         (mask (make-array size :element-type 'bit :initial-element 0)))
+    (%map-code-characters
+     text (constantly nil)
+     :state-fn (lambda (i state)
+                 (when (and (< i size) (member (char text i) '(#\Return #\Newline))
+                            (member state '(:code :line-comment :block-comment)))
+                   (setf (sbit mask i) 1))))
+    mask))
+
 (defun format-source-line-endings (text newline &key (start 0) (end (length text)))
   "Use NEWLINE for formatting line breaks within [START, END) of Lisp source TEXT.
 Scan from the beginning so a patch inside a literal preserves its characters.
 Return the full string and the change in its length."
   (let ((crlf-p (= (length newline) 2)))
-    (labels ((paired-p (i)
-               (and (> i start) (char= (char text (1- i)) #\Return)))
-             (formatting-p (state)
-               (member state '(:code :line-comment :block-comment))))
-      (unless (loop for i = (position #\Newline text :start start :end end)
-                    then (position #\Newline text :start (1+ i) :end end)
-                    while i thereis (not (eql crlf-p (paired-p i))))
-        (return-from format-source-line-endings (values text 0)))
-      (let* ((states (%code-state-mask text))
-             (updated
-               (with-output-to-string (out)
-                 (loop with from = 0
-                       for i = (position #\Newline text :start start :end end)
-                         then (position #\Newline text :start (1+ i) :end end)
-                       while i
-                       when (and (formatting-p (svref states i))
-                                 (not (eql crlf-p (paired-p i)))
-                                 (or crlf-p (formatting-p (svref states (1- i)))))
-                         do (write-string text out :start from :end (if crlf-p i (1- i)))
-                            (write-string newline out)
-                            (setf from (1+ i))
-                       finally (write-string text out :start from)))))
-        (values updated (- (length updated) (length text)))))))
+    (unless (and (find #\Newline text :start start :end end)
+                 (or crlf-p (find #\Return text :start start :end end)))
+      (return-from format-source-line-endings (values text 0)))
+    (let* ((breaks (source-line-break-mask text))
+           (updated
+             (with-output-to-string (out)
+               (loop with from = 0
+                     for i = (position #\Newline text :start start :end end)
+                       then (position #\Newline text :start (1+ i) :end end)
+                     while i
+                     for paired = (and (> i start) (char= (char text (1- i)) #\Return)
+                                       (plusp (sbit breaks (1- i))))
+                     when (and (plusp (sbit breaks i)) (not (eql crlf-p paired)))
+                       do (write-string text out :start from :end (if crlf-p i (1- i)))
+                          (write-string newline out)
+                          (setf from (1+ i))
+                     finally
+                        (when (zerop from)
+                          (return-from format-source-line-endings (values text 0)))
+                        (write-string text out :start from)))))
+      (values updated (- (length updated) (length text))))))
 
 (defun %any-fix-outside-code-p (text repaired fixes)
   "Return T when any of FIXES (from REPAIR-LINE-DIFFERENCES on TEXT and

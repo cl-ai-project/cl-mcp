@@ -979,7 +979,8 @@ Input:
   replacement's last line. If that line already has a `;` comment, the file's original comment
   goes on the next line. `insert_after` goes below the comment, and `delete` removes it with
   the form. The active readtable determines which characters count as whitespace around
-  the target. Generated separators and formatting line breaks in submitted standard Lisp use
+  the target. A default insertion copies the adjacent gap verbatim, including its original
+  line endings in a mixed file. Newly generated separators and formatting breaks in standard Lisp use
   the file's dominant ending (CRLF or LF, with LF on a tie). Strings, escaped symbols and
   character literals retain their submitted characters. With a named readtable other than
   `:standard`, submitted form text keeps its line endings because reader macros may consume
@@ -1191,8 +1192,10 @@ Input:
   matches, the error lists the file's forms of that type (or all its top-level forms when it has none)
 - `form_name` (string, required): name/specializers to match; for `defmethod` include specializers such as `"print-object ((obj my-class) stream)"`; `"#+ecl impl"` names a form under a feature expression false in the server, as in `lisp-edit-form`
 - `old_text` (string, required): whitespace-sensitive text to find exactly once in the form.
-  A bare LF matches either LF or CRLF, so multiline text copied from `lisp-read-file` works.
-  An explicit CR matches literally. All matches count, including both line endings in a mixed file.
+  Under the standard readtable, a bare LF matches either a formatting LF or a formatting CRLF,
+  so multiline code copied from `lisp-read-file` works. Literal data and text under other named
+  readtables match exactly. An explicit CR matches literally. All matches count, including both
+  formatting line endings in a mixed file.
 - `new_text` (string, required): replacement text. Formatting line breaks follow the file's
   dominant ending under the standard readtable, with the same literal and readtable handling
   as `lisp-edit-form`. The rest of the form and file keep their original text.

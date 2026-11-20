@@ -1561,6 +1561,38 @@ handling and return the file's text afterwards."
                                      :content (format nil "~A ; note~A(defun b () 2)" form crlf))))
       (named-readtables:unregister-readtable name))))
 
+(deftest lisp-edit-form-distinguishes-a-token-sharp-from-dispatch
+  (let* ((crlf (coerce '(#\Return #\Newline) 'string))
+         (source (format nil ";; one~A(defun target () nil)~A" crlf crlf)))
+    (flet ((body (nl)
+             (format nil "(defun target ()~A  '(pre#|a~%b| pre\\ #|c~%d|~A~
+                         |e|#|f~%g| #\\# #| comment~Acontinues |# \"h~%i\"))"
+                     nl nl nl)))
+      (let ((edited (%default-edit source :form-type "defun" :form-name "target"
+                                   :operation "replace" :content (body (string #\Newline)))))
+        (ok (string= (format nil ";; one~A~A~A" crlf (body crlf) crlf) edited))
+        (ok (equal (read-from-string (body (string #\Newline))) (read-from-string edited)))))))
+
+(deftest lisp-edit-form-keeps-a-literal-return-before-a-submitted-line-ending
+  (let* ((crlf (coerce '(#\Return #\Newline) 'string))
+         (source (format nil ";; heading~A(defun target () nil)~A" crlf crlf))
+         (prefix (format nil "(defun target () (list #\\~C" #\Return))
+         (submitted (format nil "~A~%  :next))" prefix))
+         (edited (%default-edit source :form-type "defun" :form-name "target"
+                                :operation "replace" :content submitted)))
+    (ok (string= (format nil ";; heading~A~A~A  :next))~A" crlf prefix crlf crlf) edited))
+    (ok (equal (read-from-string submitted) (read-from-string edited)))))
+
+(deftest lisp-edit-form-copies-the-adjacent-gap-in-a-mixed-file
+  (let* ((crlf (coerce '(#\Return #\Newline) 'string))
+         (prefix (format nil ";; first~A;; second~A(defun target () 1)" crlf crlf))
+         (suffix (format nil "~%(defun next () 3)~A" crlf))
+         (source (concatenate 'string prefix suffix)))
+    (ok (string= (format nil "~A~%(defun added ()~A  2)~A" prefix crlf suffix)
+                 (%default-edit source :form-type "defun" :form-name "target"
+                                :operation "insert_after"
+                                :content (format nil "(defun added ()~%  2)"))))))
+
 (deftest lisp-edit-form-setf-name-matches-without-its-package-prefix
   ;; Issue #326: (setf c::top-level-lambda-max) was reported unmatched by
   ;; "(setf top-level-lambda-max)"; a package prefix inside a (setf ...) name is
