@@ -59,6 +59,7 @@
    #:protocol-version
    #:make-state
    #:handle-notification
+   #:process-json-message
    #:process-json-line))
 
 (in-package #:cl-mcp/src/protocol)
@@ -213,6 +214,11 @@ surrogate raw, and 0.7.x a control character too, and neither can be sent."
 ;;;   result, rpc-error, text-content, tool-error
 
 (defun handle-initialize (state id params)
+  (when (and params
+             (or (not (stringp (gethash "protocolVersion" params "")))
+                 (not (hash-table-p (gethash "capabilities" params params)))
+                 (not (hash-table-p (gethash "clientInfo" params params)))))
+    (return-from handle-initialize (rpc-error id -32602 "Invalid initialize parameters")))
   ;; Sync rootPath from client if provided
   (when params
     (let* ((root-path (gethash "rootPath" params))
@@ -263,22 +269,12 @@ surrogate raw, and 0.7.x a control character too, and neither can be sent."
          (supported
           (and client-ver
                (find client-ver +supported-protocol-versions+ :test #'string=)))
-         (chosen
-          (cond (supported supported)
-                ((null client-ver) (first +supported-protocol-versions+))
-                (t nil)))
-         (caps (make-ht "tools" (make-ht "listChanged" t))))
-    (if (null chosen)
-        (rpc-error id -32602
-                (format nil "Unsupported protocolVersion ~A" client-ver)
-                (make-ht "supportedVersions" +supported-protocol-versions+))
-        (progn
-          (setf (protocol-version state) chosen)
-          (result id
-                   (make-ht "protocolVersion" chosen "serverInfo"
-                             (make-ht "name" "cl-mcp" "version" (version))
-                             "capabilities" caps
-                             "instructions" (server-instructions)))))))
+         (chosen (or supported +protocol-version+)))
+    (setf (protocol-version state) chosen)
+    (result id (make-ht "protocolVersion" chosen
+                        "serverInfo" (make-ht "name" "cl-mcp" "version" (version))
+                        "capabilities" (make-ht "tools" (make-ht))
+                        "instructions" (server-instructions)))))
 
 (defun %handle-cancel-notification (params)
   "Handle a notifications/cancelled message from the MCP client.
@@ -372,7 +368,7 @@ Returns a JSON-RPC response hash-table when handled, or NIL to defer."
 MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
 :tool-groups (list :~A) to cl-mcp:run."
                               name group group group))))
-        (t (rpc-error id -32601 (format nil "Tool ~A not found" name)))))))
+        (t (rpc-error id -32602 (format nil "Tool ~A not found" name)))))))
 
 (defun handle-request (state id method params)
   ;; Every request runs under its own session's project root, so the parent's
@@ -387,6 +383,63 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
            (handle-tools-call state id params)))
       ((string= method "ping") (result id (make-ht)))
       (t (rpc-error id -32601 (format nil "Method ~A not found" method))))))
+
+(defun %dispatch-message (message state in-batch-p)
+  "Return the reply object for one message, or NIL for a one-way message."
+  (unless (hash-table-p message)
+    (return-from %dispatch-message (rpc-error nil -32600 "Invalid Request")))
+  (let* ((id (gethash "id" message :absent))
+         (valid-id (typep id '(or integer string)))
+         (method (gethash "method" message :absent))
+         (params (gethash "params" message :absent))
+         (result (gethash "result" message :absent))
+         (error (gethash "error" message :absent)))
+    (log-event :debug "rpc.dispatch" "id" id "method" method)
+    (unless (and (equal (gethash "jsonrpc" message) "2.0")
+                 (or (eq id :absent) valid-id))
+      (return-from %dispatch-message (rpc-error (when valid-id id) -32600 "Invalid Request")))
+    ;; November 2025 permits an omitted ID on an error response only.
+    (when (and (eq method :absent)
+               (or (and valid-id (hash-table-p result) (eq error :absent))
+                   (and (or valid-id (equal (protocol-version state) "2025-11-25"))
+                        (eq result :absent) (hash-table-p error)
+                        (integerp (gethash "code" error))
+                        (stringp (gethash "message" error)))))
+      (return-from %dispatch-message nil))
+    (unless (and (stringp method) (eq result :absent) (eq error :absent))
+      (return-from %dispatch-message (rpc-error (when valid-id id) -32600 "Invalid Request")))
+    (handler-case
+        (cond
+          ((eq id :absent)
+           (handle-notification state method (unless (eq params :absent) params))
+           nil)
+          ((and (equal method "initialize") (or in-batch-p (protocol-version state)))
+           (rpc-error id -32600 "Initialize must be the first, separate request of a session"))
+          ((not (or (eq params :absent) (hash-table-p params)))
+           (rpc-error id -32602 "Expected parameters to be an object"))
+          (t (let ((reply (handle-request state id method (unless (eq params :absent) params))))
+               (log-event :debug "rpc.result" "id" id "method" method)
+               reply)))
+      (error (e)
+        (ignore-errors (log-event :error "rpc.internal" "id" id "method" method
+                                  "error" (princ-to-string e)))
+        (when valid-id (rpc-error id -32603 "Internal error")))
+      (storage-condition ()
+        (ignore-errors (log-event :error "rpc.internal" "method" method "error" "storage exhausted"))
+        (when valid-id (rpc-error id -32603 "Internal error: the server ran out of stack or heap"))))))
+
+(defun process-json-message (message state)
+  "Dispatch a parsed MCP message and return its encoded reply, or NIL.
+For a single message the second value is its reply object, if any."
+  (if (and (vectorp message) (not (stringp message)) (plusp (length message))
+           (equal (protocol-version state) "2025-03-26"))
+      ;; Encode each reply independently, preserving its ID even on the encoder's retry path.
+      (let ((replies (loop for item across message
+                           for reply = (%dispatch-message item state t)
+                           when reply collect (%encode-json reply))))
+        (when replies (format nil "[~{~A~^,~}]" replies)))
+      (let ((reply (%dispatch-message message state nil)))
+        (when reply (values (%encode-json reply) reply)))))
 
 (defun process-json-line (line &optional (state (make-state)))
   "Process one JSON-RPC line and return a JSON line to send, or NIL for notifications."
@@ -417,53 +470,4 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
                    (return-from process-json-line
                      (%encode-json
                       (rpc-error nil -32700 "Parse error: nested too deeply")))))))
-      (unless (hash-table-p msg)
-        (log-event :warn "rpc.invalid" "reason" "message not object")
-        (return-from process-json-line
-          (%encode-json (rpc-error nil -32600 "Invalid Request"))))
-      (let ((jsonrpc (gethash "jsonrpc" msg))
-            (id (gethash "id" msg))
-            (method (gethash "method" msg))
-            (params (gethash "params" msg)))
-        (log-event :debug "rpc.dispatch" "id" id "method" method)
-        (unless (and (stringp jsonrpc) (string= jsonrpc "2.0"))
-          (let ((resp (%encode-json (rpc-error id -32600 "Invalid Request"))))
-            (log-event :warn "rpc.invalid" "reason" "bad jsonrpc version")
-            (return-from process-json-line resp)))
-        (handler-case
-            (cond
-              ((and method id)
-               (let ((r (handle-request state id method params)))
-                 (log-event :debug "rpc.result" "id" id "method" method)
-                 (%encode-json r)))
-              (method
-               ;; notification
-               (handle-notification state method params)
-               (log-event :debug "rpc.notify" "method" method)
-               nil)
-              (t
-               (let ((resp (%encode-json (rpc-error id -32600 "Invalid Request"))))
-                 (log-event :warn "rpc.invalid" "reason" "missing method")
-                 resp)))
-          (error (e)
-            (ignore-errors
-              (log-event :error "rpc.internal"
-                         "id" id
-                         "method" method
-                         "error" (princ-to-string e)))
-            ;; Coerce id to a safe type before building the error response.
-            ;; JSON-RPC 2.0 says ids SHOULD NOT have fractional parts,
-            ;; so we accept only integer, string, or null.  Floats,
-            ;; booleans, and arrays are dropped to nil.
-            (let ((safe-id (typecase id
-                             ((or null string integer) id)
-                             (t nil))))
-              (%encode-json (rpc-error safe-id -32603 "Internal error"))))
-          (storage-condition ()
-            (ignore-errors
-              (log-event :error "rpc.internal" "method" method "error" "storage exhausted"))
-            (%encode-json (rpc-error (typecase id
-                                       ((or null string integer) id)
-                                       (t nil))
-                                     -32603
-                                     "Internal error: the server ran out of stack or heap"))))))))
+      (process-json-message msg state))))
