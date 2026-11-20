@@ -1645,6 +1645,10 @@ Notes:
 ## `run-tests`
 Run tests for a system and return structured results with pass/fail counts and failure details.
 
+Clients using MCP 2025-06-18 or later receive the report in `structuredContent`.
+All supported versions receive a text summary in `content` and the individual report fields
+at the top level of the tool result.
+
 Input:
 - `system` (string, required): ASDF system name to test (e.g., `"my-project/tests"`). A system ASDF does not know yet is looked for under the project root, as `load-system` does; a name found nowhere is reported as such, not as a broken worker. The system and its direct `<system>/...` dependencies are cleared and their `.asd` read again, so every system defined there that the test system reaches is loaded again; any other file of a package-inferred system, or of a system defined in another `.asd`, is loaded again only when its FASL is stale, so a definition made in `repl-eval` there stays for the run. A file of its tree written in the same second as its fasl has the fasl deleted first, so an edit made right after a compile is what runs (ASDF's timestamps have one-second resolution). Rove keeps every test and hook (`setup`, `teardown`, `defhook`) it has loaded, so before that load the ones made by the files it is about to load again (as ASDF's plan for it names them) are dropped, and the load makes again what those files still hold: a `deftest` deleted from one of them no longer runs, and a file the load leaves alone -- one another system shares, or one sharing a package with a reloaded file -- keeps all its tests. Which file made a test is what SBCL's name for its function says; one compiled under `repl-eval` (a system loaded with `asdf:load-system` there) names no file, and is dropped only when a reloaded file defines its package
 - `framework` (string, optional): Force a specific framework (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, or `"auto"` for auto-detect). Auto-detection reads the test system's own `:depends-on`: a framework the system declares directly wins, then one reached transitively, and only for a system ASDF has not registered does it fall back to guessing from the loaded packages. Detection never loads anything.
@@ -1707,7 +1711,8 @@ Output:
 - `counts_available` (boolean, ASDF fallback only): `false` — `asdf:test-system` reports no counts
 - `success` (boolean|null, ASDF fallback only): `false` when `asdf:test-system` signalled; `null` when it
   returned normally, which says nothing about whether the tests passed
-- `duration_ms` (integer): Execution time in milliseconds
+- `duration_ms` (integer): Execution time in milliseconds. For an aggregate Rove system this
+  includes its test sub-systems. Their output contributes to the same bounded streams.
 - `stdout` / `stderr` (string, present when non-empty): the run's captured output. JSON only:
   the summary text does not show them
 - `debug_output` (string, present when non-empty): what the tests wrote to
