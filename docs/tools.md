@@ -963,10 +963,11 @@ Input:
   directly above the form (`;` lines with no blank line between them and the form, a `;;;`
   header among them) is the form's in either mode: `replace` keeps it attached, and
   `insert_before` puts the new form above it; `delete` leaves it. A `;` comment on the rest of
-  the form's last line is the form's too: by default `insert_after` goes below it and `delete`
-  removes it with the form. New line breaks follow the file's (CRLF in a CRLF file). A comment
-  in the content of a
-  `replace` is put after the file's, which stays. Every summary names the line the matched form
+  the form's last line belongs to that form in either mode. `replace` keeps it on the
+  replacement's last line. If that line already has a `;` comment, the file's original comment
+  goes on the next line. `insert_after` goes below the comment, and `delete` removes it with
+  the form. New line breaks around the target follow the file's (CRLF in a CRLF file).
+  Every summary names the line the matched form
   starts on, its `#+` line when it has one (`Applied replace to defun beta (line 4) in …`, also
   the result's `line`), and a "Multiple matches" error lists each candidate with its line
 - `readtable` (string, optional): named-readtable designator for files using custom reader
@@ -1060,7 +1061,7 @@ Dry-run output (when `dry_run` is true):
 - `path`, `operation`, `form_type`, `form_name`, and `forms` for a multi-form `content`
 - `would_change` (boolean): whether the operation would modify the file
 - `original` (string): the matched form text before changes
-- `preview` (string): full file preview with changes applied
+- `preview` (string): full file preview with changes applied, including surrounding comments
 - `preview_form` (string): just the edited form after changes, or `"(form removed)"` for `delete`. This is what the human-readable summary shows; `preview` holds the whole file and is not inlined into the summary, so a dry-run against a large file no longer returns the file twice.
 - `parinfer_warning` (string, optional): auto-repair warning when closing delimiters are added
 - `content`: human-readable summary

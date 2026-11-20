@@ -1270,6 +1270,69 @@ handling and return the file's text afterwards."
                     :key #'cl-mcp/src/cst:cst-node-kind))
         "both forms still read")))
 
+(deftest lisp-edit-form-keeps-a-trailing-comment-on-replacement
+  (let ((source (format nil "(in-package #:cl-user)~%~%~
+                             (defun coord-a () 1)~C; returns one  ~%~
+                             (defun coord-b () 2)~%" #\Tab))
+        (single "(defun coord-a () 11)")
+        (multi (format nil "(defun coord-a ()~%  11)"))
+        (literal "(defun coord-a () \";\")"))
+    (dolist (normalize '(nil t))
+      (loop for (content expected-replacement) in
+            (list (list single single)
+                  (list multi multi)
+                  (list literal literal)
+                  (list (concatenate 'string single " ; new note")
+                        (format nil "~A ; new note~%" single)))
+            do (testing (format nil "~S with normalization ~S" content normalize)
+                 (with-temp-file "tests/tmp/edit-form-trailing-replace.lisp" source
+                   (lambda (path)
+                     (let* ((args (list :file-path path :form-type "defun" :form-name "coord-a"
+                                        :operation "replace" :content content
+                                        :normalize-blank-lines normalize))
+                            (preview (apply #'lisp-edit-form :dry-run t args))
+                            (expected (format nil "(in-package #:cl-user)~%~%~
+                                                   ~A~C; returns one  ~%~:[~;~%~]~
+                                                   (defun coord-b () 2)~%"
+                                              expected-replacement #\Tab normalize)))
+                       (ok (gethash "would_change" preview))
+                       (ok (string= (gethash "preview" preview) expected))
+                       (ok (string= (fs-read-file path) source))
+                       (apply #'lisp-edit-form args)
+                       (ok (string= (fs-read-file path) expected))))))))))
+
+(deftest lisp-edit-form-normalizes-around-a-form-and-its-trailing-comment
+  (let ((source (format nil "(defun a () 1) ; about a~%;; about b~%(defun b () 2)~%"))
+         (inserted "(defun n () 0)")
+         (following (format nil ";; about b~%(defun b () 2)~%")))
+    (loop for (operation content expected) in
+          (list (list "insert_after" inserted
+                      (format nil "(defun a () 1) ; about a~%~%~A~%~%~A" inserted following))
+                (list "insert_before" inserted (format nil "~A~%~%~A" inserted source))
+                (list "delete" nil following))
+          do (testing operation
+               (with-temp-file "tests/tmp/edit-form-trailing-normalization.lisp" source
+                 (lambda (path)
+                   (let* ((args (list :file-path path :form-type "defun" :form-name "a"
+                                      :operation operation :content content
+                                      :normalize-blank-lines t))
+                          (preview (apply #'lisp-edit-form :dry-run t args)))
+                     (ok (gethash "would_change" preview))
+                     (ok (string= (gethash "preview" preview) expected))
+                     (ok (string= (fs-read-file path) source))
+                     (apply #'lisp-edit-form args)
+                     (ok (string= (fs-read-file path) expected)))))))))
+
+(deftest lisp-edit-form-normalizes-trailing-comments-with-the-files-line-endings
+  (let ((crlf (coerce '(#\Return #\Newline) 'string)))
+    (let ((source (format nil "(defun a () 1) ; about a~A(defun b () 2)~A" crlf crlf))
+          (expected (format nil "(defun a () 3) ; about a~A~A(defun b () 2)~A"
+                            crlf crlf crlf)))
+      (ok (string= (%default-edit source :form-type "defun" :form-name "a"
+                                :operation "replace" :content "(defun a () 3)"
+                                :normalize-blank-lines t)
+                   expected)))))
+
 (deftest lisp-edit-form-setf-name-matches-without-its-package-prefix
   ;; Issue #326: (setf c::top-level-lambda-max) was reported unmatched by
   ;; "(setf top-level-lambda-max)"; a package prefix inside a (setf ...) name is
