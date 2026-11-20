@@ -1495,6 +1495,66 @@
       (let ((obj (parse (%pjl req))))
         (ok (%tool-call-failed-p obj) "should fail on missing system arg")))))
 
+(deftest tools-call-rejects-invalid-array-arguments
+  (with-test-project-root
+    (dolist (*use-worker-pool* '(nil t))
+      ;; Invalid arguments must be rejected before dispatch can need a worker session.
+      (let ((cl-mcp/src/state:*current-session-id* nil))
+        (dolist (version '("2025-06-18" "2025-11-25"))
+          (let ((state (cl-mcp/src/protocol:make-state)))
+            (setf (cl-mcp/src/state:protocol-version state) version)
+            (dolist (case '(("clgrep-search"
+                             "{\"pattern\":\"defun make-ht\",\"path\":\"src/tools/helpers.lisp\",
+                               \"form_types\":\"defun\"}"
+                             "form_types must be an array")
+                            ("clgrep-search"
+                             "{\"pattern\":\"defun make-ht\",\"path\":\"src/tools/helpers.lisp\",
+                               \"form_types\":[\"defun\",7]}"
+                             "form_types item 2 must be a string")
+                            ("run-tests"
+                             "{\"system\":\"cl-mcp/tests/utils-strings-test\",\"tests\":\"\"}"
+                             "tests must be an array")
+                            ("run-tests"
+                             "{\"system\":\"cl-mcp/tests/utils-strings-test\",\"tests\":[null]}"
+                             "tests item 1 must be a string")
+                            ("lisp-patch-form"
+                             "{\"file_path\":\"src/tools/helpers.lisp\",\"patches\":[{},\"patch\"]}"
+                             "patches item 2 must be an object")))
+              (destructuring-bind (name arguments message) case
+                (testing (format nil "~A, pool ~S, protocol ~A" arguments *use-worker-pool* version)
+                  (let* ((request (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,~
+                                              \"method\":\"tools/call\",~
+                                              \"params\":{\"name\":~S,\"arguments\":~A}}"
+                                          name arguments))
+                         (reply (parse (process-json-line request state))))
+                    (ok (equal message (%tool-call-message reply)))
+                    (if (string= version "2025-11-25")
+                        (let ((result (gethash "result" reply)))
+                          (ok (and result (eq t (gethash "isError" result))))
+                          (ok (null (gethash "error" reply))))
+                        (let ((error (gethash "error" reply)))
+                          (ok (and error (eql -32602 (gethash "code" error))))))))))))))))
+
+(deftest tools-call-clgrep-requires-a-positive-limit
+  (with-test-project-root
+    (flet ((call (arguments)
+             (parse (%pjl
+                     (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",~
+                                  \"params\":{\"name\":\"clgrep-search\",\"arguments\":{~
+                                  \"pattern\":\"defun make-ht\",~
+                                  \"path\":\"src/tools/helpers.lisp\",~
+                                  ~A}}}"
+                             arguments)))))
+      (dolist (limit '(0 -1))
+        (let* ((reply (call (format nil "\"limit\":~D" limit)))
+               (error (gethash "error" reply)))
+          (ok (and error (eql -32602 (gethash "code" error))))
+          (ok (equal "limit must be a positive integer" (%tool-call-message reply)))))
+      (dolist (filter '("[]" "[\"defun\"]"))
+        (let* ((reply (call (format nil "\"limit\":1,\"form_types\":~A" filter)))
+               (result (gethash "result" reply)))
+          (ok (and result (eql 1 (gethash "count" result)))))))))
+
 (deftest tools-list-includes-tool-descriptors
   (testing "tools/list exposes descriptors for critical tools"
     (multiple-value-bind (obj result tools)

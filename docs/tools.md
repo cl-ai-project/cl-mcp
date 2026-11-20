@@ -1242,7 +1242,7 @@ Input:
   `with-upgradability`) is attributed to the definition directly inside it that holds the hit,
   so `["defclass"]` finds `(eval-when (...) (defclass ...))`. Hits inside an unterminated form
   bypass the filter.
-- `limit` (integer, default `200`): cap on the line hits that pass `form_types`, counted
+- `limit` (positive integer, default `200`): cap on the line hits that pass `form_types`, counted
   **before** hits are grouped by form, so fewer entries than `limit` can come back.
 - `include_form` (boolean, default `false`): attach each form's full text; a form longer than
   2000 characters is cut to the lines within five of the hit plus its first and last two lines,

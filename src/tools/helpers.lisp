@@ -25,6 +25,7 @@
            #:arg-validation-error
            #:validation-message
            #:extract-arg
+           #:extract-array-arg
            #:extract-boolean-arg))
 
 (in-package #:cl-mcp/src/tools/helpers)
@@ -111,22 +112,24 @@ which is what most callers have, still catch it."))
   (:documentation "Signaled when tool argument validation fails.
 Use VALIDATION-MESSAGE to get the user-facing error message."))
 
-(defun %check-type-match (value type arg-name)
+(defun %check-type-match (value type arg-name &optional item-number)
   "Check if VALUE matches TYPE. Signal ARG-VALIDATION-ERROR if not.
-TYPE can be :string, :integer, :number, :boolean, :array, :object, or NIL (any)."
+TYPE can be :string, :integer, :number, :boolean, :array, :object, or NIL (any).
+ITEM-NUMBER, when given, identifies an item in the array argument (starting at 1)."
   (when type
     (let ((valid (ecase type
                    (:string (stringp value))
                    (:integer (integerp value))
                    (:number (numberp value))
                    (:boolean (member value '(t nil)))
-                   (:array (or (vectorp value) (listp value)))
+                   (:array (or (listp value)
+                               (and (vectorp value) (not (stringp value)))))
                    (:object (hash-table-p value)))))
       (unless valid
         (error 'arg-validation-error
                :arg-name arg-name
-               :message (format nil "~A must be ~A"
-                                arg-name
+               :message (format nil "~A~@[ item ~D~] must be ~A"
+                                arg-name item-number
                                 (ecase type
                                   (:string "a string")
                                   (:integer "an integer")
@@ -165,6 +168,16 @@ Example:
        value)
       ;; Optional and missing
       (t nil))))
+
+(defun extract-array-arg (args name item-type &key required)
+  "Extract the array argument NAME from ARGS and validate its items against ITEM-TYPE.
+REQUIRED has the same meaning as in EXTRACT-ARG. Return the array unchanged."
+  (let ((items (extract-arg args name :type :array :required required))
+        (item-number 0))
+    (map nil (lambda (item)
+               (%check-type-match item item-type name (incf item-number)))
+         items)
+    items))
 
 (declaim (ftype (function ((or hash-table null) string &key (:default boolean)) boolean) extract-boolean-arg))
 (defun extract-boolean-arg (args name &key (default nil))
