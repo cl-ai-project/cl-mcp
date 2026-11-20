@@ -313,6 +313,72 @@ machine, so this deletes every ended worker's, as a starting worker would."
              (return nil))
            (sleep 0.1)))
 
+(defun %copy-worker-install (dir)
+  (let ((source (asdf:system-source-directory :cl-mcp)))
+    (dolist (file '("cl-mcp.asd" "main.lisp" "scripts/worker-bootstrap.lisp"))
+      (uiop:copy-file (merge-pathnames file source)
+                      (ensure-directories-exist (merge-pathnames file dir))))
+    (uiop:run-program (list "cp" "-R" (uiop:native-namestring (merge-pathnames "src" source))
+                            (uiop:native-namestring (merge-pathnames "src" dir))))))
+
+(defun %check-installed-worker (dir command &key clean-sbcl)
+  ;; Supply the installed dependencies through ASDF even in a clean SBCL
+  ;; without Quicklisp's system-definition search function.
+  (let* ((directories
+           (remove-duplicates
+            (loop for name in (asdf:registered-systems)
+                  for system = (asdf:registered-system name)
+                  for file = (and system (asdf:system-source-file system))
+                  when file collect (namestring (uiop:pathname-directory-pathname file)))
+            :test #'equal))
+         (registry (format nil "CL_SOURCE_REGISTRY=(:source-registry (:directory ~S) ~
+                               ~{(:directory ~S) ~}:inherit-configuration)"
+                           (namestring dir) directories))
+         (env (append (list "env" registry (format nil "CL_MCP_TEST_INSTALL=~A"
+                                                   (uiop:native-namestring dir)))
+                      (when clean-sbcl
+                        (list (format nil "CL_MCP_TEST_CLEAN_SBCL=~A" clean-sbcl))))))
+    (multiple-value-bind (output stderr code)
+        (uiop:run-program (append env command) :output :string :error-output :output
+                                               :ignore-error-status t)
+      (declare (ignore stderr))
+      (let* ((expected (if clean-sbcl "AUTHENTICATED :ASDF-CHILD" "AUTHENTICATED :"))
+             (passed (and (zerop code) (search expected output :test #'char-equal))))
+        (ok passed
+            (if passed
+                "the installed worker authenticated and answered a request"
+                (let ((start (or (search "Unhandled " output) (max 0 (- (length output) 2400)))))
+                  (subseq output start (min (length output) (+ start 2400))))))))))
+
+(deftest workers-start-from-a-bracketed-install-with-plain-asdf-or-roswell
+  (let* ((root (%scratch-directory "worker-install"))
+         (dir (merge-pathnames (make-pathname :directory '(:relative "[installed] cl-mcp")) root))
+         (driver (uiop:native-namestring
+                  (asdf:system-relative-pathname
+                   :cl-mcp "tests/fixtures/launch-installed-worker.lisp")))
+         (clean (merge-pathnames "clean-sbcl" root)))
+    (unwind-protect
+         (progn
+           (%copy-worker-install dir)
+           (%write-text clean
+                        (format nil "#!/bin/sh~%[ \"$1\" != --noinform ] || shift~%~
+                                     exec ~A --noinform --no-sysinit --no-userinit \"$@\"~%"
+                                (uiop:escape-sh-token (cl-mcp/src/worker-client::%find-sbcl-path))))
+           (sb-posix:chmod clean #o700)
+           (testing "stock SBCL loads the worker using ASDF alone"
+             (%check-installed-worker dir (list (uiop:native-namestring clean)
+                                                "--non-interactive" "--load" driver)
+                                      :clean-sbcl (uiop:native-namestring clean)))
+           (testing "Roswell reads the literal installation path"
+             (if (cl-mcp/src/worker-client::%roswell-p)
+                 (%check-installed-worker
+                  dir (list (cl-mcp/src/worker-client::%find-ros-path)
+                            "run" "-e" "(sb-ext:disable-debugger)"
+                            "-e" (format nil "(load (uiop:parse-native-namestring ~S))" driver)
+                            "-q"))
+                 (skip "Roswell is not the current launcher"))))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
+
 (defun %bootstrap-test-launcher (dir)
   "Return a launcher for a copy of this worker system with a cold ASDF output directory."
   (let ((source (asdf:system-source-directory :cl-mcp))
@@ -321,10 +387,7 @@ machine, so this deletes every ended worker's, as a starting worker would."
         (runner (if (cl-mcp/src/worker-client::%roswell-p)
                     (cl-mcp/src/worker-client::%find-ros-path)
                     (cl-mcp/src/worker-client::%find-sbcl-path))))
-    (uiop:copy-file (merge-pathnames "cl-mcp.asd" source) (merge-pathnames "cl-mcp.asd" dir))
-    (uiop:copy-file (merge-pathnames "main.lisp" source) (merge-pathnames "main.lisp" dir))
-    (uiop:run-program (list "cp" "-R" (uiop:native-namestring (merge-pathnames "src" source))
-                            (uiop:native-namestring (merge-pathnames "src" dir))))
+    (%copy-worker-install dir)
     (with-open-file (out (merge-pathnames "src/worker/server.lisp" dir)
                          :direction :output :if-exists :append)
       (terpri out)

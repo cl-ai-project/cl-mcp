@@ -2,11 +2,11 @@
 (require :asdf)
 (require :sb-posix)
 
-(defpackage #:cl-mcp/worker-bootstrap
+(defpackage #:cl-mcp/scripts/worker-bootstrap
   (:use #:cl)
   (:export #:release))
 
-(in-package #:cl-mcp/worker-bootstrap)
+(in-package #:cl-mcp/scripts/worker-bootstrap)
 
 (defvar *lock-fd* nil)
 
