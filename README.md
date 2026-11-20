@@ -326,6 +326,11 @@ trading first-eval latency for the smallest possible startup
 footprint. Once your client establishes the session you can ignore
 the warmup; the pool will grow as sessions arrive.
 
+Workers that share a writable ASDF cache coordinate startup through a lock
+beside the worker's compiled `main.fasl`. A cold build takes exclusive access.
+Workers can load current FASLs concurrently. When that directory is read-only,
+workers use their common user cache directory for the lock.
+
 ### Running an app inside a worker (init hook)
 
 Set `MCP_WORKER_INIT_SYSTEM` (and optionally `MCP_WORKER_INIT_ENTRY`) to have

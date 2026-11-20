@@ -345,6 +345,10 @@ loaded in the current image, or NIL otherwise."
               (namestring (merge-pathnames "setup.lisp"
                                            (namestring home))))))))))
 
+(defun %bootstrap-script ()
+  "Return the file loaded before workers can compile into their shared ASDF cache."
+  (asdf:system-relative-pathname :cl-mcp "scripts/worker-bootstrap.lisp"))
+
 (defun %build-sbcl-args ()
   "Build command-line arguments for spawning a worker via bare SBCL.
 Configures ASDF source registry to find cl-mcp, optionally loads
@@ -365,9 +369,12 @@ might bypass the .asd."
      (when ql-setup
        (list "--load" ql-setup))
      (list
+      "--eval" "(require :asdf)"
       "--eval" (format nil "(asdf:initialize-source-registry '(:source-registry :inherit-configuration (:tree ~S)))"
                        source-dir)
+      "--load" (uiop:native-namestring (%bootstrap-script))
       "--eval" "(asdf:load-system :cl-mcp/src/worker/main)"
+      "--eval" "(cl-mcp/scripts/worker-bootstrap:release)"
       "--eval" "(cl-mcp/src/worker/main:start)"))))
 
 (defun %launch-worker-process (secret id)
@@ -378,8 +385,12 @@ Uses ros-run when running under Roswell, bare sbcl otherwise."
     (if (%roswell-p)
         (let ((ros-path (%find-ros-path)))
           (sb-ext:run-program ros-path
-                              (list "run" "-s" "cl-mcp/src/worker/main" "-e"
-                                    "(cl-mcp/src/worker/main:start)")
+                              ;; Roswell reads -l as a Lisp pathname.
+                              ;; SBCL --load takes a native filename.
+                              (list "run" "-l" (namestring (%bootstrap-script))
+                                    "-s" "cl-mcp/src/worker/main"
+                                    "-e" "(cl-mcp/scripts/worker-bootstrap:release)"
+                                    "-e" "(cl-mcp/src/worker/main:start)")
                               :output :stream :error :stream :wait nil
                               :search t :environment env))
         (let ((sbcl-path (%find-sbcl-path)))
