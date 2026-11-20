@@ -2,6 +2,7 @@
 
 (defpackage #:cl-mcp/src/protocol
   (:use #:cl)
+  (:import-from #:quri)
   (:import-from #:cl-mcp/src/core
                 #:version)
   (:import-from #:cl-mcp/src/log
@@ -213,6 +214,42 @@ surrogate raw, and 0.7.x a control character too, and neither can be sent."
 ;;; Response builders are imported from cl-mcp/src/tools/helpers:
 ;;;   result, rpc-error, text-content, tool-error
 
+(defun %decode-file-uri-path (path)
+  "Decode contiguous percent-encoded UTF-8 bytes and keep literal path characters."
+  (with-output-to-string (out)
+    (loop with length = (length path)
+          with i = 0
+          while (< i length)
+          do (if (char= (char path i) #\%)
+                 (let ((start i))
+                   (loop while (and (< i length) (char= (char path i) #\%))
+                         do (unless (and (< (+ i 2) length)
+                                         (digit-char-p (char path (1+ i)) 16)
+                                         (digit-char-p (char path (+ i 2)) 16))
+                              (return-from %decode-file-uri-path nil))
+                            (incf i 3))
+                   (write-string (quri:url-decode path :start start :end i :encoding :utf-8) out))
+                 (progn (write-char (char path i) out) (incf i))))))
+
+(defun %initialize-uri-path (value)
+  "Return the local path of an initialize root URI, or NIL when it cannot be used."
+  (when (stringp value)
+    ;; Clients also send native absolute paths in rootUri.
+    (when (uiop:string-prefix-p "/" value)
+      (return-from %initialize-uri-path value))
+    (handler-case
+        (let* ((uri (quri:uri value))
+               (host (quri:uri-host uri))
+               (path (quri:uri-path uri)))
+          (when (and (equalp "file" (quri:uri-scheme uri))
+                     (or (null host) (equalp "localhost" host))
+                     (null (quri:uri-userinfo uri)) (null (quri:uri-port uri))
+                     (null (quri:uri-query uri)) (null (quri:uri-fragment uri))
+                     path (uiop:string-prefix-p "/" path))
+            (let ((decoded (%decode-file-uri-path path)))
+              (unless (find (code-char 0) decoded) decoded))))
+      (error () nil))))
+
 (defun handle-initialize (state id params)
   (when (and params
              (or (not (stringp (gethash "protocolVersion" params "")))
@@ -223,12 +260,7 @@ surrogate raw, and 0.7.x a control character too, and neither can be sent."
   (when params
     (let* ((root-path (gethash "rootPath" params))
            (root-uri (gethash "rootUri" params))
-           (root
-            (or root-path
-                (and root-uri
-                     (if (uiop/utility:string-prefix-p "file://" root-uri)
-                         (subseq root-uri 7)
-                         root-uri)))))
+           (root (or root-path (%initialize-uri-path root-uri))))
       (when (and root (stringp root) (plusp (length root)))
         (handler-case
             ;; PARSE-UNIX-NAMESTRING: ENSURE-DIRECTORY-PATHNAME hands a string
