@@ -1609,6 +1609,96 @@ send-root-to-session-worker failure"
 ;;; Reaper thread tracking test (Major #1)
 ;;; ---------------------------------------------------------------------------
 
+(defun %call-with-reaper-start (worker start thunk)
+  ;; Choose when this worker's real reaper runs relative to its creator.
+  (let ((original (symbol-function 'bt:make-thread))
+        (name (format nil "reap-worker-~A" (worker-id worker))))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'bt:make-thread)
+                 (lambda (function &rest args)
+                   (if (equal name (getf args :name))
+                       (funcall start (lambda () (apply original function args)))
+                       (apply original function args))))
+           (funcall thunk))
+      (setf (symbol-function 'bt:make-thread) original))))
+
+(deftest monitor-preserves-crashed-process-for-reaper
+  (let* ((process (sb-ext:run-program "/bin/sleep" '("30") :wait nil))
+         (pid (sb-ext:process-pid process))
+         (worker (cl-mcp/src/worker-client:make-worker
+                  :id pid :pid pid :state :bound :process-info process))
+         (cl-mcp/src/pool::*all-workers* (list worker))
+         (thread nil))
+    (unwind-protect
+         (progn
+           (%call-with-reaper-start
+            worker
+            (lambda (start)
+              ;; The crash is visible to the monitor before the reaper runs.
+              (cl-mcp/src/pool::%check-worker-health)
+              (setf thread (funcall start)))
+            (lambda () (cl-mcp/src/worker-client::%mark-worker-crashed worker "timeout")))
+           (sb-thread:join-thread thread :timeout 8 :default nil)
+           (ok (not (bt:thread-alive-p thread)))
+           (ok (eq :signaled (sb-ext:process-status process)))
+           (ok (eql sb-posix:sigterm (sb-ext:process-exit-code process))))
+      (ignore-errors (sb-ext:process-kill process sb-posix:sigkill))
+      (sb-ext:process-close process))))
+
+(deftest reaper-removes-itself-after-fast-exit
+  (let* ((process (sb-ext:run-program "/bin/true" nil :wait t))
+         (pid (sb-ext:process-pid process))
+         (worker (cl-mcp/src/worker-client:make-worker
+                  :id pid :pid pid :state :bound :process-info process))
+         (thread nil))
+    (unwind-protect
+         (progn
+           (%call-with-reaper-start
+            worker
+            (lambda (start)
+              (setf thread (funcall start))
+              ;; Give the child the first turn. If registration already
+              ;; holds the registry lock, removal waits until we return.
+              (sb-thread:join-thread thread :timeout 1 :default nil)
+              thread)
+            (lambda () (cl-mcp/src/worker-client::%mark-worker-crashed worker "eof")))
+           (sb-thread:join-thread thread :timeout 5 :default nil)
+           (ok (not (bt:thread-alive-p thread)))
+           (ok (bt:with-lock-held (*reaper-threads-lock*)
+                 (not (member thread *reaper-threads*)))
+               "the finished thread removed itself from the registry"))
+      (bt:with-lock-held (*reaper-threads-lock*)
+        (setf *reaper-threads* (remove thread *reaper-threads*)))
+      (sb-ext:process-close process))))
+
+(deftest kill-leaves-crashed-process-to-its-reaper
+  (let* ((process (sb-ext:run-program "/bin/true" nil :wait t))
+         (pid (sb-ext:process-pid process))
+         (worker (cl-mcp/src/worker-client:make-worker
+                  :id pid :pid pid :state :bound :process-info process))
+         (original (symbol-function 'sb-ext:process-close))
+         (closers nil)
+         (thread nil))
+    (unwind-protect
+         (progn
+           (sb-ext:without-package-locks
+             (setf (symbol-function 'sb-ext:process-close)
+                   (lambda (target)
+                     (when (eq target process)
+                       (push (bt:current-thread) closers))
+                     (funcall original target))))
+           (%call-with-reaper-start
+            worker (lambda (start) (setf thread (funcall start)))
+            (lambda () (cl-mcp/src/worker-client::%mark-worker-crashed worker "eof")))
+           (sb-thread:join-thread thread :timeout 5 :default nil)
+           (kill-worker worker)
+           (ok (equal (list thread) closers)
+               "only the reaper closes the process, even when the pool ends the worker"))
+      (sb-ext:without-package-locks
+        (setf (symbol-function 'sb-ext:process-close) original))
+      (sb-ext:process-close process))))
+
 (deftest shutdown-joins-reaper-threads
   (testing "shutdown-pool waits for reaper threads to complete"
     (unless (spawn-available-p)

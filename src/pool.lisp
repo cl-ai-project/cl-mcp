@@ -1234,8 +1234,8 @@ Returns T if alive, NIL if dead.  Does not acquire any locks or perform I/O."
 (defun %check-worker-health ()
   "Check every bound and standby worker once.  Detect crashed ones using
 OS-level process liveness, which acquires no lock and performs no I/O, and
-start their recovery as background work; reap the processes of crashed
-workers, and prune stale crash history.  One iteration of the health
+start their recovery as background work, and prune stale crash history.
+Crash cleanup owns the process until it observes exit. One iteration of the health
 monitor, separated so the ownership contracts can run it at a chosen point."
   (let ((workers nil))
     ;; Snapshot worker list under lock
@@ -1280,14 +1280,6 @@ monitor, separated so the ownership contracts can run it at a chosen point."
                            (format nil "pool-recover-~A"
                                    (worker-id w))))
                     (push thread *recovery-threads*))))))))
-    ;; Reap zombie workers: crashed workers whose OS process
-    ;; is still tracked but no longer alive.
-    (dolist (w workers)
-      (when (eq (worker-state w) :crashed)
-        (let ((process (worker-process-info w)))
-          (when process
-            (ignore-errors
-              (sb-ext:process-close process))))))
     ;; Prune stale crash-history entries for sessions that
     ;; have no recent crashes (all timestamps outside window).
     (let ((window-start (- (get-universal-time)

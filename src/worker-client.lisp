@@ -196,6 +196,8 @@ Handles both LF and CRLF line endings."
   (id nil)
   (state :dead :type keyword)
   (process-info nil)
+  ;; Set under the stream lock when crash cleanup takes ownership of PROCESS-INFO.
+  (reaper-thread nil)
   (stream nil)
   (socket nil)
   (stream-lock (make-lock "worker-stream-lock"))
@@ -755,6 +757,31 @@ SHUTDOWN-POOL waits for."
              (return nil))
            (sleep 0.05)))
 
+(defun %reap-worker-process (worker process reason exit-status exit-code)
+  "Signal PROCESS, observe its terminal status within the deadline, and close its handle."
+  (let ((wid (worker-id worker)))
+    (unwind-protect
+         (progn
+           (ignore-errors
+             (when (sb-ext:process-alive-p process)
+               (sb-ext:process-kill process 15)
+               (unless (%await-process-exit process 2)
+                 (log-event :warn "worker.reaper.sigkill" "id" wid)
+                 (sb-ext:process-kill process 9))))
+           (%await-process-exit process 2)
+           ;; The pool and proxy may already have copied the EOF-time snapshot.
+           ;; Only the log carries the terminal observation.
+           (let ((status (ignore-errors (sb-ext:process-status process))))
+             (if (member status '(:exited :signaled))
+                 (log-event :info "worker.reaped"
+                            "id" wid "pid" (worker-pid worker) "reason" reason
+                            "observed_exit_status" exit-status "observed_exit_code" exit-code
+                            "final_exit_status" (string-downcase (symbol-name status))
+                            "final_exit_code" (sb-ext:process-exit-code process))
+                 (log-event :warn "worker.reaper.still-running"
+                            "id" wid "pid" (worker-pid worker)))))
+      (ignore-errors (sb-ext:process-close process)))))
+
 (defun %mark-worker-crashed (worker reason)
   "Mark WORKER as crashed, record its end in the reset ledger unless it was
 already decided, close its stream to prevent further use, and log the event.
@@ -842,68 +869,22 @@ Returns nothing."
   ;; written above, before the death was published, because a reader can be
   ;; copying it the moment it is.
   (let ((process (worker-process-info worker))
-        (wid (worker-id worker))
         (exit-code (worker-last-exit-code worker))
         (exit-status (worker-last-exit-status worker)))
-    (when process
-      ;; Send signals and wait for exit in a background thread to avoid
-      ;; blocking the caller. SB-EXT:PROCESS-CLOSE stops updating the Lisp
-      ;; process object's status. On Unix, SBCL still collects the child
-      ;; with waitpid. Observe the terminal status before closing the object.
-      (let ((reaper-thread nil))
-        (setf reaper-thread
-              (bt:make-thread
-               (lambda ()
-                 (unwind-protect
-                     (progn
-                       ;; SIGTERM first, then wait up to 2s, then SIGKILL if needed
-                       ;; (matches kill-worker's graceful shutdown pattern)
-                       (ignore-errors
-                         (when (sb-ext:process-alive-p process)
-                           (sb-ext:process-kill process 15)
-                           (loop repeat 20
-                                 while (sb-ext:process-alive-p process)
-                                 do (sleep 0.1))
-                           (when (sb-ext:process-alive-p process)
-                             (log-event :warn "worker.reaper.sigkill" "id" wid)
-                             (sb-ext:process-kill process 9)
-                             (sleep 0.2))))
-                        (%await-process-exit process 2)
-                        ;; The pool and proxy may already have copied the
-                        ;; EOF-time crash snapshot. The log carries the
-                        ;; terminal observation.
-                        (let ((final-status nil)
-                              (final-code nil))
-                          (ignore-errors
-                            (let ((status (sb-ext:process-status process)))
-                              (when (member status '(:exited :signaled))
-                                (setf final-status
-                                      (string-downcase (symbol-name status))
-                                      final-code
-                                      (sb-ext:process-exit-code process)))))
-                          (if final-status
-                              (log-event :info "worker.reaped"
-                                         "id" wid
-                                         "pid" (worker-pid worker)
-                                         "reason" reason
-                                         "observed_exit_status"
-                                         (or exit-status "unknown")
-                                         "observed_exit_code"
-                                         (or exit-code "unknown")
-                                         "final_exit_status" final-status
-                                         "final_exit_code"
-                                         (or final-code "unknown"))
-                              (log-event :warn "worker.reaper.still-running"
-                                         "id" wid "pid" (worker-pid worker))))
-                       (ignore-errors (sb-ext:process-close process)))
-                   ;; Self-remove from reaper thread list on completion
-                   (bt:with-lock-held (*reaper-threads-lock*)
-                     (setf *reaper-threads*
-                           (remove reaper-thread *reaper-threads*)))))
-               :name (format nil "reap-worker-~A" wid)))
-        ;; Register the thread before it can self-remove
-        (bt:with-lock-held (*reaper-threads-lock*)
-          (push reaper-thread *reaper-threads*))))
+    (when (and process (null (worker-reaper-thread worker)))
+      ;; WORKER-RPC holds the stream lock. Publish the owner before KILL-WORKER
+      ;; can take that lock, and register before the thread can remove itself.
+      (bt:with-lock-held (*reaper-threads-lock*)
+        (let ((thread (bt:make-thread
+                       (lambda ()
+                         (unwind-protect
+                              (%reap-worker-process worker process reason exit-status exit-code)
+                           (bt:with-lock-held (*reaper-threads-lock*)
+                             (setf *reaper-threads*
+                                   (remove (bt:current-thread) *reaper-threads*)))))
+                       :name (format nil "reap-worker-~A" (worker-id worker)))))
+          (setf (worker-reaper-thread worker) thread)
+          (push thread *reaper-threads*))))
     (log-event :warn "worker.crashed"
                "id" (worker-id worker)
                "pid" (worker-pid worker)
@@ -1235,7 +1216,8 @@ Also destroys the stderr drain thread to prevent leaked file
 descriptors from blocking subsequent subprocess launches.
 
 Robust against already-dead processes."
-  (let ((process (worker-process-info worker)))
+  (let ((process (worker-process-info worker))
+        (reaper nil))
     (log-event :info "worker.killing"
                "id" (worker-id worker)
                "pid" (worker-pid worker))
@@ -1256,9 +1238,14 @@ Robust against already-dead processes."
       ;; Written before the state, as %MARK-WORKER-CRASHED does.
       (record-worker-termination worker :stopped)
       (sb-thread:barrier (:write))
-      (setf (worker-state worker) :dead))
+      (setf reaper (worker-reaper-thread worker)
+            (worker-state worker) :dead))
     ;; Terminate the OS process outside the lock (may block up to ~2.2s)
-    (when process
+    ;; Crash cleanup already owns this process. Wait outside the stream lock,
+    ;; within the same bound shutdown uses for reapers.
+    (when reaper
+      (sb-thread:join-thread reaper :timeout 5 :default nil))
+    (when (and process (null reaper))
       (handler-case
           (when (sb-ext:process-alive-p process)
             ;; SIGTERM
