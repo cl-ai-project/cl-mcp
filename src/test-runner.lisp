@@ -54,6 +54,8 @@ the edit.  Rove's tests and hooks made by the files this load loads again are
 dropped first and made again by the load, so a deftest deleted from one of
 those files stops running, and a file the load leaves alone keeps its tests --
 one another system shares, or one sharing a package with a reloaded file.
+Rove and FiveAM resolve every selected name before running any test. An unknown
+name returns UNRESOLVED with the available names in its package.
 
 Supports multiple test frameworks with automatic detection:
 - Rove: Full structured results with failure details

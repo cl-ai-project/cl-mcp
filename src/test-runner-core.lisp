@@ -522,20 +522,53 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
                                        (push assertion results)))))))
     (nreverse results)))
 
-(defun %coerce-test-symbol (test-name)
-  "Convert TEST-NAME to a fully qualified test symbol.
-Signals TEST-RESOLUTION-ERROR (not a plain error) for unusable test names so
-run-tests can report a structured :unresolved result.  Shared by the Rove and
-FiveAM selective paths, giving both frameworks the same resolution semantics."
+(defun %registered-test-names (framework)
+  "Index the test names FRAMEWORK can run, including FiveAM suite names."
+  (let ((registered (make-hash-table :test 'eq)))
+    (ecase framework
+      (:rove
+       ;; GET-TEST reads a symbol property that can outlive a test removed
+       ;; from its suite on reload. Only current suite entries are selectable.
+       (dolist (suite (uiop:symbol-call :rove :all-suites))
+         (dolist (name (uiop:symbol-call :rove/core/suite/package :suite-tests suite))
+           (setf (gethash name registered) t))))
+      (:fiveam
+       (dolist (name (uiop:symbol-call :fiveam :test-names))
+         (when (and (symbolp name) (uiop:symbol-call :fiveam :get-test name))
+           (setf (gethash name registered) t)))))
+    registered))
+
+(defun %resolve-registered-test (name package framework registered)
+  "Find NAME accessible in PACKAGE and registered with FRAMEWORK, without interning."
+  (flet ((look-up (package)
+           (multiple-value-bind (symbol status) (find-symbol name package)
+             (when (and status (gethash symbol registered))
+               (return-from %resolve-registered-test symbol)))))
+    (look-up package)
+    ;; FiveAM also accepts the same name registered in its own package.
+    (when (eq framework :fiveam)
+      (look-up (find-package :fiveam))))
+  (let ((available (loop for test being the hash-keys of registered
+                         when (eq package (symbol-package test))
+                           collect (symbol-name test))))
+    (error 'test-resolution-error
+           :detail (format nil "Test ~A::~A not found in the ~A registry."
+                           (package-name package) name framework)
+           :hint (format nil "The system was already reloaded. ~
+                              ~:[No registered tests in ~A.~;Available in ~A: ~{~A~^, ~}.~]"
+                         available (package-name package) (sort available #'string<)))))
+
+(defun %coerce-test-symbol (test-name framework registered)
+  "Resolve a qualified TEST-NAME against FRAMEWORK's REGISTERED names."
   (cond
     ((null test-name)
      (error 'test-resolution-error :detail "Test name must not be NIL"))
     ((symbolp test-name)
      (unless (symbol-package test-name)
        (error 'test-resolution-error
-              :detail (format nil "Test symbol must be package-qualified: ~S"
-                              test-name)))
-     test-name)
+              :detail (format nil "Test symbol must be package-qualified: ~S" test-name)))
+     (%resolve-registered-test (symbol-name test-name) (symbol-package test-name)
+                               framework registered))
     ((stringp test-name)
      (let* ((name (string-upcase test-name))
             (colon-pos (search "::" name)))
@@ -545,32 +578,28 @@ FiveAM selective paths, giving both frameworks the same resolution semantics."
                                 test-name)
                 :hint "Use the form \"package::test-name\"."))
        (let* ((pkg-name (subseq name 0 colon-pos))
-              (sym-name (subseq name (+ colon-pos 2)))
               (pkg (find-package pkg-name)))
          (unless pkg
            (error 'test-resolution-error
                   :detail (format nil "Test package not found: ~A" pkg-name)
-                  :hint "Load the system that defines the test package first."))
-         (intern sym-name pkg))))
+                  :hint "The system was already reloaded. Check the system and package names."))
+         (%resolve-registered-test (subseq name (+ colon-pos 2)) pkg framework registered))))
     (t
      (error 'test-resolution-error
-            :detail (format nil "Test name must be a string or symbol: ~S"
-                            test-name)))))
+            :detail (format nil "Test name must be a string or symbol: ~S" test-name)))))
 
-(defun %normalize-tests-arg (tests)
-  "Normalize TESTS to a non-empty list of fully-qualified test symbols.
-Signals TEST-RESOLUTION-ERROR for malformed input so run-tests reports a
-structured :unresolved result."
+(defun %selected-test-symbols (test tests framework)
+  "Resolve the complete TEST or TESTS selection before running any of its tests."
   (let ((items (cond
-                 ((null tests) nil)
+                 (test (list test))
                  ((vectorp tests) (coerce tests 'list))
                  ((listp tests) tests)
                  (t (error 'test-resolution-error
-                           :detail "tests must be an array of test names")))))
-    (when (and tests (null items))
-      (error 'test-resolution-error
-             :detail "tests must contain at least one test name"))
-    (mapcar #'%coerce-test-symbol items)))
+                           :detail "tests must be an array of test names"))))
+        (registered (%registered-test-names framework)))
+    (when (null items)
+      (error 'test-resolution-error :detail "tests must contain at least one test name"))
+    (mapcar (lambda (name) (%coerce-test-symbol name framework registered)) items)))
 
 (defun %resolve-framework (system-name framework)
   "Resolve FRAMEWORK argument to a backend keyword.
@@ -1469,10 +1498,8 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
               ht))))))
 
 (defun run-rove-single-test (test-name)
-  "Run a single Rove test by name and return structured results.
-TEST-NAME should be a fully qualified symbol name (e.g., 'pkg::test-name')."
-  (run-rove-selected-tests
-   (list (%coerce-test-symbol test-name))))
+  "Run a single Rove test by fully qualified name and return structured results."
+  (run-rove-selected-tests (%selected-test-symbols test-name nil :rove)))
 
 (defun %find-rove-test-sub-systems (system-name)
   "Return test sub-system names from SYSTEM-NAME's ASDF :depends-on.
@@ -2593,44 +2620,11 @@ ways a FiveAM run and the system's test-op silently part (%FIVEAM-REACHABILITY).
           (setf (gethash "suites_outside_root" result) (coerce outside 'vector))))
       result)))
 
-(defun %resolve-fiveam-test-symbol (test-sym)
-  "Resolve TEST-SYM to a symbol that FiveAM's test table recognizes.
-FiveAM stores tests keyed by symbol identity (EQ).  When a test was
-defined in package A, the key is the symbol interned in A.  If direct
-lookup fails, fall back to the same name already present in the FIVEAM
-package (common when tests are defined via FiveAM's own macro expansion).
-Uses FIND-SYMBOL rather than INTERN so a missing test name never pollutes
-the FIVEAM package with a junk symbol.  Signals TEST-RESOLUTION-ERROR when
-the test cannot be resolved, so run-tests reports a structured :unresolved
-result.  Uses dynamic symbol resolution so FiveAM is an optional dependency."
-  (let* ((fiveam-pkg (find-package :fiveam))
-         (get-test-fn (and fiveam-pkg
-                           (fdefinition (find-symbol "GET-TEST" fiveam-pkg)))))
-    (cond
-      ((and get-test-fn (funcall get-test-fn test-sym))
-       test-sym)
-      ((and fiveam-pkg get-test-fn)
-       (let ((fiveam-sym (find-symbol (symbol-name test-sym) fiveam-pkg)))
-         (if (and fiveam-sym (funcall get-test-fn fiveam-sym))
-             fiveam-sym
-             (error 'test-resolution-error
-                    :detail (format nil "Test ~S not found in FiveAM registry."
-                                    test-sym)
-                    :hint "Load the system that defines the test first."))))
-      (t
-       (error 'test-resolution-error
-              :detail (format nil "FiveAM package not found; cannot resolve test symbol: ~S"
-                              test-sym)
-              :hint "Load FiveAM and the test system first.")))))
-
 (defun run-fiveam-selected-tests (test-symbols)
-  "Run specific FiveAM tests by symbol and return structured results.
-TEST-SYMBOLS is a list of fully qualified symbols naming tests or suites."
-  (let ((resolved-symbols
-          (mapcar #'%resolve-fiveam-test-symbol test-symbols)))
-    (log-event :info "test.runner" "framework" "fiveam" "selected_tests"
-               (format nil "~{~A~^, ~}" resolved-symbols))
-    (values (%fiveam-run-and-collect resolved-symbols test-symbols))))
+  "Run the resolved FiveAM tests or suites in TEST-SYMBOLS and return structured results."
+  (log-event :info "test.runner" "framework" "fiveam" "selected_tests"
+             (format nil "~{~A~^, ~}" test-symbols))
+  (values (%fiveam-run-and-collect test-symbols test-symbols)))
 
 (defun run-tests (system-name &key framework test tests)
   "Run tests for SYSTEM-NAME using the specified or auto-detected FRAMEWORK.
@@ -2685,11 +2679,7 @@ may itself block on the caller's lock."
           (:rove
            (if (find-package :rove)
                (if selective-requested-p
-                   (let ((selected-tests
-                          (if test
-                              (list (%coerce-test-symbol test))
-                              (%normalize-tests-arg tests))))
-                     (run-rove-selected-tests selected-tests))
+                   (run-rove-selected-tests (%selected-test-symbols test tests fw))
                    (run-rove-tests system-name))
                (if selective-requested-p
                    (error
@@ -2702,11 +2692,7 @@ may itself block on the caller's lock."
           (:fiveam
            (if (find-package :fiveam)
                (if selective-requested-p
-                   (let ((selected-tests
-                          (if test
-                              (list (%coerce-test-symbol test))
-                              (%normalize-tests-arg tests))))
-                     (run-fiveam-selected-tests selected-tests))
+                   (run-fiveam-selected-tests (%selected-test-symbols test tests fw))
                    (run-fiveam-tests system-name))
                (if selective-requested-p
                    (error
