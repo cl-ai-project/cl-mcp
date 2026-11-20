@@ -64,6 +64,7 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | `cl-mcp/src/pool::%spawn-and-bind`, `%schedule-replenish`, `%replenish-standbys`, `%handle-worker-crash`, `%signal-worker`, `%wait-for-work-in-flight`, `%begin-ending`, `%end-worker` (internal) | none | `pool-shutdown-leaves-nothing-behind` |
 | `cl-mcp/src/pool:initialize-pool`, `cl-mcp/src/pool::%make-generation`, `%effective-pool-size` (internal) | none | `pool-late-work-stays-with-its-generation` |
 | `cl-mcp/src/pool:kill-session-worker`, `cl-mcp/src/pool::%check-worker-health`, `%handle-worker-crash`, `%effective-pool-size` (internal) | none | `pool-holds-while-operations-overlap` |
+| `cl-mcp/src/pool:set-dedicated-repl-idle`, `cl-mcp/src/tools/repl-session:call-with-repl-session` | none | `pool-holds-while-operations-overlap` |
 
 Property names are in `cl-mcp/specs/strings`, `cl-mcp/specs/sanitize`,
 `cl-mcp/specs/paths`, `cl-mcp/specs/write-paths`, `cl-mcp/specs/core-records`,
