@@ -24,6 +24,7 @@
   (:import-from #:cl-mcp/src/parinfer
                 #:apply-indent-mode)
   (:import-from #:cl-mcp/src/paren-diagnostics
+                #:format-source-line-endings
                 #:diagnose-delimiters
                 #:format-delimiter-diagnosis
                 #:repair-line-differences
@@ -57,6 +58,7 @@
                 #:read-time-evaluation-p
                 #:source-read-from-string)
   (:import-from #:cl-mcp/src/lisp-edit-form-core
+                #:source-newline
                 #:%skip-blank-and-comments
                 #:%feature-prefix-end
                 #:%skipped-feature-node-p
@@ -496,7 +498,10 @@ holds anything else, so the caller keeps it as it is."
                           do (incf i))
                     (push (list :whitespace start i) segments))
                    ((char= ch #\;)
-                    (setf i (or (position #\Newline gap :start i) len))
+                    (let ((lf (position #\Newline gap :start i)))
+                      (setf i (cond ((null lf) len)
+                                    ((char= (char gap (1- lf)) #\Return) (1- lf))
+                                    (t lf))))
                     (push (list :comment start i) segments))
                    ((pair-at-p i #\# #\|)
                     (let ((depth 0))
@@ -517,7 +522,7 @@ holds anything else, so the caller keeps it as it is."
                     (return-from %gap-segments nil))))))
     (nreverse segments)))
 
-(defun %normalized-gap (gap)
+(defun %normalized-gap (gap newline)
   "Return GAP, the text between two top-level forms of an inserted block, with
 its whitespace normalised and its comments kept in place.  Every comment that
 starts on the previous form's line -- a ; comment, or a #| |# comment even when
@@ -556,12 +561,12 @@ returned unchanged."
                          (subseq gap (second (first body-comments))
                                  (third (car (last body-comments))))
                          "")))
-          (concatenate 'string same-line (format nil "~%~%")
+          (concatenate 'string same-line newline newline
                        (if (plusp (length body))
-                           (concatenate 'string body (string #\Newline))
+                           (concatenate 'string body newline)
                            ""))))))
 
-(defun %normalize-block-gaps (text spans)
+(defun %normalize-block-gaps (text spans newline)
   "Return TEXT with each gap between the top-level forms SPANS gives
 normalised by %NORMALIZED-GAP.  The forms themselves, and the text before the
 first and after the last, are copied unchanged, so nothing inside a form, a
@@ -571,7 +576,7 @@ string or a comment is touched."
     (loop for (span . rest) on spans
           do (write-string text out :start (car span) :end (cdr span))
              (when rest
-               (write-string (%normalized-gap (subseq text (cdr span) (car (first rest))))
+               (write-string (%normalized-gap (subseq text (cdr span) (car (first rest))) newline)
                              out)))
     (write-string text out :start (cdr (car (last spans))))))
 
@@ -1049,11 +1054,6 @@ of a #| |# comment can start with ; too -- and is never taken."
                          (return))))
           (or block-start start)))))
 
-(defun %source-newline (text)
-  "Return the line break to use when inserting new lines into TEXT."
-  (let ((crlf (coerce '(#\Return #\Newline) 'string)))
-    (if (search crlf text) crlf (string #\Newline))))
-
 (defun %trailing-line-comment-end (text start readtable)
   "After the ; comment that follows START on its line, or START if absent.
 The line break itself is outside the comment."
@@ -1076,7 +1076,7 @@ it and a delete of it take the line end as the form's end, so the comment
 neither moves onto the next form nor is left behind.  New line breaks are the
 file's own (CRLF in a CRLF file)."
   (let* ((start (cst-node-start node))
-         (newline (%source-newline text))
+         (newline (source-newline text))
          (horizontal (%splice-whitespace readtable '(#\Space #\Tab)))
          (whitespace (%splice-whitespace readtable '(#\Space #\Tab #\Newline #\Return)))
          (snippet (%trim-outer-whitespace content))
@@ -1173,7 +1173,7 @@ file's own (CRLF in a CRLF file)."
 (defun %apply-operation-normalized (text node end operation content
                                     readtable comment-floor replacement-line-comment-p)
   (let ((start (cst-node-start node))
-        (newline (%source-newline text))
+        (newline (source-newline text))
         (whitespace (%splice-whitespace readtable '(#\Space #\Tab #\Newline #\Return))))
     (ecase operation
       ;; The comment written directly above the form is the form's: the
@@ -1483,19 +1483,31 @@ replaced form, and the line the matched form starts on. A dry run carries the re
                          ;; only where the gaps read the standard way.
                          (if (and spans normalize-blank-lines
                                   (%gap-syntax-standard-p active-readtable))
-                             (%normalize-block-gaps validated-content spans)
+                             (%normalize-block-gaps validated-content spans
+                                                    (source-newline original))
                              validated-content))
                        ;; The target's expressions are kept only when the
                        ;; content brings none and holds a form for them.
                        (target-prefix (and (eq op-key :replace) (null own-prefix)
                                            (%target-feature-prefix original target)))
-                       (spliced (cond
-                                  (own-prefix
-                                   (%put-feature-prefix block-spliced own-prefix
-                                                        (count #\Newline own-prefix)))
-                                  (target-prefix
-                                   (%put-feature-prefix block-spliced target-prefix))
-                                  (t block-spliced)))
+                       (submitted (if own-prefix
+                                      (%put-feature-prefix block-spliced own-prefix
+                                                           (count #\Newline own-prefix))
+                                      block-spliced))
+                       (verbatim (if target-prefix
+                                     (%put-feature-prefix submitted target-prefix)
+                                     submitted))
+                       (keep-verbatim (and (eq op-key :replace)
+                                           (string= (%trim-outer-whitespace verbatim)
+                                                    (%trim-outer-whitespace target-snippet))))
+                       (formatted (if (or keep-verbatim
+                                          (not (member content-readtable '(nil :standard))))
+                                      submitted
+                                      (format-source-line-endings submitted
+                                                                  (source-newline original))))
+                       (spliced (cond ((eq formatted submitted) verbatim)
+                                      (target-prefix (%put-feature-prefix formatted target-prefix))
+                                      (t formatted)))
                        ;; The expressions alone: a comment between them and
                        ;; the form is kept in the file but is no part of them.
                        (kept-feature (and target-prefix (%form-start block-spliced)
@@ -1658,7 +1670,9 @@ form_name targets its active twin, \"#+ecl name\" the skipped form; content
 opening with expressions false here is refused, for a target this server reads,
 when such a skipped form is the same definition as the target or the content,
 since it would take away the definition this server uses.
-Missing closing parentheses are automatically repaired using parinfer; a block
+Under the standard readtable, formatting line breaks use the file's dominant line ending.
+Newlines in literal data are kept as supplied. Missing closing parentheses are
+automatically repaired using parinfer; a block
 is repaired as a whole and must then read as complete forms, or nothing is
 written.")
          (dry_run :type :boolean

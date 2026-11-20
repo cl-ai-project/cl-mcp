@@ -1496,6 +1496,103 @@ handling and return the file's text afterwards."
                                 :normalize-blank-lines t)
                    expected)))))
 
+(deftest lisp-edit-form-uses-the-files-line-endings-in-submitted-forms
+  (let ((lf (string #\Newline))
+         (crlf (coerce '(#\Return #\Newline) 'string))
+         ;; This literal belongs to a different form and contains a lone Return.
+         (before (format nil "(defvar *keep* \"a~Cb\")" #\Return))
+         (after "(defun last-one () :keep)"))
+    (dolist (nl (list crlf lf))
+      (let* ((source (format nil "~A~A~A(defun target ()~A  1)~A~A~A~A"
+                             before nl nl nl nl nl after nl))
+             (other (if (string= nl crlf) lf crlf))
+             (input (format nil "(defun changed ()~A  \"a~%b\")" other))
+             (form (format nil "(defun changed ()~A  \"a~%b\")" nl))
+             (gap (concatenate 'string nl nl)))
+        (dolist (normalize '(nil t))
+          (dolist (op '("replace" "insert_before" "insert_after" "delete"))
+            (let* ((target (format nil "(defun target ()~A  1)" nl))
+                   (forms (cond ((string= op "replace") (list before form after))
+                                ((string= op "insert_before") (list before form target after))
+                                ((string= op "insert_after") (list before target form after))
+                                (t (list before after))))
+                   (expected (format nil "~{~A~}~A"
+                                     (loop for (x . more) on forms collect x
+                                           when more collect gap)
+                                     nl)))
+              (ok (string= expected
+                           (%default-edit source :operation op :form-name "target"
+                                          :form-type "defun" :content input
+                                          :normalize-blank-lines normalize))))))))))
+
+(deftest lisp-edit-form-keeps-verbatim-replacement-in-a-mixed-file
+  (let* ((crlf (coerce '(#\Return #\Newline) 'string))
+         (form (format nil "(defun target ()~%  1)"))
+         (source (format nil ";; one~A;; two~A~A~A~A" crlf crlf crlf form crlf)))
+    (ok (string= source (%default-edit source :operation "replace" :form-name "target"
+                                          :form-type "defun" :content form
+                                          :normalize-blank-lines t)))))
+
+(deftest lisp-edit-form-normalizes-inserted-block-gaps-with-the-dominant-line-ending
+  (let* ((crlf (coerce '(#\Return #\Newline) 'string))
+         (input (format nil "(defun a () 1) ; first~A(defun b () 2)" crlf)))
+    (dolist (nl (list crlf (string #\Newline)))
+      (let* ((prefix (format nil ";; isolated CRLF~A;; another~A;; more~A" crlf nl nl))
+             (source (format nil "~A(defun target () 0)~A" prefix nl)))
+        (ok (string= (format nil "~A(defun target () 0)~A~A(defun a () 1) ; first~A~A~
+                                 (defun b () 2)~A" prefix nl nl nl nl nl)
+                     (%default-edit source :operation "insert_after" :form-name "target"
+                                    :form-type "defun" :content input
+                                    :normalize-blank-lines t)))))))
+
+(deftest lisp-edit-form-formats-only-known-gaps-under-a-custom-readtable
+  (let* ((name :cl-mcp-test-edit-line-ending-readtable)
+         (table (copy-readtable nil))
+         (crlf (coerce '(#\Return #\Newline) 'string))
+         (source (format nil "(defun target () 0)~A" crlf))
+         (form (format nil "(defun a () !~%data)")))
+    (set-syntax-from-char #\! #\\ table)
+    (named-readtables:register-readtable name table)
+    (unwind-protect
+         (ok (string= (format nil "~A~A~A ; note~A~A(defun b () 2)~A"
+                              source crlf form crlf crlf crlf)
+                      (%default-edit source :operation "insert_after" :form-name "target"
+                                     :form-type "defun" :normalize-blank-lines t :readtable name
+                                     :content (format nil "~A ; note~A(defun b () 2)" form crlf))))
+      (named-readtables:unregister-readtable name))))
+
+(deftest lisp-edit-form-distinguishes-a-token-sharp-from-dispatch
+  (let* ((crlf (coerce '(#\Return #\Newline) 'string))
+         (source (format nil ";; one~A(defun target () nil)~A" crlf crlf)))
+    (flet ((body (nl)
+             (format nil "(defun target ()~A  '(pre#|a~%b| pre\\ #|c~%d|~A~
+                         |e|#|f~%g| #\\# #| comment~Acontinues |# \"h~%i\"))"
+                     nl nl nl)))
+      (let ((edited (%default-edit source :form-type "defun" :form-name "target"
+                                   :operation "replace" :content (body (string #\Newline)))))
+        (ok (string= (format nil ";; one~A~A~A" crlf (body crlf) crlf) edited))
+        (ok (equal (read-from-string (body (string #\Newline))) (read-from-string edited)))))))
+
+(deftest lisp-edit-form-keeps-a-literal-return-before-a-submitted-line-ending
+  (let* ((crlf (coerce '(#\Return #\Newline) 'string))
+         (source (format nil ";; heading~A(defun target () nil)~A" crlf crlf))
+         (prefix (format nil "(defun target () (list #\\~C" #\Return))
+         (submitted (format nil "~A~%  :next))" prefix))
+         (edited (%default-edit source :form-type "defun" :form-name "target"
+                                :operation "replace" :content submitted)))
+    (ok (string= (format nil ";; heading~A~A~A  :next))~A" crlf prefix crlf crlf) edited))
+    (ok (equal (read-from-string submitted) (read-from-string edited)))))
+
+(deftest lisp-edit-form-copies-the-adjacent-gap-in-a-mixed-file
+  (let* ((crlf (coerce '(#\Return #\Newline) 'string))
+         (prefix (format nil ";; first~A;; second~A(defun target () 1)" crlf crlf))
+         (suffix (format nil "~%(defun next () 3)~A" crlf))
+         (source (concatenate 'string prefix suffix)))
+    (ok (string= (format nil "~A~%(defun added ()~A  2)~A" prefix crlf suffix)
+                 (%default-edit source :form-type "defun" :form-name "target"
+                                :operation "insert_after"
+                                :content (format nil "(defun added ()~%  2)"))))))
+
 (deftest lisp-edit-form-setf-name-matches-without-its-package-prefix
   ;; Issue #326: (setf c::top-level-lambda-max) was reported unmatched by
   ;; "(setf top-level-lambda-max)"; a package prefix inside a (setf ...) name is
