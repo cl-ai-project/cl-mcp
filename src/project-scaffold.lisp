@@ -73,21 +73,18 @@ that concurrent calls never collide."
     (values target-dir temp-dir backup-dir)))
 
 (defun %resolve-deepest-existing (pathname)
-  "Return the deepest existing ancestor of PATHNAME as a resolved truename.
-Walks up parent-by-parent through PATHNAME's directory components until
-TRUENAME succeeds, then returns that ancestor as a directory pathname.
+  "Return the deepest existing ancestor of PATHNAME as a truename and as originally spelled.
+The two values locate the existing prefix and the suffix still to be created.
 Used to detect symlink-based path traversal before any filesystem write:
 even when the target itself does not exist yet, its deepest existing
 ancestor must still resolve inside *PROJECT-ROOT*."
   (labels ((walk (dir)
-             (or (ignore-errors
-                  (uiop/pathname:ensure-directory-pathname (truename dir)))
-                 (let ((parent (uiop/pathname:pathname-parent-directory-pathname
-                                dir)))
-                   (cond
-                     ((null parent) nil)
-                     ((equal parent dir) nil)
-                     (t (walk parent)))))))
+             (let ((resolved (ignore-errors (truename dir))))
+               (if resolved
+                   (values (uiop:ensure-directory-pathname resolved) dir)
+                   (let ((parent (uiop:pathname-parent-directory-pathname dir)))
+                     (when (and parent (not (equal parent dir)))
+                       (walk parent)))))))
     (walk (uiop/pathname:ensure-directory-pathname pathname))))
 
 (defun %assert-within-project-root (pathname)
@@ -193,6 +190,21 @@ INVALID-ARGUMENT-ERROR rather than deleting when any of those fail."
                                (native-path-namestring directory))))
       (uiop:delete-directory-tree directory :validate #'safe-to-delete-p))))
 
+(defun %prompt-destination (target-dir)
+  "Return the destination relative to the physical root, including its uncreated suffix."
+  (let ((destination (uiop:pathname-parent-directory-pathname target-dir)))
+    (multiple-value-bind (resolved ancestor) (%resolve-deepest-existing destination)
+      (let ((physical (merge-pathnames (uiop:enough-pathname destination ancestor) resolved)))
+        (native-path-namestring (uiop:enough-pathname physical (truename *project-root*)))))))
+
+(defun %missing-prompt-files (root)
+  "Return manifest entries for the bundled guides ROOT does not already provide."
+  (loop for path in '("prompts/repl-driven-development.md" "prompts/common-lisp-expert.md")
+        unless (uiop:file-exists-p (merge-pathnames path root))
+          collect (cons path (uiop:read-file-string
+                              (asdf:system-relative-pathname :cl-mcp path)
+                              :external-format :utf-8))))
+
 (defun write-scaffold (&key name description author license destination overwrite
                             framework)
   "Generate the scaffold project atomically. Returns a plist with:
@@ -247,8 +259,9 @@ underlying error after cleaning up the temp directory."
                                  :description (or description "")
                                  :author (or author "")
                                  :license (or license "")
-                                 :destination destination
-                                 :framework framework))
+                                 :destination (%prompt-destination target-dir)
+                                 :framework framework
+                                 :bundled-prompts (%missing-prompt-files *project-root*)))
             (moved-aside nil)
             (committed nil)
             (leftover-backup nil))
@@ -294,10 +307,10 @@ underlying error after cleaning up the temp directory."
   :description
   "Generate a minimal Common Lisp project skeleton under the project root.
 
-The generated project uses package-inferred-system and ships with
-CLAUDE.md/AGENTS.md templates referencing cl-mcp's existing prompts via
-relative @-include paths (they point at <project root>/prompts, so they resolve
-only when the project root is the cl-mcp checkout). Its test suite is written with Rove by default;
+The generated project uses package-inferred-system. Its CLAUDE.md and AGENTS.md
+include guides from the project root's prompts/ directory.
+Each missing guide is copied from cl-mcp into the generated project's prompts/ directory
+and listed in files. Its test suite is written with Rove by default;
 pass 'framework' to get a FiveAM project instead. Either way run-tests
 detects the framework from the generated .asd, so no extra wiring is needed.
 
