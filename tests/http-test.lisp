@@ -622,6 +622,76 @@ Host header's value, which is 127.0.0.1:PORT otherwise."
                                :start from)))
         (subseq headers from end)))))
 
+(deftest http-negotiated-session
+  (unwind-protect
+       (multiple-value-bind (acceptor port)
+           (start-http-server :host "127.0.0.1" :port 0 :token nil :worker-pool nil)
+         (declare (ignore acceptor))
+         (let ((id nil)
+               (init "{\"jsonrpc\":\"2.0\",\"method\":\"initialize\"")
+               (ping "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}")
+               (notice "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")
+               (response "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}"))
+           (flet ((request (method &optional body version)
+                    (send-http-request
+                     port method "/mcp" :body body
+                     :headers (append '(("Content-Type" . "application/json"))
+                                      (when id (list (cons "Mcp-Session-Id" id)))
+                                      (when version (list (cons "MCP-Protocol-Version" version)))))))
+             (testing "failed initialization never publishes a session"
+               (let ((before (hash-table-count *sessions*)))
+                 (dolist (body (list (concatenate 'string init "}")
+                                     (concatenate 'string init ",\"id\":false}")
+                                     (concatenate 'string init ",\"id\":3,\"params\":42}")
+                                     "{\"jsonrpc\":\"1.0\",\"method\":\"initialize\",\"id\":3}"))
+                   (multiple-value-bind (status headers reply) (request "POST" body)
+                     (ok (= 400 status))
+                     (ok (null (%header-value headers "Mcp-Session-Id")))
+                     (ok (gethash "error" (parse reply)))))
+                 (ok (= before (hash-table-count *sessions*)))))
+             (multiple-value-bind (status headers reply)
+                 (request "POST" (concatenate 'string init
+                                              ",\"id\":1,\"params\":{\"protocolVersion\":"
+                                              "\"2025-03-26\"}}"))
+               (ok (= 200 status))
+               (ok (equal "2025-03-26" (gethash "protocolVersion" (gethash "result" (parse reply)))))
+               (setf id (%header-value headers "Mcp-Session-Id"))
+               (ok id))
+             (testing "an established session cannot negotiate a second version"
+               (multiple-value-bind (status headers reply)
+                   (request "POST" (concatenate 'string init ",\"id\":8}"))
+                 (ok (= 400 status))
+                 (ok (null (%header-value headers "Mcp-Session-Id")))
+                 (ok (gethash "error" (parse reply)))))
+             (testing "subsequent methods validate the negotiated version"
+               (dolist (method '("POST" "GET" "DELETE"))
+                 (dolist (version '("2025-06-18" "unknown"))
+                   (ok (= 400 (request method (when (equal "POST" method) ping) version))))))
+             (testing "one-way messages have an empty HTTP response"
+               (dolist (body (list notice response (format nil "[~A,~A]" notice response)))
+                 (multiple-value-bind (status headers reply) (request "POST" body "2025-03-26")
+                   (declare (ignore headers))
+                   (ok (= 202 status))
+                   (ok (equal "" reply)))))
+             (testing "batch requests return one answer per request"
+               (multiple-value-bind (status headers reply)
+                   (request "POST" (format nil "[~A,~A,~A]" notice ping response))
+                 (declare (ignore headers))
+                 (ok (= 200 status))
+                 (let ((answers (parse reply)))
+                   (ok (and (vectorp answers) (= 1 (length answers))
+                            (eql 2 (gethash "id" (aref answers 0))))))))
+             (multiple-value-bind (status headers) (request "OPTIONS")
+               (ok (= 204 status))
+               (ok (search "MCP-Protocol-Version" (%header-value headers "Access-Control-Allow-Headers")
+                           :test #'char-equal)))
+             (multiple-value-bind (status headers) (request "PUT")
+               (ok (= 405 status))
+               (ok (%header-value headers "Allow")))
+             (ok (= 204 (request "DELETE")))
+             (ok (= 404 (request "DELETE"))))))
+    (stop-http-server)))
+
 (deftest http-cancellation-stops-a-running-clgrep-search
   (testing "notifications/cancelled, posted while a search runs, ends it (issue #286)"
     (if (not (http-port-available-p))
