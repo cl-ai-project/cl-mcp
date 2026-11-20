@@ -1911,12 +1911,14 @@ Example request:
                         "license":"MIT"}}}
 ```
 
-Response (excerpt):
+An example result when the project root supplies neither guide follows.
+
 ```json
 {"result":{"created":true,
            "path":"scaffolds/demo-lib/",
            "files":["demo-lib.asd","CLAUDE.md","AGENTS.md","README.md",
-                    ".gitignore","src/main.lisp","tests/main-test.lisp"],
+                    ".gitignore","src/main.lisp","tests/main-test.lisp",
+                    "prompts/repl-driven-development.md","prompts/common-lisp-expert.md"],
            "framework":"rove",
            "next_steps":["The generated system is not registered with ASDF yet; run load-system to register it in this session's worker (or (asdf:load-asd \"...\") via repl-eval)",
                          "To load: run load-system with {\"system\": \"demo-lib\"}",

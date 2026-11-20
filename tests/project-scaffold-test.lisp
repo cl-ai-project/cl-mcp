@@ -328,9 +328,16 @@ callers do not need to reference it."
   (dolist (case '((:rove "scaffolds" ())
                   (:fiveam "nested/projects" ("repl-driven-development.md"))
                   (:rove "nested/deeper/projects"
-                   ("repl-driven-development.md" "common-lisp-expert.md"))))
-    (destructuring-bind (framework destination overrides) case
+                   ("repl-driven-development.md" "common-lisp-expert.md"))
+                  (:fiveam "samples/new/projects" ("common-lisp-expert.md") t)))
+    (destructuring-bind (framework destination overrides &optional aliased) case
       (with-temp-project-root (root)
+        (when aliased
+          (let ((real (merge-pathnames "work/examples/" root)))
+            (ensure-directories-exist real)
+            (uiop:symbol-call :sb-posix :symlink
+                              (uiop:native-namestring real)
+                              (uiop:native-namestring (merge-pathnames "samples" root)))))
         (dolist (name overrides)
           (let ((path (merge-pathnames (concatenate 'string "prompts/" name) root)))
             (ensure-directories-exist path)
