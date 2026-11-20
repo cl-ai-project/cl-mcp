@@ -324,6 +324,45 @@ callers do not need to reference it."
                        ".gitignore" "src/main.lisp" "tests/main-test.lisp"))
           (ok (probe-file (uiop:merge-pathnames* rel target))))))))
 
+(deftest scaffold-prompt-includes-resolve
+  (dolist (case '((:rove "scaffolds" ())
+                  (:fiveam "nested/projects" ("repl-driven-development.md"))
+                  (:rove "nested/deeper/projects"
+                   ("repl-driven-development.md" "common-lisp-expert.md"))))
+    (destructuring-bind (framework destination overrides) case
+      (with-temp-project-root (root)
+        (dolist (name overrides)
+          (let ((path (merge-pathnames (concatenate 'string "prompts/" name) root)))
+            (ensure-directories-exist path)
+            (with-open-file (out path :direction :output :if-exists :supersede)
+              (write-string name out))))
+        (let* ((result (cl-mcp/src/project-scaffold:write-scaffold
+                        :name "guide-test" :framework framework :destination destination))
+               (target (getf result :target-dir))
+               (files (getf result :files))
+               (marker (merge-pathnames *scaffold-marker-file* target)))
+          (ok (equal files (getf (first (read-top-level-forms (uiop:read-file-string marker)))
+                                 :files)))
+          (dolist (guide '("AGENTS.md" "CLAUDE.md"))
+            (let ((includes (loop for line in (uiop:read-file-lines (merge-pathnames guide target))
+                                  when (uiop:string-prefix-p "@" line) collect (subseq line 1))))
+              (ok (= 2 (length (remove-duplicates includes :test #'string=))))
+              (dolist (include includes)
+                (let* ((path (merge-pathnames include target))
+                       (name (file-namestring path))
+                       (local (concatenate 'string "prompts/" name)))
+                  (ok (uiop:file-exists-p path) include)
+                  (when (uiop:file-exists-p path)
+                    (if (member name overrides :test #'string=)
+                        (progn
+                          (ok (equal name (uiop:read-file-string path)))
+                          (ok (not (member local files :test #'string=))))
+                        (progn
+                          (ok (member local files :test #'string=))
+                          (ok (equal (uiop:read-file-string path)
+                                     (uiop:read-file-string
+                                      (asdf:system-relative-pathname :cl-mcp local))))))))))))))))
+
 (deftest write-scaffold-rejects-existing-target
   (with-temp-project-root (root)
     (let ((target (uiop:merge-pathnames* "scaffolds/foo-lib/" root)))
@@ -466,9 +505,9 @@ callers do not need to reference it."
           (ok (stringp path)))
         (testing "response has absolute_path string"
           (ok (stringp absolute-path)))
-        (testing "response has files vector of seven entries"
+        (testing "response includes the seven base files and two bundled guides"
           (ok (vectorp files))
-          (ok (= 7 (length files)))
+          (ok (= 9 (length files)))
           (ok (every #'stringp (coerce files 'list))))
         (testing "response has next_steps vector of four non-empty strings"
           (ok (vectorp next-steps))

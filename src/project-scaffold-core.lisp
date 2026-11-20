@@ -259,8 +259,17 @@ own spelling of its name, substituted into the generated Markdown as
     (:fiveam (values *asd-template-fiveam* *main-test-template-fiveam*
                      "FiveAM"))))
 
-(defun plan-scaffold (&key name description author license destination framework)
+(defun %prompt-include-path (name parent-prompts bundled-prompts)
+  "Locate NAME in the generated project when bundled, or in the parent's guides."
+  (let ((local (concatenate 'string "prompts/" name)))
+    (if (assoc local bundled-prompts :test #'string=)
+        local
+        (format nil "~A/~A" parent-prompts name))))
+
+(defun plan-scaffold (&key name description author license destination framework
+                           bundled-prompts)
   "Return an alist of (RELATIVE-PATH . CONTENT) for the scaffold manifest.
+BUNDLED-PROMPTS holds (relative path . text) entries for guides absent from the project root.
 Applies all template substitutions but performs no I/O. Two binding sets
 are used: the .asd template drops its values inside Lisp string literals,
 so those are escaped with ESCAPE-LISP-STRING, while the Markdown and
@@ -280,16 +289,20 @@ normalized strings."
                              ("description" . ,description)
                              ("author" . ,author)
                              ("license" . ,license)
-                             ("parent-prompts" . ,parent-prompts)
+                             ("repl-prompt" . ,(%prompt-include-path
+                                                "repl-driven-development.md"
+                                                parent-prompts bundled-prompts))
+                             ("expert-prompt" . ,(%prompt-include-path
+                                                  "common-lisp-expert.md"
+                                                  parent-prompts bundled-prompts))
                              ("test-framework" . ,framework-label)))
              (asd-bindings `(("name" . ,name)
                              ("description" . ,(escape-lisp-string description))
                              ("author" . ,(escape-lisp-string author))
                              ("license" . ,(escape-lisp-string license))
-                             ("parent-prompts" . ,parent-prompts)
                              ("test-framework" . ,framework-label)))
              (render (lambda (tpl) (render-template tpl raw-bindings))))
-        (list
+        (list*
          (cons (format nil "~A.asd" name) (render-template asd-template
                                                            asd-bindings))
          (cons "CLAUDE.md"            (funcall render *claude-md-template*))
@@ -297,4 +310,5 @@ normalized strings."
          (cons "README.md"            (funcall render *readme-template*))
          (cons ".gitignore"           (funcall render *gitignore-template*))
          (cons "src/main.lisp"        (funcall render *main-lisp-template*))
-         (cons "tests/main-test.lisp" (funcall render main-test-template)))))))
+         (cons "tests/main-test.lisp" (funcall render main-test-template))
+         bundled-prompts)))))

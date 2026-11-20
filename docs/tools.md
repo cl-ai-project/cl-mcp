@@ -1837,8 +1837,11 @@ Example requests:
 ## `project-scaffold`
 Generate a minimal Common Lisp project skeleton under the project root. The
 generated project uses `package-inferred-system` and ships with
-`CLAUDE.md` / `AGENTS.md` templates referencing cl-mcp's existing prompts via
-relative `@`-include paths. Its tests are written with Rove by default, or with
+`CLAUDE.md` and `AGENTS.md` instructions. Both use relative `@` includes for the
+REPL development and Common Lisp guides. Each guide in the project root's `prompts/`
+directory takes precedence. For each missing guide, the tool copies cl-mcp's bundled
+version into the generated project's `prompts/` directory and includes the copy in the
+file manifest. Its tests are written with Rove by default, or with
 FiveAM when `framework` says so. On success, returns the list of created files and
 a `next_steps` array with concrete REPL commands the agent can invoke to
 register the project with ASDF and run its tests.

@@ -193,6 +193,14 @@ INVALID-ARGUMENT-ERROR rather than deleting when any of those fail."
                                (native-path-namestring directory))))
       (uiop:delete-directory-tree directory :validate #'safe-to-delete-p))))
 
+(defun %missing-prompt-files (root)
+  "Return manifest entries for the bundled guides ROOT does not already provide."
+  (loop for path in '("prompts/repl-driven-development.md" "prompts/common-lisp-expert.md")
+        unless (uiop:file-exists-p (merge-pathnames path root))
+          collect (cons path (uiop:read-file-string
+                              (asdf:system-relative-pathname :cl-mcp path)
+                              :external-format :utf-8))))
+
 (defun write-scaffold (&key name description author license destination overwrite
                             framework)
   "Generate the scaffold project atomically. Returns a plist with:
@@ -248,7 +256,8 @@ underlying error after cleaning up the temp directory."
                                  :author (or author "")
                                  :license (or license "")
                                  :destination destination
-                                 :framework framework))
+                                 :framework framework
+                                 :bundled-prompts (%missing-prompt-files *project-root*)))
             (moved-aside nil)
             (committed nil)
             (leftover-backup nil))
@@ -295,9 +304,9 @@ underlying error after cleaning up the temp directory."
   "Generate a minimal Common Lisp project skeleton under the project root.
 
 The generated project uses package-inferred-system and ships with
-CLAUDE.md/AGENTS.md templates referencing cl-mcp's existing prompts via
-relative @-include paths (they point at <project root>/prompts, so they resolve
-only when the project root is the cl-mcp checkout). Its test suite is written with Rove by default;
+CLAUDE.md and AGENTS.md include guides from the project root's prompts/ directory.
+Each missing guide is copied from cl-mcp into the generated project's prompts/ directory
+and listed in files. Its test suite is written with Rove by default;
 pass 'framework' to get a FiveAM project instead. Either way run-tests
 detects the framework from the generated .asd, so no extra wiring is needed.
 

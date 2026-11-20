@@ -106,8 +106,8 @@ share.")
 
 ## Agent Guidelines
 
-@{{parent-prompts}}/repl-driven-development.md
-@{{parent-prompts}}/common-lisp-expert.md
+@{{repl-prompt}}
+@{{expert-prompt}}
 
 ## Project Overview
 
@@ -143,8 +143,8 @@ Use cl-mcp tools for all Lisp code operations:
 (defparameter *agents-md-template*
   "# Repository Guidelines
 
-@{{parent-prompts}}/repl-driven-development.md
-@{{parent-prompts}}/common-lisp-expert.md
+@{{repl-prompt}}
+@{{expert-prompt}}
 
 ## Project Overview
 
