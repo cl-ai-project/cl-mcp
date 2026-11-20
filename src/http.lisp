@@ -382,7 +382,8 @@ Encoded by ENCODE-JSON-LINE, as every line sent is."
         (%handle-mcp-post-initialize body)
         (%call-with-http-session
          (lambda (session)
-           (let ((response (process-json-message body (http-session-state session))))
+           (let ((response (process-json-message body (http-session-state session)
+                                                  :wire-input-p t)))
              (cond
                ((initialize-request-p body)
                 (json-response (or response (%http-error-json -32600 "Initialize requires an id"))
