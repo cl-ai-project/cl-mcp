@@ -43,7 +43,7 @@
                 #:worker-retired-p
                 #:worker-retirement-recorded
                 #:exit-code-says-retired-p
-                #:*reaper-threads* #:*reaper-threads-lock*
+                #:*reaper-threads* #:*reaper-threads-lock* #:*defer-reaper-joins*
                 #:*worker-startup-timeout*)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:*retired-leaked-thread-reason*)
@@ -1234,8 +1234,8 @@ Returns T if alive, NIL if dead.  Does not acquire any locks or perform I/O."
 (defun %check-worker-health ()
   "Check every bound and standby worker once.  Detect crashed ones using
 OS-level process liveness, which acquires no lock and performs no I/O, and
-start their recovery as background work; reap the processes of crashed
-workers, and prune stale crash history.  One iteration of the health
+start their recovery as background work, and prune stale crash history.
+Crash cleanup owns the process until it observes exit. One iteration of the health
 monitor, separated so the ownership contracts can run it at a chosen point."
   (let ((workers nil))
     ;; Snapshot worker list under lock
@@ -1280,14 +1280,6 @@ monitor, separated so the ownership contracts can run it at a chosen point."
                            (format nil "pool-recover-~A"
                                    (worker-id w))))
                     (push thread *recovery-threads*))))))))
-    ;; Reap zombie workers: crashed workers whose OS process
-    ;; is still tracked but no longer alive.
-    (dolist (w workers)
-      (when (eq (worker-state w) :crashed)
-        (let ((process (worker-process-info w)))
-          (when process
-            (ignore-errors
-              (sb-ext:process-close process))))))
     ;; Prune stale crash-history entries for sessions that
     ;; have no recent crashes (all timestamps outside window).
     (let ((window-start (- (get-universal-time)
@@ -1586,7 +1578,8 @@ whose work it waits for and whose workers it ends."
         ;; takes its stream, which an RPC running on it holds for as long as the
         ;; request takes -- a shutdown behind a long load waited for all of it.
         (dolist (w workers) (ignore-errors (%signal-worker w)))
-        (dolist (w workers) (%end-worker w)))
+        (let ((*defer-reaper-joins* t))
+          (dolist (w workers) (%end-worker w))))
       ;; An ending begun after the wait above and before the snapshot --
       ;; RELEASE-SESSION or KILL-SESSION-WORKER took the worker out of the lists
       ;; and is ending it outside the lock -- is on this generation too, and

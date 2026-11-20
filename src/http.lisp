@@ -5,7 +5,8 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/tools/repl-session #:close-repl-sessions)
   (:import-from #:cl-mcp/src/log #:log-event)
-  (:import-from #:cl-mcp/src/protocol #:make-state #:process-json-line)
+  (:import-from #:cl-mcp/src/protocol #:make-state #:process-json-message
+                #:protocol-version)
   (:import-from #:cl-mcp/src/proxy #:*use-worker-pool*)
   (:import-from #:cl-mcp/src/tools/registry #:set-enabled-tool-groups)
   (:import-from #:cl-mcp/src/pool
@@ -146,13 +147,12 @@ this call sees the request (see %RELEASE-SESSION-REQUEST)."
         (ignore-errors (release-session session-id))))
     result))
 
-(defun create-session ()
-  "Create a new session and return it."
-  (let* ((id (generate-session-id))
-         (session (make-http-session :id id :state (make-state))))
-    (bordeaux-threads:with-lock-held (*sessions-lock*)
-      (setf (gethash id *sessions*) session))
-    session))
+(defun create-session (&optional (session (make-http-session :id (generate-session-id)
+                                                           :state (make-state))))
+  "Publish SESSION in the session table and return it."
+  (bordeaux-threads:with-lock-held (*sessions-lock*)
+    (setf (gethash (http-session-id session) *sessions*) session))
+  session)
 
 (defun delete-session (session-id)
   "Delete a registered HTTP session by ID and release its worker assignment.
@@ -176,7 +176,8 @@ was sent for, never the server default."
         (when idle
           (forget-session-project-root session-id))
         (when *use-worker-pool*
-          (release-session session-id))))))
+          (release-session session-id)))
+      t)))
 
 (defun %release-session-request (session)
   "Count one request of SESSION as finished.  The last one to finish after the
@@ -288,7 +289,7 @@ Sessions with active in-flight requests are skipped even when expired."
 (defun initialize-request-p (body)
   "Check if the request body is an initialize request."
   (and (hash-table-p body)
-       (string= (gethash "method" body) "initialize")))
+       (equal (gethash "method" body) "initialize")))
 
 (defun parse-json-body ()
   "Parse the request body as JSON."
@@ -299,7 +300,7 @@ Sessions with active in-flight requests are skipped even when expired."
       (return-from parse-json-body nil))
     (when (and body (plusp (length body)))
       (handler-case
-          (yason:parse body)
+          (values (yason:parse body) t)
         (error (e)
           (log-event :warn "http.parse-error" "error" (princ-to-string e))
           nil)
@@ -324,127 +325,107 @@ Encoded by ENCODE-JSON-LINE, as every line sent is."
     (encode-json-line outer)))
 
 (defun %handle-mcp-post-initialize (body)
-  (when (initialize-request-p body)
-    (let* ((session (create-session))
-           (state (http-session-state session))
-           (line (with-output-to-string (s)
-                   (yason:encode body s)))
-           (response (let ((cl-mcp/src/protocol:*current-session-id* (http-session-id session)))
-                       (process-json-line line state))))
-      (log-event :info "http.initialize"
-                 "session-id" (http-session-id session))
-      (set-header :mcp-session-id (http-session-id session))
-      response)))
-
-(defun %handle-mcp-post-session (session-id body)
-  ;; Found and counted as in flight in one step, so neither cleanup nor a
-  ;; DELETE-SESSION between the two can take the session's root from under it.
-  (let ((session (get-session session-id :acquire t)))
-    (unless session
-      (return-from %handle-mcp-post-session (values nil :invalid)))
+  ;; Root synchronization needs an ID during initialization. Publish that ID
+  ;; only after dispatch produced an InitializeResult for this request.
+  (let* ((id (generate-session-id))
+         (state (make-state))
+         (cl-mcp/src/protocol:*current-session-id* id)
+         (published nil))
     (unwind-protect
-         (let* ((state (http-session-state session))
-                (line (with-output-to-string (s)
-                        (yason:encode body s)))
-                (response (let ((cl-mcp/src/protocol:*current-session-id* session-id))
-                            (process-json-line line state))))
-           (log-event :debug "http.response"
-                      "session-id" session-id
-                      "has-response" (not (null response)))
-           (if response
-               (values response :response)
-               (values nil :notification)))
-      ;; Always decrement, even on error
-      (%release-session-request session))))
+         (multiple-value-bind (encoded reply) (process-json-message body state)
+           (cond
+             ((and reply (gethash "result" reply))
+              (create-session (make-http-session :id id :state state))
+              (setf published t)
+              (set-header :mcp-session-id id)
+              (log-event :info "http.initialize" "session-id" id)
+              (json-response encoded))
+             (t (json-response (or encoded (%http-error-json -32600 "Initialize requires an id"))
+                               :status 400))))
+      (unless published (forget-session-project-root id)))))
+
+(defun %call-with-http-session (function)
+  "Run FUNCTION with the live session after checking the client's version."
+  (let* ((id (get-header :mcp-session-id))
+         (version (get-header :mcp-protocol-version))
+         (session (and id (get-session id :acquire t))))
+    (cond
+      ((null id)
+       (json-response (%http-error-json -32600 "Missing Mcp-Session-Id header") :status 400))
+      ((null session)
+       (json-response (%http-error-json -32600 "Session expired or invalid") :status 404))
+      (t
+       (unwind-protect
+            (if (and version (not (equal version (protocol-version (http-session-state session)))))
+                (json-response (%http-error-json -32600 "MCP-Protocol-Version mismatch") :status 400)
+                (let ((cl-mcp/src/protocol:*current-session-id* id))
+                  (funcall function session)))
+         (%release-session-request session))))))
 
 (defun handle-mcp-post ()
   "Handle POST requests to the MCP endpoint."
-  ;; Auth check
   (unless (%check-auth)
     (return-from handle-mcp-post
       (json-response (%http-error-json -32600 "Unauthorized") :status 401)))
-
-  (let ((accept (get-header :accept))
-        (session-id (get-header :mcp-session-id))
-        (body (parse-json-body)))
-    (log-event :debug "http.post"
-               "session-id" session-id
-               "has-body" (not (null body)))
-
-    ;; Validate Accept header
+  (let ((accept (get-header :accept)))
     (unless (or (null accept)
                 (search "application/json" accept)
                 (search "text/event-stream" accept)
                 (search "*/*" accept))
       (return-from handle-mcp-post
-        (json-response (%http-error-json -32600 "Invalid Accept header")
-                       :status 406)))
-
-    ;; Handle missing body
-    (unless body
+        (json-response (%http-error-json -32600 "Invalid Accept header") :status 406))))
+  (multiple-value-bind (body parsed-p) (parse-json-body)
+    (unless parsed-p
       (return-from handle-mcp-post
-        (json-response (%http-error-json -32700 "Parse error")
-                       :status 400)))
+        (json-response (%http-error-json -32700 "Parse error") :status 400)))
+    (if (and (initialize-request-p body) (null (get-header :mcp-session-id)))
+        (%handle-mcp-post-initialize body)
+        (%call-with-http-session
+         (lambda (session)
+           (let ((response (process-json-message body (http-session-state session))))
+             (cond
+               ((initialize-request-p body)
+                (json-response (or response (%http-error-json -32600 "Initialize requires an id"))
+                               :status 400))
+               (response (json-response response))
+               (t (setf (hunchentoot:return-code*) 202)
+                  ""))))))))
 
-    ;; Handle initialization (no session required)
-    (let ((init-response (%handle-mcp-post-initialize body)))
-      (when init-response
-        (return-from handle-mcp-post
-          (json-response init-response))))
-
-    ;; Require session for non-initialize requests
-    (unless session-id
-      (return-from handle-mcp-post
-        (json-response (%http-error-json -32600 "Missing Mcp-Session-Id header")
-                       :status 400)))
-
-    ;; Process the request
-    (multiple-value-bind (response status)
-        (%handle-mcp-post-session session-id body)
-      (cond
-        ((eq status :invalid)
-         (json-response (%http-error-json -32600 "Session expired or invalid")
-                        :status 404))
-        ((eq status :response)
-         (json-response response))
-        (t
-         ;; Notification - no response body
-         (setf (hunchentoot:return-code*) 202)
-         "")))))
+(defun %method-not-allowed (message)
+  (set-header :allow "POST, DELETE, OPTIONS")
+  (json-response (%http-error-json -32601 message) :status 405))
 
 (defun handle-mcp-get ()
-  "Handle GET requests to the MCP endpoint (SSE stream).
-Currently returns 405 as SSE is not yet implemented."
-  ;; Auth check
+  "Handle GET requests to the MCP endpoint (SSE stream)."
   (unless (%check-auth)
     (return-from handle-mcp-get
       (json-response (%http-error-json -32600 "Unauthorized") :status 401)))
-  (log-event :debug "http.get.sse-not-supported")
-  (json-response (%http-error-json -32601
-                                   "SSE not yet supported. Use POST for request/response.")
-                 :status 405))
+  (flet ((no-stream (&optional session)
+           (declare (ignore session))
+           (%method-not-allowed "SSE not yet supported. Use POST for request/response.")))
+    (if (get-header :mcp-session-id)
+        (%call-with-http-session #'no-stream)
+        (no-stream))))
 
 (defun handle-mcp-delete ()
   "Handle DELETE requests to terminate a session."
-  ;; Auth check
   (unless (%check-auth)
     (return-from handle-mcp-delete
       (json-response (%http-error-json -32600 "Unauthorized") :status 401)))
-  (let ((session-id (get-header :mcp-session-id)))
-    (cond
-      (session-id
-       (delete-session session-id)
-       (log-event :info "http.session.deleted" "session-id" session-id)
-       (setf (hunchentoot:return-code*) 204)
-       "")
-      (t
-       (json-response (%http-error-json -32600 "Missing Mcp-Session-Id header")
-                      :status 400)))))
+  (%call-with-http-session
+   (lambda (session)
+     (if (delete-session (http-session-id session))
+         (progn
+           (setf (hunchentoot:return-code*) 204)
+           "")
+         ;; A concurrent DELETE can retire the session after acquisition.
+         (json-response (%http-error-json -32600 "Session expired or invalid") :status 404)))))
 
 (defun handle-mcp-options ()
   "Handle OPTIONS requests for CORS preflight."
   (set-header :access-control-allow-methods "GET, POST, DELETE, OPTIONS")
-  (set-header :access-control-allow-headers "Content-Type, Accept, Authorization, Mcp-Session-Id")
+  (set-header :access-control-allow-headers
+              "Content-Type, Accept, Authorization, Mcp-Session-Id, MCP-Protocol-Version")
   (set-header :access-control-max-age "86400")
   (setf (hunchentoot:return-code*) 204)
   "")
@@ -553,8 +534,7 @@ loopback interface." (or host "(none)"))))
                 (:delete (handle-mcp-delete))
                 (:options (handle-mcp-options))
                 (otherwise
-                 (setf (hunchentoot:return-code*) 405)
-                 (json-response "{\"error\":\"Method not allowed\"}")))))))))
+                 (%method-not-allowed "Method not allowed")))))))))
 
 ;;; ------------------------------------------------------------
 ;;; Server Control

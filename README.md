@@ -176,6 +176,16 @@ or write the entry yourself, in the project's `.mcp.json` (or `~/.claude.json` f
 `Authorization: Bearer <token>` header on every request; the generated token is printed
 to `*error-output*`.
 
+A successful HTTP initialization supplies `Mcp-Session-Id` and returns the negotiated
+`protocolVersion` in the JSON result. Send that session ID and the negotiated version
+(`MCP-Protocol-Version`) on subsequent requests. A conflicting version gets HTTP 400.
+An unknown or retired session gets HTTP 404. Notifications and client responses receive
+HTTP 202 with an empty body.
+
+Across transports, an unknown requested version negotiates the server’s preferred supported
+version. A session using 2025-03-26 accepts JSON-RPC batches after initialization. The
+other supported revisions use individual messages.
+
 This approach lets both you and Claude Code share the same Lisp runtime.
 You can inspect state from SLIME/Sly while Claude Code works through MCP.
 
