@@ -966,7 +966,8 @@ Input:
   the form's last line belongs to that form in either mode. `replace` keeps it on the
   replacement's last line. If that line already has a `;` comment, the file's original comment
   goes on the next line. `insert_after` goes below the comment, and `delete` removes it with
-  the form. New line breaks around the target follow the file's (CRLF in a CRLF file).
+  the form. The active readtable determines which characters count as whitespace around
+  the target. New line breaks around the target follow the file's (CRLF in a CRLF file).
   Every summary names the line the matched form
   starts on, its `#+` line when it has one (`Applied replace to defun beta (line 4) in …`, also
   the result's `line`), and a "Multiple matches" error lists each candidate with its line

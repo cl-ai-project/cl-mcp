@@ -1330,6 +1330,74 @@ handling and return the file's text afterwards."
                    (ok (= 2 (count :expr (parse-top-level-forms actual)
                                    :key #'cl-mcp/src/cst:cst-node-kind)))))))))
 
+(deftest lisp-edit-form-keeps-a-readtable-escape-outside-the-target
+  (let ((name :cl-mcp-test-edit-tab-escape)
+        (table (copy-readtable nil))
+        (suffix (format nil "~C;name (defun b () 2)~%" #\Tab)))
+    (set-syntax-from-char #\Tab #\\ table)
+    (named-readtables:register-readtable name table)
+    (unwind-protect
+         (dolist (normalize '(nil t))
+           (loop for (operation content) in
+                 '(("replace" "(defun a () 3)")
+                   ("insert_before" "(defun added () 0)")
+                   ("insert_after" "(defun added () 0)")
+                   ("delete" nil))
+                 do (testing (format nil "~A with normalization ~S" operation normalize)
+                      (let* ((source (concatenate 'string "(defun a () 1)" suffix))
+                             (edited (%default-edit source :form-type "defun" :form-name "a"
+                                                    :operation operation :content content
+                                                    :normalize-blank-lines normalize
+                                                    :readtable name))
+                             (suffix-start (- (length edited) (length suffix))))
+                        (ok (and (>= suffix-start 0)
+                                 (string= suffix edited :start2 suffix-start)))
+                        (let ((*readtable* table)
+                              (*package* (symbol-package 'b)))
+                          (with-input-from-string (stream edited)
+                            (loop for form = (read stream nil :eof)
+                                  until (eq form :eof)
+                                  collect form into forms
+                                  finally (ok (equal '(defun b () 2)
+                                                     (car (last forms)))))))))))
+      (named-readtables:unregister-readtable name))))
+
+(deftest lisp-edit-form-checks-replacement-comments-with-the-active-readtable
+  (let* ((name :cl-mcp-test-edit-replacement-comment)
+         (standard (copy-readtable nil))
+         (source (format nil "(defparameter a 1) (defparameter b 2)~%"))
+         (left-paren (get-macro-character #\( standard)))
+    (loop for (content configure) in
+          (list (list "(defparameter a 3) #|; note |#"
+                      (lambda (table)
+                        (set-dispatch-macro-character
+                         #\# #\| (lambda (stream sub-char count)
+                                   (declare (ignore stream sub-char count))
+                                   (values))
+                         table)))
+                (list "(defparameter a 3) #+(or) :ignored ; note"
+                      (lambda (table)
+                        (set-macro-character
+                         #\( (lambda (stream char)
+                               (or (funcall left-paren stream char) #()))
+                         nil table))))
+          do (let ((table (copy-readtable standard)))
+               (funcall configure table)
+               (named-readtables:register-readtable name table)
+               (unwind-protect
+                    (dolist (normalize '(nil t))
+                      (testing (format nil "~A with normalization ~S" content normalize)
+                        (let ((edited (%default-edit source :form-type "defparameter"
+                                                     :form-name "a" :operation "replace"
+                                                     :content content :readtable name
+                                                     :normalize-blank-lines normalize))
+                              (*readtable* table)
+                              (*package* (symbol-package 'b)))
+                          (with-input-from-string (stream edited)
+                            (ok (equal '(defparameter a 3) (read stream nil :eof)))
+                            (ok (equal '(defparameter b 2) (read stream nil :eof)))))))
+                 (named-readtables:unregister-readtable name))))))
+
 (deftest lisp-edit-form-normalizes-around-a-form-and-its-trailing-comment
   (let ((source (format nil "(defun a () 1) ; about a~%;; about b~%(defun b () 2)~%"))
          (inserted "(defun n () 0)")
