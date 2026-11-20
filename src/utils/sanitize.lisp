@@ -122,6 +122,39 @@ princ-to-string then sanitized."
                 (t (vector-push-extend char result) (incf i)))))
     (coerce result 'string)))
 
+(defun %strip-printed-objects (message)
+  "Remove balanced #<...> representations from MESSAGE. Keep text outside
+them, including unfinished representations and unmatched delimiters."
+  (let ((first (search "#<" message)))
+    (if (null first)
+        message
+        (let* ((end (length message))
+               (out (make-array end :element-type 'character :fill-pointer first))
+               (openings nil)
+               (quote-delimiter nil))
+          (replace out message :end2 first)
+          ;; Keep an unfinished object in OUT. Only its matching close rewinds
+          ;; the output, so completed inner objects disappear even in a fragment.
+          (loop for i from first below end
+                for ch = (char message i)
+                do (vector-push ch out)
+                   (cond
+                     ((and openings (char= ch #\\)
+                           (or quote-delimiter (char= (char message (1- i)) #\#)))
+                      ;; A quoted escape or a printed character such as #\".
+                      (when (< (1+ i) end)
+                        (vector-push (char message (incf i)) out)))
+                     (quote-delimiter
+                      (when (char= ch quote-delimiter)
+                        (setf quote-delimiter nil)))
+                     ((and openings (find ch "\"|"))
+                      (setf quote-delimiter ch))
+                     ((and (char= ch #\#) (< (1+ i) end) (char= (char message (1+ i)) #\<))
+                      (push (1- (fill-pointer out)) openings))
+                     ((and openings (char= ch #\>))
+                      (setf (fill-pointer out) (pop openings)))))
+          out))))
+
 (defun sanitize-error-message (msg)
   "Sanitize an error message for external consumption.
 Strips SBCL internal object representations (#<...>), multi-line
@@ -130,8 +163,7 @@ clean string suitable for JSON-RPC error responses."
   (when (null msg) (return-from sanitize-error-message ""))
   (unless (stringp msg)
     (setf msg (princ-to-string msg)))
-  ;; Remove #<...> object representations (SBCL stream objects, etc.)
-  (setf msg (cl-ppcre:regex-replace-all "#<[^>]*>" msg ""))
+  (setf msg (%strip-printed-objects msg))
   ;; Unwrap #P"..." pathname literals (SBCL file error messages) to show the actual path
   (setf msg (cl-ppcre:regex-replace-all "#P\"([^\"]*)\"" msg "\\1"))
   ;; Remove multi-line "Stream:" sections that SBCL appends

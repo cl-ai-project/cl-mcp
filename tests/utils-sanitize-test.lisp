@@ -223,6 +223,23 @@
                  (sanitize-error-message
                   (format nil "failed Stream: #<SB-SYS:FD-STREAM {1}>~%  more"))))))
 
+(deftest sanitize-error-message-removes-complete-printed-objects
+  (testing "the matching outer delimiter ends a nested printed object"
+    (ok (string= "x y" (sanitize-error-message "x #<A #<B {1}> {2}> y")))
+    (ok (string= "a>b" (sanitize-error-message "a#<A #<B #<C>>>#<D>>b"))))
+  (testing "delimiters inside printed strings and quoted symbol names stay inside"
+    (ok (string= "x y" (sanitize-error-message "x #<THREAD \"a>b\" {1}> y")))
+    (ok (string= "x y" (sanitize-error-message "x #<FUNCTION |A\\|B>C| {1}> y")))
+    (ok (string= "left right"
+                 (sanitize-error-message "left #<A \"a\\\"#<b>\\\\\" {1}> right"))))
+  (testing "a printed character does not open a string or close an object"
+    (ok (string= "left right" (sanitize-error-message "left #<A #\\\" #\\> {1}> right"))))
+  (testing "outside text and incomplete printed forms stay visible"
+    (ok (string= "keep > #<unfinished"
+                 (sanitize-error-message "#<DONE> keep > #<unfinished")))
+    (ok (string= "keep #<unfinished tail"
+                 (sanitize-error-message "keep #<unfinished #<DONE> tail")))))
+
 (deftest sanitize-for-json-strips-escape-sequence-cut-at-end
   (testing "a CSI sequence cut off by the end of the input leaves no fragment"
     (let ((esc (code-char 27)))
