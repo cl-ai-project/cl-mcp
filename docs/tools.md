@@ -1781,9 +1781,10 @@ Example requests:
 Notes:
 - **Auto-reloads the test system** before execution (see `system` above for what is loaded again). Files edited via `lisp-edit-form` are automatically picked up — no need to call `load-system` first.
 - Auto-detects Rove, FiveAM or prove; anything else falls back to ASDF `test-system` for text capture
-- A `test`/`tests` name is resolved after that reload, so its package needs no separate
-  loading as long as `system` loads it; a name that still does not resolve is reported as
-  `✗ UNRESOLVED`. Selection works with Rove and FiveAM only
+- Rove and FiveAM resolve every `test`/`tests` name after the reload, before running any
+  selected test. An unknown name returns `✗ UNRESOLVED` with a single `TEST-RESOLUTION`
+  entry in `failed_tests`. Its reason names the missing target and lists the registered
+  names in the requested package when available
 - Test names must be fully qualified with package prefix (e.g., `"package::test-name"`)
 - With the worker pool enabled, a worker crash is distinct from a test failure:
   it aborts the in-flight call, resets worker-local Lisp state, and is reported
