@@ -593,3 +593,41 @@
               *default-pathname-defaults* original-defaults)
         (when original-cwd (ignore-errors (uiop:chdir original-cwd)))
         (ignore-errors (uiop:delete-empty-directory dir))))))
+
+(deftest initialize-decodes-local-file-uris
+  (let* ((parent (uiop:merge-pathnames*
+                  (format nil "cl-mcp-root-uri-~D-~D/" (get-universal-time) (random 100000))
+                  (uiop:temporary-directory)))
+         (dir (uiop:merge-pathnames* "space 東京+%20/" parent))
+         (prefix (uiop:native-namestring parent))
+         (encoded (concatenate 'string prefix "space%20%E6%9D%B1%E4%BA%AC+%2520/"))
+         (original-cwd (uiop:getcwd))
+         (*default-pathname-defaults* *default-pathname-defaults*)
+         (*project-root* nil))
+    (labels ((initialize-root (params)
+               (setf *project-root* nil)
+               (let* ((request (make-ht "jsonrpc" "2.0" "id" 1 "method" "initialize"
+                                        "params" params))
+                      (line (with-output-to-string (s) (yason:encode request s)))
+                      (reply (parse (process-json-line line))))
+                 (ok (hash-table-p (gethash "result" reply)))
+                 *project-root*)))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist dir)
+             (dolist (scheme '("file://" "file://LOCALHOST" "file:"))
+               (let ((uri (concatenate 'string scheme encoded)))
+                 (ok (equal (truename dir) (initialize-root (make-ht "rootUri" uri))) uri)))
+             (ok (equal (truename dir)
+                        (initialize-root (make-ht "rootPath" (uiop:native-namestring dir)
+                                                  "rootUri" "file:///"))))
+             ;; Keep a directory at the spelling a lenient decoder could select.
+             (dolist (suffix '("%" "%Z9" "%C3" "%00" "?" "#"))
+               (let ((uri (concatenate 'string "file://" prefix suffix)))
+                 (ok (null (initialize-root (make-ht "rootUri" uri))) uri)))
+             (dolist (uri (list (concatenate 'string "file://elsewhere.invalid" prefix)
+                                (concatenate 'string "https://localhost" prefix)
+                                "file:///%74mp/" 23))
+               (ok (null (initialize-root (make-ht "rootUri" uri))) uri)))
+        (uiop:chdir original-cwd)
+        (when (probe-file parent) (uiop:delete-directory-tree parent :validate t))))))
