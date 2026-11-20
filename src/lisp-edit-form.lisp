@@ -191,12 +191,26 @@ blank line. For EOF boundary use a single newline."
 
 (defun %line-comment-at-end-p (text form-end)
   "Return true when trimming TEXT after FORM-END leaves a line comment at EOF."
-  (and (%standard-line-comment-p *readtable*)
-       (let* ((tail (string-right-trim '(#\Space #\Tab #\Newline #\Return)
-                                       (subseq text form-end)))
-              (last-segment (car (last (%gap-segments tail)))))
-         (and (eq (first last-segment) :comment)
-              (char= (char tail (second last-segment)) #\;)))))
+  (when (%standard-line-comment-p *readtable*)
+    (let* ((tail (string-right-trim '(#\Space #\Tab #\Newline #\Return)
+                                    (subseq text form-end)))
+           (last-line-start (1+ (or (position #\Newline tail :from-end t) -1))))
+      (when (find #\; tail :start last-line-start)
+        (let ((last-segment (car (last (%gap-segments tail)))))
+          (if last-segment
+              (and (eq (first last-segment) :comment)
+                   (char= (char tail (second last-segment)) #\;))
+              ;; Validation found no readable form in this tail, but it can
+              ;; contain discarded input (e.g. a false reader conditional).
+              ;; A terminal line comment hides an empty list appended on the
+              ;; same line. On a new line the active reader must see the list.
+              (flet ((read-with-probe (separator)
+                       (source-read-from-string (concatenate 'string tail separator "()")
+                                                :eof-error-p nil :eof-value :eof)))
+                (handler-case
+                    (and (eq :eof (read-with-probe " "))
+                         (null (read-with-probe (string #\Newline))))
+                  (error () nil)))))))))
 
 (defun %validate-and-repair-content (content &optional readtable-designator
                                              package-name source-path)
@@ -289,7 +303,8 @@ comments near a target form."
                           (source-read-from-string text :eof-error-p nil :eof-value :eof)
                         (when (eq form :eof)
                           (if (comment-only-p text)
-                              (return-from try-parse (values text nil 0))
+                              (return-from try-parse
+                                (values text nil (%line-comment-at-end-p text 0)))
                               (error "content is empty")))
                         (let* ((len (length text))
                                (rest-start
@@ -306,18 +321,21 @@ comments near a target form."
                               (t
                                (error "content has trailing malformed characters ~
                                        after the first form"))))
-                          (values text nil pos))))
+                          (values text nil (%line-comment-at-end-p text pos)))))
                     :source-path source-path)
                  (error (e)
                    (values nil e)))))
       (when (comment-only-p content)
         (return-from %validate-and-repair-content
-          (values content nil nil nil nil (%line-comment-at-end-p content 0))))
-      (multiple-value-bind (result err end)
+          (values content nil nil nil nil
+                  (call-with-package-context
+                   package-name (lambda () (%line-comment-at-end-p content 0))
+                   :source-path source-path))))
+      (multiple-value-bind (result err line-comment-p)
           (try-parse content)
         (if result
             (values result nil nil (%bracket-warning result nonstandard-rt) nil
-                    (%line-comment-at-end-p result end))
+                    line-comment-p)
             (let ((diagnosis (diagnose-delimiters content)))
               ;; Under a custom readtable the standard delimiter scan is not
               ;; trustworthy (a reader macro may consume raw parentheses as
@@ -355,7 +373,7 @@ comments near a target form."
               ;; balanced text that still fails to read runs it here.
               (let ((repaired (or (getf diagnosis :repaired)
                                   (apply-indent-mode content))))
-                (multiple-value-bind (repaired-result repaired-err repaired-end)
+                (multiple-value-bind (repaired-result repaired-err repaired-line-comment-p)
                     (try-parse repaired)
                   (cond
                     (repaired-result
@@ -371,7 +389,7 @@ comments near a target form."
                                ;; mean it would name "moves" that are not.
                                (and (not nonstandard-rt)
                                     (reparented-forms content repaired-result))
-                               (%line-comment-at-end-p repaired-result repaired-end))))
+                               repaired-line-comment-p)))
                     ((and (typep err 'multiple-top-level-forms-error)
                           (typep repaired-err 'multiple-top-level-forms-error))
                      (error err))

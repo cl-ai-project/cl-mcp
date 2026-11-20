@@ -1301,6 +1301,35 @@ handling and return the file's text afterwards."
                        (apply #'lisp-edit-form args)
                        (ok (string= (fs-read-file path) expected))))))))))
 
+(deftest lisp-edit-form-keeps-a-line-break-after-reader-discarded-forms
+  (loop for (content ends-in-comment) in
+        '(("(defun a () 3) #+(or) (defun absent () 3) ; new note" t)
+          ("(defun a () 3) #+(or) (list \";\" #\\; '|x;y|) #| ; block |#" nil)
+          ("(defun a () 3) #+(or) #\\;" nil))
+        do (dolist (normalize '(nil t))
+             (dolist (old-comment '("" " ; original note"))
+               (testing (format nil "~S, normalize ~S, old comment ~S"
+                                content normalize old-comment)
+                 (let* ((has-old-comment (plusp (length old-comment)))
+                        (source (if has-old-comment
+                                    (format nil "(defun a () 1)~A~%(defun b () 2)~%" old-comment)
+                                    (format nil "(defun a () 1) (defun b () 2)~%")))
+                        (expected (format nil "~A~A~A~A(defun b () 2)~%"
+                                          content
+                                          (if (and ends-in-comment has-old-comment)
+                                              (string #\Newline) "")
+                                          old-comment
+                                          (cond (normalize (format nil "~%~%"))
+                                                (has-old-comment (string #\Newline))
+                                                (ends-in-comment (format nil "~% "))
+                                                (t " "))))
+                        (actual (%default-edit source :form-type "defun" :form-name "a"
+                                               :operation "replace" :content content
+                                               :normalize-blank-lines normalize)))
+                   (ok (string= actual expected))
+                   (ok (= 2 (count :expr (parse-top-level-forms actual)
+                                   :key #'cl-mcp/src/cst:cst-node-kind)))))))))
+
 (deftest lisp-edit-form-normalizes-around-a-form-and-its-trailing-comment
   (let ((source (format nil "(defun a () 1) ; about a~%;; about b~%(defun b () 2)~%"))
          (inserted "(defun n () 0)")
