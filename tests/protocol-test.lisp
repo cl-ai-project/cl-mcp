@@ -621,7 +621,12 @@
              (ok (equal (truename dir)
                         (initialize-root (make-ht "rootPath" (uiop:native-namestring dir)
                                                   "rootUri" "file:///"))))
-             ;; Keep a directory at the spelling a lenient decoder could select.
+             ;; A decoder that preserves malformed escapes or substitutes U+FFFD
+             ;; would select an existing directory, making that mistake observable.
+             (dolist (name '("%" "%Z9" "%C3" "%00" "�"))
+               (ensure-directories-exist
+                (uiop:parse-native-namestring (concatenate 'string prefix name "/")
+                                              :ensure-directory t)))
              (dolist (suffix '("%" "%Z9" "%C3" "%00" "?" "#"))
                (let ((uri (concatenate 'string "file://" prefix suffix)))
                  (ok (null (initialize-root (make-ht "rootUri" uri))) uri)))
