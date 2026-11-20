@@ -165,6 +165,54 @@
           (ok (null (find-package "CLMCP-NO-SUCH-PACKAGE-XYZ/SRC/X"))
               "and nothing was created"))))))
 
+(deftest code-lookup-leaves-missing-names-uninterned
+  (let* ((home (make-package (symbol-name (gensym "LOOKUP-HOME-")) :use '(:cl)))
+         (*package* home))
+    (unwind-protect
+         (dolist (tool '(("code-find" cl-mcp/src/worker/handlers::%handle-code-find)
+                         ("code-describe" cl-mcp/src/worker/handlers::%handle-code-describe)))
+           (dolist (pooled '(nil t))
+             (dolist (syntax '(:bare :qualified :list))
+               (let* ((name (symbol-name (gensym "LOOKUP-MISSING-")))
+                      (input (ecase syntax
+                               (:bare name)
+                               (:qualified (format nil "~A::~A" (package-name home) name))
+                               (:list (format nil "(~A)" name))))
+                      (response (%call-code-tool (first tool) (second tool) input :pooled pooled))
+                      (result (gethash "result" response)))
+                 (testing (format nil "~A ~A pooled=~S" (first tool) input pooled)
+                   (ok (and result (eq t (gethash "isError" result))))
+                   (ok (null (find-symbol name home))))))))
+      (delete-package home))))
+
+(deftest code-lookup-honors-the-package-of-an-unqualified-name
+  (dolist (tool '(("code-find" cl-mcp/src/worker/handlers::%handle-code-find)
+                  ("code-describe" cl-mcp/src/worker/handlers::%handle-code-describe)))
+    (dolist (pooled '(nil t))
+      (flet ((lookup (symbol)
+               (gethash "result"
+                        (%call-code-tool (first tool) (second tool) symbol
+                                         :package "CLMCP-NO-SUCH-LOOKUP-HOME"
+                                         :pooled pooled))))
+        (let* ((result (lookup "car"))
+               (text (and result (gethash "text" (elt (gethash "content" result) 0)))))
+          (ok (and result (eq t (gethash "isError" result))))
+          (ok (and text (search "CLMCP-NO-SUCH-LOOKUP-HOME" text))))
+        (let ((result (lookup "cl-mcp:version")))
+          (ok (and result (gethash "path" result) (not (gethash "isError" result)))))))))
+
+(defvar |lookup:MiX| t "An internal lookup fixture whose colon is part of its name.")
+
+(deftest code-lookup-respects-reader-escapes-and-external-symbols
+  (let ((package "cl-mcp/tests/code-test"))
+    (ok (equal "variable" (nth-value 1 (code-describe-symbol "|lookup:MiX|" :package package))))
+    (ok (equal "variable"
+               (nth-value 1 (code-describe-symbol "cl-mcp/tests/code-test::|lookup:MiX|"))))
+    (ok (handler-case (progn (code-describe-symbol "cl-mcp/tests/code-test:|lookup:MiX|") nil)
+          (cl-mcp/src/tools/helpers:arg-validation-error () t)))
+    (ok (equal "variable" (nth-value 1 (code-describe-symbol "cl:nil"))))
+    (ok (equal "variable" (nth-value 1 (code-describe-symbol ":start"))))))
+
 (deftest code-find-definition-logical-pathname
   (testing "code-find-definition handles CL standard symbols with logical pathnames"
     ;; CL standard symbols like CL:CAR have source locations with logical pathnames
@@ -730,14 +778,19 @@ worker's answer with its JSON types kept."
                           :json-nulls-as-keyword t)
         (yason:parse text))))
 
-(defun %call-code-tool (tool handler symbol &key pooled worker)
+(defun %call-code-tool (tool handler symbol &key package pooled worker)
   "Call TOOL for SYMBOL through process-json-line and return the whole JSON-RPC
 response.  When POOLED, the worker pool path is taken with PROXY-TO-WORKER
 standing in for the pool: it calls WORKER (by default HANDLER, the real handler
 of \"worker/TOOL\", across both JSON boundaries) instead of a worker process."
-  (let* ((request (format nil "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",~
-\"params\":{\"name\":~S,\"arguments\":{\"symbol\":~S}}}"
-                          tool symbol))
+  (let* ((arguments (if package
+                        (make-ht "symbol" symbol "package" package)
+                        (make-ht "symbol" symbol)))
+         (request (with-output-to-string (out)
+                    (yason:encode
+                     (make-ht "jsonrpc" "2.0" "id" 7 "method" "tools/call"
+                              "params" (make-ht "name" tool "arguments" arguments))
+                     out)))
          (method (format nil "worker/~A" tool))
          (proxy 'cl-mcp/src/proxy:proxy-to-worker)
          (original (fdefinition proxy))

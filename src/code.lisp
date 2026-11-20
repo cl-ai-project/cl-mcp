@@ -51,14 +51,11 @@ says so (nothing is interned).
 For code exploration WITHOUT loading systems, use 'clgrep-search' instead.
 Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
   :args ((symbol :type :string :required t
-                 :description "Symbol name like \"cl:mapcar\" (package-qualified preferred). It is
-read as the Lisp reader would, so a symbol the package does not export needs 'pkg::name' ('pkg:name'
-fails on it), and looking a name up interns it")
+                 :description "Lisp symbol name, e.g. \"cl:mapcar\". Use pkg:name for an exported
+symbol or pkg::name for an internal one. Lookup uses existing symbols.")
          (package :type :string
-                  :description "Optional package used when SYMBOL is unqualified; ensure the package exists
-and is loaded. A package that does not exist is not reported: the name is read in
-the current package instead, so it may resolve to a different symbol visible there,
-or not be found"))
+                  :description "Package for an unqualified symbol. Defaults to the current package.
+An unknown package produces a tool error. A qualified symbol supplies its own package."))
   :body
   (with-proxy-dispatch (id "worker/code-find"
                           (make-ht "symbol" symbol "package" package))
@@ -67,7 +64,7 @@ or not be found"))
                 (multiple-value-bind (path line on-disk stale)
                     (code-find-definition symbol :package package)
                   (build-code-find-response symbol path line on-disk stale))
-              (symbol-package-missing (condition)
+              ((or symbol-package-missing arg-validation-error) (condition)
                 (build-tool-refusal-response condition))))))
 
 (define-tool "code-describe"
@@ -82,14 +79,11 @@ says so (nothing is interned).
 For code exploration WITHOUT loading systems, use 'clgrep-search' instead.
 Fallback: Use 'lisp-read-file' with 'name_pattern' to search the file system."
   :args ((symbol :type :string :required t
-                 :description "Symbol name like \"cl:mapcar\" (package-qualified preferred). It is
-read as the Lisp reader would, so a symbol the package does not export needs 'pkg::name' ('pkg:name'
-fails on it), and looking a name up interns it")
+                 :description "Lisp symbol name, e.g. \"cl:mapcar\". Use pkg:name for an exported
+symbol or pkg::name for an internal one. Lookup uses existing symbols.")
          (package :type :string
-                  :description "Optional package used when SYMBOL is unqualified; ensure the package exists
-and is loaded. A package that does not exist is not reported: the name is read in
-the current package instead, so it may resolve to a different symbol visible there,
-or not be found"))
+                  :description "Package for an unqualified symbol. Defaults to the current package.
+An unknown package produces a tool error. A qualified symbol supplies its own package."))
   :body
   (with-proxy-dispatch (id "worker/code-describe"
                           (make-ht "symbol" symbol "package" package))
@@ -104,7 +98,7 @@ or not be found"))
               (symbol-not-describable (condition)
                 (build-code-describe-not-found-response
                  (symbol-not-describable-name condition)))
-              (symbol-package-missing (condition)
+              ((or symbol-package-missing arg-validation-error) (condition)
                 (build-tool-refusal-response condition))))))
 
 (defun %json-nulls->nil (value)

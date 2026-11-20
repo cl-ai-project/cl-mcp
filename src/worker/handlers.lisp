@@ -46,7 +46,8 @@
                 #:native-path-namestring)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht
-                #:text-content)
+                #:text-content
+                #:arg-validation-error)
   (:import-from #:cl-mcp/src/tools/response-builders
                 #:build-eval-response
                 #:build-load-system-response
@@ -277,7 +278,7 @@ caller is answered at the deadline even while the suite is still blocked."
         (multiple-value-bind (path line on-disk stale)
             (code-find-definition symbol :package package)
           (build-code-find-response symbol path line on-disk stale))
-      (symbol-package-missing (condition)
+      ((or symbol-package-missing arg-validation-error) (condition)
         (build-tool-refusal-response condition)))))
 
 ;;; ---------------------------------------------------------------------------
@@ -302,7 +303,7 @@ it can describe."
       (symbol-not-describable (condition)
         (build-code-describe-not-found-response
          (symbol-not-describable-name condition)))
-      (symbol-package-missing (condition)
+      ((or symbol-package-missing arg-validation-error) (condition)
         (build-tool-refusal-response condition)))))
 
 ;;; ---------------------------------------------------------------------------
