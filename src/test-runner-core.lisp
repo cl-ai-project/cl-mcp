@@ -205,25 +205,21 @@ it is only ever a guess, and in a long-lived worker it is a stale one."
 
 (defun detect-test-framework (system-name)
   "Detect which test framework SYSTEM-NAME uses.
-Returns :ROVE, :FIVEAM, :PROVE, or :ASDF (fallback).
+Return :ROVE, :FIVEAM, :PROVE, or :ASDF (fallback), without loading systems.
 
-The system's own :depends-on decides, because the image cannot: cl-mcp's
-worker is long lived and shared, so the moment any session loads a Rove
-project, Rove is in the image forever.  Detecting from loaded packages
-therefore reported :ROVE for every system thereafter -- a FiveAM system was
-handed to the Rove backend, which found none of its suites, ran nothing, and
-returned passed=0 failed=0.  That renders as a pass, so the agent was told
-its tests were green when none had run.
+Look for known frameworks in the system's own :depends-on first, then in
+its transitive dependencies.  When several frameworks are declared, prefer
+FiveAM if the system has registered FiveAM suites.  Otherwise use the first
+declared framework in *TEST-FRAMEWORK-SYSTEMS* order.
 
-Order of evidence:
-  1. exactly one framework among the transitive dependencies -> that one;
-  2. several -- a project may depend on both, or inherit one through a
-     library -- broken by whether the system actually has FiveAM suites
-     registered, since that is direct evidence rather than a declaration;
-  3. none, or an unresolvable system -> the loaded-package guess, which is
-     all the information there is."
+Use :ASDF for a registered system with no known framework in its
+dependencies.  Only guess from the loaded packages when ASDF has not
+registered the system."
   (let ((declared (%declared-test-frameworks system-name)))
-    (cond ((null declared) (%framework-from-image))
+    (cond ((null declared)
+           (if (ignore-errors (asdf:registered-system system-name))
+               :asdf
+               (%framework-from-image)))
           ((null (rest declared)) (first declared))
           ((and (member :fiveam declared)
                 (%find-fiveam-suites-for-system system-name))
