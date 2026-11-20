@@ -393,6 +393,23 @@ Cleans up server and socket on exit. AUTHENTICATED selects post-auth tests."
           (ok (stringp (gethash "stdout" result))
               "result has stdout string"))))))
 
+(deftest worker-eval-preserves-supplementary-display-text
+  (with-handler-server (stream :authenticated t)
+    (let ((params (make-hash-table :test 'equal))
+          (expected (format nil "😀~C~%~C!" #\Tab #\Return)))
+      (setf (gethash "code" params)
+            "(let ((s (format nil \"~C[31m😀~C[0m~C~C~C~%~C!\" (code-char 27) (code-char 27)
+                              (code-char 0) (code-char 7) #\\Tab #\\Return)))
+               (write-string s)
+               (write-string s *error-output*)
+               s)")
+      (let* ((result (%result-of (%send-and-receive stream 1 "worker/eval" params)))
+             (text (gethash "text" (aref (gethash "content" result) 0))))
+        (ok (eql 0 (search (prin1-to-string expected) text))
+            "the printed value starts the decoded content with the emoji and whitespace intact")
+        (ok (string= expected (gethash "stdout" result)))
+        (ok (string= expected (gethash "stderr" result)))))))
+
 (deftest worker-survives-a-lone-surrogate-in-a-result
   (testing "a result holding U+DFFF is answered, and the connection goes on"
     ;; Yason writes a lone surrogate as the character itself, and the UTF-8

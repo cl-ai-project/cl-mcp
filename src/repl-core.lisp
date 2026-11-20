@@ -64,8 +64,7 @@ Text nested too deeply to read safely is refused first (CHECK-LISP-NESTING)."
                  repl-eval))
 
 (defun %sanitize-control-chars (string)
-  "Remove control characters that are invalid in JSON strings.
-Delegates to sanitize-for-json which also strips DEL (127)."
+  "Apply the display filter to the printed result or a captured output stream."
   (sanitize-for-json string))
 
 (defun %truncate-output (string max-output-length)

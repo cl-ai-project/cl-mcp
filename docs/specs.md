@@ -16,7 +16,7 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 | Function | Function Spec (one per function) | Properties |
 |---|---|---|
 | `cl-mcp/src/utils/strings:ensure-trailing-newline` | ends in a newline, starts with the whole argument as it was before the call, at most one character longer, and leaves the argument as it was | `ensure-trailing-newline-keeps-terminated-text` |
-| `cl-mcp/src/utils/sanitize:sanitize-for-json` | three cases: `NIL` gives `NIL`; a string gives a string free of what the docstring says is stripped (C0 controls but tab/LF/CR, DEL, anything above U+FFFF) and no longer than the argument; an integer gives its printed form | `…-keeps-allowed-text`, `…-is-idempotent`, `…-removes-complete-escape-sequences`, `…-removes-truncated-escape-sequence`, `…-leaves-its-argument-unmodified` |
+| `cl-mcp/src/utils/sanitize:sanitize-for-json` | `NIL` gives `NIL`. A string gives a string no longer than the argument and free of DEL and C0 controls other than tab/LF/CR. An integer gives its printed form. The preservation property includes supplementary Unicode characters. | `…-keeps-allowed-text`, `…-is-idempotent`, `…-removes-complete-escape-sequences`, `…-removes-truncated-escape-sequence`, `…-leaves-its-argument-unmodified` |
 | `cl-mcp/src/utils/sanitize:sanitize-error-message` | a string of at most 500 characters, on one line, with no whitespace run and none at either end | `…-keeps-normalized-text`, `…-truncates-long-text`, `…-keeps-only-visible-words` |
 | `cl-mcp/src/utils/paths:allowed-read-path` | none (see *Read access*) | `read-allows-project-files-as-themselves`, `read-follows-dependency-registration`, `read-denies-unlisted-regions`, `read-judges-symlinks-by-their-target` |
 | `cl-mcp/src/utils/paths:resolve-readable-path` | none | the same four |
@@ -2364,12 +2364,10 @@ These are recorded here, not fixed in this change:
   both shapes out, and this file says so.
 - `sanitize-error-message` removes `Stream:` wherever it appears, so
   `"UpStream: closed"` gives `"Up"`.
-- `sanitize-for-json` passes lone surrogates (U+D800–U+DFFF) through. SBCL
-  cannot encode them as UTF-8, and returning one from `repl-eval`, as in
-  `(string (code-char #xD800))`, takes the MCP worker down. The docstring does
-  not claim to handle them, so this bundle neither generates nor claims
-  anything about them. Never put a surrogate in a generator: a counterexample
-  carrying one crashes the worker that prints it.
+- The display sanitizer passes lone surrogates (U+D800–U+DFFF) through. They
+  are outside this contract's generated inputs. The transport encoder replaces
+  a lone surrogate with U+FFFD before the UTF-8 write. The worker tests cover
+  this case alongside the JSON surrogate pair used for a supplementary character.
 - `allowed-read-path` resolves `..` lexically before the filesystem sees the
   path, so `..` after a symlink cancels the link's name instead of leaving the
   link's target. Take `dlnk` in the project, a link to `outside/`: the OS

@@ -16,25 +16,21 @@
 (in-package #:cl-mcp/src/utils/sanitize)
 
 (defun %string-needs-sanitizing-p (string)
-  "Return T if STRING contains any characters that sanitize-for-json would strip.
-Fast pre-scan: iterates once looking for ESC, control chars, DEL, or
-supplemental plane characters."
+  "Return true if STRING contains a C0 control to filter or DEL."
   (declare (type string string) (optimize (speed 3) (safety 1)))
   (loop for i fixnum from 0 below (length string)
         for code fixnum = (char-code (char string i))
-        thereis (or (= code 27)        ; ESC
-                    (and (< code 32)    ; Control chars
-                         (not (= code 9))   ; except tab
+        thereis (or (and (< code 32)
+                         (not (= code 9))   ; tab
                          (not (= code 10))  ; newline
                          (not (= code 13))) ; carriage return
-                    (= code 127)       ; DEL
-                    (> code #xFFFF)))) ; Supplemental plane
+                    (= code 127))))
 
 (defun sanitize-for-json (string)
-  "Remove characters that are invalid in JSON strings.
+  "Filter terminal controls from STRING for display.
 Strips ANSI/ECMA-48 escape sequences (CSI, OSC, DCS, SOS, PM, APC, and
-2-byte sequences like SS2/SS3), control characters (codes 0-31 except tab,
-newline, carriage return), and the DEL character (code 127).
+2-byte sequences like SS2/SS3), C0 controls except tab, newline and carriage
+return, and DEL. Preserves supplementary Unicode characters in display text.
 Returns NIL when given NIL. Non-string inputs are converted via
 princ-to-string then sanitized."
   (when (null string) (return-from sanitize-for-json nil))
@@ -122,10 +118,6 @@ princ-to-string then sanitized."
                 ((< code 32) (incf i))
                 ;; Strip DEL (127)
                 ((= code 127) (incf i))
-                ;; Supplemental plane chars (above U+FFFF) crash yason:encode
-                ;; on some streams — replace with U+FFFD REPLACEMENT CHARACTER
-                ((> code #xFFFF)
-                 (vector-push-extend (code-char #xFFFD) result) (incf i))
                 ;; Pass through everything else
                 (t (vector-push-extend char result) (incf i)))))
     (coerce result 'string)))

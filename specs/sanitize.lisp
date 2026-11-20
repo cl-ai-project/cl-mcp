@@ -66,14 +66,11 @@
 ;;; Policy predicates
 
 (defun json-policy-clean-p (string)
-  "True when STRING holds none of the characters SANITIZE-FOR-JSON's docstring
-says it strips or replaces: C0 controls other than tab, newline and carriage
-return (ESC among them), DEL, and characters above U+FFFF."
+  "True when STRING holds no DEL or C0 controls other than tab, newline and return."
   (notany (lambda (character)
             (let ((code (char-code character)))
               (or (and (< code 32) (not (member code '(9 10 13))))
-                  (= code 127)
-                  (> code #xFFFF))))
+                  (= code 127))))
           string))
 
 (defun single-line-normalized-p (string)
@@ -384,8 +381,10 @@ single-spaced messages one below, at and one above the 500-character limit."
 CL-SPEC:*REGISTRY*.  Registering again replaces each definition by name."
   ;; SANITIZE-FOR-JSON
   (defgenerator allowed-text-generator ()
-    "Draw text SANITIZE-FOR-JSON must leave alone (see DRAW-ALLOWED-TEXT)."
-    (draw-allowed-text :max-length 24))
+    "Draw allowed display text, including supplementary Unicode characters."
+    (if (chance 25)
+        (string (code-character (pick *supplementary-codes*)))
+        (draw-allowed-text :max-length 24)))
   (defspec allowed-text string
     (:generator allowed-text-generator))
   (defgenerator mixed-segments-generator ()
@@ -417,9 +416,9 @@ of a complete escape sequence that follow it, at least one and fewer than all."
                   ((< roll 25) (- (random (expt 10 20)) (floor (expt 10 20) 2)))
                   (t (render-segments (loop repeat (random 9) collect (draw-segment))))))))
   (defspec-function sanitize-for-json
-    "NIL gives NIL.  A string gives a string with none of the characters the
-docstring says are stripped or replaced, and no longer than the argument.  An
-integer gives its printed form, which never needs sanitizing.  Checked over
+    "NIL gives NIL.  A string gives a string no longer than the argument, free
+of DEL and C0 controls other than tab, newline and return.  An integer
+gives its printed form, which never needs sanitizing.  Checked over
 SANITIZE-FOR-JSON-ARGUMENTS; other non-string objects are outside this
 contract.  The length clause reads the argument after the call; the generated
 strings are simple, and no call can change a simple string's length.  That the

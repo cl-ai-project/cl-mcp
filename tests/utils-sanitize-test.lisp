@@ -19,6 +19,13 @@
 (deftest sanitize-for-json-clean-string-passes-through
   (ok (string= "hello world" (sanitize-for-json "hello world"))))
 
+(deftest sanitize-for-json-preserves-supplementary-characters
+  (let ((text (map 'string #'code-char '(#x10000 #x1f600 #x10ffff))))
+    (ok (eq text (sanitize-for-json text))
+        "supplementary characters alone take the clean-string path")
+    (ok (string= text (sanitize-for-json (format nil "~C~A~C" (code-char 0) text (code-char 127))))
+        "filtering adjacent controls preserves every supplementary character")))
+
 (deftest sanitize-for-json-strips-control-chars
   (let ((bel (code-char 7))
         (bs (code-char 8))
