@@ -127,6 +127,33 @@
   (dolist (member '("\"result\":{}" "\"error\":{\"code\":1,\"message\":\"test\"}"))
     (ok (null (process-json-line (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,~A}" member))))))
 
+(deftest client-error-without-id-follows-negotiation
+  (let ((state (make-state))
+        (failure "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}"))
+    (dolist (version '("2024-11-05" "2025-03-26" "2025-06-18"))
+      (setf (protocol-version state) version)
+      (ok (= -32600 (gethash "code" (gethash "error" (parse (process-json-line failure state)))))))
+    (setf (protocol-version state) "2025-11-25")
+    (ok (null (process-json-line failure state)))
+    (dolist (line '("{\"jsonrpc\":\"2.0\",\"result\":{}}"
+                    "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":1,\"message\":\"x\"}}"))
+      (ok (= -32600 (gethash "code" (gethash "error" (parse (process-json-line line state)))))))))
+
+(deftest failing-notification-is-contained
+  (let* ((handler 'cl-mcp/src/protocol:handle-notification)
+         (original (symbol-function handler))
+         (line "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}"))
+    (unwind-protect
+         (dolist (condition '(simple-error storage-condition))
+           (setf (symbol-function handler)
+                 (lambda (&rest arguments)
+                   (declare (ignore arguments))
+                   (error condition)))
+           (ok (null (handler-case (process-json-line line)
+                       (error () :escaped)
+                       (storage-condition () :escaped)))))
+      (setf (symbol-function handler) original))))
+
 (deftest batch-dispatch-follows-negotiation
   (let* ((state (make-state))
          (ping "{\"jsonrpc\":\"2.0\",\"id\":\"a\",\"method\":\"ping\"}")

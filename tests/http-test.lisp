@@ -681,6 +681,15 @@ Host header's value, which is 127.0.0.1:PORT otherwise."
                  (let ((answers (parse reply)))
                    (ok (and (vectorp answers) (= 1 (length answers))
                             (eql 2 (gethash "id" (aref answers 0))))))))
+             (testing "both ping requests receive their own result"
+               (multiple-value-bind (status headers reply)
+                   (request "POST" (format nil "[~A,~A]" ping
+                                           "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}"))
+                 (declare (ignore headers))
+                 (ok (= 200 status))
+                 (let ((answers (parse reply)))
+                   (ok (equal '(2 3) (map 'list (lambda (item) (gethash "id" item)) answers)))
+                   (ok (every (lambda (item) (hash-table-p (gethash "result" item))) answers)))))
              (multiple-value-bind (status headers) (request "OPTIONS")
                (ok (= 204 status))
                (ok (search "MCP-Protocol-Version" (%header-value headers "Access-Control-Allow-Headers")
@@ -689,7 +698,20 @@ Host header's value, which is 127.0.0.1:PORT otherwise."
                (ok (= 405 status))
                (ok (%header-value headers "Allow")))
              (ok (= 204 (request "DELETE")))
-             (ok (= 404 (request "DELETE"))))))
+             (ok (= 404 (request "DELETE")))
+             (testing "November 2025 accepts an error response with an omitted id"
+               (setf id nil)
+               (multiple-value-bind (status headers)
+                   (request "POST" (concatenate 'string init ",\"id\":1,\"params\":"
+                                                "{\"protocolVersion\":\"2025-11-25\"}}"))
+                 (ok (= 200 status))
+                 (setf id (%header-value headers "Mcp-Session-Id")))
+               (multiple-value-bind (status headers reply)
+                   (request "POST" (concatenate 'string "{\"jsonrpc\":\"2.0\",\"error\":"
+                                                "{\"code\":-32700,\"message\":\"Parse error\"}}"))
+                 (declare (ignore headers))
+                 (ok (= 202 status))
+                 (ok (equal "" reply)))))))
     (stop-http-server)))
 
 (deftest http-cancellation-stops-a-running-clgrep-search
