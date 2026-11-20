@@ -2,6 +2,8 @@
 
 (defpackage #:cl-mcp/tests/lisp-read-file-test
   (:use #:cl)
+  (:import-from #:cl-mcp/tests/readtable-fixture
+                #:call-with-qualified-readtable #:call-readtable-tool)
   (:import-from #:rove
                 #:deftest #:testing #:ok #:ng
                 #:skip)
@@ -859,48 +861,35 @@ shapes issue #322 found invisible to name-based reading.")
 
 
 (deftest lisp-read-file-with-package-qualified-readtable
-  (testing "readtable parameter supports package-qualified symbol names (pkg:sym format)"
-    (handler-case
-        (progn
-          (unless (%try-load :named-readtables) (error "not available"))
-          (unless (%try-load :cl-interpol) (error "not available"))
-          ;; Create a test package with a named readtable at runtime
-          ;; to avoid parse-time errors with non-existent package-qualified symbols
-          (let ((test-pkg-name "CL-MCP-TEST-PKG-QUALIFIED-RT"))
-            (when (find-package test-pkg-name)
-              (delete-package test-pkg-name))
-            (unwind-protect
-                 (progn
-                   ;; Create package and register readtable dynamically
-                   (eval `(defpackage ,test-pkg-name
-                            (:use :cl)))
-                   (eval `(in-package ,test-pkg-name))
-                   ;; Copy interpol-syntax to our test package's readtable
-                   ;; Use funcall to avoid read-time package resolution
-                   (let ((defreadtable-fn (find-symbol "DEFREADTABLE" :named-readtables)))
-                     (eval `(,defreadtable-fn
-                                ,(intern "TEST-INTERPOL" test-pkg-name)
-                              (:merge :interpol-syntax))))
-                   (in-package :cl-mcp/tests/lisp-read-file-test)
-                   ;; Now test reading with package-qualified readtable string
-                   (with-temp-lisp-file "tests/tmp/lisp-read-pkg-qualified-rt.lisp"
-                       (format nil "(in-package :cl-user)~%~%(defun greet-pkg (name)~%  #?\"Hello, ${name}!\")~%")
-                     (lambda (path)
-                       ;; Use the package-qualified format: "pkg:sym"
-                       (let* ((rt-string (format nil "~A:~A" test-pkg-name "TEST-INTERPOL"))
-                              (result (lisp-read-file path :readtable rt-string))
-                              (content (gethash "content" result)))
-                         (ok (stringp content))
-                         (ok (search "(defun greet-pkg" content))))))
-              ;; Cleanup: unregister readtable and delete package
-              (ignore-errors
-               (let ((rt-sym (find-symbol "TEST-INTERPOL" test-pkg-name))
-                     (unregister-fn (find-symbol "UNREGISTER-READTABLE" :named-readtables)))
-                 (when (and rt-sym unregister-fn)
-                   (funcall unregister-fn rt-sym))))
-              (ignore-errors (delete-package test-pkg-name)))))
-      (error (e)
-        (skip (format nil "Test dependencies not available: ~A" e))))))
+  (call-with-qualified-readtable
+   (lambda (name client-name)
+     (with-temp-lisp-file "tests/tmp/lisp-read-pkg-qualified-rt.lisp"
+         (format nil "(defun target () #?:before)~%")
+       (lambda (path)
+         (flet ((check-expansion (result text-key)
+                  (let ((meta (gethash "meta" result)))
+                    (ng (gethash "unparseable" meta) "the reader parsed the file")
+                    (ok (eql 1 (gethash "name_matches" meta)))
+                    (ok (eql 1 (gethash "expanded_forms" meta)))
+                    (ok (search "(defun target () #?:before)" (gethash text-key result))))))
+           (testing "The Lisp API accepts the readtable's symbol"
+             (check-expansion (lisp-read-file path :readtable name :name-pattern "^target$")
+                              "content"))
+           (testing "A JSON tool call accepts its package-qualified name"
+             (check-expansion
+              (call-readtable-tool
+               "lisp-read-file"
+               (cl-mcp/src/tools/helpers:make-ht
+                "path" path "name_pattern" "^target$" "readtable" client-name))
+              "text"))
+           (testing "Both APIs mark recovery when the readtable is omitted"
+             (let ((direct (lisp-read-file path :name-pattern "^target$"))
+                   (json (call-readtable-tool
+                          "lisp-read-file"
+                          (cl-mcp/src/tools/helpers:make-ht
+                           "path" path "name_pattern" "^target$"))))
+               (ok (eq t (gethash "unparseable" (gethash "meta" direct))))
+               (ok (eq t (gethash "unparseable" (gethash "meta" json))))))))))))
 
 (deftest lisp-read-file-raw-truncated-footer
   (testing "appends footer when content is truncated in raw mode"

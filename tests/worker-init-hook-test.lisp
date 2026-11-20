@@ -186,58 +186,79 @@
 
 (defun integration-entry-thunk () (setf *entry-ran* t) 12345)
 
-(defun %rpc (stream id method &optional params)
-  "Send one JSON-RPC line and read one response line; return the parsed hash."
-  (let ((req (make-hash-table :test 'equal)))
-    (setf (gethash "jsonrpc" req) "2.0"
-          (gethash "id" req) id
-          (gethash "method" req) method)
-    (when params (setf (gethash "params" req) params))
-    (yason:encode req stream) (terpri stream) (force-output stream)
-    (yason:parse (read-line stream))))
+(defun %rpc-result (stream id method &optional params)
+  "Send one JSON-RPC request and return its result object or report the RPC error."
+  (let ((request (make-hash-table :test 'equal)))
+    (setf (gethash "jsonrpc" request) "2.0"
+          (gethash "id" request) id
+          (gethash "method" request) method)
+    (when params (setf (gethash "params" request) params))
+    (yason:encode request stream)
+    (terpri stream)
+    (force-output stream)
+    (let* ((response (yason:parse (read-line stream)))
+           (rpc-error (gethash "error" response))
+           (result (gethash "result" response)))
+      (when rpc-error
+        (error "~A (id ~D) failed with JSON-RPC error ~D: ~A"
+               method id (gethash "code" rpc-error) (gethash "message" rpc-error)))
+      (unless (and (equal (gethash "jsonrpc" response) "2.0")
+                   (eql (gethash "id" response) id)
+                   (hash-table-p result))
+        (error "~A (id ~D) returned an invalid JSON-RPC result" method id))
+      result)))
 
 (deftest init-start-then-status-integration
-  (testing "worker/init-start acks fast; init runs the entry; status reaches running"
+  (testing "worker/init-start acks; init runs the entry; status reaches running"
     (if (not (socket-available-p))
         (skip "socket unavailable")
-        (let ((server (make-worker-server :port 0)))
-          (register-all-handlers server)
-          (setf *entry-ran* nil)
-          (cl-mcp/src/worker/init-hook::%reset-init-state)
+        (let* ((previous-secret (uiop:getenv "MCP_WORKER_SECRET"))
+               (secret (or previous-secret "init-hook-test-secret"))
+               (server (make-worker-server :port 0)))
           (unwind-protect
-               (let ((port (server-port server)))
-                 (bt:make-thread (lambda () (start-accept-loop server))
-                                 :name "test-init-accept")
-                 (sleep 0.1)
-                 (let ((socket (usocket:socket-connect "127.0.0.1" port
-                                                       :element-type 'character)))
+               (progn
+                 (unless previous-secret
+                   (sb-posix:setenv "MCP_WORKER_SECRET" secret 1))
+                 (register-all-handlers server)
+                 (setf *entry-ran* nil)
+                 (cl-mcp/src/worker/init-hook::%reset-init-state)
+                 (let ((socket (usocket:socket-connect "127.0.0.1" (server-port server)
+                                                       :element-type 'character))
+                       (accept-thread nil))
                    (unwind-protect
-                        (let ((stream (usocket:socket-stream socket))
-                              (params (make-hash-table :test 'equal)))
-                          (setf (gethash "entry" params)
-                                "CL-MCP/TESTS/WORKER-INIT-HOOK-TEST:INTEGRATION-ENTRY-THUNK")
-                          (let ((ack (%rpc stream 1 "worker/init-start" params)))
-                            (ok (gethash "accepted" (gethash "result" ack))
-                                "init-start acked with accepted=t"))
-                          (let ((final nil))
-                            (loop repeat 50
-                                  for st = (gethash "result"
-                                            (%rpc stream 2 "worker/init-status"))
-                                  for state = (gethash "init_state" st)
-                                  do (setf final state)
-                                  until (member state '("running" "failed")
-                                                :test #'string=)
-                                  do (sleep 0.05))
-                            (ok (string= final "running") "init reached running")
-                            (ok *entry-ran* "entry thunk executed")
-                            (ok (eql (gethash "app_port"
-                                              (gethash "result"
-                                                       (%rpc stream 3
-                                                             "worker/init-status")))
-                                     12345)
-                                "app_port recorded")))
-                     (ignore-errors (usocket:socket-close socket)))))
-            (stop-server server))))))
+                        (progn
+                          (setf accept-thread
+                                (bt:make-thread (lambda () (start-accept-loop server))
+                                                :name "test-init-accept"))
+                          (let ((stream (usocket:socket-stream socket))
+                                (auth-params (make-hash-table :test 'equal))
+                                (init-params (make-hash-table :test 'equal)))
+                            (setf (gethash "secret" auth-params) secret
+                                  (gethash "entry" init-params)
+                                  "CL-MCP/TESTS/WORKER-INIT-HOOK-TEST:INTEGRATION-ENTRY-THUNK")
+                            (ok (eq t (gethash "authenticated"
+                                               (%rpc-result stream 1 "worker/authenticate"
+                                                            auth-params)))
+                                "the test connection authenticated")
+                            (ok (eq t (gethash "accepted"
+                                               (%rpc-result stream 2 "worker/init-start"
+                                                            init-params)))
+                                "init-start acked with accepted=true")
+                            (let ((status nil))
+                              (loop for id from 3 below 53
+                                    do (setf status (%rpc-result stream id "worker/init-status"))
+                                    until (member (gethash "init_state" status)
+                                                  '("running" "failed") :test #'string=)
+                                    do (sleep 0.05))
+                              (ok (string= (gethash "init_state" status) "running")
+                                  "init reached running")
+                              (ok *entry-ran* "entry thunk executed")
+                              (ok (eql (gethash "app_port" status) 12345)
+                                  "app_port recorded"))))
+                     (ignore-errors (usocket:socket-close socket))
+                     (when accept-thread (bt:join-thread accept-thread)))))
+            (stop-server server)
+            (unless previous-secret (sb-posix:unsetenv "MCP_WORKER_SECRET")))))))
 
 (deftest init-eval-failure-records-failed
   (testing "an erroring eval form drives init to :failed with the message recorded"
