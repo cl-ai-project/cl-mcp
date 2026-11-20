@@ -369,6 +369,14 @@ Output fields:
 Nested objects are returned as `object-ref` with their own `id` for further inspection.
 Circular references are detected and marked as `circular-ref`.
 
+Primitive elements, hash keys and values, and slot values carry both `value` and
+`printed`. The text rows use `printed` so a string `"A"`, symbol `A`, keyword
+`:A` and character `#\A` are distinguishable. Symbols also carry `package` when
+interned. The expanded locals in a `repl-eval` backtrace use the same notation.
+A dotted list's final row starts with `.` and shows its tail using the same
+value, handle and depth rules as other elements. A slot holding the keyword
+`:UNBOUND` displays that keyword. A slot without a value displays `#<unbound-slot>`.
+
 Example workflow:
 ```json
 // 1. Evaluate code that returns a complex object

@@ -62,12 +62,12 @@
                          (generate-result-preview outer :max-depth 1)))
                (deep (cl-mcp/src/inspect:format-inspect-elements
                       (generate-result-preview outer :max-depth 3))))
-           (ok (search "inner =>" shallow)
+           (ok (search "\"inner\" =>" shallow)
                "the outer entry is listed at either depth")
-           (ok (not (search "answer =>" shallow))
+           (ok (not (search "\"answer\" =>" shallow))
                "at depth 1 the child was never expanded, so nothing to write")
-           (ok (search "inner =>" deep))
-           (ok (search "answer =>" deep)
+           (ok (search "\"inner\" =>" deep))
+           (ok (search "\"answer\" =>" deep)
                "at depth 3 the child's own entries are written out")
            (ok (search "42" deep) "with their values")))))))
 
@@ -268,6 +268,27 @@
            (when unbound-slot
              (ok (string= "unbound" (ht-get (ht-get unbound-slot "value") "kind"))))))))))
 
+#+sbcl
+(deftest inspect-distinguishes-an-unbound-slot-from-the-keyword
+  (with-fresh-registry
+   (lambda ()
+     (let* ((*print-case* :upcase)
+            (obj (make-instance 'test-person :name :unbound))
+            (inspection (inspect-object-by-id (register-object obj)))
+            (slots (gethash "slots" inspection))
+            (text (cl-mcp/src/inspect:format-inspect-elements inspection)))
+       (flet ((slot-repr (name)
+                (gethash "value" (find name slots :test #'string=
+                                       :key (lambda (slot) (gethash "name" slot))))))
+         (let ((bound (slot-repr "NAME"))
+               (unset (slot-repr "UNBOUND-SLOT")))
+           (ok (equal "SYMBOL" (gethash "type" bound)))
+           (ok (equal "KEYWORD" (gethash "package" bound)))
+           (ok (equal "UNBOUND" (gethash "value" bound)))
+           (ok (equal "unbound" (gethash "kind" unset)))
+           (ok (search "NAME: :UNBOUND" text))
+           (ok (search "UNBOUND-SLOT: #<unbound-slot>" text))))))))
+
 ;;; Test structure inspection
 
 #+sbcl
@@ -280,6 +301,20 @@
               (result (inspect-object-by-id id)))
          (ok (string= "structure" (ht-get result "kind")))
          (ok (string= "TEST-POINT" (ht-get result "class"))))))))
+
+#+sbcl
+(deftest inspect-structure-slot-containing-unbound-keyword
+  (with-fresh-registry
+   (lambda ()
+     (let* ((*print-case* :upcase)
+            (point (make-test-point :x :unbound :y 42))
+            (inspection (inspect-object-by-id (register-object point)))
+            (slot (find "X" (gethash "slots" inspection) :test #'string=
+                        :key (lambda (slot) (gethash "name" slot))))
+            (value (and slot (gethash "value" slot))))
+       (ok (and value (equal "KEYWORD" (gethash "package" value))))
+       (ok (and value (equal "UNBOUND" (gethash "value" value))))
+       (ok (search "X: :UNBOUND" (cl-mcp/src/inspect:format-inspect-elements inspection)))))))
 
 ;;; Test circular reference detection
 
@@ -378,6 +413,27 @@
            (let ((last-elem (car (last elements))))
              (ok (string= "dotted-tail" (ht-get last-elem "kind"))))))))))
 
+(deftest inspect-dotted-tail-rows-show-values-and-handles
+  (with-fresh-registry
+   (lambda ()
+     (let* ((id (register-object (cons 1 (vector 2 3))))
+            (shallow (inspect-object-by-id id :max-depth 1))
+            (tail (elt (gethash "elements" shallow) 1))
+            (child (gethash "value" tail))
+            (handle (gethash "id" child))
+            (shallow-text (cl-mcp/src/inspect:format-inspect-elements shallow))
+            (deep-text (cl-mcp/src/inspect:format-inspect-elements
+                        (inspect-object-by-id id :max-depth 2)))
+            (pair-text (cl-mcp/src/inspect:format-inspect-elements
+                        (inspect-object-by-id (register-object (cons 1 "tail"))))))
+       (ok (equal "dotted-tail" (gethash "kind" tail)))
+       (ok (equal "object-ref" (gethash "kind" child)))
+       (ok (stringp handle))
+       (ok (search (format nil "[1] . #(2 3) [object-id: ~A]" handle) shallow-text))
+       (ok (not (search "[0] 2" shallow-text)))
+       (ok (search "[0] 2" deep-text))
+       (ok (search "[1] . \"tail\"" pair-text))))))
+
 (deftest inspect-improper-list
   (testing "inspect improper list (a b . c)"
     (with-fresh-registry
@@ -467,6 +523,26 @@
               "content text should include Elements section")
              (ok (search "[0]" text)
               "content text should show element indices")))))))))
+
+(deftest inspect-primitive-rows-retain-lisp-notation
+  (with-fresh-registry
+   (lambda ()
+     (let* ((*package* (find-package :cl-user))
+            (*print-case* :upcase)
+            (object (list "A" 'cl-user::a :a #\A (make-symbol "A") 'test-person 42))
+            (inspection (inspect-object-by-id (register-object object)))
+            (elements (gethash "elements" inspection))
+            (text (cl-mcp/src/inspect:format-inspect-elements inspection))
+            (printed '("\"A\"" "A" ":A" "#\\A" "#:A"
+                       "CL-MCP/TESTS/INSPECT-TEST::TEST-PERSON" "42")))
+       (ok (equal printed (map 'list (lambda (el) (gethash "printed" el)) elements)))
+       (ok (equal '("A" "A" "A" "A" "A" "TEST-PERSON" 42)
+                  (map 'list (lambda (el) (gethash "value" el)) elements)))
+       (loop for spelling in printed
+             for index from 0
+             do (ok (search (format nil "[~D] ~A" index spelling) text)))
+       (ok (equal "KEYWORD" (gethash "package" (elt elements 2))))
+       (ok (null (gethash "package" (elt elements 4))))))))
 
 (deftest inspect-content-text-includes-entries
  (testing

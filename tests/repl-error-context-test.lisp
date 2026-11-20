@@ -383,7 +383,7 @@ budget pressure a real response is under."
             (ok (search "TABLE = " with))
             (ok (search "Entries (" with)
                 "with it the hash-table's entries are expanded in place")
-            (ok (search "a => 2" with)
+            (ok (search "\"a\" => 2" with)
                 "and those entries are the real contents")))))))
 
 (deftest one-huge-local-does-not-evict-the-frames-below-it
