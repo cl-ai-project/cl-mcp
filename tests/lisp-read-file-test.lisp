@@ -866,15 +866,30 @@ shapes issue #322 found invisible to name-based reading.")
      (with-temp-lisp-file "tests/tmp/lisp-read-pkg-qualified-rt.lisp"
          (format nil "(defun target () #?:before)~%")
        (lambda (path)
-         (testing "The Lisp API accepts the readtable's symbol"
-           (let ((result (lisp-read-file path :readtable name :name-pattern "^target$")))
-             (ok (search "(defun target () #?:before)" (gethash "content" result)))))
-         (testing "A JSON tool call accepts its package-qualified name"
-           (let ((result (call-readtable-tool
+         (flet ((check-expansion (result text-key)
+                  (let ((meta (gethash "meta" result)))
+                    (ng (gethash "unparseable" meta) "the reader parsed the file")
+                    (ok (eql 1 (gethash "name_matches" meta)))
+                    (ok (eql 1 (gethash "expanded_forms" meta)))
+                    (ok (search "(defun target () #?:before)" (gethash text-key result))))))
+           (testing "The Lisp API accepts the readtable's symbol"
+             (check-expansion (lisp-read-file path :readtable name :name-pattern "^target$")
+                              "content"))
+           (testing "A JSON tool call accepts its package-qualified name"
+             (check-expansion
+              (call-readtable-tool
+               "lisp-read-file"
+               (cl-mcp/src/tools/helpers:make-ht
+                "path" path "name_pattern" "^target$" "readtable" client-name))
+              "text"))
+           (testing "Both APIs mark recovery when the readtable is omitted"
+             (let ((direct (lisp-read-file path :name-pattern "^target$"))
+                   (json (call-readtable-tool
                           "lisp-read-file"
                           (cl-mcp/src/tools/helpers:make-ht
-                           "path" path "name_pattern" "^target$" "readtable" client-name))))
-             (ok (search "(defun target () #?:before)" (gethash "text" result))))))))))
+                           "path" path "name_pattern" "^target$"))))
+               (ok (eq t (gethash "unparseable" (gethash "meta" direct))))
+               (ok (eq t (gethash "unparseable" (gethash "meta" json))))))))))))
 
 (deftest lisp-read-file-raw-truncated-footer
   (testing "appends footer when content is truncated in raw mode"
