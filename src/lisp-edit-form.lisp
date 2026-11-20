@@ -1483,7 +1483,8 @@ replaced form, and the line the matched form starts on. A dry run carries the re
                          ;; only where the gaps read the standard way.
                          (if (and spans normalize-blank-lines
                                   (%gap-syntax-standard-p active-readtable))
-                             (%normalize-block-gaps validated-content spans (source-newline original))
+                             (%normalize-block-gaps validated-content spans
+                                                    (source-newline original))
                              validated-content))
                        ;; The target's expressions are kept only when the
                        ;; content brings none and holds a form for them.

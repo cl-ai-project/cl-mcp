@@ -680,7 +680,8 @@ values, for COUNT patches on FILE-PATH."
   :description "Scoped text replacement within a matched top-level Lisp form.
 Finds old_text (exact, whitespace-sensitive match) within the form identified
 by form_type and form_name, and replaces it with new_text. old_text must match
-exactly once within the form. Under the standard readtable, an LF in old_text can match a formatting CRLF.
+exactly once within the form. Under the standard readtable, an LF in old_text can match
+a formatting CRLF.
 Most token-efficient way to make small changes to large forms.
 Does NOT auto-repair parentheses — if the patch breaks form structure, it fails
 immediately and no changes are written to disk.
@@ -708,11 +709,12 @@ branch) is named by its expressions in front of the name, as the file writes the
 skipped one only when no read form has that name.")
          (old_text :type :string
                    :description "Text to find within the matched form.
-Whitespace-sensitive and unique within the form. A bare LF also matches a formatting CRLF under the standard
-readtable. Literal data and text under other named readtables match exactly.")
+Whitespace-sensitive and unique within the form. A bare LF can also match a formatting
+CRLF under the standard readtable. Literal data and text under other named readtables match
+exactly.")
          (new_text :type :string
-                   :description "Replacement text. With the standard readtable, formatting line breaks use
-the file's dominant LF or CRLF ending. Newlines in literal data are kept as supplied.
+                   :description "Replacement text. With the standard readtable, formatting line
+breaks use the file's dominant LF or CRLF ending. Newlines in literal data are kept as supplied.
 If new_text opens and closes a different net number of parentheses than old_text
 and the patched form no longer parses, the error says exactly how many \")\" to
 add or remove.")
