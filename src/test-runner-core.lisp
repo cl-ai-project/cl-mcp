@@ -1387,6 +1387,20 @@ a future Rove version returns them directly instead of crashing."
               (push assertion failure-details)))))
     (nreverse failure-details)))
 
+(defmacro %with-rove-output ((report-stream-symbol stdout stderr debug) &body body)
+  "Capture test output and suppress the Rove reporter while running BODY."
+  `(let ((*standard-output* ,stdout)
+         (*error-output* ,stderr)
+         (*test-debug-output* ,debug))
+     ;; The Rove CLI overrides the standard streams inside CALL-WITH-SUITE.
+     ;; Bind any installed overrides to NIL so Rove uses these capture streams.
+     ;; Rove is an optional dependency, so resolve its variables at runtime.
+     (progv (remove nil (list ,report-stream-symbol
+                              (find-symbol "*ROVE-STANDARD-OUTPUT*" :rove/core/suite)
+                              (find-symbol "*ROVE-ERROR-OUTPUT*" :rove/core/suite)))
+         (list (make-broadcast-stream) nil nil)
+       ,@body)))
+
 (defun run-rove-selected-tests (test-symbols)
   "Run Rove TEST-SYMBOLS and return structured results.
 Wraps rove:run-tests with error handling for Rove bugs (e.g., direct assertions
@@ -1409,15 +1423,9 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
          rove-error)
     (declare (ignore successp _))
     (handler-case
-        ;; progv: bind late-resolved Rove *REPORT-STREAM* to suppress output.
-        ;; Cannot use regular let because the symbol is resolved at runtime.
         (setf (values successp results)
-              (progv (list report-stream-sym)
-                  (list (make-broadcast-stream))
-                (let ((*standard-output* stdout-stream)
-                      (*error-output* stderr-stream)
-                      (*test-debug-output* debug-stream))
-                  (funcall run-tests-fn test-symbols))))
+              (%with-rove-output (report-stream-sym stdout-stream stderr-stream debug-stream)
+                (funcall run-tests-fn test-symbols)))
       (error (c)
         (setf rove-error (princ-to-string c))
         (log-event :error "test.runner" "message"
@@ -1519,42 +1527,28 @@ detects test sub-systems from ASDF dependencies and runs each individually."
          rove-error)
     (declare (ignore successp results _))
     (handler-case
-     ;; progv: bind late-resolved Rove *REPORT-STREAM* to suppress output.
-     ;; Cannot use regular let because the symbol is resolved at runtime.
      (setf (values successp results)
-             (progv (list report-stream-sym)
-                 (list (make-broadcast-stream))
-               (let ((*standard-output* stdout-stream)
-                     (*error-output* stderr-stream)
-                     (*test-debug-output* debug-stream))
-                 (funcall run-fn
-                          (intern (string-upcase system-name) :keyword)))))
+           (%with-rove-output (report-stream-sym stdout-stream stderr-stream debug-stream)
+             (funcall run-fn (intern (string-upcase system-name) :keyword))))
      (error (c) (setf rove-error (princ-to-string c))
             (log-event :error "test.runner" "message" "rove:run crashed"
                        "error" rove-error)))
-    (let* ((end-time (get-internal-real-time))
-           (duration-ms
-            (round
-             (* 1000
-                (/ (- end-time start-time) internal-time-units-per-second))))
-           (stdout (bounded-output-string stdout-stream))
-           (stderr (bounded-output-string stderr-stream))
-           (debug-output (bounded-output-string debug-stream)))
+    (flet ((build-report (passed failed pending skipped failures)
+             (let ((report (make-test-result
+                            :passed passed :failed failed :pending pending
+                            :skipped-tests skipped :failed-tests failures :framework :rove
+                            :duration (round (* 1000 (- (get-internal-real-time) start-time))
+                                             internal-time-units-per-second))))
+               (loop for stream in (list stdout-stream stderr-stream debug-stream)
+                     for key in '("stdout" "stderr" "debug_output")
+                     for output = (bounded-output-string stream)
+                     when (plusp (length output)) do (setf (gethash key report) output))
+               report)))
       (if rove-error
-          (let ((ht
-                 (make-test-result :passed 0 :failed 1 :failed-tests
-                                   (list
-                                    (make-failure-detail :test-name system-name
-                                                         :reason
-                                                         (format nil
-                                                                 "Test runner crashed: ~A"
-                                                                 rove-error)))
-                                   :framework :rove :duration duration-ms)))
-            (when (plusp (length stdout)) (setf (gethash "stdout" ht) stdout))
-            (when (plusp (length stderr)) (setf (gethash "stderr" ht) stderr))
-            (when (plusp (length debug-output))
-              (setf (gethash "debug_output" ht) debug-output))
-            ht)
+          (build-report 0 1 0 nil
+                        (list (make-failure-detail :test-name system-name
+                                                   :reason (format nil "Test runner crashed: ~A"
+                                                                   rove-error))))
           (let ((suite-results (symbol-value last-report-sym))
                 (passed 0)
                 (failed 0)
@@ -1624,16 +1618,9 @@ the surrounding passed/failed/pending/skipped/failure-details bindings."
                               ;; triggers a real reload of deftest forms.
                               (ignore-errors
                                 (asdf/system-registry:clear-system sub-sys))
-                              ;; progv: bind late-resolved Rove special
-                              ;; (see M1 guard above for nil safety)
-                              (progv (list report-stream-sym)
-                                  (list (make-broadcast-stream))
-                                (let ((*standard-output* (make-broadcast-stream))
-                                      (*error-output* (make-broadcast-stream))
-                                      (*test-debug-output* (make-broadcast-stream)))
-                                  (funcall run-fn
-                                           (intern (string-upcase sub-sys)
-                                                   :keyword))))
+                              (%with-rove-output (report-stream-sym stdout-stream
+                                                  stderr-stream debug-stream)
+                                (funcall run-fn (intern (string-upcase sub-sys) :keyword)))
                               (setf run-ok t))
                           (error (c)
                             (incf failed 1)
@@ -1653,18 +1640,7 @@ the surrounding passed/failed/pending/skipped/failure-details bindings."
                         (when run-ok
                           (%extract-suites
                            (symbol-value last-report-sym)))))))))
-            (let ((ht
-                   (make-test-result :passed passed :failed failed :pending
-                                     pending :skipped-tests skipped :failed-tests
-                                     (nreverse failure-details) :framework
-                                     :rove :duration duration-ms)))
-              (when (plusp (length stdout))
-                (setf (gethash "stdout" ht) stdout))
-              (when (plusp (length stderr))
-                (setf (gethash "stderr" ht) stderr))
-              (when (plusp (length debug-output))
-                (setf (gethash "debug_output" ht) debug-output))
-              ht))))))
+            (build-report passed failed pending skipped (nreverse failure-details)))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; ASDF Fallback (text capture)

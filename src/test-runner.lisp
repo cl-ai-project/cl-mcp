@@ -2,6 +2,8 @@
 
 (defpackage #:cl-mcp/src/test-runner
   (:use #:cl)
+  (:import-from #:alexandria #:copy-hash-table)
+  (:import-from #:cl-mcp/src/state #:protocol-version)
   (:import-from #:cl-mcp/src/test-runner-core
                 #:run-tests
                 #:detect-test-framework
@@ -24,6 +26,16 @@
 ;;; ---------------------------------------------------------------------------
 ;;; Tool Definition
 ;;; ---------------------------------------------------------------------------
+
+(defun %publish-test-report (reply version)
+  "Attach the test report as structured content for clients that negotiated it."
+  (let ((report (gethash "result" reply)))
+    (when (and version (string>= version "2025-06-18") (hash-table-p report)
+               (nth-value 1 (gethash "passed" report)))
+      (let ((data (copy-hash-table report)))
+        (remhash "content" data)
+        (setf (gethash "structuredContent" report) data))))
+  reply)
 
 (define-tool "run-tests"
   :description "Run tests for a system and return structured results.
@@ -52,7 +64,8 @@ Supports multiple test frameworks with automatic detection:
   pass: read stdout
 
 Returns:
-- content (summary text, backward compatible)
+- content (summary text)
+- structuredContent (MCP 2025-06-18 and later): the same report fields listed below
 - passed (integer) -- tests, not assertions (Rove and FiveAM, whether the whole
   system or a test/tests selection ran); prove counts assertions
 - failed (integer) -- same unit as passed
@@ -118,27 +131,29 @@ and FiveAM only; exclusive with test")
                           :description "Maximum seconds to wait for the test run to complete
 (default: 300; a value of 0 or below means the default). Increase for large test suites."))
   :body
-  (with-proxy-dispatch (id "worker/run-tests"
-                          (make-ht "system" system
-                                   "framework" framework
-                                   "test" test
-                                   "tests" tests
-                                   "timeout_seconds" timeout-seconds))
-    (let ((effective-timeout (or (coerce-timeout-seconds timeout-seconds) 300)))
-      (multiple-value-bind (test-result status thread-leaked)
-          (call-with-test-run-deadline
-           (lambda ()
-             (run-tests system
-                        :framework framework
-                        :test test
-                        :tests tests))
-           effective-timeout)
-        (result id
-                (build-run-tests-response
-                 (ecase status
-                   (:ok test-result)
-                   (:timeout (make-timeout-result test-result
-                                                  :thread-leaked thread-leaked))
-                   ;; Re-signal so real failures stay visible instead of
-                   ;; being reported as a bogus test result.
-                   (:error (error test-result)))))))))
+  (%publish-test-report
+   (with-proxy-dispatch (id "worker/run-tests"
+                           (make-ht "system" system
+                                    "framework" framework
+                                    "test" test
+                                    "tests" tests
+                                    "timeout_seconds" timeout-seconds))
+     (let ((effective-timeout (or (coerce-timeout-seconds timeout-seconds) 300)))
+       (multiple-value-bind (test-result status thread-leaked)
+           (call-with-test-run-deadline
+            (lambda ()
+              (run-tests system
+                         :framework framework
+                         :test test
+                         :tests tests))
+            effective-timeout)
+         (result id
+                 (build-run-tests-response
+                  (ecase status
+                    (:ok test-result)
+                    (:timeout (make-timeout-result test-result
+                                                   :thread-leaked thread-leaked))
+                    ;; Re-signal so real failures stay visible instead of
+                    ;; being reported as a bogus test result.
+                    (:error (error test-result))))))))
+   (protocol-version state)))

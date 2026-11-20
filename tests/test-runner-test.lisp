@@ -797,6 +797,59 @@ suites, and the directory."
               (ignore-errors (delete-package package))))))
       (ignore-errors (uiop:delete-directory-tree dir :validate t)))))
 
+(deftest aggregate-rove-run-includes-subsystem-time-and-output
+  (%call-with-sibling-rove-fixture
+   (lambda (dir shared)
+     (declare (ignore shared))
+     (%write-fixture-file
+      dir "tests/a.lisp"
+      "(defpackage #:clmcp-sib/tests/a (:use #:cl #:rove))
+(in-package #:clmcp-sib/tests/a)
+(deftest emits-output
+  (write-line \"aggregate stdout\" *standard-output*)
+  (write-line \"aggregate stderr\" *error-output*)
+  (write-line \"aggregate debug\" cl-mcp/src/test-runner-core:*test-debug-output*)
+  (sleep 0.25)
+  (ok t))
+")
+     ;; Rove's CLI sets both overrides to its terminal streams. Reproduce
+     ;; that enclosing run when this case is invoked directly through MCP too.
+     (let ((report (let ((asdf/session:*asdf-session* nil)
+                         (rove/core/suite:*rove-standard-output* (make-broadcast-stream))
+                         (rove/core/suite:*rove-error-output* (make-broadcast-stream)))
+                     (run-tests "clmcp-sib" :framework :rove))))
+       (ok (= 1 (gethash "passed" report)))
+       (ok (zerop (gethash "failed" report)))
+       (ok (>= (gethash "duration_ms" report) 240))
+       (ok (search "aggregate stdout" (gethash "stdout" report)))
+       (ok (search "aggregate stderr" (gethash "stderr" report)))
+       (ok (search "aggregate debug" (gethash "debug_output" report)))))))
+
+(deftest run-tests-structured-report-follows-the-negotiated-version
+  (let ((cl-mcp/src/proxy:*use-worker-pool* nil)
+        (arguments (cl-mcp/src/tools/helpers:make-ht
+                    "system" "cl-mcp/tests/test-runner-test-counts"
+                    "test" "cl-mcp/tests/test-runner-test-counts::only-skipped")))
+    (dolist (version '("2025-03-26" "2025-06-18" "2025-11-25"))
+      (let ((state (cl-mcp/src/state:make-state)))
+        (setf (cl-mcp/src/state:protocol-version state) version)
+        (let* ((reply (cl-mcp/src/test-runner::run-tests-handler state 11 arguments))
+               (report (gethash "result" reply))
+               (data (gethash "structuredContent" report)))
+          (ok (= 1 (gethash "pending" report)))
+          (ok (stringp (gethash "text" (aref (gethash "content" report) 0))))
+          (if (string= version "2025-03-26")
+              (ok (null data))
+              (progn
+                (ok (hash-table-p data))
+                (when data
+                  (ok (equalp (gethash "skipped_tests" data) (gethash "skipped_tests" report)))
+                  (ok (equalp (gethash "failed_tests" data) #()))
+                  (ok (eql 0 (gethash "failed" data)))
+                  (ok (eql 1 (gethash "pending" data)))
+                  (ok (null (gethash "content" data)))
+                  (ok (null (gethash "structuredContent" data)))))))))))
+
 (defun %rove-suite-test-names (package-name)
   "Return the names of the tests Rove's suite for PACKAGE-NAME holds, as
 strings, or :NO-SUITE when Rove holds no suite for it."
