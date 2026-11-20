@@ -209,29 +209,24 @@ blank line. For EOF boundary use a single newline."
                      candidates)))
 
 (defun %line-comment-at-end-p (text form-end)
-  "Return true when trimming TEXT after FORM-END leaves a line comment at EOF."
-  (when (%standard-line-comment-p *readtable*)
-    (let* ((tail (string-right-trim '(#\Space #\Tab #\Newline #\Return)
-                                    (subseq text form-end)))
-           (last-line-start (1+ (or (position #\Newline tail :from-end t) -1))))
-      (when (find #\; tail :start last-line-start)
-        (let ((last-segment (and (%gap-syntax-standard-p *readtable*)
-                                 (car (last (%gap-segments tail))))))
-          (if last-segment
-              (and (eq (first last-segment) :comment)
-                   (char= (char tail (second last-segment)) #\;))
-              ;; Validation found no readable form in this tail, but it can
-              ;; contain discarded input (e.g. a false reader conditional).
-              ;; A terminal line comment hides a form appended on the same
-              ;; line. On a new line, the active reader must see the form.
-              (let ((eof (list nil)))
-                (flet ((read-with-probe (separator)
-                         (source-read-from-string (concatenate 'string tail separator "()")
-                                                  :eof-error-p nil :eof-value eof)))
-                  (handler-case
-                      (and (eq eof (read-with-probe " "))
-                           (not (eq eof (read-with-probe (string #\Newline)))))
-                    (error () nil))))))))))
+  "Return true if the end of TEXT needs a line break before adjoining source."
+  (let* ((tail (string-right-trim '(#\Space #\Tab #\Newline #\Return)
+                                  (subseq text form-end)))
+         (last-line-start (1+ (or (position #\Newline tail :from-end t) -1))))
+    (when (find #\; tail :start last-line-start)
+      (let ((last-segment (and (%gap-syntax-standard-p *readtable*)
+                               (car (last (%gap-segments tail))))))
+        (if last-segment
+            (and (eq (first last-segment) :comment)
+                 (char= (char tail (second last-segment)) #\;))
+            ;; Validation found no readable form in this tail. If adjoining a
+            ;; probe produces no form or cannot be read, keep the line break:
+            ;; the active reader may have discarded it inside a comment.
+            (let ((eof (list nil)))
+              (handler-case
+                  (eq eof (source-read-from-string (concatenate 'string tail " ()")
+                                                   :eof-error-p nil :eof-value eof))
+                (error () t))))))))
 
 (defun %validate-and-repair-content (content &optional readtable-designator
                                              package-name source-path)
@@ -241,7 +236,7 @@ using parinfer:apply-indent-mode. Returns the validated
 line diff or NIL, a bracket warning (FORMAT-BRACKET-WARNING) or NIL, the
 forms the repair moved out of the form CONTENT's own parens put them in
 (REPARENTED-FORMS; always NIL under a readtable that changes the syntax), and
-whether the trimmed content ends with a line comment.
+whether adjoining source needs a line break after the trimmed content.
 When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing.
 Unknown package prefixes are handled leniently via stub packages.
 
@@ -993,6 +988,35 @@ wrapper's ( for its first child."
                    (eq (car (cst-node-value node)) :line-comment))
         (setf floor (cst-node-end node))))))
 
+(defun %source-line-comment-end (text semicolon readtable)
+  "Return the end of the line comment at SEMICOLON in TEXT, or NIL if unproven."
+  (let* ((line-break (position #\Newline text :start semicolon))
+         (line-end (or line-break (length text)))
+         (comment-end (if (char= (char text (1- line-end)) #\Return)
+                          (1- line-end) line-end))
+         (reader (get-macro-character #\; readtable)))
+    (when (or (%standard-line-comment-p readtable)
+              (and reader
+                   (let ((*readtable* readtable)
+                         (*read-eval* nil))
+                     (flet ((discards-through-p (source start end)
+                              (handler-case
+                                  (with-input-from-string (stream source :start start)
+                                    (and (null (multiple-value-list
+                                                (funcall reader stream #\;)))
+                                         (= (file-position stream) (- end start))))
+                                (error () nil))))
+                       ;; The callback must discard the actual line and keep
+                       ;; discarding after extra text is placed on that line.
+                       ;; Add text beyond the line to distinguish reading EOF.
+                       (let ((probe (format nil "~A 0 1~%"
+                                            (subseq text (1+ semicolon) comment-end))))
+                         (and (discards-through-p (concatenate 'string probe "2")
+                                                  0 (length probe))
+                              (discards-through-p text (1+ semicolon)
+                                                  (if line-break (1+ line-break) line-end))))))))
+      comment-end)))
+
 (defun %attached-comment-start (text start floor readtable)
   "Return where the comment block written directly above the form at START in TEXT
 begins: the first of the ; lines that run, with no blank line between them, down
@@ -1004,9 +1028,8 @@ of a #| |# comment can start with ; too -- and is never taken."
   (let ((line-start (let ((newline (position #\Newline text :end start :from-end t)))
                       (if newline (1+ newline) 0)))
         (horizontal (%splice-whitespace readtable '(#\Space #\Tab))))
-    (if (or (not (%standard-line-comment-p readtable))
-            (find-if-not (lambda (ch) (member ch horizontal)) text
-                         :start line-start :end start))
+    (if (find-if-not (lambda (ch) (member ch horizontal)) text
+                     :start line-start :end start)
         start
         (let ((block-start nil))
           (loop while (> line-start floor)
@@ -1015,11 +1038,12 @@ of a #| |# comment can start with ; too -- and is never taken."
                             (let ((newline (position #\Newline text
                                                      :end previous-end :from-end t)))
                               (if newline (1+ newline) 0)))
-                          (line (string-left-trim horizontal
-                                                  (subseq text previous-start previous-end))))
+                          (comment (position-if-not (lambda (ch) (member ch horizontal))
+                                                    text :start previous-start :end previous-end)))
                      (if (and (>= previous-start floor)
-                              (plusp (length line))
-                              (char= (char line 0) #\;))
+                              comment
+                              (char= (char text comment) #\;)
+                              (%source-line-comment-end text comment readtable))
                          (setf block-start previous-start
                                line-start previous-start)
                          (return))))
@@ -1035,11 +1059,9 @@ of a #| |# comment can start with ; too -- and is never taken."
 The line break itself is outside the comment."
   (let* ((horizontal (%splice-whitespace readtable '(#\Space #\Tab)))
          (comment (position-if-not (lambda (ch) (member ch horizontal)) text :start start)))
-    (if (and comment
+    (or (and comment
              (char= (char text comment) #\;)
-             (%standard-line-comment-p readtable))
-        (let ((end (or (position #\Newline text :start comment) (length text))))
-          (if (char= (char text (1- end)) #\Return) (1- end) end))
+             (%source-line-comment-end text comment readtable))
         start)))
 
 (defun %apply-operation-preserve-spacing (text node end operation content
@@ -1221,7 +1243,8 @@ file's own (CRLF in a CRLF file)."
                          &optional (comment-floor 0) replacement-line-comment-p)
   "Apply OPERATION to NODE within TEXT, optionally normalizing blank lines.
 END includes the target's same-line comment. COMMENT-FLOOR bounds the comment
-block above NODE, and REPLACEMENT-LINE-COMMENT-P says CONTENT ends in a ; comment."
+block above NODE. REPLACEMENT-LINE-COMMENT-P indicates a line break may be
+needed after CONTENT."
   (if normalize-blank-lines
       (%apply-operation-normalized text node end operation content readtable comment-floor
                                    replacement-line-comment-p)

@@ -1380,6 +1380,13 @@ handling and return the file's text afterwards."
                         (set-macro-character
                          #\( (lambda (stream char)
                                (or (funcall left-paren stream char) #()))
+                         nil table)))
+                (list "(defparameter a 3) #+(or) :ignored ; note"
+                      (lambda (table)
+                        (set-macro-character
+                         #\( (lambda (stream char)
+                               (let ((form (funcall left-paren stream char)))
+                                 (if form form (values))))
                          nil table))))
           do (let ((table (copy-readtable standard)))
                (funcall configure table)
@@ -1394,9 +1401,68 @@ handling and return the file's text afterwards."
                               (*readtable* table)
                               (*package* (symbol-package 'b)))
                           (with-input-from-string (stream edited)
-                            (ok (equal '(defparameter a 3) (read stream nil :eof)))
-                            (ok (equal '(defparameter b 2) (read stream nil :eof)))))))
+                            (let ((first (read stream nil :eof))
+                                  (second (read stream nil :eof)))
+                              (ok (equal '(defparameter a 3) first))
+                              (ok (equal '(defparameter b 2) second)))))))
                  (named-readtables:unregister-readtable name))))))
+
+(deftest lisp-edit-form-protects-source-with-a-wrapped-semicolon-reader
+  (let* ((name :cl-mcp-test-edit-comment-wrapper)
+         (table (copy-readtable nil))
+         (original (get-macro-character #\; table))
+         (adjacent (format nil "(defun a () 1) (defun b () 2)~%"))
+         (commented (format nil "(defun a () 1) ; old note~%(defun b () 2)~%")))
+    (set-macro-character #\; (lambda (stream char) (funcall original stream char)) nil table)
+    (named-readtables:register-readtable name table)
+    (unwind-protect
+         (dolist (normalize '(nil t))
+           (testing (format nil "wrapped semicolon, normalize ~S" normalize)
+             (let ((edited (%default-edit adjacent :form-type "defun" :form-name "a"
+                                          :operation "replace" :readtable name
+                                          :normalize-blank-lines normalize
+                                          :content "(defun a () 3) ; new note")))
+               (let ((*readtable* table)
+                     (*package* (symbol-package 'b)))
+                 (with-input-from-string (stream edited)
+                   (let ((first (read stream nil :eof))
+                         (second (read stream nil :eof)))
+                     (ok (equal '(defun a () 3) first))
+                     (ok (equal '(defun b () 2) second))))))
+             (ok (string= (%default-edit commented :form-type "defun" :form-name "a"
+                                         :operation "replace" :readtable name
+                                         :normalize-blank-lines normalize
+                                         :content "(defun a () 3)")
+                          (format nil "(defun a () 3) ; old note~%~:[~;~%~](defun b () 2)~%"
+                                  normalize)))
+             (ok (string= (%default-edit commented :form-type "defun" :form-name "a"
+                                         :operation "delete" :readtable name
+                                         :normalize-blank-lines normalize)
+                          (format nil "(defun b () 2)~%")))))
+      (named-readtables:unregister-readtable name))))
+
+(deftest lisp-edit-form-preserves-semicolon-source-with-noncomment-semantics
+  (let ((name :cl-mcp-test-edit-semicolon-form)
+        (table (copy-readtable nil))
+        (source (format nil "(defun a () 1) ; (defun b () 2)~%")))
+    (set-macro-character #\; (lambda (stream char) (declare (ignore stream char)) :marker)
+                         nil table)
+    (named-readtables:register-readtable name table)
+    (unwind-protect
+         (dolist (normalize '(nil t))
+           (testing (format nil "semicolon as a form, normalize ~S" normalize)
+             (let ((result (%default-edit source :form-type "defun" :form-name "a"
+                                          :operation "delete" :readtable name
+                                          :normalize-blank-lines normalize)))
+               (ok (string= result (format nil "; (defun b () 2)~%")))
+               (let ((*readtable* table)
+                     (*package* (symbol-package 'b)))
+                 (with-input-from-string (stream result)
+                   (let ((first (read stream nil :eof))
+                         (second (read stream nil :eof)))
+                     (ok (eq :marker first))
+                     (ok (equal '(defun b () 2) second))))))))
+      (named-readtables:unregister-readtable name))))
 
 (deftest lisp-edit-form-normalizes-around-a-form-and-its-trailing-comment
   (let ((source (format nil "(defun a () 1) ; about a~%;; about b~%(defun b () 2)~%"))
