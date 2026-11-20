@@ -2158,7 +2158,9 @@ something failed, `2` the script could not run them.
   does not load, exits `2`. Both suites swap the cl-spec registry, or bind
   one, while they run: use a process of their own, not the MCP worker you
   are working in.
-- `negative-control` swaps in thirty-six wrong implementations, one at a time:
+- `negative-control` swaps in one wrong implementation per case. To see exactly which cases
+  ran, set `CL_MCP_SPECS_REPORT` when running this mode. Each entry in the report's
+  `:outcomes` list identifies one case. The controls include:
   - an `ensure-trailing-newline` that returns its argument unchanged;
   - one that overwrites its argument with newlines and returns it;
   - a `sanitize-for-json` that returns `""`;
