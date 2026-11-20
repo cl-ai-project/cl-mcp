@@ -201,17 +201,57 @@
         (let ((result (lookup "cl-mcp:version")))
           (ok (and result (gethash "path" result) (not (gethash "isError" result)))))))))
 
-(defvar |lookup:MiX| t "An internal lookup fixture whose colon is part of its name.")
+(defun |lookup:MiX| ()
+  "An internal lookup fixture whose colon is part of its name."
+  t)
 
 (deftest code-lookup-respects-reader-escapes-and-external-symbols
   (let ((package "cl-mcp/tests/code-test"))
-    (ok (equal "variable" (nth-value 1 (code-describe-symbol "|lookup:MiX|" :package package))))
-    (ok (equal "variable"
+    (ok (equal "function" (nth-value 1 (code-describe-symbol "|lookup:MiX|" :package package))))
+    (ok (equal "function"
                (nth-value 1 (code-describe-symbol "cl-mcp/tests/code-test::|lookup:MiX|"))))
     (ok (handler-case (progn (code-describe-symbol "cl-mcp/tests/code-test:|lookup:MiX|") nil)
           (cl-mcp/src/tools/helpers:arg-validation-error () t)))
     (ok (equal "variable" (nth-value 1 (code-describe-symbol "cl:nil"))))
     (ok (equal "variable" (nth-value 1 (code-describe-symbol ":start"))))))
+
+(deftest code-lookup-checks-an-explicit-empty-package-name
+  (if (find-package "")
+      (skip "An existing package owns the empty name in this image.")
+      (let ((*package* (find-package :cl-user)))
+        (let* ((reply (%call-code-tool "code-describe"
+                                       'cl-mcp/src/worker/handlers::%handle-code-describe
+                                       "car" :package "" :pooled t))
+               (result (gethash "result" reply)))
+          (ok (and result (eq t (gethash "isError" result))))
+          (ok (and result (search "Package \"\" not found"
+                                  (gethash "text" (elt (gethash "content" result) 0))))))
+        (let ((home (make-package "" :use nil)))
+          (unwind-protect
+               (progn
+                 (import '|lookup:MiX| home)
+                 (ok (equal "function"
+                            (nth-value 1 (code-describe-symbol "|lookup:MiX|" :package "")))))
+            (delete-package home))))))
+
+(deftest code-describe-counts-methods-on-the-described-symbol
+  (let ((context (make-package (symbol-name (gensym "LOOKUP-CONTEXT-")) :use nil))
+        (shadow (make-package (symbol-name (gensym "LOOKUP-SHADOW-")) :use nil))
+        (count (length (sb-mop:generic-function-methods #'sb-gray:stream-read-char))))
+    (unwind-protect
+         (progn
+           (sb-ext:add-package-local-nickname "SB-GRAY" shadow context)
+           (dolist (pooled '(nil t))
+             (let* ((reply (%call-code-tool "code-describe"
+                                            'cl-mcp/src/worker/handlers::%handle-code-describe
+                                            "sb-gray:stream-read-char"
+                                            :package (package-name context) :pooled pooled))
+                    (result (gethash "result" reply))
+                    (text (and result (gethash "text" (elt (gethash "content" result) 0)))))
+               (ok (and result (equal "generic-function" (gethash "type" result))))
+               (ok (and text (search (format nil "~D method~:P;" count) text))))))
+      (delete-package context)
+      (delete-package shadow))))
 
 (deftest code-find-definition-logical-pathname
   (testing "code-find-definition handles CL standard symbols with logical pathnames"

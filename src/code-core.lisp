@@ -99,7 +99,7 @@ A lookup that found nothing, not a fault: the tools answer it as not found."))
     (unless indicator
       (error 'symbol-not-describable :symbol (make-symbol name) :name (format nil "#:~A" name)))
     (let* ((designator (case indicator
-                         (:current (if (or (null package) (equal package "")) *package* package))
+                         (:current (or package *package*))
                          (:keyword "KEYWORD")
                          (t indicator)))
            (home (or (find-package designator)
@@ -789,12 +789,9 @@ TYPE is one of:
         (values name type arglist doc path line stale)))))
 
 (defun generic-function-method-count (symbol-name &key package)
-  "Return how many methods the generic function SYMBOL-NAME names has, or NIL
-when it names no generic function -- including when SYMBOL-NAME cannot be
-resolved at all, such as a keyword, which RESOLVE-TARGET refuses with an
-error.  Resolved with RESOLVE-TARGET, so nothing is interned; code-describe
-uses it to point at clos-describe, and must still describe what it cannot."
-  (let ((symbol (handler-case (resolve-target symbol-name :package package)
+  "Return the number of methods on the generic function that CODE-DESCRIBE-SYMBOL
+would resolve from SYMBOL-NAME and PACKAGE, or NIL when it names no generic function."
+  (let ((symbol (handler-case (%parse-symbol symbol-name :package package)
                   (error () nil))))
     (and symbol
          (fboundp symbol)
