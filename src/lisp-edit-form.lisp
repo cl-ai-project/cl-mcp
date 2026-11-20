@@ -156,42 +156,87 @@ necessary to leave one blank line between top-level forms."
           (concatenate 'string between
                        (make-string missing :initial-element #\Newline))))))
 
-(defun %split-leading-whitespace (text)
+(defun %split-leading-whitespace (text whitespace)
   "Split TEXT into two values: leading whitespace and the remaining text."
-  (let ((ws-end (or (position-if-not #'%whitespace-char-p text)
+  (let ((ws-end (or (position-if-not (lambda (ch) (member ch whitespace)) text)
                     (length text))))
     (values (subseq text 0 ws-end)
             (subseq text ws-end))))
 
-(defun %split-trailing-whitespace (text)
+(defun %split-trailing-whitespace (text whitespace)
   "Split TEXT into two values: text without trailing whitespace and trailing whitespace."
-  (let ((last-non-ws (position-if-not #'%whitespace-char-p text :from-end t)))
+  (let ((last-non-ws (position-if-not (lambda (ch) (member ch whitespace))
+                                     text :from-end t)))
     (if last-non-ws
         (values (subseq text 0 (1+ last-non-ws))
                 (subseq text (1+ last-non-ws)))
         (values "" text))))
 
-(defun %normalized-separator (left-text right-text)
+(defun %normalized-separator (left-text right-text newline)
   "Return normalized separator between LEFT-TEXT and RIGHT-TEXT at top-level.
 No separator is emitted before the first form. Between top-level forms use one
 blank line. For EOF boundary use a single newline."
   (cond
     ((zerop (length left-text)) "")
-    ((zerop (length right-text)) (string #\Newline))
-    (t (format nil "~%~%"))))
+    ((zerop (length right-text)) newline)
+    (t (concatenate 'string newline newline))))
 
 (defun %trim-outer-whitespace (text)
   "Trim leading/trailing horizontal and vertical whitespace from TEXT."
   (string-trim '(#\Space #\Tab #\Newline #\Return) text))
 
+(defun %standard-line-comment-p (readtable)
+  "Return true when a semicolon starts an ordinary line comment in READTABLE."
+  (eq (get-macro-character #\; readtable)
+      (get-macro-character #\; *standard-readtable*)))
+
+(defun %readtable-whitespace-p (char readtable)
+  "Return true when CHAR is whitespace in READTABLE."
+  (and (null (get-macro-character char readtable))
+       (let ((*readtable* readtable)
+             (*read-suppress* t)
+             (*read-eval* nil))
+         ;; A token stops at whitespace, so X ends at index 1.
+         (eql 1 (ignore-errors
+                  (nth-value 1 (read-from-string (format nil "x~Cy" char) nil nil
+                                                 :preserve-whitespace t)))))))
+
+(defun %splice-whitespace (readtable candidates)
+  "Return the CANDIDATES that can be trimmed as whitespace in READTABLE."
+  (if (eq readtable *standard-readtable*)
+      candidates
+      (remove-if-not (lambda (char) (%readtable-whitespace-p char readtable))
+                     candidates)))
+
+(defun %line-comment-at-end-p (text form-end)
+  "Return true if the end of TEXT needs a line break before adjoining source."
+  (let* ((tail (string-right-trim '(#\Space #\Tab #\Newline #\Return)
+                                  (subseq text form-end)))
+         (last-line-start (1+ (or (position #\Newline tail :from-end t) -1))))
+    (when (find #\; tail :start last-line-start)
+      (let ((last-segment (and (%gap-syntax-standard-p *readtable*)
+                               (car (last (%gap-segments tail))))))
+        (if last-segment
+            (and (eq (first last-segment) :comment)
+                 (char= (char tail (second last-segment)) #\;))
+            ;; Validation found no readable form in this tail. If adjoining a
+            ;; probe produces no form or cannot be read, keep the line break:
+            ;; the active reader may have discarded it inside a comment.
+            (let ((eof (list nil)))
+              (handler-case
+                  (eq eof (source-read-from-string (concatenate 'string tail " ()")
+                                                   :eof-error-p nil :eof-value eof))
+                (error () t))))))))
+
 (defun %validate-and-repair-content (content &optional readtable-designator
                                              package-name source-path)
   "Ensure CONTENT is a single valid form. If parsing fails, attempt to repair
-using parinfer:apply-indent-mode. Returns five values: the validated
+using parinfer:apply-indent-mode. Returns the validated
 (possibly repaired) content, a parinfer warning string or NIL, the repair
-line diff or NIL, a bracket warning (FORMAT-BRACKET-WARNING) or NIL, and the
+line diff or NIL, a bracket warning (FORMAT-BRACKET-WARNING) or NIL, the
 forms the repair moved out of the form CONTENT's own parens put them in
-(REPARENTED-FORMS; always NIL under a readtable that changes the syntax).
+(REPARENTED-FORMS; always NIL under a readtable that changes the syntax), and
+whether adjoining source needs a line break after the trimmed content.
 When READTABLE-DESIGNATOR is provided, use that named-readtable for parsing.
 Unknown package prefixes are handled leniently via stub packages.
 
@@ -274,7 +319,8 @@ comments near a target form."
                           (source-read-from-string text :eof-error-p nil :eof-value :eof)
                         (when (eq form :eof)
                           (if (comment-only-p text)
-                              (return-from try-parse text)
+                              (return-from try-parse
+                                (values text nil (%line-comment-at-end-p text 0)))
                               (error "content is empty")))
                         (let* ((len (length text))
                                (rest-start
@@ -290,17 +336,22 @@ comments near a target form."
                                (error 'multiple-top-level-forms-error))
                               (t
                                (error "content has trailing malformed characters ~
-                                       after the first form")))))
-                        text))
+                                       after the first form"))))
+                          (values text nil (%line-comment-at-end-p text pos)))))
                     :source-path source-path)
                  (error (e)
                    (values nil e)))))
       (when (comment-only-p content)
-        (return-from %validate-and-repair-content (values content nil nil nil)))
-      (multiple-value-bind (result err)
+        (return-from %validate-and-repair-content
+          (values content nil nil nil nil
+                  (call-with-package-context
+                   package-name (lambda () (%line-comment-at-end-p content 0))
+                   :source-path source-path))))
+      (multiple-value-bind (result err line-comment-p)
           (try-parse content)
         (if result
-            (values result nil nil (%bracket-warning result nonstandard-rt))
+            (values result nil nil (%bracket-warning result nonstandard-rt) nil
+                    line-comment-p)
             (let ((diagnosis (diagnose-delimiters content)))
               ;; Under a custom readtable the standard delimiter scan is not
               ;; trustworthy (a reader macro may consume raw parentheses as
@@ -338,7 +389,7 @@ comments near a target form."
               ;; balanced text that still fails to read runs it here.
               (let ((repaired (or (getf diagnosis :repaired)
                                   (apply-indent-mode content))))
-                (multiple-value-bind (repaired-result repaired-err)
+                (multiple-value-bind (repaired-result repaired-err repaired-line-comment-p)
                     (try-parse repaired)
                   (cond
                     (repaired-result
@@ -353,7 +404,8 @@ comments near a target form."
                                ;; under a readtable that changes what ( and )
                                ;; mean it would name "moves" that are not.
                                (and (not nonstandard-rt)
-                                    (reparented-forms content repaired-result)))))
+                                    (reparented-forms content repaired-result))
+                               repaired-line-comment-p)))
                     ((and (typep err 'multiple-top-level-forms-error)
                           (typep repaired-err 'multiple-top-level-forms-error))
                      (error err))
@@ -524,25 +576,14 @@ string or a comment is touched."
     (write-string text out :start (cdr (car (last spans))))))
 
 (defun %gap-syntax-standard-p (readtable)
-  "True when READTABLE reads the text between two top-level forms the standard
-way: Space, Tab, Newline, Return and Page are whitespace, and ; and #| are the
-standard comments.  Only then may the gaps of an inserted block be scanned and
-normalised.  Whitespace is tested by reading, not by GET-MACRO-CHARACTER: a
-character can be neither a macro character nor whitespace (a Tab made a single
-escape reads <Tab>1 as the symbol |1|, and dropping the Tab would make it 1)."
-  (flet ((whitespace-p (ch)
-           (and (null (get-macro-character ch readtable))
-                (let ((*readtable* readtable)
-                      (*read-suppress* t))
-                  ;; A token stops at whitespace, so X ends at index 1.
-                  (eql 1 (ignore-errors
-                          (nth-value 1 (read-from-string (format nil "x~Cy" ch) nil nil
-                                                         :preserve-whitespace t))))))))
-    (and (every #'whitespace-p '(#\Space #\Tab #\Newline #\Return #\Page))
-         (eq (get-macro-character #\; readtable)
-             (get-macro-character #\; *standard-readtable*))
-         (eq (ignore-errors (get-dispatch-macro-character #\# #\| readtable))
-             (get-dispatch-macro-character #\# #\| *standard-readtable*)))))
+  "True when READTABLE treats the usual whitespace, ; and #| as standard.
+Only then may a gap between forms be tokenized without the active reader."
+  (or (eq readtable *standard-readtable*)
+      (and (every (lambda (char) (%readtable-whitespace-p char readtable))
+                  '(#\Space #\Tab #\Newline #\Return #\Page))
+           (%standard-line-comment-p readtable)
+           (eq (ignore-errors (get-dispatch-macro-character #\# #\| readtable))
+               (get-dispatch-macro-character #\# #\| *standard-readtable*)))))
 
 (defun %repair-block (content nonstandard-rt package-name source-path)
   "Repair CONTENT as one block with the repair %VALIDATE-AND-REPAIR-CONTENT
@@ -947,7 +988,36 @@ wrapper's ( for its first child."
                    (eq (car (cst-node-value node)) :line-comment))
         (setf floor (cst-node-end node))))))
 
-(defun %attached-comment-start (text start &optional (floor 0))
+(defun %source-line-comment-end (text semicolon readtable)
+  "Return the end of the line comment at SEMICOLON in TEXT, or NIL if unproven."
+  (let* ((line-break (position #\Newline text :start semicolon))
+         (line-end (or line-break (length text)))
+         (comment-end (if (char= (char text (1- line-end)) #\Return)
+                          (1- line-end) line-end))
+         (reader (get-macro-character #\; readtable)))
+    (when (or (%standard-line-comment-p readtable)
+              (and reader
+                   (let ((*readtable* readtable)
+                         (*read-eval* nil))
+                     (flet ((discards-through-p (source start end)
+                              (handler-case
+                                  (with-input-from-string (stream source :start start)
+                                    (and (null (multiple-value-list
+                                                (funcall reader stream #\;)))
+                                         (= (file-position stream) (- end start))))
+                                (error () nil))))
+                       ;; The callback must discard the actual line and keep
+                       ;; discarding after extra text is placed on that line.
+                       ;; Add text beyond the line to distinguish reading EOF.
+                       (let ((probe (format nil "~A 0 1~%"
+                                            (subseq text (1+ semicolon) comment-end))))
+                         (and (discards-through-p (concatenate 'string probe "2")
+                                                  0 (length probe))
+                              (discards-through-p text (1+ semicolon)
+                                                  (if line-break (1+ line-break) line-end))))))))
+      comment-end)))
+
+(defun %attached-comment-start (text start floor readtable)
   "Return where the comment block written directly above the form at START in TEXT
 begins: the first of the ; lines that run, with no blank line between them, down
 to the line the form starts on.  START when there is none, or when the form does
@@ -956,8 +1026,9 @@ edits keep the two together.  FLOOR is where the node before the form ends
 (%COMMENT-FLOOR): a line before it is that node's -- the last line of a string or
 of a #| |# comment can start with ; too -- and is never taken."
   (let ((line-start (let ((newline (position #\Newline text :end start :from-end t)))
-                      (if newline (1+ newline) 0))))
-    (if (find-if-not (lambda (ch) (member ch '(#\Space #\Tab))) text
+                      (if newline (1+ newline) 0)))
+        (horizontal (%splice-whitespace readtable '(#\Space #\Tab))))
+    (if (find-if-not (lambda (ch) (member ch horizontal)) text
                      :start line-start :end start)
         start
         (let ((block-start nil))
@@ -967,18 +1038,34 @@ of a #| |# comment can start with ; too -- and is never taken."
                             (let ((newline (position #\Newline text
                                                      :end previous-end :from-end t)))
                               (if newline (1+ newline) 0)))
-                          (line (string-trim '(#\Space #\Tab #\Return)
-                                             (subseq text previous-start previous-end))))
+                          (comment (position-if-not (lambda (ch) (member ch horizontal))
+                                                    text :start previous-start :end previous-end)))
                      (if (and (>= previous-start floor)
-                              (plusp (length line))
-                              (char= (char line 0) #\;))
+                              comment
+                              (char= (char text comment) #\;)
+                              (%source-line-comment-end text comment readtable))
                          (setf block-start previous-start
                                line-start previous-start)
                          (return))))
           (or block-start start)))))
 
-(defun %apply-operation-preserve-spacing (text node operation content
-                                          &optional (comment-floor 0))
+(defun %source-newline (text)
+  "Return the line break to use when inserting new lines into TEXT."
+  (let ((crlf (coerce '(#\Return #\Newline) 'string)))
+    (if (search crlf text) crlf (string #\Newline))))
+
+(defun %trailing-line-comment-end (text start readtable)
+  "After the ; comment that follows START on its line, or START if absent.
+The line break itself is outside the comment."
+  (let* ((horizontal (%splice-whitespace readtable '(#\Space #\Tab)))
+         (comment (position-if-not (lambda (ch) (member ch horizontal)) text :start start)))
+    (or (and comment
+             (char= (char text comment) #\;)
+             (%source-line-comment-end text comment readtable))
+        start)))
+
+(defun %apply-operation-preserve-spacing (text node end operation content
+                                          readtable comment-floor replacement-line-comment-p)
   "Apply OPERATION to NODE within TEXT changing nothing but the form's own text
 (issue #326): a replace swaps the form's span for CONTENT, a delete removes the
 form and the gap after it, and an insert puts CONTENT beside the target with
@@ -989,29 +1076,12 @@ it and a delete of it take the line end as the form's end, so the comment
 neither moves onto the next form nor is left behind.  New line breaks are the
 file's own (CRLF in a CRLF file)."
   (let* ((start (cst-node-start node))
-         (newline (if (search (coerce '(#\Return #\Newline) 'string) text)
-                      (coerce '(#\Return #\Newline) 'string)
-                      (string #\Newline)))
-         ;; The form's end, or the end of its line when only a ; comment
-         ;; follows it there.
-         (end (let* ((form-end (cst-node-end node))
-                     (after (or (position-if-not (lambda (ch) (member ch '(#\Space #\Tab)))
-                                                 text :start form-end)
-                                (length text))))
-                (if (and (< after (length text)) (char= (char text after) #\;))
-                    (let ((line-end (or (position #\Newline text :start after)
-                                        (length text))))
-                      ;; Not the CR of a CRLF: it belongs to the line break.
-                      (if (and (> line-end after)
-                               (char= (char text (1- line-end)) #\Return))
-                          (1- line-end)
-                          line-end))
-                    form-end)))
+         (newline (%source-newline text))
+         (horizontal (%splice-whitespace readtable '(#\Space #\Tab)))
+         (whitespace (%splice-whitespace readtable '(#\Space #\Tab #\Newline #\Return)))
          (snippet (%trim-outer-whitespace content))
          (suffix (subseq text end))
-         (ws-end (or (position-if-not (lambda (ch)
-                                        (member ch '(#\Space #\Tab #\Newline #\Return)))
-                                      suffix)
+         (ws-end (or (position-if-not (lambda (ch) (member ch whitespace)) suffix)
                      (length suffix)))
          (gap-after (subseq suffix 0 ws-end))
          (following (subseq suffix ws-end))
@@ -1024,8 +1094,7 @@ file's own (CRLF in a CRLF file)."
              (if (find #\Newline gap) gap (concatenate 'string newline newline)))
            (gap-before (from)
              ;; The whitespace in front of FROM, back to the text before it.
-             (let ((core (string-right-trim '(#\Space #\Tab #\Newline #\Return)
-                                            (subseq text 0 from))))
+             (let ((core (string-right-trim whitespace (subseq text 0 from))))
                (values core (subseq text (length core) from)))))
       (ecase operation
         ((:replace)
@@ -1035,10 +1104,8 @@ file's own (CRLF in a CRLF file)."
                         ;; line break that ends it, when more text follows on
                         ;; the target's line: trimmed, the comment would swallow
                         ;; that text -- a form on the same line included.
-                        (if (and (find #\; (subseq snippet (1+ (or (position #\Newline snippet
-                                                                             :from-end t)
-                                                                   -1))))
-                                 (plusp (length rest))
+                        (if (and replacement-line-comment-p
+                                  (plusp (length rest))
                                  (not (member (char rest 0) '(#\Newline #\Return))))
                             newline
                             "")
@@ -1047,14 +1114,14 @@ file's own (CRLF in a CRLF file)."
          ;; Above the comment written directly over the target, so the comment
          ;; still reads as the target's, with the gap the file has there on
          ;; both sides.
-         (let* ((comment-start (%attached-comment-start text start comment-floor))
+         (let* ((comment-start (%attached-comment-start text start comment-floor readtable))
                 ;; A comment block starts at its line's start, indentation
                 ;; included: the new form takes that indentation too.
                 (indent (if (< comment-start start)
                             (subseq text comment-start
                                     (or (position-if-not (lambda (ch)
-                                                           (member ch '(#\Space #\Tab)))
-                                                         text :start comment-start)
+                                                           (member ch horizontal))
+                                                           text :start comment-start)
                                         comment-start))
                             "")))
            (multiple-value-bind (before-core before-gap) (gap-before comment-start)
@@ -1083,7 +1150,7 @@ file's own (CRLF in a CRLF file)."
                            ;; block included) is the file's spacing.
                            (multiple-value-bind (before-core before-gap)
                                (gap-before (%attached-comment-start text start
-                                                                    comment-floor))
+                                                                     comment-floor readtable))
                              (if (plusp (length before-core)) before-gap ""))))))
            (concatenate 'string (subseq text 0 end)
                         (line-gap gap)
@@ -1103,55 +1170,61 @@ file's own (CRLF in a CRLF file)."
                       (concatenate 'string before-core newline))
                      (t "")))))))))
 
-(defun %apply-operation-normalized (text node operation content
-                                    &optional (comment-floor 0))
+(defun %apply-operation-normalized (text node end operation content
+                                    readtable comment-floor replacement-line-comment-p)
   (let ((start (cst-node-start node))
-        (end (cst-node-end node)))
+        (newline (%source-newline text))
+        (whitespace (%splice-whitespace readtable '(#\Space #\Tab #\Newline #\Return))))
     (ecase operation
       ;; The comment written directly above the form is the form's: the
       ;; blank lines are set around the two, and an inserted form goes above it.
       ((:replace)
        (let* ((snippet (%trim-outer-whitespace content))
-              (comment-start (%attached-comment-start text start comment-floor))
-              (comment (string-right-trim '(#\Space #\Tab)
+              (comment-start (%attached-comment-start text start comment-floor readtable))
+              (comment (string-right-trim (%splice-whitespace readtable '(#\Space #\Tab))
                                           (subseq text comment-start start)))
-              (front (concatenate 'string comment snippet)))
+              (form-end (cst-node-end node))
+              (trailing-comment (subseq text form-end end))
+              (front (concatenate 'string comment snippet
+                                  (if (and replacement-line-comment-p (< form-end end))
+                                      newline "")
+                                  trailing-comment)))
          (multiple-value-bind (prefix-core _)
-             (%split-trailing-whitespace (subseq text 0 comment-start))
+             (%split-trailing-whitespace (subseq text 0 comment-start) whitespace)
            (declare (ignore _))
            (multiple-value-bind (_ suffix-core)
-               (%split-leading-whitespace (subseq text end))
+               (%split-leading-whitespace (subseq text end) whitespace)
              (declare (ignore _))
              (concatenate 'string prefix-core
-                          (%normalized-separator prefix-core front) front
-                          (%normalized-separator snippet suffix-core)
+                          (%normalized-separator prefix-core front newline) front
+                          (%normalized-separator front suffix-core newline)
                           suffix-core)))))
       ((:insert-before)
        (let ((snippet (%trim-outer-whitespace content))
-             (comment-start (%attached-comment-start text start comment-floor)))
+             (comment-start (%attached-comment-start text start comment-floor readtable)))
          (multiple-value-bind (prefix-core _)
-             (%split-trailing-whitespace (subseq text 0 comment-start))
+             (%split-trailing-whitespace (subseq text 0 comment-start) whitespace)
            (declare (ignore _))
            (let ((target (subseq text comment-start end)) (suffix (subseq text end)))
              (concatenate 'string prefix-core
-                          (%normalized-separator prefix-core snippet) snippet
-                          (%normalized-separator snippet target) target
+                          (%normalized-separator prefix-core snippet newline) snippet
+                          (%normalized-separator snippet target newline) target
                           suffix)))))
       ((:insert-after)
        (let ((snippet (%trim-outer-whitespace content)))
          (multiple-value-bind (_ suffix-core)
-             (%split-leading-whitespace (subseq text end))
+             (%split-leading-whitespace (subseq text end) whitespace)
            (declare (ignore _))
            (let ((prefix (subseq text 0 end)))
-             (concatenate 'string prefix (%normalized-separator prefix snippet)
-                          snippet (%normalized-separator snippet suffix-core)
+             (concatenate 'string prefix (%normalized-separator prefix snippet newline)
+                          snippet (%normalized-separator snippet suffix-core newline)
                           suffix-core)))))
       ((:delete)
        (multiple-value-bind (prefix-core _)
-           (%split-trailing-whitespace (subseq text 0 start))
+           (%split-trailing-whitespace (subseq text 0 start) whitespace)
          (declare (ignore _))
          (multiple-value-bind (_ suffix-core)
-             (%split-leading-whitespace (subseq text end))
+             (%split-leading-whitespace (subseq text end) whitespace)
            (declare (ignore _))
            (cond
             ((and (zerop (length prefix-core))
@@ -1160,19 +1233,23 @@ file's own (CRLF in a CRLF file)."
             ((zerop (length prefix-core))
              suffix-core)
             ((zerop (length suffix-core))
-             (concatenate 'string prefix-core (string #\Newline)))
+             (concatenate 'string prefix-core newline))
             (t
              (concatenate 'string prefix-core
-                          (%normalized-separator prefix-core suffix-core)
+                          (%normalized-separator prefix-core suffix-core newline)
                           suffix-core)))))))))
 
-(defun %apply-operation (text node operation content normalize-blank-lines
-                         &optional (comment-floor 0))
+(defun %apply-operation (text node end operation content normalize-blank-lines readtable
+                         &optional (comment-floor 0) replacement-line-comment-p)
   "Apply OPERATION to NODE within TEXT, optionally normalizing blank lines.
-COMMENT-FLOOR bounds the comment block taken as NODE's (%COMMENT-FLOOR)."
+END includes the target's same-line comment. COMMENT-FLOOR bounds the comment
+block above NODE. REPLACEMENT-LINE-COMMENT-P indicates a line break may be
+needed after CONTENT."
   (if normalize-blank-lines
-      (%apply-operation-normalized text node operation content comment-floor)
-      (%apply-operation-preserve-spacing text node operation content comment-floor)))
+      (%apply-operation-normalized text node end operation content readtable comment-floor
+                                   replacement-line-comment-p)
+      (%apply-operation-preserve-spacing text node end operation content readtable comment-floor
+                                         replacement-line-comment-p)))
 
 (defconstant +dry-run-snippet-limit+ 2048
   "Maximum characters of one form snippet inlined into a dry-run summary.")
@@ -1313,7 +1390,7 @@ replaced form, and the line the matched form starts on. A dry run carries the re
           (abs rel original nodes target target-snippet _ file-package-name inactive-p)
           (%locate-target-form file-path form-type form-name readtable guard)
         (declare (ignore _))
-        (let ((inactive-feature
+        (let* ((inactive-feature
                 ;; A form under a feature expression false here (issue #321):
                 ;; the edit lands on a form this server does not read, which
                 ;; the result says, since load-system will show no change.
@@ -1322,12 +1399,18 @@ replaced form, and the line the matched form starts on. A dry run carries the re
               ;; blank lines inside the wrapper are its own, never normalized.
               (normalize-blank-lines (and normalize-blank-lines
                                           (member target nodes :test #'eq)
-                                          t)))
+                                          t))
+               ;; The caller's readtable, or the one in effect at the target.
+               (content-readtable
+                 (or readtable (%detect-readtable-before-node nodes target)))
+               (active-readtable
+                 (or (%resolve-named-readtable content-readtable) *standard-readtable*))
+               (end (%trailing-line-comment-end original (cst-node-end target) active-readtable)))
         (if (eq op-key :delete)
             ;; Delete path: no content validation needed
             (let* ((updated
-                    (%apply-operation original target op-key nil
-                                      normalize-blank-lines))
+                    (%apply-operation original target end op-key nil
+                                      normalize-blank-lines active-readtable))
                    (would-change (not (string= original updated))))
               (log-event :debug "lisp.edit.form" "path" (namestring abs)
                          "operation" op-normalized "form_type" form-type
@@ -1357,9 +1440,7 @@ replaced form, and the line the matched form starts on. A dry run carries the re
             ;; Content is validated under the readtable in effect at the target:
             ;; the caller's argument, or an (in-readtable ...) earlier in the
             ;; file, as lisp-patch-form does.
-            (let* ((content-readtable
-                     (or readtable (%detect-readtable-before-node nodes target)))
-                   ;; A replace's own feature expressions are set aside so that
+            (let* (;; A replace's own feature expressions are set aside so that
                    ;; its form is validated whether or not their condition
                    ;; holds in this process.
                    (split (if (eq op-key :replace)
@@ -1373,14 +1454,19 @@ replaced form, and the line the matched form starts on. A dry run carries the re
                 (error "content has the feature expression ~A but no form after it"
                        (string-right-trim '(#\Space #\Tab #\Newline #\Return) own-prefix)))
               (multiple-value-bind (validated-content parinfer-warning repair-fixes
-                                    bracket-warning reparented form-count spans)
+                                    bracket-warning reparented form-count spans
+                                    replacement-line-comment-p)
                   ;; insert_before/insert_after take one or more forms (issue
                   ;; #189); replace keeps its one-form rule.
                   (if (member op-key '(:insert-before :insert-after))
                       (%validate-and-repair-block content content-readtable
                                                   file-package-name abs)
-                      (%validate-and-repair-content form-content content-readtable
-                                                    file-package-name abs))
+                      (multiple-value-bind (validated warning fixes bracket reparented
+                                            line-comment-p)
+                          (%validate-and-repair-content form-content content-readtable
+                                                        file-package-name abs)
+                        (values validated warning fixes bracket reparented
+                                nil nil line-comment-p)))
                 ;; Content written for a twin the reader skips here would
                 ;; overwrite the one form this server reads (issue #316).  A
                 ;; target the server does not read is no such form: replacing
@@ -1396,9 +1482,7 @@ replaced form, and the line the matched form starts on. A dry run carries the re
                          ;; Normalise only the gaps between a block's forms, and
                          ;; only where the gaps read the standard way.
                          (if (and spans normalize-blank-lines
-                                  (%gap-syntax-standard-p
-                                   (or (%resolve-named-readtable content-readtable)
-                                       *standard-readtable*)))
+                                  (%gap-syntax-standard-p active-readtable))
                              (%normalize-block-gaps validated-content spans)
                              validated-content))
                        ;; The target's expressions are kept only when the
@@ -1426,17 +1510,18 @@ replaced form, and the line the matched form starts on. A dry run carries the re
                        (updated
                          (if same-form
                              original
-                             (%apply-operation original target op-key spliced
-                                               normalize-blank-lines
-                                               (%comment-floor nodes target))))
+                             (%apply-operation original target end op-key spliced
+                                               normalize-blank-lines active-readtable
+                                               (%comment-floor nodes target)
+                                               replacement-line-comment-p)))
                        ;; Whether normalising moved the blank lines around a
                        ;; replaced form, compared with leaving them as they were.
                        (blank-lines-normalized
                          (and (eq op-key :replace) normalize-blank-lines (not same-form)
                               (not (string= updated
                                             (%apply-operation-preserve-spacing
-                                             original target :replace
-                                             (%trim-outer-whitespace spliced))))))
+                                             original target end :replace spliced
+                                             active-readtable 0 replacement-line-comment-p)))))
                        (would-change (not (string= original updated))))
                   (log-event :debug "lisp.edit.form" "path" (namestring abs)
                              "operation" op-normalized "form_type" form-type
@@ -1584,7 +1669,8 @@ written.")
 nothing else: a replace swaps the form, a delete removes it and the gap after it, and
 an insert takes the gap the file already has beside the target. When true, the blank
 lines around the edited form are normalized too (one blank line between top-level
-forms), which can move lines outside the form.")
+forms). In both modes, replace keeps an existing ; comment on the form's last line,
+insert_after goes below it, and delete removes it with the form.")
          (readtable :type :string
                     :description "Named-readtable designator for files using custom reader macros.
 Supports both keyword style ('interpol-syntax') and package-qualified style

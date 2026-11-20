@@ -1270,6 +1270,232 @@ handling and return the file's text afterwards."
                     :key #'cl-mcp/src/cst:cst-node-kind))
         "both forms still read")))
 
+(deftest lisp-edit-form-keeps-a-trailing-comment-on-replacement
+  (let ((source (format nil "(in-package #:cl-user)~%~%~
+                             (defun coord-a () 1)~C; returns one  ~%~
+                             (defun coord-b () 2)~%" #\Tab))
+        (single "(defun coord-a () 11)")
+        (multi (format nil "(defun coord-a ()~%  11)"))
+        (literal "(defun coord-a () \";\")"))
+    (dolist (normalize '(nil t))
+      (loop for (content expected-replacement) in
+            (list (list single single)
+                  (list multi multi)
+                  (list literal literal)
+                  (list (concatenate 'string single " ; new note")
+                        (format nil "~A ; new note~%" single)))
+            do (testing (format nil "~S with normalization ~S" content normalize)
+                 (with-temp-file "tests/tmp/edit-form-trailing-replace.lisp" source
+                   (lambda (path)
+                     (let* ((args (list :file-path path :form-type "defun" :form-name "coord-a"
+                                        :operation "replace" :content content
+                                        :normalize-blank-lines normalize))
+                            (preview (apply #'lisp-edit-form :dry-run t args))
+                            (expected (format nil "(in-package #:cl-user)~%~%~
+                                                   ~A~C; returns one  ~%~:[~;~%~]~
+                                                   (defun coord-b () 2)~%"
+                                              expected-replacement #\Tab normalize)))
+                       (ok (gethash "would_change" preview))
+                       (ok (string= (gethash "preview" preview) expected))
+                       (ok (string= (fs-read-file path) source))
+                       (apply #'lisp-edit-form args)
+                       (ok (string= (fs-read-file path) expected))))))))))
+
+(deftest lisp-edit-form-keeps-a-line-break-after-reader-discarded-forms
+  (loop for (content ends-in-comment) in
+        '(("(defun a () 3) #+(or) (defun absent () 3) ; new note" t)
+          ("(defun a () 3) #+(or) (list \";\" #\\; '|x;y|) #| ; block |#" nil)
+          ("(defun a () 3) #+(or) #\\;" nil))
+        do (dolist (normalize '(nil t))
+             (dolist (old-comment '("" " ; original note"))
+               (testing (format nil "~S, normalize ~S, old comment ~S"
+                                content normalize old-comment)
+                 (let* ((has-old-comment (plusp (length old-comment)))
+                        (source (if has-old-comment
+                                    (format nil "(defun a () 1)~A~%(defun b () 2)~%" old-comment)
+                                    (format nil "(defun a () 1) (defun b () 2)~%")))
+                        (expected (format nil "~A~A~A~A(defun b () 2)~%"
+                                          content
+                                          (if (and ends-in-comment has-old-comment)
+                                              (string #\Newline) "")
+                                          old-comment
+                                          (cond (normalize (format nil "~%~%"))
+                                                (has-old-comment (string #\Newline))
+                                                (ends-in-comment (format nil "~% "))
+                                                (t " "))))
+                        (actual (%default-edit source :form-type "defun" :form-name "a"
+                                               :operation "replace" :content content
+                                               :normalize-blank-lines normalize)))
+                   (ok (string= actual expected))
+                   (ok (= 2 (count :expr (parse-top-level-forms actual)
+                                   :key #'cl-mcp/src/cst:cst-node-kind)))))))))
+
+(deftest lisp-edit-form-keeps-a-readtable-escape-outside-the-target
+  (let ((name :cl-mcp-test-edit-tab-escape)
+        (table (copy-readtable nil))
+        (suffix (format nil "~C;name (defun b () 2)~%" #\Tab)))
+    (set-syntax-from-char #\Tab #\\ table)
+    (named-readtables:register-readtable name table)
+    (unwind-protect
+         (dolist (normalize '(nil t))
+           (loop for (operation content) in
+                 '(("replace" "(defun a () 3)")
+                   ("insert_before" "(defun added () 0)")
+                   ("insert_after" "(defun added () 0)")
+                   ("delete" nil))
+                 do (testing (format nil "~A with normalization ~S" operation normalize)
+                      (let* ((source (concatenate 'string "(defun a () 1)" suffix))
+                             (edited (%default-edit source :form-type "defun" :form-name "a"
+                                                    :operation operation :content content
+                                                    :normalize-blank-lines normalize
+                                                    :readtable name))
+                             (suffix-start (- (length edited) (length suffix))))
+                        (ok (and (>= suffix-start 0)
+                                 (string= suffix edited :start2 suffix-start)))
+                        (let ((*readtable* table)
+                              (*package* (symbol-package 'b)))
+                          (with-input-from-string (stream edited)
+                            (loop for form = (read stream nil :eof)
+                                  until (eq form :eof)
+                                  collect form into forms
+                                  finally (ok (equal '(defun b () 2)
+                                                     (car (last forms)))))))))))
+      (named-readtables:unregister-readtable name))))
+
+(deftest lisp-edit-form-checks-replacement-comments-with-the-active-readtable
+  (let* ((name :cl-mcp-test-edit-replacement-comment)
+         (standard (copy-readtable nil))
+         (source (format nil "(defparameter a 1) (defparameter b 2)~%"))
+         (left-paren (get-macro-character #\( standard)))
+    (loop for (content configure) in
+          (list (list "(defparameter a 3) #|; note |#"
+                      (lambda (table)
+                        (set-dispatch-macro-character
+                         #\# #\| (lambda (stream sub-char count)
+                                   (declare (ignore stream sub-char count))
+                                   (values))
+                         table)))
+                (list "(defparameter a 3) #+(or) :ignored ; note"
+                      (lambda (table)
+                        (set-macro-character
+                         #\( (lambda (stream char)
+                               (or (funcall left-paren stream char) #()))
+                         nil table)))
+                (list "(defparameter a 3) #+(or) :ignored ; note"
+                      (lambda (table)
+                        (set-macro-character
+                         #\( (lambda (stream char)
+                               (let ((form (funcall left-paren stream char)))
+                                 (if form form (values))))
+                         nil table))))
+          do (let ((table (copy-readtable standard)))
+               (funcall configure table)
+               (named-readtables:register-readtable name table)
+               (unwind-protect
+                    (dolist (normalize '(nil t))
+                      (testing (format nil "~A with normalization ~S" content normalize)
+                        (let ((edited (%default-edit source :form-type "defparameter"
+                                                     :form-name "a" :operation "replace"
+                                                     :content content :readtable name
+                                                     :normalize-blank-lines normalize))
+                              (*readtable* table)
+                              (*package* (symbol-package 'b)))
+                          (with-input-from-string (stream edited)
+                            (let ((first (read stream nil :eof))
+                                  (second (read stream nil :eof)))
+                              (ok (equal '(defparameter a 3) first))
+                              (ok (equal '(defparameter b 2) second)))))))
+                 (named-readtables:unregister-readtable name))))))
+
+(deftest lisp-edit-form-protects-source-with-a-wrapped-semicolon-reader
+  (let* ((name :cl-mcp-test-edit-comment-wrapper)
+         (table (copy-readtable nil))
+         (original (get-macro-character #\; table))
+         (adjacent (format nil "(defun a () 1) (defun b () 2)~%"))
+         (commented (format nil "(defun a () 1) ; old note~%(defun b () 2)~%")))
+    (set-macro-character #\; (lambda (stream char) (funcall original stream char)) nil table)
+    (named-readtables:register-readtable name table)
+    (unwind-protect
+         (dolist (normalize '(nil t))
+           (testing (format nil "wrapped semicolon, normalize ~S" normalize)
+             (let ((edited (%default-edit adjacent :form-type "defun" :form-name "a"
+                                          :operation "replace" :readtable name
+                                          :normalize-blank-lines normalize
+                                          :content "(defun a () 3) ; new note")))
+               (let ((*readtable* table)
+                     (*package* (symbol-package 'b)))
+                 (with-input-from-string (stream edited)
+                   (let ((first (read stream nil :eof))
+                         (second (read stream nil :eof)))
+                     (ok (equal '(defun a () 3) first))
+                     (ok (equal '(defun b () 2) second))))))
+             (ok (string= (%default-edit commented :form-type "defun" :form-name "a"
+                                         :operation "replace" :readtable name
+                                         :normalize-blank-lines normalize
+                                         :content "(defun a () 3)")
+                          (format nil "(defun a () 3) ; old note~%~:[~;~%~](defun b () 2)~%"
+                                  normalize)))
+             (ok (string= (%default-edit commented :form-type "defun" :form-name "a"
+                                         :operation "delete" :readtable name
+                                         :normalize-blank-lines normalize)
+                          (format nil "(defun b () 2)~%")))))
+      (named-readtables:unregister-readtable name))))
+
+(deftest lisp-edit-form-preserves-semicolon-source-with-noncomment-semantics
+  (let ((name :cl-mcp-test-edit-semicolon-form)
+        (table (copy-readtable nil))
+        (source (format nil "(defun a () 1) ; (defun b () 2)~%")))
+    (set-macro-character #\; (lambda (stream char) (declare (ignore stream char)) :marker)
+                         nil table)
+    (named-readtables:register-readtable name table)
+    (unwind-protect
+         (dolist (normalize '(nil t))
+           (testing (format nil "semicolon as a form, normalize ~S" normalize)
+             (let ((result (%default-edit source :form-type "defun" :form-name "a"
+                                          :operation "delete" :readtable name
+                                          :normalize-blank-lines normalize)))
+               (ok (string= result (format nil "; (defun b () 2)~%")))
+               (let ((*readtable* table)
+                     (*package* (symbol-package 'b)))
+                 (with-input-from-string (stream result)
+                   (let ((first (read stream nil :eof))
+                         (second (read stream nil :eof)))
+                     (ok (eq :marker first))
+                     (ok (equal '(defun b () 2) second))))))))
+      (named-readtables:unregister-readtable name))))
+
+(deftest lisp-edit-form-normalizes-around-a-form-and-its-trailing-comment
+  (let ((source (format nil "(defun a () 1) ; about a~%;; about b~%(defun b () 2)~%"))
+         (inserted "(defun n () 0)")
+         (following (format nil ";; about b~%(defun b () 2)~%")))
+    (loop for (operation content expected) in
+          (list (list "insert_after" inserted
+                      (format nil "(defun a () 1) ; about a~%~%~A~%~%~A" inserted following))
+                (list "insert_before" inserted (format nil "~A~%~%~A" inserted source))
+                (list "delete" nil following))
+          do (testing operation
+               (with-temp-file "tests/tmp/edit-form-trailing-normalization.lisp" source
+                 (lambda (path)
+                   (let* ((args (list :file-path path :form-type "defun" :form-name "a"
+                                      :operation operation :content content
+                                      :normalize-blank-lines t))
+                          (preview (apply #'lisp-edit-form :dry-run t args)))
+                     (ok (gethash "would_change" preview))
+                     (ok (string= (gethash "preview" preview) expected))
+                     (ok (string= (fs-read-file path) source))
+                     (apply #'lisp-edit-form args)
+                     (ok (string= (fs-read-file path) expected)))))))))
+
+(deftest lisp-edit-form-normalizes-trailing-comments-with-the-files-line-endings
+  (let ((crlf (coerce '(#\Return #\Newline) 'string)))
+    (let ((source (format nil "(defun a () 1) ; about a~A(defun b () 2)~A" crlf crlf))
+          (expected (format nil "(defun a () 3) ; about a~A~A(defun b () 2)~A"
+                            crlf crlf crlf)))
+      (ok (string= (%default-edit source :form-type "defun" :form-name "a"
+                                :operation "replace" :content "(defun a () 3)"
+                                :normalize-blank-lines t)
+                   expected)))))
+
 (deftest lisp-edit-form-setf-name-matches-without-its-package-prefix
   ;; Issue #326: (setf c::top-level-lambda-max) was reported unmatched by
   ;; "(setf top-level-lambda-max)"; a package prefix inside a (setf ...) name is
