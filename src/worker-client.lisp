@@ -735,6 +735,26 @@ worker held a session's state, and only its end is owed to anyone."
                       :exit-status (worker-last-exit-status worker)
                       :exit-code (worker-last-exit-code worker)))
 
+(defun %await-process-exit (process seconds)
+  "Wait up to SECONDS for PROCESS to stop running.  Return true once it has;
+it has then been reaped as well, because each look goes through
+SB-EXT:PROCESS-ALIVE-P, whose status update collects a child that exited.
+Return NIL when it is still running, or stopped, at the deadline, or when its
+status cannot be read.
+
+Bounded where SB-EXT:PROCESS-WAIT is not: the reaper waits here after its
+signals, and a child that outlived them must not hold the thread, which
+SHUTDOWN-POOL waits for."
+  (loop with deadline = (+ (get-internal-real-time)
+                           (round (* seconds internal-time-units-per-second)))
+        do (multiple-value-bind (alive failure)
+               (ignore-errors (sb-ext:process-alive-p process))
+             (cond (failure (return nil))
+                   ((not alive) (return t))))
+           (when (>= (get-internal-real-time) deadline)
+             (return nil))
+           (sleep 0.05)))
+
 (defun %mark-worker-crashed (worker reason)
   "Mark WORKER as crashed, record its end in the reset ledger unless it was
 already decided, close its stream to prevent further use, and log the event.
@@ -826,9 +846,10 @@ Returns nothing."
         (exit-code (worker-last-exit-code worker))
         (exit-status (worker-last-exit-status worker)))
     (when process
-      ;; Reap the OS process in a background thread to avoid blocking
-      ;; the caller.  process-close calls waitpid internally, which
-      ;; blocks if the worker process is still alive.
+      ;; Send signals and wait for exit in a background thread to avoid
+      ;; blocking the caller. SB-EXT:PROCESS-CLOSE stops updating the Lisp
+      ;; process object's status. On Unix, SBCL still collects the child
+      ;; with waitpid. Observe the terminal status before closing the object.
       (let ((reaper-thread nil))
         (setf reaper-thread
               (bt:make-thread
@@ -847,33 +868,33 @@ Returns nothing."
                              (log-event :warn "worker.reaper.sigkill" "id" wid)
                              (sb-ext:process-kill process 9)
                              (sleep 0.2))))
-                       (ignore-errors (sb-ext:process-wait process nil nil))
-                       ;; EOF only says the transport closed.  A child that
-                       ;; was still alive at that moment is terminated here.
-                       ;; Keep the EOF-time crash snapshot immutable: pool and
-                       ;; proxy may already have copied it.
-                       ;; The terminal observation belongs only to this diagnostic event.
-                       (let ((final-status nil)
-                             (final-code nil))
-                         (ignore-errors
-                           (let ((status (sb-ext:process-status process)))
-                             (when (member status '(:exited :signaled))
-                               (setf final-status
-                                     (string-downcase (symbol-name status))
-                                     final-code
-                                     (sb-ext:process-exit-code process)))))
-                         (log-event :info "worker.reaped"
-                                    "id" wid
-                                    "pid" (worker-pid worker)
-                                    "reason" reason
-                                    "observed_exit_status"
-                                    (or exit-status "unknown")
-                                    "observed_exit_code"
-                                    (or exit-code "unknown")
-                                    "final_exit_status"
-                                    (or final-status "unknown")
-                                    "final_exit_code"
-                                    (or final-code "unknown")))
+                        (%await-process-exit process 2)
+                        ;; The pool and proxy may already have copied the
+                        ;; EOF-time crash snapshot. The log carries the
+                        ;; terminal observation.
+                        (let ((final-status nil)
+                              (final-code nil))
+                          (ignore-errors
+                            (let ((status (sb-ext:process-status process)))
+                              (when (member status '(:exited :signaled))
+                                (setf final-status
+                                      (string-downcase (symbol-name status))
+                                      final-code
+                                      (sb-ext:process-exit-code process)))))
+                          (if final-status
+                              (log-event :info "worker.reaped"
+                                         "id" wid
+                                         "pid" (worker-pid worker)
+                                         "reason" reason
+                                         "observed_exit_status"
+                                         (or exit-status "unknown")
+                                         "observed_exit_code"
+                                         (or exit-code "unknown")
+                                         "final_exit_status" final-status
+                                         "final_exit_code"
+                                         (or final-code "unknown"))
+                              (log-event :warn "worker.reaper.still-running"
+                                         "id" wid "pid" (worker-pid worker))))
                        (ignore-errors (sb-ext:process-close process)))
                    ;; Self-remove from reaper thread list on completion
                    (bt:with-lock-held (*reaper-threads-lock*)
