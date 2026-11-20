@@ -1,0 +1,6 @@
+[mcp_servers.cl-mcp]
+command = "ros"
+args = ["run", "-s", "cl-mcp", "-e", "(cl-mcp:run :transport :stdio)"]
+
+[mcp_servers.cl-mcp.env]
+MCP_ENABLE_TOOL_GROUPS = "cl-spec"
