@@ -249,7 +249,9 @@ you could not drill into."
     (object seen-table active-table depth max-depth max-elements)
   "Inspect a structure."
   (let ((slots '())
-        (class-name (%type-name object)))
+        (class-name (%type-name object))
+        ;; A slot can itself contain the keyword :UNBOUND.
+        (unbound-marker (list :unbound)))
     #+sbcl
     (let ((layout-of-fn (find-symbol "LAYOUT-OF" "SB-KERNEL"))
           (dd-slots-fn (find-symbol "DD-SLOTS" "SB-KERNEL"))
@@ -270,10 +272,10 @@ you could not drill into."
                     (let* ((slot-name (symbol-name (funcall dsd-name-fn dsd)))
                            (accessor (funcall dsd-accessor-fn dsd))
                            (value (handler-case (funcall accessor object)
-                                    (error () :unbound))))
+                                    (error () unbound-marker))))
                       (push (make-ht "name" slot-name
                                      "value"
-                                     (if (eq value :unbound)
+                                     (if (eq value unbound-marker)
                                          (make-ht "kind" "unbound"
                                                   "summary" "#<unbound-slot>")
                                          (%value-repr value seen-table
@@ -301,11 +303,11 @@ you could not drill into."
                                  (accessor (funcall dsd-accessor-fn dsd))
                                  (value
                                    (handler-case (funcall accessor object)
-                                     (error () :unbound))))
+                                     (error () unbound-marker))))
                             (push (make-ht
                                    "name" slot-name
                                    "value"
-                                   (if (eq value :unbound)
+                                   (if (eq value unbound-marker)
                                        (make-ht "kind" "unbound"
                                                 "summary" "#<unbound-slot>")
                                        (%value-repr value seen-table

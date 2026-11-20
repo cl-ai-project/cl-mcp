@@ -302,6 +302,20 @@
          (ok (string= "structure" (ht-get result "kind")))
          (ok (string= "TEST-POINT" (ht-get result "class"))))))))
 
+#+sbcl
+(deftest inspect-structure-slot-containing-unbound-keyword
+  (with-fresh-registry
+   (lambda ()
+     (let* ((*print-case* :upcase)
+            (point (make-test-point :x :unbound :y 42))
+            (inspection (inspect-object-by-id (register-object point)))
+            (slot (find "X" (gethash "slots" inspection) :test #'string=
+                        :key (lambda (slot) (gethash "name" slot))))
+            (value (and slot (gethash "value" slot))))
+       (ok (and value (equal "KEYWORD" (gethash "package" value))))
+       (ok (and value (equal "UNBOUND" (gethash "value" value))))
+       (ok (search "X: :UNBOUND" (cl-mcp/src/inspect:format-inspect-elements inspection)))))))
+
 ;;; Test circular reference detection
 
 (deftest inspect-circular-reference
