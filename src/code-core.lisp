@@ -4,6 +4,8 @@
 
 (defpackage #:cl-mcp/src/code-core
   (:use #:cl)
+  (:import-from #:eclector.reader)
+  (:import-from #:cl-mcp/src/tools/helpers #:arg-validation-error)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/project-root #:*project-root*)
   (:import-from #:cl-mcp/src/utils/paths
@@ -16,7 +18,6 @@
   (:import-from #:cl-mcp/src/code-refs-core
                 #:%method-specializer-keys
                 #:sequence->list
-                #:parse-symbol-text
                 #:resolve-target
                 #:qualified-symbol-name
                 #:symbol-kind
@@ -43,63 +44,77 @@
 
 (in-package #:cl-mcp/src/code-core)
 
-(defun %ensure-package (package)
-  "Resolve PACKAGE designator to a package object.
-Signals an error when the package does not exist."
-  (cond
-    ((null package) *package*)
-    ((and (stringp package) (string= package ""))
-     *package*)
-    ((packagep package) package)
-    ((symbolp package)
-     (or (find-package package)
-         (error "Package ~S does not exist" package)))
-    ((stringp package)
-     (or (find-package (string-upcase package))
-         (error "Package ~A does not exist" package)))
-    (t (error "Invalid package designator ~S" package))))
-
 (define-condition symbol-package-missing (error)
   ((package-name :initarg :package-name :reader symbol-package-missing-name))
   (:report (lambda (condition stream)
              (format stream "Package ~S not found (nothing was interned). Load the system ~
                              that defines it with load-system."
                      (symbol-package-missing-name condition))))
-  (:documentation "A qualified symbol name names a package that does not exist,
+  (:documentation "The package for a symbol lookup does not exist,
 most often because the system defining it is not loaded yet.  Its own type, so
 code-find and code-describe answer it as a tool error rather than a fault."))
 
+(define-condition symbol-not-describable (error)
+  ((symbol :initarg :symbol :reader symbol-not-describable-symbol)
+   (name :initarg :name :reader symbol-not-describable-name
+         :documentation "SYMBOL qualified as QUALIFIED-SYMBOL-NAME writes it."))
+  (:report (lambda (condition stream)
+             (format stream "Symbol ~A is not bound as a function, variable, class, or condition"
+                     (symbol-not-describable-symbol condition))))
+  (:documentation "Signalled by CODE-DESCRIBE-SYMBOL for a symbol bound as none of
+the things it describes, such as a restart's name or a name not yet loaded.
+A lookup that found nothing, not a fault: the tools answer it as not found."))
+
+(defmethod eclector.reader:interpret-symbol
+    ((client (eql 'lookup-token)) stream package-indicator name internp)
+  ;; Keep Eclector's case, escape and package-marker rules. Resolve the token
+  ;; against the requested package only after the reader accepts the whole input.
+  (declare (ignore stream))
+  (list package-indicator name internp))
+
+(defmethod eclector.reader:call-reader-macro
+    ((client (eql 'lookup-token)) stream char readtable)
+  ;; #:NAME already denotes a symbol with no home package or definition.
+  (if (and (char= char #\#) (eql (peek-char nil stream nil nil) #\:))
+      (call-next-method)
+      (error 'arg-validation-error :arg-name "symbol"
+             :message (format nil "Expected a symbol name, found reader macro ~S" char))))
+
+(defun %read-lookup-token (text)
+  "Return the package indicator, name and access mode of exactly one symbol token."
+  (let ((eclector.reader:*client* 'lookup-token)
+        (*read-eval* nil))
+    (multiple-value-bind (token end)
+        (handler-case (eclector.reader:read-from-string text nil nil)
+          ((or reader-error end-of-file) (condition)
+            (error 'arg-validation-error :arg-name "symbol" :message (princ-to-string condition))))
+      (unless (and (consp token) (not (position-if-not #'%source-whitespace-p text :start end)))
+        (error 'arg-validation-error :arg-name "symbol"
+               :message "Expected exactly one symbol name"))
+      token)))
+
 (defun %parse-symbol (symbol-name &key package)
-  "Read SYMBOL-NAME as a symbol without permitting evaluation.
-PACKAGE is used only when SYMBOL-NAME is unqualified; when a package marker
-appears in SYMBOL-NAME (e.g., \"pkg:sym\"), PACKAGE is ignored.  A package
-part naming no package signals SYMBOL-PACKAGE-MISSING before anything is read."
-  (unless (stringp symbol-name)
-    (error "symbol must be a string"))
-  ;; Looked up before reading: the reader's own package error says only that
-  ;; the package does not exist, and reaches the client as an internal fault.
-  ;; Text that is no symbol name is left to the reader's own refusal.
-  (multiple-value-bind (name package-part) (parse-symbol-text symbol-name)
-    (declare (ignore name))
-    ;; FIND-PACKAGE as the reader will look it up: PACKAGE-PART is already
-    ;; written as the reader reads it, so no upcased retry.
-    (when (and package-part (null (find-package package-part)))
-      (error 'symbol-package-missing :package-name package-part)))
-  (let* ((qualified-p (position #\: symbol-name))
-         (*package* (if qualified-p
-                        *package*
-                        (handler-case
-                            (%ensure-package package)
-                          (error () *package*))))
-         (*readtable* (copy-readtable nil))
-         (*read-eval* nil))
-    (multiple-value-bind (obj end) (read-from-string symbol-name nil :eof)
-      (declare (ignore end))
-      (when (eq obj :eof)
-        (error "Symbol name ~S is empty" symbol-name))
-      (unless (symbolp obj)
-        (error "~S is not a symbol name" symbol-name))
-      obj)))
+  "Resolve a single Lisp symbol token without interning. PACKAGE applies to bare names."
+  (destructuring-bind (indicator name internp) (%read-lookup-token symbol-name)
+    (unless indicator
+      (error 'symbol-not-describable :symbol (make-symbol name) :name (format nil "#:~A" name)))
+    (let* ((designator (case indicator
+                         (:current (or package *package*))
+                         (:keyword "KEYWORD")
+                         (t indicator)))
+           (home (or (find-package designator)
+                     (and (eq indicator :current) (find-package (string-upcase designator)))
+                     (error 'symbol-package-missing :package-name designator))))
+      (multiple-value-bind (symbol status) (find-symbol name home)
+        (cond
+          ((null status)
+           (error 'symbol-not-describable :symbol (make-symbol name)
+                  :name (format nil "~A::~A" (package-name home) name)))
+          ((or internp (eq status :external)) symbol)
+          (t
+           (error 'arg-validation-error :arg-name "symbol"
+                  :message (format nil "~S is not external in package ~A"
+                                   name (package-name home)))))))))
 
 (defun %ensure-sb-introspect ()
   "Load and return the SB-INTROSPECT package when available."
@@ -643,9 +658,9 @@ because PATH has already been made relative for display -- to *PROJECT-ROOT*,
 not to the process's working directory, which in a worker is whatever it
 inherited.  Probing the relative string
 downstream therefore failed for every file that does exist."
-  (let* ((qualified (position #\: symbol-name))
-         (pkg (if qualified nil package))
-         (sym (%parse-symbol symbol-name :package pkg)))
+  (let ((sym (handler-case (%parse-symbol symbol-name :package package)
+               (symbol-not-describable ()
+                 (return-from code-find-definition (values nil nil nil nil))))))
     #+sbcl
     (let* ((pkg (%ensure-sb-introspect))
            (find-by-name (and pkg (find-symbol "FIND-DEFINITION-SOURCES-BY-NAME" pkg)))
@@ -684,17 +699,6 @@ downstream therefore failed for every file that does exist."
       (values nil nil nil nil))
     #-sbcl
     (error "code-find-definition requires SBCL")))
-
-(define-condition symbol-not-describable (error)
-  ((symbol :initarg :symbol :reader symbol-not-describable-symbol)
-   (name :initarg :name :reader symbol-not-describable-name
-         :documentation "SYMBOL qualified as QUALIFIED-SYMBOL-NAME writes it."))
-  (:report (lambda (condition stream)
-             (format stream "Symbol ~A is not bound as a function, variable, class, or condition"
-                     (symbol-not-describable-symbol condition))))
-  (:documentation "Signalled by CODE-DESCRIBE-SYMBOL for a symbol bound as none of
-the things it describes, such as a restart's name or a name not yet loaded.
-A lookup that found nothing, not a fault: the tools answer it as not found."))
 
 (declaim (ftype (function (string &key (:package (or null package symbol string)))
                           (values string string (or null string) (or null string)
@@ -785,12 +789,9 @@ TYPE is one of:
         (values name type arglist doc path line stale)))))
 
 (defun generic-function-method-count (symbol-name &key package)
-  "Return how many methods the generic function SYMBOL-NAME names has, or NIL
-when it names no generic function -- including when SYMBOL-NAME cannot be
-resolved at all, such as a keyword, which RESOLVE-TARGET refuses with an
-error.  Resolved with RESOLVE-TARGET, so nothing is interned; code-describe
-uses it to point at clos-describe, and must still describe what it cannot."
-  (let ((symbol (handler-case (resolve-target symbol-name :package package)
+  "Return the number of methods on the generic function that CODE-DESCRIBE-SYMBOL
+would resolve from SYMBOL-NAME and PACKAGE, or NIL when it names no generic function."
+  (let ((symbol (handler-case (%parse-symbol symbol-name :package package)
                   (error () nil))))
     (and symbol
          (fboundp symbol)

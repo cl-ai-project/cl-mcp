@@ -1371,7 +1371,11 @@ Return definition location (path, line) for a symbol using SBCL `sb-introspect`.
 
 Input:
 - `symbol` (string, required): prefer package-qualified, e.g., `"cl-mcp:version"`
-- `package` (string, optional): used when `symbol` is unqualified; must exist
+- `package` (string, optional) selects the package for an unqualified `symbol`. It defaults
+  to the current package. An unknown package returns a tool error that names the package.
+
+Lookup uses existing symbols. A typo leaves the package unchanged. Use `pkg:name` for an
+exported symbol or `pkg::name` for an internal one. A qualified name supplies its own package.
 
 Output:
 - `path` (relative when inside project, absolute otherwise)
@@ -1386,7 +1390,8 @@ Return symbol metadata (name, type, arglist, documentation).
 
 Input:
 - `symbol` (string, required)
-- `package` (string, optional): must exist when `symbol` is unqualified
+- `package` (string, optional) follows the same lookup rules as `code-find`, including the
+  error for an unknown package on an unqualified name.
 
 Output:
 - `name` (string): the resolved symbol, as printed
