@@ -672,7 +672,7 @@ initialization pool-wide for")
       (ignore-errors (sb-ext:process-wait process)))))
 
 (deftest reaper-times-out-without-logging-a-terminal-event
-  ;; The child waits on its stdin until PROCESS-CLOSE closes the pipe.
+  ;; The child stays alive while its stdin pipe is open.
   (let* ((process (sb-ext:run-program "/bin/sh" '("-c" "read -r line")
                                       :input :stream :wait nil :search nil))
          (pid (sb-ext:process-pid process))
@@ -681,7 +681,8 @@ initialization pool-wide for")
          (signal-process #'sb-ext:process-kill)
          (sink (make-string-output-stream))
          (old-log-stream cl-mcp/src/log:*log-stream*)
-         (old-log-level cl-mcp/src/log:*log-level*))
+         (old-log-level cl-mcp/src/log:*log-level*)
+         (reaper nil))
     (unwind-protect
          (progn
            (bordeaux-threads:with-lock-held (cl-mcp/src/log:*log-lock*)
@@ -694,16 +695,16 @@ initialization pool-wide for")
                      (unless (eq target process)
                        (funcall signal-process target signal whom)))))
            (cl-mcp/src/worker-client::%mark-worker-crashed worker "timeout")
-           (let ((reaper
-                   (bordeaux-threads:with-lock-held
-                       (cl-mcp/src/worker-client::*reaper-threads-lock*)
-                     (find (format nil "reap-worker-~A" pid)
-                           cl-mcp/src/worker-client::*reaper-threads*
-                           :key #'bt:thread-name :test #'equal))))
-             (when reaper
-               (sb-thread:join-thread reaper :timeout 10 :default nil)
-               (ok (not (bt:thread-alive-p reaper))
-                   "the reaper finishes before inspecting its logs")))
+           (setf reaper
+                 (bordeaux-threads:with-lock-held
+                     (cl-mcp/src/worker-client::*reaper-threads-lock*)
+                   (find (format nil "reap-worker-~A" pid)
+                         cl-mcp/src/worker-client::*reaper-threads*
+                         :key #'bt:thread-name :test #'equal)))
+           (when reaper
+             (sb-thread:join-thread reaper :timeout 10 :default nil)
+             (ok (not (bt:thread-alive-p reaper))
+                 "the reaper finishes before inspecting its logs"))
            (let* ((output (bordeaux-threads:with-lock-held (cl-mcp/src/log:*log-lock*)
                             (get-output-stream-string sink)))
                   (events (with-input-from-string (input output)
@@ -716,13 +717,19 @@ initialization pool-wide for")
                  "the reaper warns once when its wait expires")
              (ok (not (member "worker.reaped" events :test #'equal))
                  "the reaper leaves the terminal event absent")))
-      (sb-ext:without-package-locks
-        (setf (symbol-function 'sb-ext:process-kill) signal-process))
-      (bordeaux-threads:with-lock-held (cl-mcp/src/log:*log-lock*)
-        (setf cl-mcp/src/log:*log-stream* old-log-stream
-              cl-mcp/src/log:*log-level* old-log-level))
-      (sb-ext:process-close process)
-      (wait-until (lambda () (not (funcall signal-process process 0))) :timeout 5))))
+      (unwind-protect
+           (progn
+             ;; EOF lets a reaper blocked in PROCESS-WAIT observe the exit.
+             (close (sb-ext:process-input process))
+             (when (and reaper (bt:thread-alive-p reaper))
+               (sb-thread:join-thread reaper :timeout 5))
+             (sb-ext:process-close process)
+             (wait-until (lambda () (not (funcall signal-process process 0))) :timeout 5))
+        (sb-ext:without-package-locks
+          (setf (symbol-function 'sb-ext:process-kill) signal-process))
+        (bordeaux-threads:with-lock-held (cl-mcp/src/log:*log-lock*)
+          (setf cl-mcp/src/log:*log-stream* old-log-stream
+                cl-mcp/src/log:*log-level* old-log-level))))))
 
 (deftest awaiting-a-process-exit-reaps-a-child-that-ends
   ;; The reaper's wait after its signals.  It used to be
@@ -742,25 +749,34 @@ initialization pool-wide for")
            (ok (< elapsed 5)
                (format nil "the wait ends when the child does, not at the deadline (~,2Fs)"
                        elapsed)))
-      (ignore-errors (sb-ext:process-kill process 9))
-      (ignore-errors (sb-ext:process-close process)))))
+      (unwind-protect
+           (sb-ext:process-wait process)
+        (sb-ext:process-close process)))))
 
 (deftest awaiting-a-process-exit-gives-up-at-its-deadline
   ;; A child that outlives its signals must not hold the reaper: shutdown
   ;; joins the reaper threads.
-  (let ((process (sb-ext:run-program "/bin/sh" '("-c" "exec sleep 30")
-                                     :wait nil :search nil)))
+  ;; The child waits on stdin until cleanup closes the pipe.
+  (let ((process (sb-ext:run-program "/bin/sh" '("-c" "read -r line")
+                                     :input :stream :wait nil :search nil)))
     (unwind-protect
-         (let* ((start (get-internal-real-time))
-                (gone (cl-mcp/src/worker-client::%await-process-exit process 0.3))
-                (elapsed (/ (- (get-internal-real-time) start)
-                            internal-time-units-per-second)))
-           (ok (not gone) "a child still running at the deadline is not reported gone")
-           (ok (<= 0.3 elapsed 3)
-               (format nil "the wait returns at its deadline (~,2Fs)" elapsed)))
-      (ignore-errors (sb-ext:process-kill process 9))
-      (ignore-errors (sb-ext:process-wait process))
-      (ignore-errors (sb-ext:process-close process)))))
+         (handler-case
+             (sb-ext:with-timeout 5
+               (let* ((timeout 3/10)
+                      (start (get-internal-real-time))
+                      (gone (cl-mcp/src/worker-client::%await-process-exit process timeout))
+                      (elapsed (/ (- (get-internal-real-time) start)
+                                  internal-time-units-per-second)))
+                 (ok (not gone) "the wait reports an unconfirmed exit at the deadline")
+                 (ok (<= timeout elapsed 3)
+                     (format nil "the wait returns at its deadline (~,2Fs)" elapsed))))
+           (sb-ext:timeout ()
+             (ok nil "the wait returns before the test watchdog expires")))
+      (unwind-protect
+           (sb-ext:with-timeout 5
+             (close (sb-ext:process-input process))
+             (sb-ext:process-wait process))
+        (sb-ext:process-close process)))))
 
 (deftest killing-a-worker-lets-its-last-words-through
   ;; KILL-WORKER closes the worker's pipe by killing it, so the drain thread
