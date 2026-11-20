@@ -633,6 +633,6 @@
              (dolist (uri (list (concatenate 'string "file://elsewhere.invalid" prefix)
                                 (concatenate 'string "https://localhost" prefix)
                                 "file:///%74mp/" 23))
-               (ok (null (initialize-root (make-ht "rootUri" uri))) uri)))
+               (ok (null (initialize-root (make-ht "rootUri" uri))) (princ-to-string uri))))
         (uiop:chdir original-cwd)
         (when (probe-file parent) (uiop:delete-directory-tree parent :validate t))))))
