@@ -1033,6 +1033,7 @@ defaults.  These are raw values off :SOURCE, and this stream is built by a
 bare WITH-OUTPUT-TO-STRING with no printer bindings of its own."
   (let* ((record (getf result :core-record))
          (source (getf record :source))
+         (fixture-p (eql 2 (getf source :schema-version)))
          (contract-p (eq :contract (getf result :kind))))
     (when source
       (let ((case-report (getf source :case-report)))
@@ -1078,6 +1079,7 @@ bare WITH-OUTPUT-TO-STRING with no printer bindings of its own."
                      (concatenate 'string
                                   "the target was NOT called; a :capture "
                                   "form signalled before it"))
+                    (:fixture "the fixture lifecycle failed")
                     (:generation
                      (concatenate 'string
                                   "the run stopped in generation and never "
@@ -1090,8 +1092,16 @@ bare WITH-OUTPUT-TO-STRING with no printer bindings of its own."
       ;; was kept", not "the body never ran" -- and saying the latter would
       ;; be a false statement about code that executed.
       (when contract-p
-        (let ((outcome (getf (getf source :failure) :outcome)))
-          (cond ((eq :not-collected outcome)
+        (let* ((observation (or (getf source :failure) (and fixture-p (getf source :run-error))))
+               (recorded (getf observation :outcome))
+               (outcome (if fixture-p
+                            (when (eq :collected (getf recorded :availability))
+                              (getf recorded :value))
+                            recorded))
+               (lifecycle (getf observation :lifecycle)))
+          (cond ((or (eq :not-collected outcome)
+                     (and fixture-p (get-properties lifecycle '(:target-called))
+                          (null (getf lifecycle :target-called))))
                  (format stream "~&    target: not called"))
                 ((eq :returned (getf outcome :kind))
                  (format stream "~&    target: returned ~{~A~^, ~}"
@@ -1229,9 +1239,16 @@ not reach a verdict"))
 The effective trial count is the one a reader should act on: a contract whose
 :PRE refused most of what was generated was checked far less than its trial
 count suggests, and that shortfall is invisible in every other line."
-  (let ((contract (getf result :contract)))
+  (let ((contract (getf result :contract))
+        (source (getf (getf result :core-record) :source)))
     (when contract
-      (case (getf contract :rejection-status)
+      (case (if (and (eql 2 (getf source :schema-version))
+                     (getf contract :rejected-usable))
+                :fixture-trials
+                (getf contract :rejection-status))
+        (:fixture-trials
+         (format stream "~&    fixture: ~D trial~:P executed, ~D refused by :pre"
+                 (getf (getf result :trials) :executed) (getf contract :rejected)))
         ;; One CASE on the keyword the report decided, rather than five
         ;; booleans re-tested in an order that must not change.
         (:overcounted

@@ -20,6 +20,7 @@
 (defpackage #:cl-mcp/src/spec-core-record
   (:use #:cl)
   (:import-from #:cl-mcp/src/spec-adapter-core
+                #:supported-core-schema-p
                 #:symbol-data
                 #:externalize-value)
   (:export #:safe-json-integer-p
@@ -626,13 +627,23 @@ rather than by whatever reads it next."
     (when (eq :absent (field-availability record :schema-version))
       (bad "the record carries no :schema-version"))
     (let ((version (getf record :schema-version)))
-      (unless (eql 1 version)
+      (unless (supported-core-schema-p record)
         (return-from validate-versioned-record
           (values :unsupported-schema version)))
       (dolist (key +v1-required-metadata+)
         (when (eq :absent (field-availability record key))
-          (bad (format nil "a version 1 record is missing required metadata ~A"
-                       (%json-key key)))))
+          (bad (format nil "a version ~D record is missing required metadata ~A"
+                       version (%json-key key)))))
+      (when (eql 2 version)
+        (let ((fixture (getf record :fixture)))
+          (unless (and (%proper-plist-p fixture)
+                       (eq :fresh (getf fixture :isolation))
+                       (typep (getf fixture :version) '(integer 1 *))
+                       (getf fixture :recipe-name)
+                       (symbolp (getf fixture :recipe-name))
+                       (get-properties fixture '(:setup))
+                       (get-properties fixture '(:cleanup)))
+            (bad "a version 2 fixture result requires its fresh fixture declaration"))))
       (when (and expected-record-kind
                  (not (eq expected-record-kind (getf record :record-kind))))
         (bad (format nil "expected a ~A record and got ~A"
@@ -909,6 +920,45 @@ rather than by whatever reads it next."
                  (:cases . :elsewhere)
                  (:source-location . :elsewhere))))
 
+(defun %extend-object-descriptor (descriptor &rest fields)
+  "Add FIELDS to an object DESCRIPTOR, replacing existing fields by key."
+  (cons :object
+        (append fields (remove-if (lambda (entry) (assoc (car entry) fields))
+                                  (rest descriptor)))))
+
+(defparameter +fixture-result-descriptor+
+  (flet ((snapshot (value-descriptor)
+           `(:object (:availability . :leaf) (:reason . :leaf)
+                     (:type . :capture-diagnostic-type) (:value . ,value-descriptor))))
+    (let* ((observed (%extend-object-descriptor
+                      (getf *record-shapes* :observation)
+                      (cons :explanation (snapshot '(:ref :explanation)))
+                      (cons :outcome (snapshot '(:ref :target-outcome)))
+                      (cons :value (snapshot :opaque))))
+           (call-evidence (%extend-object-descriptor
+                           observed '(:failure-phase . :leaf)
+                           (cons :arguments (snapshot '(:array :opaque)))))
+           (lifecycle '(:object (:setup . :leaf) (:evaluation . :leaf) (:cleanup . :leaf)
+                                (:state . :leaf) (:completion . :leaf) (:target-called . :boolean)
+                                (:errors . (:array (:object (:phase . :leaf) (:reason . :leaf)
+                                                           (:condition-type . :leaf)
+                                                           (:condition-report . :leaf))))))
+           (observation (%extend-object-descriptor observed '(:input-kind . :leaf)
+                                                   (cons :lifecycle lifecycle)
+                                                   (cons :call-evidence call-evidence))))
+      (%extend-object-descriptor
+       (getf *record-shapes* :result-data)
+       '(:input-kind . :leaf)
+       '(:fixture . (:object (:isolation . :leaf) (:version . :leaf) (:recipe-name . :leaf)
+                             (:setup . (:array :leaf)) (:cleanup . (:array :leaf))))
+       (cons :case-report (%extend-object-descriptor (getf *record-shapes* :case-report)
+                                                     '(:fixture-errors . :leaf)))
+       (cons :failure observation) (cons :shrunk-failure observation)
+       (cons :run-error observation))))
+  "Generated fixture results keep recipes in the outer observation's arguments.
+Call evidence carries availability-tagged snapshots of the actual call. A lifecycle
+error has its own observation, including when shrinking an earlier counterexample.")
+
 (defun project-core-record (record shape-name &key expected-record-kind
                                                    expected-entity-kind
                                                    (max-chars 2000))
@@ -947,24 +997,27 @@ beside a 10-character compatibility alias is one call with two answers."
                :unsupported-schema
                reason))
       (t
-       (multiple-value-bind (node issues unknown)
-           (project-record record (list :ref shape-name) :max-chars max-chars)
-         (values (list :availability :collected
-                       :schema-supported t
-                       :schema-version 1
-                       ;; The record as cl-spec gave it, kept for the adapter's
-                       ;; own reading.  The verdict logic asks questions like
-                       ;; "was any declared case never reached", and answering
-                       ;; them off :DATA would mean re-parsing projected JSON
-                       ;; nodes to recover keywords this already has.  Never
-                       ;; rendered: :DATA is what reaches the client.
-                       :source record
-                       :field-availability
-                       (loop for (key . nil) in (rest (%resolve-descriptor
-                                                       (list :ref shape-name)))
-                             append (list key (field-availability record key)))
-                       :unknown-keys unknown
-                       :projection (list :complete (null issues) :issues issues)
-                       :data node)
-                 :ok
-                 nil))))))
+       (let* ((version (getf record :schema-version))
+              (descriptor (if (and (eql 2 version) (eq :result-data shape-name))
+                              +fixture-result-descriptor+
+                              (%resolve-descriptor (list :ref shape-name)))))
+         (multiple-value-bind (node issues unknown)
+             (project-record record descriptor :max-chars max-chars)
+           (values (list :availability :collected
+                         :schema-supported t
+                         :schema-version version
+                         ;; The record as cl-spec gave it, kept for the adapter's
+                         ;; own reading.  The verdict logic asks questions like
+                         ;; "was any declared case never reached", and answering
+                         ;; them off :DATA would mean re-parsing projected JSON
+                         ;; nodes to recover keywords this already has.  Never
+                         ;; rendered: :DATA is what reaches the client.
+                         :source record
+                         :field-availability
+                         (loop for (key . nil) in (rest descriptor)
+                               append (list key (field-availability record key)))
+                         :unknown-keys unknown
+                         :projection (list :complete (null issues) :issues issues)
+                         :data node)
+                   :ok
+                   nil)))))))

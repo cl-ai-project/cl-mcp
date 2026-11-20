@@ -150,9 +150,9 @@ trailing spaces into every message and every JSON field carrying one.")
 
 (defparameter +contract-coverage-note+
   (concatenate 'string
-               "Only the contract named: its :pre, :returns and :post over "
-               "arguments generated from its :args. Properties registered "
-               "about the same symbol are NOT included and were not run.")
+               "Only the named function contract ran. Its generated inputs are "
+               "arguments or, for a fixture, recipes used to construct each call. "
+               "Properties registered about the same symbol were not run.")
   "The limit of what an explicit contract selection covers.")
 
 (defparameter +unverifiable-contract-note+
