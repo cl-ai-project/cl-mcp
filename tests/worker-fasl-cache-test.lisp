@@ -313,6 +313,95 @@ machine, so this deletes every ended worker's, as a starting worker would."
              (return nil))
            (sleep 0.1)))
 
+(defun %bootstrap-test-launcher (dir)
+  "Return a launcher for a copy of this worker system with a cold ASDF output directory."
+  (let ((source (asdf:system-source-directory :cl-mcp))
+        (cache (merge-pathnames "cache/" dir))
+        (launcher (merge-pathnames "launch" dir))
+        (runner (if (cl-mcp/src/worker-client::%roswell-p)
+                    (cl-mcp/src/worker-client::%find-ros-path)
+                    (cl-mcp/src/worker-client::%find-sbcl-path))))
+    (uiop:copy-file (merge-pathnames "cl-mcp.asd" source) (merge-pathnames "cl-mcp.asd" dir))
+    (uiop:copy-file (merge-pathnames "main.lisp" source) (merge-pathnames "main.lisp" dir))
+    (uiop:run-program (list "cp" "-R" (uiop:native-namestring (merge-pathnames "src" source))
+                            (uiop:native-namestring (merge-pathnames "src" dir))))
+    (with-open-file (out (merge-pathnames "src/worker/server.lisp" dir)
+                         :direction :output :if-exists :append)
+      (terpri out)
+      (write-string (uiop:read-file-string
+                     (merge-pathnames "tests/fixtures/worker-bootstrap-probe.lisp" source)) out))
+    ;; Independent user cache directories still share the same ASDF outputs.
+    ;; Reuse already compiled dependencies outside this cold checkout.
+    (%write-text launcher
+                 (format nil "#!/bin/sh~%exec env XDG_CACHE_HOME=~Auser-$$ ~{~A ~}\"$@\"~%"
+                         (uiop:escape-sh-token (uiop:native-namestring dir))
+                         (mapcar #'uiop:escape-sh-token
+                                 (list (format nil "CL_SOURCE_REGISTRY=(:source-registry ~
+                                                   (:directory ~S) :inherit-configuration)"
+                                               (uiop:native-namestring dir))
+                                       (format nil "ASDF_OUTPUT_TRANSLATIONS=(:output-translations ~
+                                                   (~S ~S) (t ~S) :inherit-configuration)"
+                                               (uiop:native-namestring dir)
+                                               (uiop:native-namestring cache)
+                                               (uiop:native-namestring
+                                                (uiop:pathname-directory-pathname
+                                                 (asdf:apply-output-translations #P"/probe.fasl"))))
+                                       (format nil "CL_MCP_BOOT_PROBE_DIR=~A" dir)
+                                       runner))))
+    (sb-posix:chmod launcher #o700)
+    (uiop:native-namestring launcher)))
+
+(defun %check-concurrent-boot (launcher)
+  "Release two real worker launches together and check that both authenticated."
+  (let* ((gate (sb-thread:make-semaphore))
+         (threads
+           (loop repeat 2 collect
+             (bt:make-thread
+              (lambda ()
+                (let ((cl-mcp/src/worker-client::*cached-ros-path* launcher)
+                      (cl-mcp/src/worker-client::*cached-sbcl-path* launcher)
+                      (cl-mcp/src/worker-client::*worker-startup-timeout* 90))
+                  (sb-thread:wait-on-semaphore gate)
+                  (handler-case (spawn-worker) (error (c) c))))))))
+    (sb-thread:signal-semaphore gate 2)
+    (let ((outcomes (mapcar #'bt:join-thread threads)))
+      (unwind-protect
+           (dolist (outcome outcomes)
+             (if (typep outcome 'error)
+                 (ok nil (princ-to-string outcome))
+                 (ok (search "42" (%eval-in outcome "(+ 40 2)")))))
+        (dolist (outcome outcomes)
+          (unless (typep outcome 'error) (kill-worker outcome)))))))
+
+(deftest workers-start-together-on-a-cold-bootstrap-cache
+  (if (not (spawn-available-p))
+      (skip "Cannot spawn workers")
+      (let ((dir (%scratch-directory "bootstrap")))
+        (unwind-protect
+             (let ((launcher (%bootstrap-test-launcher dir)))
+               (testing "two workers share the initially empty worker FASL cache"
+                 (%check-concurrent-boot launcher)
+                 (ok (probe-file (merge-pathnames "cache/src/worker/server.fasl" dir))))
+               (testing "two warm workers load concurrently"
+                 (%write-text (merge-pathnames "warm" dir) "")
+                 (%check-concurrent-boot launcher)
+                 (ok (= 2 (length (directory (merge-pathnames "reader-*" dir))))))
+               (testing "a compiler that exits before its handshake releases its lock"
+                 (delete-file (merge-pathnames "warm" dir))
+                 (delete-file (merge-pathnames "cache/src/worker/server.fasl" dir))
+                 (%write-text (merge-pathnames "abort" dir) "")
+                 (let ((cl-mcp/src/worker-client::*cached-ros-path* launcher)
+                       (cl-mcp/src/worker-client::*cached-sbcl-path* launcher))
+                   (let ((failed (handler-case (spawn-worker) (error (c) c))))
+                     (unwind-protect
+                          (ok (and (typep failed 'error)
+                                   (search "Aborting the bootstrap compiler"
+                                           (princ-to-string failed))))
+                       (unless (typep failed 'error) (kill-worker failed)))))
+                 (delete-file (merge-pathnames "abort" dir))
+                 (%check-concurrent-boot launcher)))
+          (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
+
 (deftest a-fresh-worker-builds-the-project-from-source
   ;; Issue #317: a worker that had the macro in its image compiled a.lisp with
   ;; it expanded, into the cache every worker shared.  The FASL was newer than
