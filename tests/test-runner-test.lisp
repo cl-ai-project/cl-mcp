@@ -812,7 +812,11 @@ suites, and the directory."
   (sleep 0.25)
   (ok t))
 ")
-     (let ((report (let ((asdf/session:*asdf-session* nil))
+     ;; Rove's CLI sets both overrides to its terminal streams. Reproduce
+     ;; that enclosing run when this case is invoked directly through MCP too.
+     (let ((report (let ((asdf/session:*asdf-session* nil)
+                         (rove/core/suite:*rove-standard-output* (make-broadcast-stream))
+                         (rove/core/suite:*rove-error-output* (make-broadcast-stream)))
                      (run-tests "clmcp-sib" :framework :rove))))
        (ok (= 1 (gethash "passed" report)))
        (ok (zerop (gethash "failed" report)))
