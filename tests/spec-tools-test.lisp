@@ -23,6 +23,7 @@
                 #:+verification-gap-values+)
   (:import-from #:cl-mcp/src/tools/registry
                 #:*enabled-tool-groups*
+                #:parse-tool-groups
                 #:disabled-tool-group)
   (:import-from #:yason #:parse))
 
@@ -95,40 +96,36 @@ are what a test about the message has to look at."
       (t ""))))
 
 (deftest spec-tools-are-hidden-until-the-group-is-enabled
-  (testing "the optional group is off by default"
-    (%ensure-tools)
-    (let* ((*use-worker-pool* nil)
-           (response (process-json-line
-                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
-           (tools (gethash "tools" (gethash "result" (parse response))))
-           (names (map 'list (lambda (tool) (gethash "name" tool)) tools)))
-      (dolist (name '("spec-list" "spec-symbol" "spec-describe" "spec-check"))
-        (ok (not (member name names :test #'string=))))
-      (testing "and the tools that are not optional are still there"
-        (ok (member "repl-eval" names :test #'string=)))))
-  (testing "calling one says which group to enable, not that it does not exist"
-    (%ensure-tools)
-    (let* ((*use-worker-pool* nil)
-           (response (process-json-line
-                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"spec-check\",\"arguments\":{}}}"))
-           (message (gethash "message" (gethash "error" (parse response)))))
-      (ok (search "cl-spec" message))
-      (ok (search "MCP_ENABLE_TOOL_GROUPS" message))
-      (ok (not (search "not found" message)))))
-  (testing "an unknown tool is still reported as unknown"
-    (%ensure-tools)
-    (let* ((*use-worker-pool* nil)
-           (response (process-json-line
-                      "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"no-such-tool\",\"arguments\":{}}}"))
-           (message (gethash "message" (gethash "error" (parse response)))))
-      (ok (search "not found" message))))
-  (testing "disabled-tool-group names the group for a registered tool only"
-    (%ensure-tools)
-    (ok (eq :cl-spec (disabled-tool-group "spec-check")))
-    (ok (null (disabled-tool-group "repl-eval")))
-    (ok (null (disabled-tool-group "no-such-tool")))
-    (with-cl-spec-group
-      (ok (null (disabled-tool-group "spec-check"))))))
+  (%ensure-tools)
+  (let ((*enabled-tool-groups* (parse-tool-groups nil))
+        (*use-worker-pool* nil))
+    (testing "an absent group setting leaves optional tools off"
+      (let* ((response (process-json-line
+                        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
+             (tools (gethash "tools" (gethash "result" (parse response))))
+             (names (map 'list (lambda (tool) (gethash "name" tool)) tools)))
+        (dolist (name '("spec-list" "spec-symbol" "spec-describe" "spec-check"))
+          (ok (not (member name names :test #'string=))))
+        (testing "and the tools that are not optional are still there"
+          (ok (member "repl-eval" names :test #'string=)))))
+    (testing "calling one says which group to enable, not that it does not exist"
+      (let* ((response (process-json-line
+                        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"spec-check\",\"arguments\":{}}}"))
+             (message (gethash "message" (gethash "error" (parse response)))))
+        (ok (search "cl-spec" message))
+        (ok (search "MCP_ENABLE_TOOL_GROUPS" message))
+        (ok (not (search "not found" message)))))
+    (testing "an unknown tool is still reported as unknown"
+      (let* ((response (process-json-line
+                        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"no-such-tool\",\"arguments\":{}}}"))
+             (message (gethash "message" (gethash "error" (parse response)))))
+        (ok (search "not found" message))))
+    (testing "disabled-tool-group names the group for a registered tool only"
+      (ok (eq :cl-spec (disabled-tool-group "spec-check")))
+      (ok (null (disabled-tool-group "repl-eval")))
+      (ok (null (disabled-tool-group "no-such-tool")))
+      (with-cl-spec-group
+        (ok (null (disabled-tool-group "spec-check")))))))
 
 (deftest spec-tools-are-registered
   (testing "all four tools appear in tools/list once the group is on"
@@ -345,11 +342,12 @@ are what a test about the message has to look at."
       (ok (search "positive" (string-downcase (%text response)))))))
 
 (deftest spec-list-is-in-the-optional-group
-  (testing "the listing tool is opt-in like the other three"
-    (%ensure-tools)
-    (ok (eq :cl-spec (disabled-tool-group "spec-list")))
-    (with-cl-spec-group
-      (ok (null (disabled-tool-group "spec-list"))))))
+  (%ensure-tools)
+  (let ((*enabled-tool-groups* nil))
+    (testing "the listing tool is opt-in like the other three"
+      (ok (eq :cl-spec (disabled-tool-group "spec-list")))
+      (with-cl-spec-group
+        (ok (null (disabled-tool-group "spec-list")))))))
 
 (deftest spec-check-description-does-not-call-skipped-unreachable
   (testing "a status the code emits is not documented as one that cannot occur"
