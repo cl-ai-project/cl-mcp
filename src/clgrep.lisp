@@ -304,8 +304,8 @@ not a recognized definer (starting with def) -- FiveAM's test, say -- has no typ
 kept")
          (limit :type :integer
                 :description "Maximum matching lines collected before they are grouped per form
-(optional, defaults to 200), so fewer entries can come back; the JSON 'limited' says when it was
-reached")
+(positive integer, defaults to 200), so fewer entries can come back; the JSON 'limited' says when
+it was reached")
          (include-form :type :boolean :json-name "include_form"
                        :description "Add each form's text to the JSON matches (default: false; the
 content text shows signatures either way)")
@@ -316,6 +316,10 @@ true. A pattern with nested repetition, such as (a*)*, can backtrack for minutes
 line."))
   :body
   (progn
+    (when (and limit (not (plusp limit)))
+      (error 'arg-validation-error
+             :arg-name "limit"
+             :message "limit must be a positive integer"))
     (when (and timeout-seconds (not (plusp timeout-seconds)))
       (error 'arg-validation-error
              :arg-name "timeout_seconds"

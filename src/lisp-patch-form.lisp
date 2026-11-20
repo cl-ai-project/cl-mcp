@@ -583,19 +583,13 @@ four of FORM-TYPE, FORM-NAME, OLD-TEXT and NEW-TEXT, and not both."
               :message "form_type, form_name, old_text and new_text are required (or pass patches)")))))
 
 (defun %patch-plists (patches)
-  "Return PATCHES, the tool's patches argument (a JSON array of objects), as the
-plists LISP-PATCH-FORM-MANY takes, refusing an element that is not an object."
-  (loop for patch in (coerce patches 'list)
-        for number from 1
-        collect (if (hash-table-p patch)
-                    (list :form-type (gethash "form_type" patch)
-                          :form-name (gethash "form_name" patch)
-                          :old-text (gethash "old_text" patch)
-                          :new-text (gethash "new_text" patch))
-                    (error 'arg-validation-error :arg-name "patches"
-                           :message (format nil "patch ~D is not an object with form_type, ~
-                                                 form_name, old_text and new_text"
-                                            number)))))
+  "Convert the validated PATCHES array of objects to plists for LISP-PATCH-FORM-MANY."
+  (map 'list (lambda (patch)
+               (list :form-type (gethash "form_type" patch)
+                     :form-name (gethash "form_name" patch)
+                     :old-text (gethash "old_text" patch)
+                     :new-text (gethash "new_text" patch)))
+       patches))
 
 (defun %patches-result (id file-path dry-run count outcome)
   "Return the tool result for LISP-PATCH-FORM-MANY's OUTCOME, the list of its

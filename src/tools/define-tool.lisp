@@ -13,6 +13,7 @@
                 #:arg-validation-error
                 #:validation-message
                 #:extract-arg
+                #:extract-array-arg
                 #:extract-boolean-arg)
   (:import-from #:cl-mcp/src/tools/registry #:register-tool)
   (:import-from #:cl-mcp/src/utils/sanitize
@@ -51,8 +52,7 @@
            :item-type :string
            :description nil))
     (list
-     (destructuring-bind (name &key json-name type required default enum description
-                               (item-type :string))
+     (destructuring-bind (name &key json-name type required default enum description item-type)
          spec
        (list :name name
              :json-name (or json-name (%symbol-to-json-name name))
@@ -60,7 +60,7 @@
              :required required
              :default default
              :enum enum
-             :item-type item-type
+             :item-type (or item-type :string)
              :description description)))))
 
 (defun %type-to-json-type (type)
@@ -79,12 +79,15 @@
         (json-name (getf parsed-spec :json-name))
         (type (getf parsed-spec :type))
         (required (getf parsed-spec :required))
-        (default (getf parsed-spec :default)))
-    (if (eq type :boolean)
-        `(,name (extract-boolean-arg ,args-var ,json-name :default ,default))
-        `(,name (extract-arg ,args-var ,json-name
-                             :type ,type
-                             :required ,required)))))
+        (default (getf parsed-spec :default))
+        (item-type (getf parsed-spec :item-type)))
+    (case type
+      (:boolean
+       `(,name (extract-boolean-arg ,args-var ,json-name :default ,default)))
+      (:array
+       `(,name (extract-array-arg ,args-var ,json-name ,item-type :required ,required)))
+      (otherwise
+       `(,name (extract-arg ,args-var ,json-name :type ,type :required ,required))))))
 
 (defun %generate-schema-property (parsed-spec)
   "Generate schema property setter form for a parsed argument spec."
@@ -96,7 +99,7 @@
     `(setf (gethash ,json-name properties)
            (make-ht "type" ,(%type-to-json-type type)
                     ,@(when (eq type :array)
-                        `("items" (make-ht "type" ,(%type-to-json-type (or item-type :string)))))
+                        `("items" (make-ht "type" ,(%type-to-json-type item-type))))
                     ,@(when enum
                         `("enum" (vector ,@enum)))
                     ,@(when description
@@ -119,7 +122,7 @@ DESCRIPTION is the tool description string for the schema.
 
 ARGS is a list of argument specifications. Each spec can be:
   - A symbol: creates an optional string argument
-  - A list: (name &key json-name type required default enum description)
+  - A list: (name &key json-name type required default enum item-type description)
     - name: Symbol used in BODY
     - json-name: JSON key (default: snake_case of name)
     - type: :string :integer :number :boolean :array :object
