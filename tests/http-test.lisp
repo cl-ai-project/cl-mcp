@@ -681,6 +681,30 @@ Host header's value, which is 127.0.0.1:PORT otherwise."
                  (let ((answers (parse reply)))
                    (ok (and (vectorp answers) (= 1 (length answers))
                             (eql 2 (gethash "id" (aref answers 0))))))))
+             (testing "the wire preserves presence of array arguments in a batch"
+               (let ((call "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",
+                            \"params\":{\"name\":\"run-tests\",\"arguments\":{
+                            \"system\":\"cl-mcp/tests/utils-strings-test\",\"tests\":~A}},
+                            \"id\":~D}"))
+                 (multiple-value-bind (status headers reply)
+                     (request "POST" (format nil "[~A,~A,~A]"
+                                              (format nil call "false" 20)
+                                              (format nil call "null" 21)
+                                              (format nil call "[]" 22)))
+                   (declare (ignore headers))
+                   (ok (= 200 status))
+                   (let ((answers (parse reply)))
+                     (ok (and (vectorp answers) (= 3 (length answers))))
+                     (loop for index from 0 to 1
+                           for answer = (aref answers index)
+                           for error = (gethash "error" answer)
+                           do (ok (eql (+ 20 index) (gethash "id" answer)))
+                              (ok (and error (eql -32602 (gethash "code" error))))
+                              (ok (and error (equal "tests must be an array"
+                                                    (gethash "message" error)))))
+                     (let ((result (gethash "result" (aref answers 2))))
+                       (ok (and result (equal "unresolved"
+                                              (gethash "framework" result)))))))))
              (testing "both ping requests receive their own result"
                (multiple-value-bind (status headers reply)
                    (request "POST" (format nil "[~A,~A]" ping

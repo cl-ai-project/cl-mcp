@@ -26,7 +26,8 @@
            #:validation-message
            #:extract-arg
            #:extract-array-arg
-           #:extract-boolean-arg))
+           #:extract-boolean-arg
+           #:*wire-tool-arguments*))
 
 (in-package #:cl-mcp/src/tools/helpers)
 
@@ -169,9 +170,20 @@ Example:
       ;; Optional and missing
       (t nil))))
 
+(defvar *wire-tool-arguments* nil
+  "The argument object of the current tool call when decoded from wire JSON.")
+
 (defun extract-array-arg (args name item-type &key required)
   "Extract the array argument NAME from ARGS and validate its items against ITEM-TYPE.
 REQUIRED has the same meaning as in EXTRACT-ARG. Return the array unchanged."
+  ;; Yason reads false and null as NIL, but reads [] as an empty vector.
+  ;; Only a decoded argument object can use presence to distinguish them from
+  ;; an omitted argument or a Lisp caller's empty list.
+  (when (and args (eq args *wire-tool-arguments*))
+    (multiple-value-bind (value supplied-p) (gethash name args)
+      (when (and supplied-p (null value))
+        (error 'arg-validation-error :arg-name name
+               :message (format nil "~A must be an array" name)))))
   (let ((items (extract-arg args name :type :array :required required))
         (item-number 0))
     (map nil (lambda (item)

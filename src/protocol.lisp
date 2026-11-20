@@ -19,6 +19,7 @@
                 #:get-tool-handler
                 #:disabled-tool-group)
   (:import-from #:cl-mcp/src/tools/helpers
+                #:*wire-tool-arguments*
                 #:make-ht
                 #:result
                 #:rpc-error)
@@ -416,7 +417,7 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
       ((string= method "ping") (result id (make-ht)))
       (t (rpc-error id -32601 (format nil "Method ~A not found" method))))))
 
-(defun %dispatch-message (message state in-batch-p)
+(defun %dispatch-message (message state in-batch-p wire-input-p)
   "Return the reply object for one message, or NIL for a one-way message."
   (unless (hash-table-p message)
     (return-from %dispatch-message (rpc-error nil -32600 "Invalid Request")))
@@ -449,9 +450,12 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
            (rpc-error id -32600 "Initialize must be the first, separate request of a session"))
           ((not (or (eq params :absent) (hash-table-p params)))
            (rpc-error id -32602 "Expected parameters to be an object"))
-          (t (let ((reply (handle-request state id method (unless (eq params :absent) params))))
-               (log-event :debug "rpc.result" "id" id "method" method)
-               reply)))
+          (t
+           (let ((*wire-tool-arguments*
+                   (when (and wire-input-p (equal method "tools/call") (hash-table-p params))
+                     (gethash "arguments" params))))
+             (prog1 (handle-request state id method (unless (eq params :absent) params))
+               (log-event :debug "rpc.result" "id" id "method" method)))))
       (error (e)
         (ignore-errors (log-event :error "rpc.internal" "id" id "method" method
                                   "error" (princ-to-string e)))
@@ -460,17 +464,19 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
         (ignore-errors (log-event :error "rpc.internal" "method" method "error" "storage exhausted"))
         (when valid-id (rpc-error id -32603 "Internal error: the server ran out of stack or heap"))))))
 
-(defun process-json-message (message state)
+(defun process-json-message (message state &key wire-input-p)
   "Dispatch a parsed MCP message and return its encoded reply, or NIL.
-For a single message the second value is its reply object, if any."
+For a single message the second value is its reply object, if any.
+Set WIRE-INPUT-P for JSON decoded from a transport so a supplied null or false
+array argument can be distinguished from an omitted argument."
   (if (and (vectorp message) (not (stringp message)) (plusp (length message))
            (equal (protocol-version state) "2025-03-26"))
       ;; Encode each reply independently, preserving its ID even on the encoder's retry path.
       (let ((replies (loop for item across message
-                           for reply = (%dispatch-message item state t)
+                           for reply = (%dispatch-message item state t wire-input-p)
                            when reply collect (%encode-json reply))))
         (when replies (format nil "[~{~A~^,~}]" replies)))
-      (let ((reply (%dispatch-message message state nil)))
+      (let ((reply (%dispatch-message message state nil wire-input-p)))
         (when reply (values (%encode-json reply) reply)))))
 
 (defun process-json-line (line &optional (state (make-state)))
@@ -502,4 +508,4 @@ For a single message the second value is its reply object, if any."
                    (return-from process-json-line
                      (%encode-json
                       (rpc-error nil -32700 "Parse error: nested too deeply")))))))
-      (process-json-message msg state))))
+      (process-json-message msg state :wire-input-p t))))

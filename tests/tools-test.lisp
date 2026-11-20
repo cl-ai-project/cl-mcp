@@ -1512,6 +1512,26 @@
                              "{\"pattern\":\"defun make-ht\",\"path\":\"src/tools/helpers.lisp\",
                                \"form_types\":[\"defun\",7]}"
                              "form_types item 2 must be a string")
+                            ("clgrep-search"
+                             "{\"pattern\":\"defun make-ht\",\"path\":\"src/tools/helpers.lisp\",
+                               \"form_types\":false}"
+                             "form_types must be an array")
+                            ("clgrep-search"
+                             "{\"pattern\":\"defun make-ht\",\"path\":\"src/tools/helpers.lisp\",
+                               \"form_types\":null}"
+                             "form_types must be an array")
+                            ("run-tests"
+                             "{\"system\":\"cl-mcp/tests/utils-strings-test\",\"tests\":false}"
+                             "tests must be an array")
+                            ("run-tests"
+                             "{\"system\":\"cl-mcp/tests/utils-strings-test\",\"tests\":null}"
+                             "tests must be an array")
+                            ("lisp-patch-form"
+                             "{\"file_path\":\"src/tools/helpers.lisp\",\"patches\":false}"
+                             "patches must be an array")
+                            ("lisp-patch-form"
+                             "{\"file_path\":\"src/tools/helpers.lisp\",\"patches\":null}"
+                             "patches must be an array")
                             ("run-tests"
                              "{\"system\":\"cl-mcp/tests/utils-strings-test\",\"tests\":\"\"}"
                              "tests must be an array")
@@ -1555,6 +1575,27 @@
         (let* ((reply (call (format nil "\"limit\":1,\"form_types\":~A" filter)))
                (result (gethash "result" reply)))
           (ok (and result (eql 1 (gethash "count" result)))))))))
+
+(deftest tools-call-keeps-lisp-array-designators-and-wire-scalar-arguments
+  (with-test-project-root
+    (let ((*use-worker-pool* nil)
+          (state (cl-mcp/src/protocol:make-state)))
+      (dolist (filter '(nil ("defun")))
+        (let* ((message (make-ht "jsonrpc" "2.0" "id" 1 "method" "tools/call"
+                                 "params" (make-ht "name" "clgrep-search"
+                                                   "arguments"
+                                                   (make-ht "pattern" "defun make-ht"
+                                                            "path" "src/tools/helpers.lisp"
+                                                            "form_types" filter))))
+               (reply (parse (cl-mcp/src/protocol:process-json-message message state)))
+               (result (gethash "result" reply)))
+          (ok (and result (eql 1 (gethash "count" result)))))))
+    (let* ((reply (parse (%pjl "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",
+                               \"params\":{\"name\":\"clgrep-search\",\"arguments\":{
+                               \"pattern\":\"DEFUN MAKE-HT\",\"path\":\"src/tools/helpers.lisp\",
+                               \"case_insensitive\":false,\"limit\":null}}}")))
+           (result (gethash "result" reply)))
+      (ok (and result (eql 0 (gethash "count" result)))))))
 
 (deftest tools-list-includes-tool-descriptors
   (testing "tools/list exposes descriptors for critical tools"
