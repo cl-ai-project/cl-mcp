@@ -256,6 +256,10 @@ Input schema (JSON):
   of the function it is written in (SBCL names it `(LABELS VISIT :IN OUTER)`), so one inside
   your own function is your frame, here and in the backtrace
 
+The printed value and captured output preserve Unicode text, including characters such as 😀.
+The display filter strips ANSI escape sequences, DEL and C0 controls other than tab, newline
+and carriage return.
+
 Output fields:
 - `content`: last value as text
 - `stdout`: concatenated standard output from evaluation
