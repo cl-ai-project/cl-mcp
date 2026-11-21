@@ -477,6 +477,31 @@ value's shape, so this is externalized like any other value"
     ;; No v1 field rules may run over a record this adapter cannot read.
     (ok (null (getf report :data)))))
 
+(deftest fixture-result-support-is-specific-to-the-versioned-record
+  (let ((record (list* :input-kind :fixture-recipe
+                       :fixture '(:isolation :fresh :version 1 :recipe-name x
+                                  :setup ((list x)) :cleanup (nil))
+                       :schema-version 2 (cddr *v1-metadata*))))
+    (dolist (key '(:fixture :capabilities :definition-digest))
+      (multiple-value-bind (report status reason)
+          (project-core-record (remove-from-plist-once record key) :result-data)
+        (ok (null report))
+        (ok (eq :malformed status))
+        (ok (stringp reason))))
+    (dolist (bad-fixture '(nil (:version) (:isolation :fresh :version 0)))
+      (ok (eq :malformed (validate-versioned-record (list* :fixture bad-fixture record)))))
+    (dolist (prefix '((:schema-version 3) (:entity-kind :property)
+                      (:record-kind :definition) (:record-kind :fixture-check)
+                      (:input-kind :other)))
+      (multiple-value-bind (report status)
+          (project-core-record (append prefix record) :result-data)
+        (ok (eq :unsupported-schema status))
+        (ok (null (getf report :source)))
+        (ok (null (getf report :data)))))
+    (let ((v1 (project-core-record (list* :schema-version 1 record) :result-data)))
+      (ok (member "fixture" (getf v1 :unknown-keys) :test #'equal))
+      (ok (null (field-of (getf v1 :data) "fixture"))))))
+
 (deftest a-malformed-record-is-not-projected-at-all
   (multiple-value-bind (report status reason)
       (project-core-record '(:schema-version 1 :record-kind :result) :result-data)

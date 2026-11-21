@@ -57,6 +57,7 @@
                 #:%counts
                 #:%contract-plist
                 #:%verified-p
+                #:%never-called-cases
                 #:%verification-gaps
                 #:%select-properties
                 #:%trials-budget
@@ -815,29 +816,11 @@ results is verified; any other list goes to REAL."
   (lambda (results)
     (or (null results) (funcall real results))))
 
-(defun %claiming-every-case-reached (result)
-  "Return RESULT, or a copy of it whose case report lists no declared case as
-never called.  The copy shares nothing it changes with RESULT."
-  (let* ((core (getf result :core-record))
-         (source (getf core :source))
-         (report (getf source :case-report)))
-    (if (and (consp report) (getf report :never-called))
-        (let ((report (copy-list report))
-              (source (copy-list source))
-              (core (copy-list core))
-              (result (copy-list result)))
-          (setf (getf report :never-called) nil
-                (getf source :case-report) report
-                (getf core :source) source
-                (getf result :core-record) core)
-          result)
-        result)))
-
 (defun %verified-ignoring-unreached-cases (real)
-  "Return a wrong %VERIFIED-P, for the negative control: REAL's verdict over
-the results as if every declared case had been reached."
+  "Return a wrong %VERIFIED-P that ignores a measured list of unreached cases."
   (lambda (results)
-    (funcall real (mapcar #'%claiming-every-case-reached results))))
+    (%call-with-replaced-function '%never-called-cases (constantly nil)
+                                  (lambda () (funcall real results)))))
 
 (defun %gaps-measuring-rejections-from-any-contract (real)
   "Return a wrong %VERIFICATION-GAPS, for the negative control: REAL's gaps,

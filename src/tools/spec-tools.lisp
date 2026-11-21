@@ -311,7 +311,8 @@ verification_gaps names what the run could not establish. Values:
                               least one was never reached. status stays
                               passed -- cl-spec judged the trials that ran --
                               but the unreached branch was not verified.
-  case-coverage-unknown       cases are declared and no case report came back.
+  case-coverage-unknown       declared cases lack a usable measurement: a missing
+                              report, incomplete rows, or inconsistent names or counts.
   generation-incomplete       the run stopped in generation and never reached
                               a verdict. NOT a finding about the code.
   core-schema-unsupported     the result record declares a schema version this
@@ -345,7 +346,12 @@ evidence, whatever a legacy field elsewhere in the response says -- verified
 is false and core-schema-unsupported (or contract-schema-unsupported, for the
 function spec's own declaration) is in verification_gaps.
 
-data.failure and data.shrunk_failure are observations whose outcome is EITHER
+Fixture-backed function checks use result schema v2. input_kind is fixture-recipe.
+data.fixture describes the recipe and its hooks. failure and shrunk_failure carry
+the recipe in arguments, lifecycle status, and availability-tagged call_evidence.
+run_error carries an aborting fixture error separately from an earlier failure.
+
+In v1, data.failure and data.shrunk_failure are observations whose outcome is EITHER
 an object ({\"kind\": \"returned\"/\"signaled\", ...}) OR, when cl-spec
 recorded none, the bare STRING \"not-collected\" -- never {\"kind\":
 \"not-collected\"}.
@@ -373,11 +379,11 @@ it started; the response's own environment field reads this image right now.
 Neither overwrites the other, and the two may legitimately disagree.
 
 CONTRACT RUNS (function=...)
-A contract check generates arguments from :args, drops the ones :pre refuses,
-calls the function, then checks :returns and :post. results[].contract carries:
+A contract check generates arguments, or fresh fixture recipes for setup to
+turn into arguments. It checks the applicable contract outcome. results[].contract carries:
   rejected         generated argument lists :pre refused
-  effective_trials trials minus rejected -- what the function was ACTUALLY
-                   called with. NULL means the figure could not be derived,
+  effective_trials trials minus rejected. Setup, capture or case selection can
+                   fail before a target call. NULL means the figure could not be derived,
                    NOT zero calls: read rejected_measured and
                    rejected_overcounted to see which. Do NOT read a passed
                    verdict as proof the function ran: verified is false

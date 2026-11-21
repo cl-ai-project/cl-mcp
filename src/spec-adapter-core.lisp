@@ -43,7 +43,7 @@
            #:printed-for-digest
            #:printed-for-display
            #:print-form-bounded
-           #:core-schema-data #:definition-digest))
+           #:supported-core-schema-p #:core-schema-data #:definition-digest))
 
 (in-package #:cl-mcp/src/spec-adapter-core)
 
@@ -630,10 +630,18 @@ followed *PRINT-CASE*, which a digest must not."
                  "|"
                  (symbol-name symbol))))
 
+(defun supported-core-schema-p (record)
+  "Recognize the version-one envelope and the version-two generated fixture result."
+  (case (getf record :schema-version)
+    (1 t)
+    (2 (and (eq :result (getf record :record-kind))
+            (eq :function-spec (getf record :entity-kind))
+            (eq :fixture-recipe (getf record :input-kind))))))
+
 (defun core-schema-data (data)
   "Return recognized core metadata, independent of the adapter's JSON schema.
 Absent or unsupported core versions return NIL; they are never inferred."
-  (when (eql 1 (getf data :schema-version))
+  (when (supported-core-schema-p data)
     (loop for key in '(:schema-version :record-kind :entity-kind :definition-digest
                       :definition-digest-complete :definition-digest-covers :capabilities)
           append (list key (getf data key)))))
@@ -687,7 +695,7 @@ than skipped, so the digest still changes if it is defined later."
         ;; Never turn an unknown schema or missing dependency into a legacy match.
         (when (get-properties property '(:schema-version))
           (return-from definition-digest
-            (if (and (eql 1 (getf property :schema-version))
+            (if (and (supported-core-schema-p property)
                      (getf property :definition-digest-complete)
                      (stringp (getf property :definition-digest)))
                 (values (getf property :definition-digest) t)

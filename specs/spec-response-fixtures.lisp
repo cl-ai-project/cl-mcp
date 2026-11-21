@@ -837,7 +837,15 @@ payload carries it at core_result.data.failure.state.capture.values."
 The names under :NEVER-CALLED are the declared cases no trial reached, which
 is the gap a bare verdict hides.  The payload carries them at
 core_result.data.case_report.never_called."
-  (%projected-record :passed :case-report (list :never-called never-called)))
+  (let ((trials (getf +run-facts+ :trials)))
+    (%projected-record
+     :passed :case-report
+     (list :selection :exclusive :unit :normal-trials
+           :declared-cases (cons :sufficient never-called)
+           :cases (cons (list :name :sufficient :called trials :passed trials :failed 0 :error 0)
+                        (loop for name in never-called
+                              collect (list :name name :called 0 :passed 0 :failed 0 :error 0)))
+           :never-called never-called))))
 
 (defun check-scenario (case)
   "Return (values REPORT FACTS) for the spec-check answer CASE.

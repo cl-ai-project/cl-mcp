@@ -2193,6 +2193,18 @@ construction is supported; it does not guarantee successful draws or reductions.
     elsewhere in the response says: `verified` is false and
     `core-schema-unsupported` (or `contract-schema-unsupported`, for the
     Function Spec declaration) is in `verification_gaps`.
+  - Generated fixture checks use result schema version 2. `data.input_kind` is
+    `fixture-recipe`. `data.fixture` describes the recipe and hooks. A failure
+    records the recipe in `arguments`, the setup and cleanup in `lifecycle`,
+    and snapshots of the actual call in `call_evidence`. Each snapshot records
+    its availability. An aborting fixture error appears in `run_error`, which
+    can accompany a counterexample found before a shrink candidate aborted.
+    A named-case check needs one measured row for each declared case. The
+    adapter checks each outcome count against the call count, the zero-call
+    rows against `never_called`, and a passed run’s calls against its total
+    trials minus refusals. Missing or inconsistent measurements produce
+    `case-coverage-unknown`. Display limits still allow verification from
+    the full saved record.
   - Four rules decide how one value inside `data` is rendered, and each one
     exists because a shape cl-spec did not declare must never be invented.
     A field cl-spec declares and did not measure is **`null`**, never `{}`:
@@ -2225,7 +2237,7 @@ construction is supported; it does not guarantee successful draws or reductions.
     so a legal application value that happens to look like cl-spec metadata is
     still data. A diagnostic `type` is ordinary data: a named type symbol,
     `{"kind": "anonymous-class", "metaclass": ...}`, or the string `"unknown"`.
-  - `data.failure` and `data.shrunk_failure` are observations, themselves a
+  - In v1, `data.failure` and `data.shrunk_failure` are observations, themselves a
     projection of cl-spec's own field names. Their `outcome` is **either** an
     object — `{"kind": "returned", "values": [...]}` or `{"kind": "signaled",
     "condition_type": ..., "condition_report": ...}` — **or**, when cl-spec

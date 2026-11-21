@@ -19,7 +19,9 @@
 
 (defpackage #:cl-mcp/src/spec-core-record
   (:use #:cl)
+  (:import-from #:alexandria #:proper-list-p)
   (:import-from #:cl-mcp/src/spec-adapter-core
+                #:supported-core-schema-p
                 #:symbol-data
                 #:externalize-value)
   (:export #:safe-json-integer-p
@@ -28,6 +30,7 @@
            #:project-core-record
            #:validate-versioned-record
            #:field-availability
+           #:measured-case-report
            #:+v1-required-metadata+
            #:+sentinel-fields+
            #:*projection-max-depth*
@@ -601,6 +604,66 @@ it is the value cl-spec meant to give."
            :not-collected)
           (t :collected))))
 
+(defun %case-report-containers-p (report)
+  "Can the case report's plist, arrays and row plists be walked safely?"
+  (and (%proper-plist-p report)
+       (proper-list-p (getf report :declared-cases))
+       (proper-list-p (getf report :never-called))
+       (proper-list-p (getf report :cases))
+       (every #'%proper-plist-p (getf report :cases))))
+
+(defun %case-names-match-p (names table)
+  "Return true when NAMES lists each key in TABLE exactly once."
+  (let ((seen (make-hash-table :test #'eq)))
+    (and (proper-list-p names)
+         (loop for name in names
+               always (and (gethash name table) (not (gethash name seen))
+                           (setf (gethash name seen) t)))
+         (= (hash-table-count seen) (hash-table-count table)))))
+
+(defun measured-case-report (record &optional (declared-names nil declaration-read-p))
+  "Return RECORD's case report when its named rows form a consistent measurement.
+When supplied, DECLARED-NAMES comes from the contract read before the run."
+  (let ((report (getf record :case-report))
+        (passed (eq :passed (getf record :status)))
+        (rows (make-hash-table :test #'eq))
+        (uncalled (make-hash-table :test #'eq))
+        (total 0))
+    (when (and (consp report) (%case-report-containers-p report)
+               (eq :exclusive (getf report :selection))
+               (eq :normal-trials (getf report :unit))
+               (getf report :cases)
+               (get-properties report '(:never-called))
+               (loop for key in '(:case-selection-errors :capture-errors :fixture-errors)
+                     always (multiple-value-bind (indicator count)
+                                (get-properties report (list key))
+                              (or (null indicator)
+                                  (and (typep count '(integer 0 *))
+                                       (or (not passed) (zerop count)))))))
+      (dolist (row (getf report :cases))
+        (let ((name (getf row :name))
+              (called (getf row :called))
+              (succeeded (getf row :passed))
+              (failed (getf row :failed))
+              (errored (getf row :error)))
+          (unless (and name (symbolp name) (not (gethash name rows))
+                       (every (lambda (n) (typep n '(integer 0 *)))
+                              (list called succeeded failed errored))
+                       (= called (+ succeeded failed errored))
+                       (or (not passed) (= called succeeded)))
+            (return-from measured-case-report nil))
+          (setf (gethash name rows) t)
+          (incf total called)
+          (when (zerop called) (setf (gethash name uncalled) t))))
+      (when (and (%case-names-match-p (getf report :declared-cases) rows)
+                 (%case-names-match-p (getf report :never-called) uncalled)
+                 (or (not declaration-read-p) (%case-names-match-p declared-names rows))
+                 (or (not passed)
+                     (let ((trials (getf record :trials)) (rejected (getf record :rejected)))
+                       (and (typep trials '(integer 0 *)) (typep rejected '(integer 0 *))
+                            (= total (- trials rejected))))))
+        report))))
+
 (defun validate-versioned-record (record &key expected-record-kind
                                               expected-entity-kind)
   "Return (values STATUS REASON) for one versioned record.
@@ -626,13 +689,27 @@ rather than by whatever reads it next."
     (when (eq :absent (field-availability record :schema-version))
       (bad "the record carries no :schema-version"))
     (let ((version (getf record :schema-version)))
-      (unless (eql 1 version)
+      (unless (supported-core-schema-p record)
         (return-from validate-versioned-record
           (values :unsupported-schema version)))
       (dolist (key +v1-required-metadata+)
         (when (eq :absent (field-availability record key))
-          (bad (format nil "a version 1 record is missing required metadata ~A"
-                       (%json-key key)))))
+          (bad (format nil "a version ~D record is missing required metadata ~A"
+                       version (%json-key key)))))
+      (when (and (eq :result (getf record :record-kind))
+                 (consp (getf record :case-report))
+                 (not (%case-report-containers-p (getf record :case-report))))
+        (bad "the case report must contain proper lists of names and per-case records"))
+      (when (eql 2 version)
+        (let ((fixture (getf record :fixture)))
+          (unless (and (%proper-plist-p fixture)
+                       (eq :fresh (getf fixture :isolation))
+                       (typep (getf fixture :version) '(integer 1 *))
+                       (getf fixture :recipe-name)
+                       (symbolp (getf fixture :recipe-name))
+                       (proper-list-p (getf fixture :setup :missing))
+                       (proper-list-p (getf fixture :cleanup :missing)))
+            (bad "a version 2 fixture result requires its fresh fixture declaration"))))
       (when (and expected-record-kind
                  (not (eq expected-record-kind (getf record :record-kind))))
         (bad (format nil "expected a ~A record and got ~A"
@@ -909,6 +986,45 @@ rather than by whatever reads it next."
                  (:cases . :elsewhere)
                  (:source-location . :elsewhere))))
 
+(defun %extend-object-descriptor (descriptor &rest fields)
+  "Add FIELDS to an object DESCRIPTOR, replacing existing fields by key."
+  (cons :object
+        (append fields (remove-if (lambda (entry) (assoc (car entry) fields))
+                                  (rest descriptor)))))
+
+(defparameter +fixture-result-descriptor+
+  (flet ((snapshot (value-descriptor)
+           `(:object (:availability . :leaf) (:reason . :leaf)
+                     (:type . :capture-diagnostic-type) (:value . ,value-descriptor))))
+    (let* ((observed (%extend-object-descriptor
+                      (getf *record-shapes* :observation)
+                      (cons :explanation (snapshot '(:ref :explanation)))
+                      (cons :outcome (snapshot '(:ref :target-outcome)))
+                      (cons :value (snapshot :opaque))))
+           (call-evidence (%extend-object-descriptor
+                           observed '(:failure-phase . :leaf)
+                           (cons :arguments (snapshot '(:array :opaque)))))
+           (lifecycle '(:object (:setup . :leaf) (:evaluation . :leaf) (:cleanup . :leaf)
+                                (:state . :leaf) (:completion . :leaf) (:target-called . :boolean)
+                                (:errors . (:array (:object (:phase . :leaf) (:reason . :leaf)
+                                                           (:condition-type . :leaf)
+                                                           (:condition-report . :leaf))))))
+           (observation (%extend-object-descriptor observed '(:input-kind . :leaf)
+                                                   (cons :lifecycle lifecycle)
+                                                   (cons :call-evidence call-evidence))))
+      (%extend-object-descriptor
+       (getf *record-shapes* :result-data)
+       '(:input-kind . :leaf)
+       '(:fixture . (:object (:isolation . :leaf) (:version . :leaf) (:recipe-name . :leaf)
+                             (:setup . (:array :leaf)) (:cleanup . (:array :leaf))))
+       (cons :case-report (%extend-object-descriptor (getf *record-shapes* :case-report)
+                                                     '(:fixture-errors . :leaf)))
+       (cons :failure observation) (cons :shrunk-failure observation)
+       (cons :run-error observation))))
+  "Generated fixture results keep recipes in the outer observation's arguments.
+Call evidence carries availability-tagged snapshots of the actual call. A lifecycle
+error has its own observation, including when shrinking an earlier counterexample.")
+
 (defun project-core-record (record shape-name &key expected-record-kind
                                                    expected-entity-kind
                                                    (max-chars 2000))
@@ -947,24 +1063,27 @@ beside a 10-character compatibility alias is one call with two answers."
                :unsupported-schema
                reason))
       (t
-       (multiple-value-bind (node issues unknown)
-           (project-record record (list :ref shape-name) :max-chars max-chars)
-         (values (list :availability :collected
-                       :schema-supported t
-                       :schema-version 1
-                       ;; The record as cl-spec gave it, kept for the adapter's
-                       ;; own reading.  The verdict logic asks questions like
-                       ;; "was any declared case never reached", and answering
-                       ;; them off :DATA would mean re-parsing projected JSON
-                       ;; nodes to recover keywords this already has.  Never
-                       ;; rendered: :DATA is what reaches the client.
-                       :source record
-                       :field-availability
-                       (loop for (key . nil) in (rest (%resolve-descriptor
-                                                       (list :ref shape-name)))
-                             append (list key (field-availability record key)))
-                       :unknown-keys unknown
-                       :projection (list :complete (null issues) :issues issues)
-                       :data node)
-                 :ok
-                 nil))))))
+       (let* ((version (getf record :schema-version))
+              (descriptor (if (and (eql 2 version) (eq :result-data shape-name))
+                              +fixture-result-descriptor+
+                              (%resolve-descriptor (list :ref shape-name)))))
+         (multiple-value-bind (node issues unknown)
+             (project-record record descriptor :max-chars max-chars)
+           (values (list :availability :collected
+                         :schema-supported t
+                         :schema-version version
+                         ;; The record as cl-spec gave it, kept for the adapter's
+                         ;; own reading.  The verdict logic asks questions like
+                         ;; "was any declared case never reached", and answering
+                         ;; them off :DATA would mean re-parsing projected JSON
+                         ;; nodes to recover keywords this already has.  Never
+                         ;; rendered: :DATA is what reaches the client.
+                         :source record
+                         :field-availability
+                         (loop for (key . nil) in (rest descriptor)
+                               append (list key (field-availability record key)))
+                         :unknown-keys unknown
+                         :projection (list :complete (null issues) :issues issues)
+                         :data node)
+                   :ok
+                   nil)))))))

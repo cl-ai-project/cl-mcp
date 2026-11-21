@@ -1454,8 +1454,15 @@ listing functions are not -- the shape the blanket listing guard refused."
                              :core-record
                              (list :availability :collected :schema-supported t
                                    :field-availability '(:case-report :collected)
-                                   :source '(:case-report
-                                             (:never-called (:insufficient))))))))
+                                   :source '(:status :passed :trials 2 :rejected 0
+                                             :case-report
+                                             (:selection :exclusive :unit :normal-trials
+                                              :declared-cases (:ok :insufficient)
+                                              :cases ((:name :ok :called 2 :passed 2
+                                                       :failed 0 :error 0)
+                                                      (:name :insufficient :called 0 :passed 0
+                                                       :failed 0 :error 0))
+                                              :never-called (:insufficient))))))))
     (ok (not (cl-mcp/src/spec-adapter-report::%verified-p results)))
     (ok (member :cases-never-called
                 (cl-mcp/src/spec-adapter-report::%verification-gaps results)))))
@@ -1550,7 +1557,12 @@ listing functions are not -- the shape the blanket listing guard refused."
                          :core-record
                          '(:availability :collected :schema-supported t
                            :field-availability (:case-report :collected)
-                           :source (:case-report (:never-called nil)))))))
+                           :source (:status :passed :trials 2 :rejected 0
+                                    :case-report (:selection :exclusive :unit :normal-trials
+                                                  :declared-cases (:ok)
+                                                  :cases ((:name :ok :called 2 :passed 2
+                                                           :failed 0 :error 0))
+                                                  :never-called nil)))))))
     (testing "the baseline itself verifies, so the isolation below means something"
       (ok (cl-mcp/src/spec-adapter-report::%verified-p
            (list (passing-contract-result)))))
