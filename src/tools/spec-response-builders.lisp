@@ -987,6 +987,7 @@ and the line says so.  A value shaped like cl-spec's own old marker is
                            "the reduction is unfinished"))
         (cons :budget-exhausted "stopped -- the shrink budget ran out")
         (cons :shrinker-error "stopped -- the shrinker signalled")
+        (cons :fixture-error "stopped when a shrink candidate's fixture failed")
         (cons :exhausted
               "ran to exhaustion -- no smaller failing input was found"))
   "How to word each shrink termination cl-spec is known to record.
@@ -1018,6 +1019,41 @@ cl-spec's own VALIDATE-BACKEND-OUTCOME requires one of these three
 (cl-spec/src/generator.lisp:229); a later revision's fourth is printed as
 itself rather than sorted into a verdict this adapter invented.")
 
+(defun %fixture-abort-after-failure-p (source)
+  "Return true if SOURCE records both a counterexample and a later fixture abort."
+  (and (eql 2 (getf source :schema-version))
+       (getf source :failure) (getf source :run-error)))
+
+(defun %format-observation-evidence (stream observation contract-p fixture-p)
+  "Write the target and state evidence from one OBSERVATION."
+  ;; A property records no target outcome. Its body can run without one.
+  (when contract-p
+    (let* ((recorded (getf observation :outcome))
+           (outcome (if fixture-p
+                        (when (eq :collected (getf recorded :availability))
+                          (getf recorded :value))
+                        recorded))
+           (lifecycle (getf observation :lifecycle)))
+      (cond ((or (eq :not-collected outcome)
+                 (and fixture-p (get-properties lifecycle '(:target-called))
+                      (null (getf lifecycle :target-called))))
+             (format stream "~&    target: not called"))
+            ((eq :returned (getf outcome :kind))
+             (format stream "~&    target: returned ~{~A~^, ~}"
+                     (mapcar #'%evidence-value (getf outcome :values))))
+            ((eq :signaled (getf outcome :kind))
+             (format stream "~&    target: signalled ~A" (getf outcome :condition-type))))))
+  (let* ((state (getf observation :state))
+         (capture (getf state :capture))
+         (post (getf state :state-post)))
+    (when (getf capture :values)
+      (format stream "~&    captured: ~{~A~^, ~}"
+              (mapcar #'%capture-value-text (getf capture :values))))
+    (when (member (getf post :status) '(:violation :error))
+      (format stream "~&    state-post: ~(~A~) at form ~A~@[ -- ~A~]"
+              (getf post :status) (getf post :index)
+              (when (getf post :form) (%bounded-form-text (getf post :form)))))))
+
 (defun %format-core-evidence (stream result)
   "Write the evidence cl-spec recorded for RESULT to STREAM.
 
@@ -1035,6 +1071,8 @@ bare WITH-OUTPUT-TO-STRING with no printer bindings of its own."
   (let* ((record (getf result :core-record))
          (source (getf record :source))
          (fixture-p (eql 2 (getf source :schema-version)))
+         (failure (getf source :failure))
+         (run-error (and fixture-p (getf source :run-error)))
          (contract-p (eq :contract (getf result :kind))))
     (when source
       (let ((case-report (result-case-report result)))
@@ -1057,6 +1095,14 @@ bare WITH-OUTPUT-TO-STRING with no printer bindings of its own."
 ~:*~[~;was~:;were~] never reached, so this run says nothing about ~
 ~:*~[~;it~:;them~]."
                       (length never))))))
+      (when (%fixture-abort-after-failure-p source)
+        (format stream "~&    original failure: ~(~A~)" (getf failure :reason))
+        (let ((snapshot (getf failure :explanation)))
+          (when (and (eq :collected (getf snapshot :availability)) (getf snapshot :value))
+            (format stream "~&    original failure explanation: ~A"
+                    (%bounded-form-text (getf snapshot :value)))))
+        (%format-observation-evidence stream failure contract-p fixture-p)
+        (format stream "~&    fixture run error: ~(~A~)" (getf run-error :reason)))
       (let ((phase (getf source :failure-phase)))
         (when phase
           (format stream "~&    failure phase: ~(~A~) -- ~A"
@@ -1088,39 +1134,7 @@ bare WITH-OUTPUT-TO-STRING with no printer bindings of its own."
                                   "complete, and this is not a finding about "
                                   "the code under test"))
                     (t "see failure_phase in the payload")))))
-      ;; Only for a contract.  A property's observation records no target
-      ;; outcome at all, so :NOT-COLLECTED there means "no target evidence
-      ;; was kept", not "the body never ran" -- and saying the latter would
-      ;; be a false statement about code that executed.
-      (when contract-p
-        (let* ((observation (or (getf source :failure) (and fixture-p (getf source :run-error))))
-               (recorded (getf observation :outcome))
-               (outcome (if fixture-p
-                            (when (eq :collected (getf recorded :availability))
-                              (getf recorded :value))
-                            recorded))
-               (lifecycle (getf observation :lifecycle)))
-          (cond ((or (eq :not-collected outcome)
-                     (and fixture-p (get-properties lifecycle '(:target-called))
-                          (null (getf lifecycle :target-called))))
-                 (format stream "~&    target: not called"))
-                ((eq :returned (getf outcome :kind))
-                 (format stream "~&    target: returned ~{~A~^, ~}"
-                         (mapcar #'%evidence-value (getf outcome :values))))
-                ((eq :signaled (getf outcome :kind))
-                 (format stream "~&    target: signalled ~A"
-                         (getf outcome :condition-type))))))
-      (let ((state (getf (getf source :failure) :state)))
-        (let ((capture (getf state :capture)))
-          (when (getf capture :values)
-            (format stream "~&    captured: ~{~A~^, ~}"
-                    (mapcar #'%capture-value-text (getf capture :values)))))
-        (let ((post (getf state :state-post)))
-          (when (member (getf post :status) '(:violation :error))
-            (format stream "~&    state-post: ~(~A~) at form ~A~@[ -- ~A~]"
-                    (getf post :status) (getf post :index)
-                    (when (getf post :form)
-                      (%bounded-form-text (getf post :form)))))))
+      (%format-observation-evidence stream (or run-error failure) contract-p fixture-p)
       (let ((generation (getf source :generation-report)))
         (when (and generation (not (eq :not-collected generation))
                    (not (eq :completed (getf generation :termination))))
@@ -1292,6 +1306,10 @@ so the function was called ~A time~:P"
                  (getf contract :rejected)
                  (or (getf contract :effective-trials)
                      "an unknown number of"))))
+      ;; The legacy reason and explanation can come from different observations.
+      ;; The versioned record below supplies the evidence for each invocation.
+      (when (%fixture-abort-after-failure-p source)
+        (return-from %format-contract))
       ;; An absent reason has two causes and they are opposite accusations:
       ;; cl-spec saying the counterexample would not reproduce, and this
       ;; adapter never having had a reader to ask.  Printing the first for
@@ -1343,7 +1361,9 @@ a finding about the function"))))
   (%format-counterexample stream result)
   (let ((condition (getf result :condition)))
     (when condition
-      (format stream "~&    condition: [~A] ~A"
+      (format stream "~&    ~@[~A ~]condition: [~A] ~A"
+              (when (%fixture-abort-after-failure-p (getf (getf result :core-record) :source))
+                "fixture run error")
               (getf condition :type) (getf condition :message))))
   ;; Profile only when there was one.  A contract run has none, and printing
   ;; the :NORMAL that leaks off cl-spec's synthetic property named a setting
