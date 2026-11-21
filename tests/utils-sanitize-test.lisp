@@ -287,9 +287,14 @@
                          (lambda () (values 'string> 12)) (lambda () (list #'string> 'string>))
                          (lambda () (compile nil '(lambda (x->y) x->y)))))
       (let ((thread (sb-thread:make-thread thunk :name "normal")))
-        (sb-thread:join-thread thread)
-        (ok (string= "left right"
-                     (sanitize-error-message (format nil "left ~A right" thread)))))))
+        (unwind-protect
+             (progn
+               (sb-thread:join-thread thread)
+               (ok (string= "left right"
+                            (sanitize-error-message (format nil "left ~A right" thread)))))
+          (when (sb-thread:thread-alive-p thread)
+            (ignore-errors (sb-thread:terminate-thread thread)))
+          (sb-thread:join-thread thread :default nil)))))
   (testing "a raw class name and adjacent printed values keep the separating text"
     (ok (string= "left keep| > right"
                  (sanitize-error-message
