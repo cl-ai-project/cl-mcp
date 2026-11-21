@@ -21,7 +21,8 @@
   (:import-from #:cl-mcp/src/spec-adapter-report
                 #:+listing-kinds+
                 #:listing-kind-wanted-p
-                #:result-case-report)
+                #:result-case-report
+                #:case-selectors)
   (:export #:build-spec-list-response
            #:build-spec-symbol-response
            #:build-spec-describe-response
@@ -415,6 +416,10 @@ to see the rest.~@[ ~A~]"
               (when (plusp indent) indent)
               (getf report omitted-key) budget extra))))
 
+(defun %described-case-name (case)
+  "Return the published selector of a case from a description report."
+  (or (getf case :selector) (%keyword-string (getf case :name))))
+
 (defun %format-case-detail (stream case)
   "Write one contract case's guard, outcome and postconditions to STREAM."
   (format stream "~&    when:  ~A" (getf case :guard))
@@ -517,7 +522,7 @@ to see the rest.~@[ ~A~]"
               (string-downcase (princ-to-string (getf report :case-selection))))
       (dolist (case (getf report :cases))
         (format stream "~&  ~A~@[ -- ~A~]"
-                (string-downcase (princ-to-string (getf case :name)))
+                (%described-case-name case)
                 (getf case :documentation))
         (if (equal (getf report :detail) "summary")
             (format stream "  ~A" (%keyword-string (getf case :outcome)))
@@ -653,7 +658,7 @@ apart is what lets a reader ask whether a short list is short or was cut."
 
 (defun %case-ht (case)
   "Render one named case of a Function Spec."
-  (make-ht "name" (%keyword-string (getf case :name))
+  (make-ht "name" (%described-case-name case)
            "documentation" (sanitize-for-json (getf case :documentation))
            "guard" (sanitize-for-json (getf case :guard))
            "guard_complete" (%optional-bool case :guard-complete)
@@ -691,13 +696,13 @@ apart is what lets a reader ask whether a short list is short or was cut."
                     "cases" (map 'vector
                                  (if selected #'%case-ht
                                      (lambda (row)
-                                       (make-ht "name" (%keyword-string (getf row :name))
+                                       (make-ht "name" (%described-case-name row)
                                                 "outcome" (%keyword-string (getf row :outcome)))))
                                  (getf report :cases))
                     "environment" (%environment-ht (getf report :environment))
                     "content" (text-content (%format-describe-text report)))))
     (if selected
-        (setf (gethash "selected_case" response) (%keyword-string selected))
+        (setf (gethash "selected_case" response) selected)
         (setf (gethash "arguments" response)
               (map 'vector #'%describe-argument-ht (getf report :arguments))
               (gethash "outcome" response) (%keyword-string (getf report :outcome))
@@ -1623,10 +1628,9 @@ digest given")))
                (make-ht "reached" (- (length cases) (length (getf report :never-called)))
                         "declared" (length cases)
                         "cases" (map 'vector
-                                     (lambda (row)
-                                       (make-ht "name" (%keyword-string (getf row :name))
-                                                "called" (getf row :called)))
-                                     cases)))
+                                     (lambda (row selector)
+                                       (make-ht "name" selector "called" (getf row :called)))
+                                     cases (case-selectors cases))))
              "seed" (getf result :seed)
              "definition_digest" (getf result :definition-digest))))
 

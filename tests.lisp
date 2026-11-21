@@ -89,6 +89,7 @@
     "cl-mcp/tests/pool-ownership-test"
     "cl-mcp/tests/debugger-boundary-worker-test"
     "cl-mcp/tests/spec-worker-test"
+    "cl-mcp/tests/spec-workflow-wire-test"
     "cl-mcp/tests/pool-kill-worker-test"
     "cl-mcp/tests/pool-startup-latency-test"
     "cl-mcp/tests/concurrency-test"

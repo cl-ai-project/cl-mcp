@@ -3,7 +3,8 @@
 (defpackage #:cl-mcp/tests/spec-discovery-views-test
   (:use #:cl)
   (:import-from #:rove #:deftest #:ok #:skip)
-  (:import-from #:cl-mcp/src/tools/spec-entry #:spec-list-response #:spec-describe-response)
+  (:import-from #:cl-mcp/src/tools/spec-entry
+                #:spec-list-response #:spec-describe-response #:spec-check-response)
   (:import-from #:cl-mcp/src/tools/helpers #:make-ht)
   (:import-from #:cl-mcp/src/spec-adapter-report #:list-report #:describe-report)
   (:import-from #:cl-mcp/src/tools/spec-response-builders #:build-spec-describe-response)
@@ -126,6 +127,47 @@
       (ok (eq 'yason:false (gethash "state_post_complete" selected)))
       (ok (gethash "state_post" selected))
       (ok (search "truncated" (%text view) :test #'char-equal)))))
+
+(deftest case-selectors-distinguish-case-sensitive-keywords
+  (with-contracts
+    (let* ((summary (describe-contract "CASE-SENSITIVE-IDENTITY" "detail" "summary"))
+           (full (describe-contract "CASE-SENSITIVE-IDENTITY"))
+           (names (map 'list (lambda (row) (gethash "name" row)) (gethash "cases" summary))))
+      (ok (equal '("ready" "READY" ":||") names))
+      (ok (equal names (map 'list (lambda (row) (gethash "name" row)) (gethash "cases" full))))
+      (loop for selector in names
+            for guard in '("ZEROP" "PLUSP" "MINUSP")
+            for answer = (describe-contract "CASE-SENSITIVE-IDENTITY" "case" selector)
+            for row = (elt (gethash "cases" answer) 0)
+            do (ok (search selector (%text summary)))
+               (ok (equal selector (gethash "selected_case" answer)))
+               (ok (equal selector (gethash "name" row)))
+               (ok (search guard (gethash "guard" row)))
+               (ok (search (gethash "guard" row) (%text answer)))))
+    (let ((ambiguous (describe-contract "CASE-SENSITIVE-IDENTITY" "case" "rEaDy")))
+      (ok (equal "invalid-arguments" (gethash "status" ambiguous)))
+      (ok (search "ambiguous" (%text ambiguous) :test #'char-equal))
+      (ok (search "ready" (%text ambiguous)))
+      (ok (search "READY" (%text ambiguous))))))
+
+(deftest case-coverage-summary-publishes-the-same-selectors
+  (with-contracts
+    (let* ((script (find-symbol "*SCRIPTED-ARGUMENTS*" "CL-MCP/TESTS/FIXTURES/SPEC-FIXTURE"))
+           (before (symbol-value script)))
+      (unwind-protect
+           (progn
+             (setf (symbol-value script) (list '(0) '(1) '(1) '(-1)))
+             (let* ((answer (spec-check-response
+                             (make-ht "function" (%fixture-name "CASE-SENSITIVE-IDENTITY")
+                                      "detail" "summary" "seed" "42" "trials" 4)))
+                    (coverage (gethash "case_coverage" (elt (gethash "results" answer) 0))))
+               (ok (equal '(("ready" 1) ("READY" 2) (":||" 1))
+                          (map 'list (lambda (row)
+                                       (list (gethash "name" row) (gethash "called" row)))
+                               (gethash "cases" coverage))))
+               (dolist (line '("ready: 1" "READY: 2" ":||: 1"))
+                 (ok (search line (%text answer))))))
+        (setf (symbol-value script) before)))))
 
 (deftest compact-names-only-need-enumeration
   (multiple-value-bind (api calls)

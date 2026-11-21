@@ -7,13 +7,15 @@
                 #:resolve-cl-spec-api #:resolve-symbol-designator)
   (:import-from #:cl-mcp/src/spec-adapter-report
                 #:environment-data #:unavailable-report #:*default-check-timeout-seconds*
-                #:%classify-condition #:%condition-report)
+                #:exact-case-selector #:%classify-condition #:%condition-report)
   (:import-from #:cl-mcp/src/spec-core-record #:project-core-record)
   (:import-from #:cl-mcp/src/tools/spec-response-builders #:%core-record-ht #:%reason-line)
   (:import-from #:cl-mcp/src/tools/spec-entry #:%positive-integer-arg)
   (:import-from #:cl-mcp/src/tools/helpers #:make-ht #:text-content #:json-bool)
   (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-for-json)
   (:import-from #:cl-mcp/src/utils/deadline #:call-with-deadline-thread)
+  (:import-from #:cl-mcp/src/utils/request-debugger-boundary
+                #:request-debugger-escape-error-p #:request-debugger-escape-error-display-text)
   (:import-from #:cl-mcp/src/object-registry #:*object-registry* #:lookup-object)
   (:import-from #:cl-ppcre #:scan)
   (:import-from #:yason)
@@ -94,14 +96,15 @@ previous registry generation. Obtain a current handle in this session."))
           ((hash-table-p outcome) (make-ht "availability" "collected" "value" outcome))
           (t (make-ht "availability" "not-collected")))))
 
-(defun %summary-text (function status selected outcome phase reason lifecycle)
+(defun %summary-text (function status selected selector outcome phase reason lifecycle)
   (let* ((availability (gethash "availability" outcome))
          (value (gethash "value" outcome))
          (kind (and (hash-table-p value) (gethash "kind" value))))
     (with-output-to-string (s)
-      (format s "~A on one concrete input to ~A~%  selected case: ~A~%  target outcome: ~A"
+      (format s "~A on one concrete input to ~A~%  selected case: ~A~@[ (selector ~S)~]~%  target outcome: ~A"
               status function
               (if (hash-table-p selected) (gethash "qualified" selected) (or selected "none"))
+              (and selector (not (equal selected selector)) selector)
               (or kind availability))
       (when (gethash "reason" outcome) (format s " (~A)" (gethash "reason" outcome)))
       (format s "~%  failure phase: ~A~@[ (~A)~]" (or phase "none") reason)
@@ -134,14 +137,16 @@ previous registry generation. Obtain a current handle in this session."))
              (observation (gethash "observation" data))
              (status (gethash "status" data))
              (selected (and observation (gethash "case" observation)))
+             (case-name (and selected (getf (getf record :observation) :case)))
+             (selector (and (keywordp case-name) (exact-case-selector case-name)))
              (outcome (%input-outcome observation fixture-p))
              (phase (gethash "failure_phase" data))
              (reason (or (gethash "reason" data) (and observation (gethash "reason" observation))))
              (lifecycle (gethash "lifecycle" data))
-             (summary (%summary-text function status selected outcome phase reason lifecycle))
+             (summary (%summary-text function status selected selector outcome phase reason lifecycle))
              (result (make-ht "schema_version" "1" "scope" "single-input"
                               "function" function "input_kind" input-kind
-                              "status" status "selected_case" selected
+                              "status" status "selected_case" selected "selected_case_selector" selector
                               "outcome" outcome "failure_phase" phase "reason" reason
                               "core_result" core
                               "content" (text-content (sanitize-for-json summary)))))
@@ -176,23 +181,35 @@ previous registry generation. Obtain a current handle in this session."))
         (call-with-deadline-thread
          (lambda ()
            (progv specials bindings
-             (let* ((*object-registry* objects)
-                    (name (%symbol-input function package :unresolved-symbol))
-                    (arguments-or-recipe (%decode-input input package))
-                    (result (funcall (api-fn api runner) name arguments-or-recipe
-                                     :registry (first bindings))))
-               (%record-response (funcall (api-fn api reader) result)
-                                 function fixture-p max-chars))))
+             (let ((*object-registry* objects))
+               ;; Classifying and reporting a lookup error can run a user-defined printer.
+               (handler-case
+                   (let* ((name (%symbol-input function package :unresolved-symbol))
+                          (arguments-or-recipe (%decode-input input package))
+                          (result (funcall (api-fn api runner) name arguments-or-recipe
+                                           :registry (first bindings))))
+                     (%record-response (funcall (api-fn api reader) result)
+                                       function fixture-p max-chars))
+                 (serious-condition (condition)
+                   (%input-error api condition input-kind max-chars))))))
          seconds :name "mcp-spec-input")
       (ecase status
         (:ok (first value))
-        (:error (%input-error api value input-kind max-chars))
+        (:error
+         ;; The deadline has ended. Only a debugger snapshot has safe, saved text.
+         (%message :internal-error
+                   (if (request-debugger-escape-error-p value)
+                       (%condition-report (request-debugger-escape-error-display-text value)
+                                          max-chars)
+                       "The concrete check ended before it could report its error.")
+                   :input-kind input-kind))
         (:timeout
          (let ((response (%message :timeout
-                                   (format nil "The concrete check exceeded ~D seconds. ~
-Its side effects and fixture cleanup are unknown." seconds) :input-kind input-kind)))
+                                   (format nil "The concrete check exceeded ~D second~:P. ~
+Its side effects and fixture cleanup are unknown.~:[~; The check thread is still running. ~
+Replace this worker before further checks.~]" seconds leaked) :input-kind input-kind)))
            (setf (gethash "thread_leaked" response) (json-bool leaked)
-                 (gethash "worker_reuse" response) "unknown")
+                 (gethash "worker_reuse" response) (if leaked "unsafe" "unknown"))
            response))))))
 
 (defun spec-input-response (params)

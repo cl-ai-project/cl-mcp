@@ -5,6 +5,8 @@
   (:import-from #:rove #:deftest #:ok #:skip)
   (:import-from #:cl-mcp/src/object-registry #:register-object #:lookup-object)
   (:import-from #:cl-mcp/src/tools/helpers #:make-ht)
+  (:import-from #:cl-mcp/tests/spec-integration-test
+                #:%contracts-available-p #:%fixture-name #:with-fixture-registry)
   (:import-from #:cl-mcp/tests/spec-tools-test #:%call))
 
 (in-package #:cl-mcp/tests/spec-input-test)
@@ -52,6 +54,18 @@
     (cons (map 'vector #'wire-argument value))
     (t (make-ht "object_id" (register-object value)))))
 
+(deftest concrete-input-identifies-the-exact-selected-case
+  (if (%contracts-available-p)
+      (with-fixture-registry
+        (loop for argument in '(0 1 -1)
+              for selector in '("ready" "READY" ":||")
+              for result = (input-check (%fixture-name "CASE-SENSITIVE-IDENTITY")
+                                        "arguments" (vector argument))
+              do (ok (equal "passed" (field result "status")))
+                 (ok (equal selector (field result "selected_case_selector")))
+                 (ok (search selector (input-text result)))))
+      (skip "The optional cl-spec function contracts are unavailable.")))
+
 (deftest caller-arguments-check-and-mutate-the-supplied-registry
   (with-self-specs
     (let* ((args (uiop:symbol-call :cl-spec/self-spec-fixtures
@@ -88,6 +102,7 @@
       (ok (equal "single-input" (field result "scope")))
       (ok (equal "recipe" (field result "input_kind")))
       (ok (equal "new-registration" (field result "selected_case")))
+      (ok (equal "NEW-REGISTRATION" (field result "selected_case_selector")))
       (ok (null (field result "failure_phase")))
       (ok (equal "unavailable" (field result "outcome" "availability")))
       (ok (equal "opaque-value" (field result "outcome" "reason")))
@@ -166,7 +181,72 @@
       (ok (equal "timeout" (field result "status")))
       (ok (equal "unknown" (field result "worker_reuse")))
       (ok (hash-table-p result))
-      (when result (ok (nth-value 1 (gethash "thread_leaked" result)))))))
+      (when result (ok (nth-value 1 (gethash "thread_leaked" result))))
+      (ok (not (field result "thread_leaked"))))))
+
+(defun run-input-probe (probe)
+  (funcall probe))
+
+(deftest concrete-input-reports-unsafe-when-the-thread-survives
+  (with-self-specs
+    (let* ((release (sb-thread:make-semaphore))
+           (thread nil)
+           (probe (lambda ()
+                    (setf thread sb-thread:*current-thread*)
+                    (sb-sys:without-interrupts
+                      (loop repeat 500 until (plusp (sb-thread:semaphore-count release))
+                            do (sleep 0.02)))
+                    t))
+           (spec (uiop:symbol-call :cl-spec :normalize-spec-form '(satisfies run-input-probe))))
+      (unwind-protect
+           (let ((report (input-check "cl-spec:validate" "arguments"
+                                      (vector (wire-argument spec) (wire-argument probe))
+                                      "timeout_seconds" 1)))
+             (ok (and thread (sb-thread:thread-alive-p thread)))
+             (ok (equal "timeout" (field report "status")))
+             (ok (eq t (field report "thread_leaked")))
+             (ok (equal "unsafe" (field report "worker_reuse")))
+             (ok (search "still running" (input-text report))))
+        (sb-thread:signal-semaphore release)
+        (when thread
+          (sb-thread:join-thread thread :timeout 5 :default nil)
+          (ok (not (sb-thread:thread-alive-p thread))))))))
+
+(deftest concrete-input-deadline-covers-condition-reporting
+  (with-self-specs
+    (let* ((registry (symbol-value (find-symbol "*REGISTRY*" "CL-SPEC")))
+           (reader (fdefinition (find-symbol "REGISTRY-FIND-FUNCTION-SPEC" "CL-SPEC")))
+           (started nil)
+           (finished nil)
+           (unwound nil)
+           (failure (make-condition
+                     'simple-error :format-arguments nil
+                     :format-control (lambda (stream)
+                                       (setf started t)
+                                       (unwind-protect
+                                            (progn
+                                              (sleep 2)
+                                              (setf finished t)
+                                              (write-string "registry lookup failed" stream))
+                                         (setf unwound t)))))
+           (method (make-instance (sb-mop:generic-function-method-class reader)
+                                  :qualifiers '(:before) :lambda-list '(registry name)
+                                  :specializers (list (sb-mop:intern-eql-specializer registry)
+                                                      (find-class 't))
+                                  :function (lambda (args next)
+                                              (declare (ignore args next))
+                                              (error failure)))))
+      (add-method reader method)
+      (unwind-protect
+           (let ((result (input-check "cl-spec:validate" "arguments" #() "timeout_seconds" 1)))
+             (ok started)
+             (ok unwound)
+             (ok (not finished))
+             (ok (equal "timeout" (field result "status")))
+             (ok (equal "unknown" (field result "worker_reuse")))
+             (ok (nth-value 1 (gethash "thread_leaked" result)))
+             (ok (not (field result "thread_leaked"))))
+        (remove-method reader method)))))
 
 (deftest unavailable-handles-and-contracts-are-distinct
   (with-self-specs

@@ -2077,7 +2077,8 @@ construction is supported; it does not guarantee successful draws or reductions.
 - `spec-describe` — one definition in full.
   - For a function spec, `detail="summary"` shows its arguments, outcome, named cases
     and fixture presence. Pass `case` with a case name to expand its guard, outcome and
-    postconditions. The default `detail="full"` includes the complete declaration.
+    postconditions. Use the spelling from the summary when case names differ only
+    by letter case. The default `detail="full"` includes the complete declaration.
   - `kind` (`property` | `spec` | `function-spec`, required), `name` (required),
     `package`, `max_chars` (positive integer, default 8000),
     `timeout_seconds` (number, default 30)
@@ -2302,8 +2303,11 @@ construction is supported; it does not guarantee successful draws or reductions.
   or `{"object_id":"…"}` for an existing symbol, keyword or object in this worker.
   `check-call` uses caller-owned arguments, so a function can mutate those objects.
   `check-fixture` sets up and cleans up its own state. Both responses report the
-  selected case, outcome and failure phase. Recipes also report lifecycle evidence
-  and the availability of snapshots. For example, after loading `cl-spec/specs`:
+  selected case, outcome and failure phase. Pass `selected_case_selector` back as
+  the `case` argument of `spec-describe` to inspect that case. Recipes also report
+  lifecycle evidence and the availability of snapshots. A timeout reports `worker_reuse="unsafe"`
+  if the evaluation thread is still running, and `"unknown"` if it stopped.
+  This example checks a new registration after loading `cl-spec/specs`.
 
   ```json
   {"function":"cl-spec:registry-register-property","recipe":{"keyword":"new"}}

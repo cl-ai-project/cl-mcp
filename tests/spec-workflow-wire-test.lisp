@@ -1,9 +1,10 @@
 (defpackage #:cl-mcp/tests/spec-workflow-wire-test
   (:use #:cl)
-  (:import-from #:rove #:deftest #:testing #:ok)
+  (:import-from #:rove #:deftest #:testing #:ok #:skip)
   (:import-from #:cl-mcp/src/tools/helpers #:make-ht)
   (:import-from #:cl-mcp/specs/spec-response-fixtures
                 #:json-at #:json-true-p #:json-false-p)
+  (:import-from #:cl-mcp/tests/spec-input-test #:with-self-specs)
   (:import-from #:cl-mcp/tests/spec-wire-test
                 #:with-wire-server #:with-session #:%tool #:%load-fixture))
 
@@ -65,7 +66,8 @@
       (ok (search (format nil "~D/3 cases reached" reached) text))
       (ok (search "Input coverage: unmeasured" text)))))
 
-(deftest self-spec-workflows-in-a-worker
+(defun exercise-self-spec-workflows ()
+  "Run the self-bundle acceptance examples in one client session."
   (with-wire-server (port :worker-pool t)
     (with-session (client port)
       ;; The wire fixture adds unrelated registrations to the worker.
@@ -118,3 +120,8 @@
         (testing "named cases reached by generated trials"
           (%generated-counts client 1 1 '(1 0 0))
           (%generated-counts client 50 3 '(29 10 11)))))))
+
+(deftest self-spec-workflows-in-a-worker
+  (if (asdf:find-system "cl-spec/check-it" nil)
+      (with-self-specs (exercise-self-spec-workflows))
+      (skip "The optional cl-spec/check-it system is unavailable.")))

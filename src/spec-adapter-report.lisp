@@ -58,6 +58,8 @@
            #:describe-report
            #:check-report
            #:result-case-report
+           #:exact-case-selector
+           #:case-selectors
            #:*default-check-timeout-seconds*))
 
 (in-package #:cl-mcp/src/spec-adapter-report)
@@ -948,7 +950,29 @@ this list runs no capture form."
                         :form-complete complete
                         :form-omitted-chars omitted))))
 
-(defun %contract-cases (cases max-chars)
+(defun exact-case-selector (name)
+  "Return a selector for the keyword NAME that identifies it in any contract.
+Use readable keyword syntax for an empty name and for names beginning with a colon,
+so the empty keyword also has a non-empty selector and that syntax stays unambiguous."
+  (let ((spelling (symbol-name name)))
+    (if (or (zerop (length spelling)) (char= (char spelling 0) #\:))
+        (with-standard-io-syntax (prin1-to-string name))
+        spelling)))
+
+(defun case-selectors (cases)
+  "Return a selector for each case row, preserving order and keyword identity.
+An ordinary, unambiguous name uses its familiar lowercase spelling. Case-folding
+collisions keep the exact names so each displayed selector retrieves its own guard."
+  (let ((names (loop for case in cases collect (exact-case-selector (getf case :name))))
+        (counts (make-hash-table :test #'equalp)))
+    (dolist (name names)
+      (incf (gethash name counts 0)))
+    (loop for name in names
+          collect (if (or (> (gethash name counts) 1) (char= (char name 0) #\:))
+                      name
+                      (string-downcase name)))))
+
+(defun %contract-cases (cases max-chars &optional (selectors (case-selectors cases)))
   "Return a contract's ordered named cases as report plists.
 
 Order is the contract's, because case selection is exclusive and the author
@@ -959,7 +983,7 @@ source forms; their compiled counterparts are not projected and are not run.
 %CLAUSE-TEXT, so each arrives as a form a reader can paste back and each
 carries the complete/omitted pair beside it.  A :STATE-POST that was cut with
 no such pair is a clause a reader takes for the whole condition."
-  (loop for case in cases
+  (loop for case in cases for selector in selectors
         collect
         (multiple-value-bind (guard guard-complete guard-omitted)
             (%print-bounded-form (getf case :when) max-chars)
@@ -967,7 +991,7 @@ no such pair is a clause a reader takes for the whole condition."
               (%clause-text (getf case :postconditions) max-chars)
             (multiple-value-bind (state-text state-complete state-omitted)
                 (%clause-text (getf case :state-post) max-chars)
-              (list :name (getf case :name)
+              (list :name (getf case :name) :selector selector
                     :documentation (getf case :documentation)
                     :guard guard
                     :guard-complete guard-complete
@@ -986,21 +1010,27 @@ no such pair is a clause a reader takes for the whole condition."
 
 (defun %focused-function-spec (name data max-chars case-name)
   "Summarize validated contract DATA or expand just the case named by CASE-NAME."
-  (let ((cases (getf data :cases)))
+  (let* ((cases (getf data :cases))
+         (selectors (case-selectors cases)))
     (if case-name
-        (let ((selected (find case-name cases :key (lambda (row) (getf row :name))
-                              :test #'string-equal)))
+        (let* ((matches (loop for row in cases for selector in selectors
+                              when (string-equal case-name selector) collect (cons selector row)))
+               (selected (or (assoc case-name matches :test #'string=)
+                             (and (null (rest matches)) (first matches)))))
           (if selected
               (list :status :ok :kind "function-spec" :name (symbol-data name)
-                    :detail "case" :selected-case (getf selected :name)
+                    :detail "case" :selected-case (car selected)
                     :case-selection (getf data :case-selection)
-                    :cases (%contract-cases (list selected) max-chars))
+                    :cases (%contract-cases (list (cdr selected)) max-chars (list (car selected))))
               (list :status :invalid-arguments :kind "function-spec" :name (symbol-data name)
-                    :message (if cases
-                                 (format nil "Unknown case ~S. Choose one of ~{~(~A~)~^, ~}."
-                                         case-name (mapcar (lambda (row) (getf row :name)) cases))
-                                 (format nil "This contract declares no named cases. Omit case ~S."
-                                         case-name)))))
+                    :message (cond (matches
+                                    (format nil "Ambiguous case ~S. Use an exact spelling from ~
+~{~S~^, ~}." case-name (mapcar #'car matches)))
+                                   (cases
+                                    (format nil "Unknown case ~S. Choose one of ~{~S~^, ~}."
+                                            case-name selectors))
+                                   (t (format nil "This contract declares no named cases. ~
+Omit case ~S." case-name))))))
         (list :status :ok :kind "function-spec" :name (symbol-data name) :detail "summary"
               :arguments (%contract-arguments (getf data :arguments))
               :outcome (cond (cases :cases)
@@ -1011,8 +1041,9 @@ no such pair is a clause a reader takes for the whole condition."
               :signals (%spec-tree (getf data :signals))
               :fixture-present (and (getf data :fixture) t)
               :case-selection (getf data :case-selection)
-              :cases (loop for row in cases
-                           collect (list :name (getf row :name) :outcome (getf row :outcome)))))))
+              :cases (loop for row in cases for selector in selectors
+                           collect (list :name (getf row :name) :selector selector
+                                         :outcome (getf row :outcome)))))))
 
 (defun %describe-function-spec (api name registry max-chars &key (detail "full") case-name)
   "Return the detail plist for the contract registered for NAME.
