@@ -89,7 +89,7 @@
                 #:spec-list
                 #:spec-symbol
                 #:spec-describe
-                #:spec-check)
+                #:spec-check #:spec-check-input #:spec-check-batch)
   (:export #:run
            #:version
            ;; Tool definition macro
@@ -101,6 +101,8 @@
            #:spec-symbol
            #:spec-describe
            #:spec-check
+           #:spec-check-input
+           #:spec-check-batch
            ;; File system tools
            #:fs-read-file
            #:fs-write-file

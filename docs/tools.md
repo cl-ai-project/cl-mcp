@@ -2017,7 +2017,7 @@ Calling a tool whose group is off returns a JSON-RPC error naming the group and
 how to enable it, rather than "tool not found" — the tool is real, the setting
 is what is missing.
 
-### Group `cl-spec` — `spec-list`, `spec-symbol`, `spec-describe`, `spec-check`
+### Group `cl-spec`
 
 Fetch the [cl-spec](https://github.com/masatoi/cl-spec) Spec, Property or
 function spec registered about a symbol, read one in full, and run it for a
@@ -2040,7 +2040,7 @@ the legacy adapter digest. Capability `available` means generator/shrinker
 construction is supported; it does not guarantee successful draws or reductions.
 
 - `spec-list` — what is registered at all. The entry point when you do not yet
-  know a name: the other three all take one you already have. Returns names,
+  know a name. Returns names,
   for each property its kind, tags, `(:about ...)` targets and docstring, and for
   each function spec its parameter names and whether it carries a `:returns` —
   not bodies.
@@ -2060,6 +2060,10 @@ construction is supported; it does not guarantee successful draws or reductions.
     carries this tag" and "this tag does not exist here" are different answers.
   - An empty listing is not evidence that a project has no contracts: it shows
     what is registered in *this worker*.
+  - `package_mode="home"` (default) matches each symbol's home package.
+    `package_mode="external"` with `package` matches symbols exported by that package,
+    including re-exports. `detail="compact"` returns qualified name strings in
+    `specs`, `function_specs` and `properties`. Counts and limits apply in both views.
   - `counts` is `null` for a kind that was not requested, and the text omits
     its line. A `0` there would read as "the registry holds none" when it
     means "this call did not look".
@@ -2071,6 +2075,9 @@ construction is supported; it does not guarantee successful draws or reductions.
   - An unqualified `symbol` is read in `COMMON-LISP-USER` unless `package` says otherwise;
     so is an unqualified `name` in `spec-describe` and `spec-check`.
 - `spec-describe` — one definition in full.
+  - For a function spec, `detail="summary"` shows its arguments, outcome, named cases
+    and fixture presence. Pass `case` with a case name to expand its guard, outcome and
+    postconditions. The default `detail="full"` includes the complete declaration.
   - `kind` (`property` | `spec` | `function-spec`, required), `name` (required),
     `package`, `max_chars` (positive integer, default 8000),
     `timeout_seconds` (number, default 30)
@@ -2172,6 +2179,10 @@ construction is supported; it does not guarantee successful draws or reductions.
     in the tool's own description rather than duplicated here — that
     description is checked against the code's status list by
     `tests/spec-tools-test.lisp`, and a second copy would only drift.
+  - `detail="summary"` shows each status, executed trial count, measured case counts,
+    related checks outside the selection and input-domain coverage. For a measured
+    contract, `results[].case_coverage` gives `reached`, `declared` and each case's
+    `called` count. `detail="full"` (default) includes the underlying result record.
   - The seed is text because a cl-spec seed exceeds JSON's safe integer range;
     a JSON number is refused rather than silently ignored.
   - `results[].core_result` carries cl-spec's own versioned result record.
@@ -2284,7 +2295,35 @@ construction is supported; it does not guarantee successful draws or reductions.
     other, and the two may legitimately disagree — for example if the
     worker was restarted between the run and reading the result.
 
-Prerequisite: `load-system` with `cl-spec/check-it` (execution) or `cl-spec`
-(introspection only), plus the system defining the specs and properties. All
-four tools run in the session's worker, so the definitions a `load-system`
-put there are the ones they see.
+- `spec-check-input` checks one invocation of `function`. Supply exactly one of
+  `arguments` (a JSON array, including `[]`) or `recipe` (one JSON value).
+  Strings and numbers are literals, arrays become Lisp lists, and JSON null and
+  false both denote NIL. Use `{"symbol":"my-app:register"}`, `{"keyword":"new"}`
+  or `{"object_id":"…"}` for an existing symbol, keyword or object in this worker.
+  `check-call` uses caller-owned arguments, so a function can mutate those objects.
+  `check-fixture` sets up and cleans up its own state. Both responses report the
+  selected case, outcome and failure phase. Recipes also report lifecycle evidence
+  and the availability of snapshots. For example, after loading `cl-spec/specs`:
+
+  ```json
+  {"function":"cl-spec:registry-register-property","recipe":{"keyword":"new"}}
+  ```
+
+- `spec-check-batch` runs a symbol's contract and its directly registered properties
+  in one request. Alternatively, pass arrays of `functions` and/or `properties`
+  to select an exact set in a worker with other registrations. Each distinct
+  definition runs once. `trials` controls contracts, `profile` controls properties,
+  and an optional decimal-string `seed` is passed to each item.
+
+  ```json
+  {"symbol":"cl-spec:validate","trials":50,"profile":"smoke","seed":"42"}
+  ```
+
+  Read each item's `status`, `seed`, `definition_digest` and `replay`. Pass the
+  replay object to `spec-check` to repeat that item. One `timeout_seconds` budget
+  covers the batch. Completed results stay available and selected items that did
+  not start have status `not-run`. `selection_complete` indicates whether discovery
+  finished before the deadline.
+
+All tools use the session's worker. Load the system defining the declarations first.
+Generated runs also require a generator backend such as `cl-spec/check-it`.

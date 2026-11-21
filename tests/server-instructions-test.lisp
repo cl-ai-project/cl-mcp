@@ -169,7 +169,8 @@
                       "lisp-edit-form" "lisp-patch-form" "load-system" "repl-eval"
                       "run-tests" "clos-describe" "lisp-macroexpand"
                       "inspect-object" "lisp-check-parens" "spec-list"
-                      "spec-symbol" "spec-describe" "spec-check"))
+                      "spec-symbol" "spec-describe" "spec-check"
+                      "spec-check-input" "spec-check-batch"))
         (ok (member name listed :test #'string=) name)
         (ok (%mentions-tool-p (server-instructions) name)
             (format nil "the instructions name ~A" name))))))

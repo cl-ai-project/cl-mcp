@@ -104,7 +104,8 @@ are what a test about the message has to look at."
                         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
              (tools (gethash "tools" (gethash "result" (parse response))))
              (names (map 'list (lambda (tool) (gethash "name" tool)) tools)))
-        (dolist (name '("spec-list" "spec-symbol" "spec-describe" "spec-check"))
+        (dolist (name '("spec-list" "spec-symbol" "spec-describe" "spec-check"
+                         "spec-check-input" "spec-check-batch"))
           (ok (not (member name names :test #'string=))))
         (testing "and the tools that are not optional are still there"
           (ok (member "repl-eval" names :test #'string=)))))
@@ -128,7 +129,7 @@ are what a test about the message has to look at."
         (ok (null (disabled-tool-group "spec-check")))))))
 
 (deftest spec-tools-are-registered
-  (testing "all four tools appear in tools/list once the group is on"
+  (testing "all cl-spec tools appear in tools/list once the group is on"
     (%ensure-tools)
     (let* ((*use-worker-pool* nil)
            (*enabled-tool-groups* (list "CL-SPEC"))
@@ -136,15 +137,33 @@ are what a test about the message has to look at."
                       "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
            (tools (gethash "tools" (gethash "result" (parse response))))
            (names (map 'list (lambda (tool) (gethash "name" tool)) tools)))
-      (dolist (name '("spec-list" "spec-symbol" "spec-describe" "spec-check"))
+      (dolist (name '("spec-list" "spec-symbol" "spec-describe" "spec-check"
+                       "spec-check-input" "spec-check-batch"))
         (ok (member name names :test #'string=)))
       (testing "and each carries an inputSchema"
         (loop for tool across tools
               when (member (gethash "name" tool)
                            '("spec-list" "spec-symbol" "spec-describe"
-                             "spec-check")
+                             "spec-check" "spec-check-input" "spec-check-batch")
                            :test #'string=)
                 do (ok (hash-table-p (gethash "inputSchema" tool))))))))
+
+(deftest concrete-input-schema-accepts-heterogeneous-lisp-values
+  (%ensure-tools)
+  (with-cl-spec-group
+    (let* ((response (parse (process-json-line
+                             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")))
+           (descriptors (gethash "tools" (gethash "result" response)))
+           (tool (find "spec-check-input" descriptors :test #'equal
+                       :key (lambda (entry) (gethash "name" entry)))))
+      (ok tool)
+      (when tool
+        (let* ((fields (gethash "properties" (gethash "inputSchema" tool)))
+               (recipe (gethash "recipe" fields))
+               (arguments (gethash "arguments" fields)))
+          (ok (and recipe (not (gethash "type" recipe))))
+          (ok (equal "array" (gethash "type" arguments)))
+          (ok (not (gethash "type" (gethash "items" arguments)))))))))
 
 (deftest spec-symbol-requires-a-symbol
   (testing "a missing symbol argument is a validation error, not a crash"

@@ -53,7 +53,7 @@ Tools run in two process types when the worker pool is enabled (default):
 - `repl-eval`, `load-system`, `run-tests`, `lisp-macroexpand`
 - `code-find`, `code-describe`, `code-find-references`, `clos-describe`
 - `inspect-object`
-- `spec-list`, `spec-symbol`, `spec-describe`, `spec-check` (when the optional `cl-spec` group is on)
+- `spec-list`, `spec-symbol`, `spec-describe`, `spec-check`, `spec-check-input` and `spec-check-batch` (optional `cl-spec` group)
 
 `lisp-macroexpand` splits across both: the parent resolves `path`/`form_type`/`form_name`
 against the CST to locate the form's source text, then the worker expands it, because only

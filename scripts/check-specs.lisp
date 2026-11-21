@@ -147,9 +147,34 @@ test counts as a failure, not a pass."
      "sessions-keep-their-own-registries-and-run-in-their-workers"
      "a-stopped-server-leaves-no-worker-behind"
      "inline-and-pool-send-the-same-json")
-    ;; This one is the other way round: it needs a process with NO cl-spec,
-    ;; because it builds a CL-SPEC package of its own to resolve against.  It
-    ;; refuses to run when one is already there.
+    ("cl-mcp/tests/spec-discovery-views-test"
+     "public-exports-use-exact-symbol-identity-for-every-kind"
+     "compact-list-retains-counts-and-limit"
+     "summary-lists-the-contract-interface-and-case-outcomes"
+     "selecting-a-case-expands-only-its-own-clauses"
+     "compact-names-only-need-enumeration"
+     "fixture-presence-and-unsupported-schemas-survive-focused-describe"
+     "invalid-views-name-the-option-or-available-cases")
+    ("cl-mcp/tests/spec-input-test"
+     "caller-arguments-check-and-mutate-the-supplied-registry"
+     "fixture-recipe-reports-owned-lifecycle-and-snapshot-availability"
+     "concrete-input-distinguishes-empty-arguments-scalars-and-null-recipe"
+     "invalid-concrete-input-selection-precedes-checking"
+     "invalid-concrete-tokens-never-start-a-call"
+     "concrete-input-deadline-reports-uncertain-worker-state"
+     "unavailable-handles-and-contracts-are-distinct")
+    ("cl-mcp/tests/spec-batch-test"
+     "batch-validates-the-selection-and-budgets"
+     "combined-run-selects-the-contract-and-direct-properties"
+     "explicit-bundle-excludes-unrelated-registrations-and-deduplicates-aliases"
+     "explicit-items-keep-distinct-kinds-and-actual-failures"
+     "batch-deadline-retains-finished-items-and-stops-before-the-next"
+     "slow-registry-discovery-leaves-membership-unknown"
+     "batch-reports-an-unstoppable-nested-check"
+     "zero-budget-identifies-explicit-items-without-running")
+    ("cl-mcp/tests/spec-workflow-wire-test"
+     "self-spec-workflows-in-a-worker")
+    ;; This suite resolves against a synthetic CL-SPEC in a fresh process.
     ("cl-mcp/tests/spec-api-resolution-test"
      "this-process-has-no-cl-spec-of-its-own"
      "no-package-at-all-is-not-loaded"

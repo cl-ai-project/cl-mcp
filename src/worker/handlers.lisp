@@ -59,6 +59,8 @@
                 #:build-code-find-references-response
                 #:build-inspect-response
                 #:expand-and-build-response)
+  (:import-from #:cl-mcp/src/tools/spec-input #:spec-input-response)
+  (:import-from #:cl-mcp/src/tools/spec-batch #:spec-batch-response)
   (:import-from #:cl-mcp/src/tools/spec-entry
                 #:spec-list-response
                 #:spec-symbol-response
@@ -524,6 +526,8 @@ hand-maintained count is wrong again the next time a method is added."
                    (cons "worker/spec-symbol" #'%handle-spec-symbol)
                    (cons "worker/spec-describe" #'%handle-spec-describe)
                    (cons "worker/spec-check" #'%handle-spec-check)
+                   (cons "worker/spec-check-input" #'spec-input-response)
+                   (cons "worker/spec-check-batch" #'spec-batch-response)
                    (cons "worker/set-project-root" #'%handle-set-project-root)
                    (cons "worker/init-start" #'handle-init-start)
                    (cons "worker/init-status" #'handle-init-status))

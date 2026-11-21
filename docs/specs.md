@@ -2317,12 +2317,17 @@ The `specs` job in `.github/workflows/ci.yml` does the following:
    the five real-cl-spec suites (`spec-integration-test`,
    `check-routing-specs-test`, `spec-inspection-specs-test`,
    `spec-responses-specs-test`, `spec-wire-test`) and for the API resolution suite, as separate
-   processes, each under `timeout 900` inside a 30-minute job, and uploads the
-   report files.
+   processes, each under `timeout 900` inside a 30-minute job.
+5. Checks out the self-specification bundle at `SELF_SPEC_REVISION` and runs
+   `spec-discovery-views-test`, `spec-input-test`, `spec-batch-test` and
+   `spec-workflow-wire-test` in fresh processes and a fresh FASL cache. The last
+   suite exercises the public tools over TCP in a worker with unrelated registrations.
+   The job uploads the bundle and negative-control reports.
 
 check-it and cl-mcp's other dependencies come from the current Quicklisp dist;
-the report records which one. The job uses no cache. The default `test` job is
-unchanged and still needs no cl-spec. There, `spec-integration-test` skips
+the report records which one. The job uses no shared cache. The default `test` job
+selects the checked-out cl-mcp for the parent and workers and needs no cl-spec.
+There, `spec-integration-test` skips
 when cl-spec cannot be found, as before; the `specs` job is where a skip fails.
 The Lint job covers `specs.lisp`,
 `specs/*.lisp` and `scripts/*.lisp` as well as `src/` and `tests/`.

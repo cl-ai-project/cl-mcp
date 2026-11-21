@@ -665,7 +665,7 @@ When supplied, DECLARED-NAMES comes from the contract read before the run."
         report))))
 
 (defun validate-versioned-record (record &key expected-record-kind
-                                              expected-entity-kind)
+                                              expected-entity-kind shape-name)
   "Return (values STATUS REASON) for one versioned record.
 
 STATUS is :OK, :UNSUPPORTED-SCHEMA when the record declares a version this
@@ -680,7 +680,9 @@ already makes when FUNCTION-SPEC-DATA answers NIL.
 EXPECTED-RECORD-KIND and EXPECTED-ENTITY-KIND are checked when supplied --
 RESULT-DATA answers :RESULT and FUNCTION-SPEC-DATA answers :DEFINITION with
 :FUNCTION-SPEC -- so a record projected under the wrong reader is caught here
-rather than by whatever reads it next."
+rather than by whatever reads it next. SHAPE-NAME identifies the concrete
+readers: CALL-CHECK-DATA returns a version-one result and FIXTURE-CHECK-DATA
+returns a version-two :FIXTURE-CHECK. Other readers keep their own schema rules."
   (flet ((bad (reason) (return-from validate-versioned-record
                          (values :malformed reason))))
     (unless record (bad "the versioned reader returned NIL"))
@@ -689,7 +691,14 @@ rather than by whatever reads it next."
     (when (eq :absent (field-availability record :schema-version))
       (bad "the record carries no :schema-version"))
     (let ((version (getf record :schema-version)))
-      (unless (supported-core-schema-p record)
+      (unless (case shape-name
+                (:call-check-data (eql 1 version))
+                (:fixture-check-data
+                 (and (eql 2 version)
+                      (eq :fixture-check (getf record :record-kind))
+                      (eq :function-spec (getf record :entity-kind))
+                      (eq :fixture-recipe (getf record :input-kind))))
+                (t (supported-core-schema-p record)))
         (return-from validate-versioned-record
           (values :unsupported-schema version)))
       (dolist (key +v1-required-metadata+)
@@ -992,38 +1001,65 @@ rather than by whatever reads it next."
         (append fields (remove-if (lambda (entry) (assoc (car entry) fields))
                                   (rest descriptor)))))
 
+(defparameter +fixture-declaration-descriptor+
+  '(:object (:isolation . :leaf) (:version . :leaf) (:recipe-name . :leaf)
+            (:setup . (:array :leaf)) (:cleanup . (:array :leaf))))
+
+(defparameter +fixture-lifecycle-descriptor+
+  '(:object (:setup . :leaf) (:evaluation . :leaf) (:cleanup . :leaf)
+            (:state . :leaf) (:completion . :leaf) (:target-called . :boolean)
+            (:errors . (:array (:object (:phase . :leaf) (:reason . :leaf)
+                                       (:condition-type . :leaf) (:condition-report . :leaf))))))
+
+(defun %fixture-snapshot (descriptor)
+  "Describe an availability-tagged snapshot whose collected value has DESCRIPTOR."
+  (list :object '(:availability . :leaf) '(:reason . :leaf)
+        '(:type . :capture-diagnostic-type) (cons :value descriptor)))
+
+(defparameter +fixture-observation-descriptor+
+  (%extend-object-descriptor (getf *record-shapes* :observation)
+                             (cons :explanation (%fixture-snapshot '(:ref :explanation)))
+                             (cons :outcome (%fixture-snapshot '(:ref :target-outcome)))
+                             (cons :value (%fixture-snapshot :opaque))))
+
+(defparameter +fixture-call-evidence-descriptor+
+  (%extend-object-descriptor +fixture-observation-descriptor+
+                             '(:failure-phase . :leaf)
+                             (cons :arguments (%fixture-snapshot '(:array :opaque)))))
+
 (defparameter +fixture-result-descriptor+
-  (flet ((snapshot (value-descriptor)
-           `(:object (:availability . :leaf) (:reason . :leaf)
-                     (:type . :capture-diagnostic-type) (:value . ,value-descriptor))))
-    (let* ((observed (%extend-object-descriptor
-                      (getf *record-shapes* :observation)
-                      (cons :explanation (snapshot '(:ref :explanation)))
-                      (cons :outcome (snapshot '(:ref :target-outcome)))
-                      (cons :value (snapshot :opaque))))
-           (call-evidence (%extend-object-descriptor
-                           observed '(:failure-phase . :leaf)
-                           (cons :arguments (snapshot '(:array :opaque)))))
-           (lifecycle '(:object (:setup . :leaf) (:evaluation . :leaf) (:cleanup . :leaf)
-                                (:state . :leaf) (:completion . :leaf) (:target-called . :boolean)
-                                (:errors . (:array (:object (:phase . :leaf) (:reason . :leaf)
-                                                           (:condition-type . :leaf)
-                                                           (:condition-report . :leaf))))))
-           (observation (%extend-object-descriptor observed '(:input-kind . :leaf)
-                                                   (cons :lifecycle lifecycle)
-                                                   (cons :call-evidence call-evidence))))
-      (%extend-object-descriptor
-       (getf *record-shapes* :result-data)
-       '(:input-kind . :leaf)
-       '(:fixture . (:object (:isolation . :leaf) (:version . :leaf) (:recipe-name . :leaf)
-                             (:setup . (:array :leaf)) (:cleanup . (:array :leaf))))
-       (cons :case-report (%extend-object-descriptor (getf *record-shapes* :case-report)
-                                                     '(:fixture-errors . :leaf)))
-       (cons :failure observation) (cons :shrunk-failure observation)
-       (cons :run-error observation))))
+  (let ((observation (%extend-object-descriptor
+                      +fixture-observation-descriptor+
+                      '(:input-kind . :leaf)
+                      (cons :lifecycle +fixture-lifecycle-descriptor+)
+                      (cons :call-evidence +fixture-call-evidence-descriptor+))))
+    (%extend-object-descriptor
+     (getf *record-shapes* :result-data)
+     '(:input-kind . :leaf) (cons :fixture +fixture-declaration-descriptor+)
+     (cons :case-report (%extend-object-descriptor (getf *record-shapes* :case-report)
+                                                  '(:fixture-errors . :leaf)))
+     (cons :failure observation) (cons :shrunk-failure observation)
+     (cons :run-error observation)))
   "Generated fixture results keep recipes in the outer observation's arguments.
 Call evidence carries availability-tagged snapshots of the actual call. A lifecycle
 error has its own observation, including when shrinking an earlier counterexample.")
+
+(let* ((result-fields (rest (getf *record-shapes* :result-data)))
+       (common (list* :object '(:execution-mode . :leaf)
+                      (cons :fixture +fixture-declaration-descriptor+)
+                      (loop for key in (append +v1-required-metadata+
+                                               '(:digest-omissions :digest-exclusions
+                                                 :state-constraints :coverage :evidence
+                                                 :name :status :failure-phase))
+                            collect (assoc key result-fields)))))
+  (setf (getf *record-shapes* :call-check-data)
+        (%extend-object-descriptor common '(:arguments . (:array :opaque))
+                                   '(:observation . (:ref :observation)))
+        (getf *record-shapes* :fixture-check-data)
+        (%extend-object-descriptor common '(:input-kind . :leaf) '(:recipe . :opaque)
+                                   '(:reason . :leaf)
+                                   (cons :lifecycle +fixture-lifecycle-descriptor+)
+                                   (cons :observation +fixture-call-evidence-descriptor+))))
 
 (defun project-core-record (record shape-name &key expected-record-kind
                                                    expected-entity-kind
@@ -1048,7 +1084,8 @@ beside a 10-character compatibility alias is one call with two answers."
   (multiple-value-bind (status reason)
       (validate-versioned-record record
                                  :expected-record-kind expected-record-kind
-                                 :expected-entity-kind expected-entity-kind)
+                                 :expected-entity-kind expected-entity-kind
+                                 :shape-name shape-name)
     (case status
       (:malformed (values nil :malformed reason))
       (:unsupported-schema

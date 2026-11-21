@@ -115,10 +115,11 @@ Use VALIDATION-MESSAGE to get the user-facing error message."))
 
 (defun %check-type-match (value type arg-name &optional item-number)
   "Check if VALUE matches TYPE. Signal ARG-VALIDATION-ERROR if not.
-TYPE can be :string, :integer, :number, :boolean, :array, :object, or NIL (any).
+TYPE can be :string, :integer, :number, :boolean, :array, :object, or :any (all JSON values).
 ITEM-NUMBER, when given, identifies an item in the array argument (starting at 1)."
   (when type
     (let ((valid (ecase type
+                   (:any t)
                    (:string (stringp value))
                    (:integer (integerp value))
                    (:number (numberp value))
@@ -156,10 +157,10 @@ Signals ARG-VALIDATION-ERROR on validation failure.
 Example:
   (extract-arg args \"path\" :type :string :required t)
   (extract-arg args \"limit\" :type :integer)"
-  (let ((value (and args (gethash name args))))
+  (multiple-value-bind (value supplied-p) (and args (gethash name args))
     (cond
       ;; Required but missing
-      ((and required (null value))
+      ((and required (null value) (not (and (eq type :any) supplied-p)))
        (error 'arg-validation-error
               :arg-name name
               :message (format nil "~A is required" name)))

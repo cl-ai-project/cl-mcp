@@ -52,6 +52,7 @@ jobs:
         # (*process-tier-suites* in tests.lisp).
         env:
           CL_MCP_TEST_TIER: full
+          CL_SOURCE_REGISTRY: '(:source-registry (:directory "${{ github.workspace }}/") :inherit-configuration)'
         run: |
           rove cl-mcp.asd
 
@@ -140,6 +141,21 @@ jobs:
         run: |
           CL_MCP_SPECS_MODE=integration CL_MCP_SPECS_SUITE=cl-mcp/tests/spec-api-resolution-test \
             timeout 900 ros run --load scripts/check-specs.lisp
+
+      - name: Public discovery, concrete inputs and batch runs against the cl-spec self bundle
+        env:
+          SELF_SPEC_REVISION: 06c74419597d920937842cf7950c31fdf379ad59
+          XDG_CACHE_HOME: ${{ runner.temp }}/cl-mcp-self-spec-cache
+          CL_MCP_SPECS_MODE: integration
+          CL_SOURCE_REGISTRY: '(:source-registry (:directory "${{ github.workspace }}/") :inherit-configuration)'
+        run: |
+          dir="$HOME/.roswell/local-projects/masatoi/cl-spec"
+          git -C "$dir" fetch --quiet --depth 1 "$CL_SPEC_REPOSITORY" "$SELF_SPEC_REVISION"
+          git -C "$dir" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$SELF_SPEC_REVISION"
+          for suite in spec-discovery-views-test spec-input-test spec-batch-test spec-workflow-wire-test; do
+            CL_MCP_SPECS_SUITE="cl-mcp/tests/$suite" timeout 900 ros run --load scripts/check-specs.lisp
+          done
 
       - name: Upload reports
         if: always()
