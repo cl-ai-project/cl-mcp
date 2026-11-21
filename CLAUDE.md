@@ -137,7 +137,7 @@ Elsewhere the bundle is not required.
 | Pool Mgmt | `src/tools/pool-status.lisp`, `src/tools/pool-kill-worker.lisp` | Worker diagnostics and lifecycle |
 | Worker pool | `src/pool.lisp`, `src/proxy.lisp`, `src/worker-client.lisp`, `src/request-lifecycle.lisp`, `src/reset-events.lisp`, `src/worker/` | Session affinity, spawning, crash recovery, request routing; the worker process itself |
 | Tool plumbing | `src/tools/define-tool.lisp`, `src/tools/registry.lisp`, `src/tools/all.lisp`, `src/tools/response-builders.lisp`, `src/server-instructions.lisp` | Tool definition and registration, optional groups, response text, the `initialize` instructions |
-| cl-spec (opt-in) | `src/spec-adapter-core.lisp`, `src/spec-adapter-report.lisp`, `src/tools/spec-*.lisp` | Spec/Property listing, discovery and execution (`spec-list` / `spec-symbol` / `spec-describe` / `spec-check`). **Optional tool group `cl-spec`, off by default** |
+| cl-spec (opt-in) | `src/spec-adapter-core.lisp`, `src/spec-adapter-report.lisp`, `src/tools/spec-*.lisp` | Registry discovery, contract inspection, single-input and generated checks, and batch selection. **Optional tool group `cl-spec`, off by default** |
 
 **Optional tool groups:** a tool declared with `define-tool`'s `:group` stays
 out of `tools/list` and refuses calls until its group is enabled, via

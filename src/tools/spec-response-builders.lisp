@@ -21,7 +21,8 @@
   (:import-from #:cl-mcp/src/spec-adapter-report
                 #:+listing-kinds+
                 #:listing-kind-wanted-p
-                #:result-case-report)
+                #:result-case-report
+                #:case-selectors)
   (:export #:build-spec-list-response
            #:build-spec-symbol-response
            #:build-spec-describe-response
@@ -415,6 +416,30 @@ to see the rest.~@[ ~A~]"
               (when (plusp indent) indent)
               (getf report omitted-key) budget extra))))
 
+(defun %described-case-name (case)
+  "Return the published selector of a case from a description report."
+  (or (getf case :selector) (%keyword-string (getf case :name))))
+
+(defun %format-case-detail (stream case)
+  "Write one contract case's guard, outcome and postconditions to STREAM."
+  (format stream "~&    when:  ~A" (getf case :guard))
+  (when (getf case :guard-omitted-chars)
+    (%report-cut stream case :guard-complete :guard-omitted-chars :indent 4))
+  (let ((outcome (getf case :outcome)))
+    (if (eq :signals outcome)
+        (progn (format stream "~&    signals:")
+               (%format-spec-node stream (getf case :signals) 2))
+        (progn (format stream "~&    returns:")
+               (%format-spec-node stream (getf case :returns) 2))))
+  (when (getf case :postconditions)
+    (format stream "~&    :post  ~A" (getf case :postconditions))
+    (%report-cut stream case :postconditions-complete
+                 :postconditions-omitted-chars :indent 4))
+  (when (getf case :state-post)
+    (format stream "~&    state-post: ~A" (getf case :state-post))
+    (%report-cut stream case :state-post-complete
+                 :state-post-omitted-chars :indent 4)))
+
 (defun %format-describe-text (report)
   "Render the spec-describe report as text."
   (with-output-to-string (stream)
@@ -429,6 +454,11 @@ to see the rest.~@[ ~A~]"
               (mapcar (lambda (target) (getf target :qualified))
                       (getf report :targets))))
     (%format-property-facts stream report)
+    (when (equal (getf report :detail) "summary")
+      (format stream "~&Outcome ~A~&Fixture ~:[absent~;present~]"
+              (%keyword-string (getf report :outcome)) (getf report :fixture-present))
+      (unless (getf report :arguments) (format stream "~&Arguments ()"))
+      (unless (getf report :cases) (format stream "~&No named cases.")))
     (when (getf report :arguments)
       (format stream "~&~%arguments:")
       (dolist (argument (getf report :arguments))
@@ -487,27 +517,16 @@ to see the rest.~@[ ~A~]"
       (%report-cut stream report :state-post-complete
                    :state-post-omitted-chars))
     (when (getf report :cases)
-      (format stream "~&~%cases (~A selection):"
+      (format stream "~&~%~:[cases~;selected case~] (~A selection):"
+              (getf report :selected-case)
               (string-downcase (princ-to-string (getf report :case-selection))))
       (dolist (case (getf report :cases))
         (format stream "~&  ~A~@[ -- ~A~]"
-                (string-downcase (princ-to-string (getf case :name)))
+                (%described-case-name case)
                 (getf case :documentation))
-        (format stream "~&    when:  ~A" (getf case :guard))
-        (let ((outcome (getf case :outcome)))
-          (if (eq :signals outcome)
-              (progn (format stream "~&    signals:")
-                     (%format-spec-node stream (getf case :signals) 2))
-              (progn (format stream "~&    returns:")
-                     (%format-spec-node stream (getf case :returns) 2))))
-        (when (getf case :postconditions)
-          (format stream "~&    :post  ~A" (getf case :postconditions))
-          (%report-cut stream case :postconditions-complete
-                       :postconditions-omitted-chars :indent 4))
-        (when (getf case :state-post)
-          (format stream "~&    state-post: ~A" (getf case :state-post))
-          (%report-cut stream case :state-post-complete
-                       :state-post-omitted-chars :indent 4))))
+        (if (equal (getf report :detail) "summary")
+            (format stream "  ~A" (%keyword-string (getf case :outcome)))
+            (%format-case-detail stream case))))
     (let ((tree (getf report :spec)))
       (when tree
         (format stream "~&~%normalized IR tree:")
@@ -639,7 +658,7 @@ apart is what lets a reader ask whether a short list is short or was cut."
 
 (defun %case-ht (case)
   "Render one named case of a Function Spec."
-  (make-ht "name" (%keyword-string (getf case :name))
+  (make-ht "name" (%described-case-name case)
            "documentation" (sanitize-for-json (getf case :documentation))
            "guard" (sanitize-for-json (getf case :guard))
            "guard_complete" (%optional-bool case :guard-complete)
@@ -658,8 +677,45 @@ apart is what lets a reader ask whether a short list is short or was cut."
            "state_post_complete" (%optional-bool case :state-post-complete)
            "state_post_omitted_chars" (getf case :state-post-omitted-chars)))
 
+(defun %describe-argument-ht (argument)
+  "Render one declared function or property argument."
+  (make-ht "variable" (%symbol-ht (getf argument :variable))
+           "spec" (%spec-tree-ht (getf argument :spec))
+           "kind" (%keyword-string (getf argument :kind))
+           "supplied_p" (%symbol-ht (getf argument :supplied-p))
+           "keyword" (%keyword-string (getf argument :keyword))))
+
+(defun %focused-describe-response (report)
+  "Render the contract summary or the one named case present in REPORT."
+  (let* ((selected (getf report :selected-case))
+         (response
+           (make-ht "schema_version" +schema-version+ "status" "ok" "kind" "function-spec"
+                    "name" (%symbol-ht (getf report :name))
+                    "detail" (getf report :detail)
+                    "case_selection" (%keyword-string (getf report :case-selection))
+                    "cases" (map 'vector
+                                 (if selected #'%case-ht
+                                     (lambda (row)
+                                       (make-ht "name" (%described-case-name row)
+                                                "outcome" (%keyword-string (getf row :outcome)))))
+                                 (getf report :cases))
+                    "environment" (%environment-ht (getf report :environment))
+                    "content" (text-content (%format-describe-text report)))))
+    (if selected
+        (setf (gethash "selected_case" response) selected)
+        (setf (gethash "arguments" response)
+              (map 'vector #'%describe-argument-ht (getf report :arguments))
+              (gethash "outcome" response) (%keyword-string (getf report :outcome))
+              (gethash "returns" response) (%spec-tree-ht (getf report :returns))
+              (gethash "signals" response) (%spec-tree-ht (getf report :signals))
+              (gethash "fixture_present" response) (json-bool (getf report :fixture-present))))
+    response))
+
 (defun build-spec-describe-response (report)
   "Return the MCP response for a DESCRIBE-REPORT plist."
+  (when (and (eq (getf report :status) :ok)
+             (member (getf report :detail) '("summary" "case") :test #'equal))
+    (return-from build-spec-describe-response (%focused-describe-response report)))
   (case (getf report :status)
     ((:cl-spec-not-loaded :cl-spec-incomplete) (%unavailable-response report))
     (:unresolved-symbol (%unresolved-response report))
@@ -669,6 +725,7 @@ apart is what lets a reader ask whether a short list is short or was cut."
     (t
      (make-ht "schema_version" +schema-version+
               "status" "ok"
+              "detail" "full"
               "kind" (getf report :kind)
               "name" (%symbol-ht (getf report :name))
               "property_kind" (%keyword-string (getf report :property-kind))
@@ -677,20 +734,7 @@ apart is what lets a reader ask whether a short list is short or was cut."
               "documentation" (sanitize-for-json (getf report :documentation))
               "trials_table" (sanitize-for-json (getf report :trials-table))
               "shrink_enabled" (%optional-bool report :shrink-enabled)
-              "arguments"
-              (coerce (mapcar (lambda (argument)
-                                (make-ht "variable"
-                                         (%symbol-ht (getf argument :variable))
-                                         "spec"
-                                         (%spec-tree-ht (getf argument :spec))
-                                         "kind" (%keyword-string
-                                                 (getf argument :kind))
-                                         "supplied_p"
-                                         (%symbol-ht (getf argument :supplied-p))
-                                         "keyword" (%keyword-string
-                                                    (getf argument :keyword))))
-                              (getf report :arguments))
-                      'vector)
+              "arguments" (map 'vector #'%describe-argument-ht (getf report :arguments))
               "spec" (%spec-tree-ht (getf report :spec))
               "returns" (%spec-tree-ht (getf report :returns))
               "argument_generator" (%symbol-ht (getf report :argument-generator))
@@ -1570,6 +1614,59 @@ digest given")))
                   do (%format-one-result stream result index))
             (%format-check-footer stream report))))))
 
+(defun %check-summary-result (result)
+  "Return the measured facts about one generated check in a summary."
+  (let* ((report (result-case-report result))
+         (cases (getf report :cases)))
+    (make-ht "property" (%symbol-ht (getf result :property))
+             "kind" (%keyword-string (getf result :kind))
+             "status" (%keyword-string (getf result :status))
+             "message" (sanitize-for-json (getf result :message))
+             "trials" (%trials-ht (getf result :trials))
+             "case_coverage"
+             (when report
+               (make-ht "reached" (- (length cases) (length (getf report :never-called)))
+                        "declared" (length cases)
+                        "cases" (map 'vector
+                                     (lambda (row selector)
+                                       (make-ht "name" selector "called" (getf row :called)))
+                                     cases (case-selectors cases))))
+             "seed" (getf result :seed)
+             "definition_digest" (getf result :definition-digest))))
+
+(defun %format-check-summary (report results)
+  "Render the summary's structured result rows and the selection's known limits."
+  (let* ((selection (getf report :selection))
+         (outside (append (getf selection :properties-not-run)
+                          (remove nil (list (getf selection :contract-not-run)
+                                            (getf selection :own-property-not-run))))))
+    (with-output-to-string (stream)
+      (write-string (%check-headline report) stream)
+      (loop for row across results
+            for coverage = (gethash "case_coverage" row)
+            for executed = (gethash "executed" (gethash "trials" row))
+            do (format stream "~&~A  ~A, ~A"
+                       (gethash "qualified" (gethash "property" row)) (gethash "status" row)
+                       (if executed
+                           (format nil "~D trial~:P executed" executed)
+                           "executed trial count unknown"))
+               (when coverage
+                 (format stream ", ~D/~D cases reached"
+                         (gethash "reached" coverage) (gethash "declared" coverage))
+                 (loop for case across (gethash "cases" coverage)
+                       do (format stream "~&  ~A: ~D" (gethash "name" case) (gethash "called" case))))
+               (when (gethash "message" row)
+                 (format stream "~&  ~A" (gethash "message" row))))
+      (when (getf report :message) (format stream "~&~A" (getf report :message)))
+      (format stream "~&Related checks outside selection: ~A"
+              (cond (outside
+                     (format nil "~{~A~^, ~}" (mapcar (lambda (name) (getf name :qualified))
+                                                     outside)))
+                    ((getf selection :properties-not-run-read) "none found")
+                    (t "not enumerated")))
+      (format stream "~&Input coverage: unmeasured")
+      (%format-check-footer stream report))))
+
 (defun build-spec-check-response (report)
   "Return the MCP response for a CHECK-REPORT plist."
   (case (getf report :status)
@@ -1586,8 +1683,11 @@ digest given")))
        (setf (gethash "verified" response) (json-bool nil))
        response))
     (t
-     (let ((selection (getf report :selection))
-           (counts (getf report :counts)))
+     (let* ((selection (getf report :selection))
+            (counts (getf report :counts))
+            (summary-p (equal "summary" (getf report :detail)))
+            (results (map 'vector (if summary-p #'%check-summary-result #'%result-ht)
+                          (getf report :results))))
        (make-ht "schema_version" +schema-version+
                 "status" (%keyword-string (getf report :status))
                 "verified" (json-bool (getf report :verified))
@@ -1618,8 +1718,8 @@ digest given")))
                          "own_property_not_run"
                          (%symbol-ht (getf selection :own-property-not-run))
                          "notes" (%strings (getf selection :notes)))
-                "results" (coerce (mapcar #'%result-ht (getf report :results))
-                                  'vector)
+                "detail" (if summary-p "summary" "full")
+                "results" results
                 "counts" (make-ht "selected" (getf counts :selected)
                                   "passed" (getf counts :passed)
                                   "failed" (getf counts :failed)
@@ -1649,7 +1749,9 @@ digest given")))
                                          (getf report :reproduction-faithful))
                 "message" (getf report :message)
                 "environment" (%environment-ht (getf report :environment))
-                "content" (text-content (%format-check-text report)))))))
+                "content" (text-content (if summary-p
+                                            (%format-check-summary report results)
+                                            (%format-check-text report))))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; spec-list
@@ -1685,6 +1787,52 @@ digest given")))
     (:not-requested "not-requested")
     (t "resolved")))
 
+(defun %format-full-list-entries (stream report)
+  "Write full listing entries with their definition metadata to STREAM."
+  (let ((specs (getf report :specs)))
+    (when specs
+      (format stream "~&~%specs:")
+      (dolist (spec specs)
+        (format stream "~&  ~A" (getf spec :qualified)))))
+  (let ((properties (getf report :properties)))
+    (when properties
+      (format stream "~&~%properties:")
+      (dolist (property properties)
+        (format stream "~&  ~A~@[  [~A]~]"
+                (getf (getf property :name) :qualified)
+                (%keyword-string (getf property :kind)))
+        (when (getf property :targets)
+          (format stream "~&      about: ~{~A~^, ~}"
+                  (mapcar (lambda (target) (getf target :qualified))
+                          (getf property :targets))))
+        (when (getf property :tags)
+          (format stream "~&      tags: ~{~A~^, ~}"
+                  (mapcar #'%keyword-string (getf property :tags))))
+        (when (getf property :documentation)
+          (format stream "~&      ~A" (getf property :documentation))))))
+  (let ((contracts (getf report :function-specs)))
+    (when contracts
+      (format stream "~&~%function specs:")
+      (dolist (contract contracts)
+        (if (getf contract :read-failed)
+            ;; Never as "()": an empty parameter list is a claim about
+            ;; the contract, and this entry has no evidence for one.
+            (format stream "~&  ~A  -- registered, but cl-spec could not ~
+project it here"
+                    (getf (getf contract :name) :qualified))
+            (format stream "~&  ~A (~{~A~^ ~})~:[~;  -> :returns~]"
+                    (getf (getf contract :name) :qualified)
+                    (mapcar (lambda (parameter) (getf parameter :name))
+                            (getf contract :parameters))
+                    (getf contract :returns-specified)))
+        (when (or (plusp (or (getf contract :precondition-count) 0))
+                  (plusp (or (getf contract :postcondition-count) 0)))
+          (format stream "~&      :pre ~D, :post ~D"
+                  (or (getf contract :precondition-count) 0)
+                  (or (getf contract :postcondition-count) 0)))
+        (when (getf contract :documentation)
+          (format stream "~&      ~A" (getf contract :documentation)))))))
+
 (defun %format-list-text (report)
   "Render the spec-list report as the text an MCP client will show."
   (with-output-to-string (stream)
@@ -1705,7 +1853,9 @@ digest given")))
                                           (getf counts :function-specs)))))
                   (list "nothing counted")))
       (when (getf filters :package)
-        (format stream "  in package ~A" (getf filters :package)))
+        (format stream (if (equal (getf filters :package-mode) "external")
+                           "  exported by ~A" "  in package ~A")
+                  (getf filters :package)))
       (when (getf filters :tag)
         ;; Named as narrowing properties, because that is all it narrows.
         ;; "4 function specs  tagged critical" read as four tagged contracts,
@@ -1755,49 +1905,12 @@ exports no properties-with-tag, so nothing here was filtered by it"
       (when (getf report :truncated)
         (format stream "~&Showing at most ~D of each; raise limit for more."
                 (getf report :limit)))
-      (let ((specs (getf report :specs)))
-        (when specs
-          (format stream "~&~%specs:")
-          (dolist (spec specs)
-            (format stream "~&  ~A" (getf spec :qualified)))))
-      (let ((properties (getf report :properties)))
-        (when properties
-          (format stream "~&~%properties:")
-          (dolist (property properties)
-            (format stream "~&  ~A~@[  [~A]~]"
-                    (getf (getf property :name) :qualified)
-                    (%keyword-string (getf property :kind)))
-            (when (getf property :targets)
-              (format stream "~&      about: ~{~A~^, ~}"
-                      (mapcar (lambda (target) (getf target :qualified))
-                              (getf property :targets))))
-            (when (getf property :tags)
-              (format stream "~&      tags: ~{~A~^, ~}"
-                      (mapcar #'%keyword-string (getf property :tags))))
-            (when (getf property :documentation)
-              (format stream "~&      ~A" (getf property :documentation))))))
-      (let ((contracts (getf report :function-specs)))
-        (when contracts
-          (format stream "~&~%function specs:")
-          (dolist (contract contracts)
-            (if (getf contract :read-failed)
-                ;; Never as "()": an empty parameter list is a claim about
-                ;; the contract, and this entry has no evidence for one.
-                (format stream "~&  ~A  -- registered, but cl-spec could not ~
-project it here"
-                        (getf (getf contract :name) :qualified))
-                (format stream "~&  ~A (~{~A~^ ~})~:[~;  -> :returns~]"
-                        (getf (getf contract :name) :qualified)
-                        (mapcar (lambda (parameter) (getf parameter :name))
-                                (getf contract :parameters))
-                        (getf contract :returns-specified)))
-            (when (or (plusp (or (getf contract :precondition-count) 0))
-                      (plusp (or (getf contract :postcondition-count) 0)))
-              (format stream "~&      :pre ~D, :post ~D"
-                      (or (getf contract :precondition-count) 0)
-                      (or (getf contract :postcondition-count) 0)))
-            (when (getf contract :documentation)
-              (format stream "~&      ~A" (getf contract :documentation))))))
+      (if (equal (getf report :detail) "compact")
+          (loop for key in '(:specs :properties :function-specs)
+                for row in +listing-kinds+
+                for names = (getf report key)
+                when names do (format stream "~&~%~A:~%  ~{~A~^~%  ~}" (second row) names))
+          (%format-full-list-entries stream report))
       (dolist (half +listing-kinds+)
         (destructuring-bind (name label flag keys) half
           (declare (ignore name keys))
@@ -1840,17 +1953,18 @@ has not been loaded into this worker is not here."))
      (%simple-status-response report))
     (t
      (let ((counts (getf report :counts))
-           (filters (getf report :filters)))
+           (filters (getf report :filters))
+           (compact-p (equal (getf report :detail) "compact")))
        (make-ht "schema_version" +schema-version+
                 "status" "ok"
                 "kind" (getf report :kind)
-                "specs" (%symbol-hts (getf report :specs))
-                "properties" (coerce (mapcar #'%listing-entry-ht
-                                             (getf report :properties))
-                                     'vector)
-                "function_specs" (coerce (mapcar #'%function-spec-entry-ht
-                                                 (getf report :function-specs))
-                                         'vector)
+                "detail" (or (getf report :detail) "full")
+                "specs" (map 'vector (if compact-p #'identity #'%symbol-ht)
+                             (getf report :specs))
+                "properties" (map 'vector (if compact-p #'identity #'%listing-entry-ht)
+                                  (getf report :properties))
+                "function_specs" (map 'vector (if compact-p #'identity #'%function-spec-entry-ht)
+                                      (getf report :function-specs))
                 "specs_listable" (json-bool (getf report :specs-listable))
                 "properties_listable" (json-bool
                                        (getf report :properties-listable))
@@ -1867,6 +1981,7 @@ has not been loaded into this worker is not here."))
                 "truncated" (json-bool (getf report :truncated))
                 "limit" (getf report :limit)
                 "filters" (make-ht "package" (getf filters :package)
+                                   "package_mode" (or (getf filters :package-mode) "home")
                                    "tag" (getf filters :tag)
                                    "tag_resolved"
                                    (%tag-resolved-string

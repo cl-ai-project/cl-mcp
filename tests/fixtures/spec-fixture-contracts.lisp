@@ -49,6 +49,18 @@
   "Return the next scripted argument list, so a test controls its inputs."
   (pop *scripted-arguments*))
 
+(defun case-sensitive-identity (n)
+  "Return N so case guards can distinguish the inputs without changing the outcome."
+  n)
+
+(cl-spec:defspec-function case-sensitive-identity
+  (:args (n (range integer -1 1)))
+  (:args-generator scripted-arguments)
+  (:cases
+    (:|ready| (:when (zerop n)) (:returns integer))
+    (:ready (:when (plusp n)) (:returns integer))
+    (:|| (:when (minusp n)) (:returns integer))))
+
 (cl-spec:defspec-function remaining-balance
   "Require the remainder when the balance suffices, and the named error when
 it does not."

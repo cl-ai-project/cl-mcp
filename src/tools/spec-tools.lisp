@@ -23,6 +23,8 @@
                 #:define-tool)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:result)
+  (:import-from #:cl-mcp/src/tools/spec-input #:spec-input-response)
+  (:import-from #:cl-mcp/src/tools/spec-batch #:spec-batch-response)
   (:import-from #:cl-mcp/src/tools/spec-entry
                 #:spec-list-response
                 #:spec-symbol-response
@@ -35,24 +37,24 @@
   (:export #:spec-list
            #:spec-symbol
            #:spec-describe
-           #:spec-check))
+           #:spec-check
+           #:spec-check-input
+           #:spec-check-batch))
 
 (in-package #:cl-mcp/src/tools/spec-tools)
 
 (register-tool-group-instructions
  :cl-spec
- "cl-spec tools are on (spec-list, spec-symbol, spec-describe, spec-check):
-- load-system cl-spec/check-it, the application and its contract system first.
-- Read the contract (spec-symbol, spec-describe) and take a baseline before editing.
-For new behaviour, write the contract (defspec-function, defproperty) before the code.
-- spec-check function= runs only the Function Spec; symbol= only the Properties
-about the symbol. Run both.
-- seed is a decimal string. To replay, copy the Replay: line.
-- After an edit: load-system the primary system with clear_fasls=true, then the
-contract system; re-run spec-check and run-tests.
-- Change an existing contract only when the request asks for that change; otherwise
-ask the user first, and never weaken one to make a check pass.
-- verified covers only what that call ran; report verification_gaps as given.")
+ "cl-spec tools are on. Use load-system for cl-spec/check-it, the app and its contracts.
+- Discover names with spec-list. Read the contract with spec-symbol and spec-describe.
+Take a baseline before editing. Write new contracts before the code.
+- spec-check function= runs a contract, symbol= runs direct properties.
+spec-check-batch symbol= runs both. spec-check-input takes arguments or a fixture recipe.
+- Seeds are decimal strings. Copy the Replay: line to repeat a run.
+- After an edit, load-system the primary system with clear_fasls=true, then its contracts,
+and re-run spec-check and run-tests.
+- Change a contract only when the request asks for it. Otherwise ask first. Never weaken one to pass.
+- verified covers the selected checks. Report verification_gaps as given.")
 
 (define-tool "spec-list"
   :group :cl-spec
@@ -100,8 +102,12 @@ Examples:
     :enum ("specs" "properties" "function-specs" "both")
     :description "What to list (default: both, which is all three)")
    (package :type :string
-    :description "Only names whose home package is this one. A package that does not exist returns
-status unresolved-package, not an empty list")
+    :description "Package to filter. An unknown package returns unresolved-package.")
+   (package-mode :type :string :enum ("home" "external")
+    :description "Match a symbol's home package (default) or its identity among the named
+package's external symbols, including re-exports.")
+   (detail :type :string :enum ("full" "compact")
+    :description "Full entries (default) or compact arrays of qualified names.")
    (tag :type :string
     :description "Only properties carrying this tag. Applies to properties only.")
    (limit :type :integer
@@ -112,6 +118,8 @@ status unresolved-package, not an empty list")
   :body
   (let ((params (make-ht "kind" kind
                          "package" package
+                         "package_mode" package-mode
+                         "detail" detail
                          "tag" tag
                          "limit" limit
                          "timeout_seconds" timeout-seconds)))
@@ -219,6 +227,10 @@ Examples:
     :description "Registered name: 'SYM', 'PKG:SYM' or 'PKG::SYM'")
    (package :type :string
     :description "Package for an unqualified name (default: COMMON-LISP-USER)")
+   (detail :type :string :enum ("full" "summary")
+    :description "Read the full definition (default) or summarize a function spec.")
+   (case :type :string
+    :description "Read a single named contract case with its guard, outcome and postconditions.")
    (max-chars :type :integer :json-name "max_chars"
     :description "Maximum characters of body and source form (default: 8000)")
    (timeout-seconds :type :number :json-name "timeout_seconds"
@@ -228,6 +240,8 @@ Examples:
   (let ((params (make-ht "kind" kind
                          "name" name
                          "package" package
+                         "detail" detail
+                         "case" case
                          "max_chars" max-chars
                          "timeout_seconds" timeout-seconds)))
     (with-proxy-dispatch (id "worker/spec-describe" params)
@@ -535,6 +549,8 @@ that appears in the property's :trials table (see spec-describe).")
     "Decimal digits AS A STRING. A JSON number would already have lost digits.
 A seed reproduces one run, so it is refused when symbol= selects more than one
 property; replay each with property= and its own seed.")
+   (detail :type :string :enum ("full" "summary")
+    :description "Full evidence (default) or a summary of trials, case counts and selection gaps.")
    (expect-definition-digest :type :string
     :json-name "expect_definition_digest"
     :description
@@ -553,8 +569,46 @@ budget of 0 or less runs nothing, and every result comes back not-run")
                          "package" package
                          "profile" profile
                          "seed" seed
+                         "detail" detail
                          "expect_definition_digest" expect-definition-digest
                          "timeout_seconds" timeout-seconds
                          "max_value_chars" max-value-chars)))
     (with-proxy-dispatch (id "worker/spec-check" params)
       (result id (spec-check-response params)))))
+
+(define-tool "spec-check-input"
+  :group :cl-spec
+  :description "Check one caller-supplied argument list or one fixture recipe in this worker.
+Use exactly one of arguments or recipe. Arrays encode Lisp lists. Strings and numbers are
+literals. Encode existing symbols as {\"symbol\":\"pkg:name\"}, keywords as {\"keyword\":\"new\"},
+and live objects as {\"object_id\":\"…\"}. JSON false and null denote NIL.
+A direct call can mutate its arguments. A recipe runs fixture setup, evaluation and cleanup.
+Read selected_case, outcome, failure_phase and the fixture lifecycle for this one input."
+  :args ((function :type :string :required t :description "Registered function spec")
+         (package :type :string :description "Package for unqualified symbols")
+         (arguments :type :array :item-type :any :description "Positional Lisp argument list")
+         (recipe :type :any :description "One input recipe for the contract's fixture")
+         (timeout-seconds :type :integer :description "Whole-call deadline in seconds")
+         (max-value-chars :type :integer :description "Maximum printed characters for a value"))
+  :body
+  (with-proxy-dispatch (id "worker/spec-check-input" args)
+    (result id (spec-input-response args))))
+
+(define-tool "spec-check-batch"
+  :group :cl-spec
+  :description "Run a symbol's function spec and directly registered properties together,
+or give explicit functions and/or properties arrays. Each distinct contract or property runs
+once. The response reports each item's status, seed, definition digest and replay arguments
+for spec-check. Completed items survive a timeout and remaining items are marked not-run."
+  :args ((symbol :type :string :description "Select the symbol's contract and direct properties")
+         (functions :type :array :description "Explicit function spec names")
+         (properties :type :array :description "Explicit property names")
+         (package :type :string :description "Package for unqualified names")
+         (trials :type :integer :description "Trial budget per function contract")
+         (profile :type :string :description "Trial profile for properties")
+         (seed :type :string :description "Optional decimal seed applied to each item")
+         (timeout-seconds :type :number :description "Shared deadline in seconds")
+         (max-value-chars :type :integer :description "Maximum printed characters for a value"))
+  :body
+  (with-proxy-dispatch (id "worker/spec-check-batch" args)
+    (result id (spec-batch-response args))))

@@ -58,6 +58,8 @@
            #:describe-report
            #:check-report
            #:result-case-report
+           #:exact-case-selector
+           #:case-selectors
            #:*default-check-timeout-seconds*))
 
 (in-package #:cl-mcp/src/spec-adapter-report)
@@ -559,11 +561,27 @@ finding a name, not for reading a contract."
 image, so nothing can be listed from it. It was looked up, not created."
                                       package)))))))
 
-(defun %in-package-p (name package)
-  "Return true when NAME's home package is PACKAGE, or PACKAGE is NIL."
-  (or (null package) (eq (symbol-package name) package)))
+(defun %in-package-p (name package &optional (package-mode "home"))
+  "Does the registered symbol NAME match PACKAGE in the requested PACKAGE-MODE?"
+  (cond ((null package) t)
+        ((equal package-mode "home") (eq (symbol-package name) package))
+        (t (multiple-value-bind (found status) (find-symbol (symbol-name name) package)
+             (and (eq status :external) (eq found name))))))
 
-(defun list-report (api api-status &key kind package tag (limit 200))
+(defun %listing-handles (row compact-p)
+  "Return the readers needed for this view of a listing kind."
+  (let ((handles (fourth row)))
+    (if compact-p (list (first handles)) handles)))
+
+(defun %listing-entries (names limit compact-p &optional reader)
+  "Return at most LIMIT qualified names or full entries, without reading omitted definitions."
+  (loop for name in (%take names limit)
+        collect (cond (compact-p (getf (symbol-data name) :qualified))
+                      (reader (funcall reader name))
+                      (t (symbol-data name)))))
+
+(defun list-report (api api-status &key kind package (package-mode "home") tag
+                                    (detail "full") (limit 200))
   "Return the plist behind the spec-list tool.
 
 KIND is \"specs\", \"properties\", \"function-specs\" or \"both\", and each is
@@ -574,10 +592,12 @@ FUNCTION-SPEC-DATA, whose absence is fatal to no kind: contracts are left out
 and FUNCTION-SPECS-LISTABLE says so, because \"cannot look\" and \"none here\"
 are different answers.
 
-PACKAGE and TAG narrow the result; TAG applies to properties only, and a tag
+PACKAGE matches a symbol's home or its exact external identity. Compact entries
+contain only qualified names. TAG applies to properties only, and a tag
 no loaded code mentions is reported as unresolved rather than as an empty
 result, for the same reason."
-  (let ((environment (environment-data api api-status)))
+  (let ((environment (environment-data api api-status))
+        (compact-p (equal detail "compact")))
     (unless (eq api-status :ok)
       (return-from list-report (unavailable-report api-status environment)))
     (unless (and (stringp kind)
@@ -588,6 +608,15 @@ result, for the same reason."
               :message (format nil "kind must be one of specs, properties, ~
 function-specs or both; got ~S" kind)
               :environment environment)))
+    (let ((message (cond ((not (member package-mode '("home" "external") :test #'equal))
+                          "package_mode must be home or external")
+                         ((and (equal package-mode "external") (null package))
+                          "package_mode external requires a package to search for exports")
+                         ((not (member detail '("full" "compact") :test #'equal))
+                          "detail must be full or compact for spec-list"))))
+      (when message
+        (return-from list-report
+          (list :status :invalid-arguments :message message :environment environment))))
     ;; Gated on what THIS kind needs.  The blanket check predates
     ;; kind="function-specs", which reads neither of these two, and refused a
     ;; listing it could have produced -- while reporting
@@ -600,7 +629,8 @@ function-specs or both; got ~S" kind)
     ;; reports the third half.
     (let* ((available (remove-if-not
                        (lambda (row)
-                         (every (lambda (key) (api-has-p api key)) (fourth row)))
+                         (every (lambda (key) (api-has-p api key))
+                                (%listing-handles row compact-p)))
                        +listing-kinds+))
            (asked (remove-if-not (lambda (row) (listing-kind-wanted-p row kind))
                                  +listing-kinds+))
@@ -622,7 +652,7 @@ function-specs or both; got ~S" kind)
                                        (string-downcase (symbol-name key)))
                                      (remove-if (lambda (key)
                                                   (api-has-p api key))
-                                                (fourth row))))
+                                                (%listing-handles row compact-p))))
                            (set-difference asked reachable :test #'eq)))
                 :environment environment)))
       (multiple-value-bind (package-object package-error)
@@ -652,7 +682,7 @@ function-specs or both; got ~S" kind)
                (function-spec-names
                  (when (and want-function-specs function-specs-listable)
                    (remove-if-not
-                    (lambda (name) (%in-package-p name package-object))
+                    (lambda (name) (%in-package-p name package-object package-mode))
                     (funcall (api-fn api :list-function-specs) registry))))
                ;; Each half asks only for the reader it uses.  A revision
                ;; missing one of them still lists the others, and the half it
@@ -663,8 +693,9 @@ function-specs or both; got ~S" kind)
                (properties-listable (assoc "properties" available :test #'string=))
                (spec-names
                  (when (and want-specs specs-listable)
-                   (remove-if-not (lambda (name) (%in-package-p name package-object))
-                                  (funcall (api-fn api :list-specs) registry))))
+                   (remove-if-not
+                    (lambda (name) (%in-package-p name package-object package-mode))
+                    (funcall (api-fn api :list-specs) registry))))
                ;; A tag needs a reader of its own, and a revision without one
                ;; cannot answer the question at all.  Falling through to an
                ;; empty list published "no property carries this tag" on the
@@ -676,7 +707,7 @@ function-specs or both; got ~S" kind)
                (property-names
                  (when (and want-properties properties-listable tag-filterable)
                    (remove-if-not
-                    (lambda (name) (%in-package-p name package-object))
+                    (lambda (name) (%in-package-p name package-object package-mode))
                     (cond
                       ((null tag) (funcall (api-fn api :list-properties) registry))
                       ((null tag-keyword) '())
@@ -684,11 +715,14 @@ function-specs or both; got ~S" kind)
                                   tag-keyword registry)))))))
           (list :status :ok
                 :kind kind
-                :specs (mapcar #'symbol-data (%take spec-names limit))
-                :properties (loop for name in (%take property-names limit)
-                                  collect (%property-listing api name registry))
-                :function-specs (loop for name in (%take function-spec-names limit)
-                                      collect (%function-spec-listing api name registry))
+                :detail detail
+                :specs (%listing-entries spec-names limit compact-p)
+                :properties (%listing-entries property-names limit compact-p
+                                              (lambda (name)
+                                                (%property-listing api name registry)))
+                :function-specs (%listing-entries function-spec-names limit compact-p
+                                                  (lambda (name)
+                                                    (%function-spec-listing api name registry)))
                 :function-specs-listable (and function-specs-listable t)
                 :specs-listable (and specs-listable t)
                 :properties-listable (and properties-listable t)
@@ -714,6 +748,7 @@ function-specs or both; got ~S" kind)
                 :limit limit
                 :filters (list :package (when package-object
                                           (package-name package-object))
+                               :package-mode package-mode
                                :tag tag
                                ;; A tag that names no keyword in this image
                                ;; cannot be carried by any registered property,
@@ -915,7 +950,29 @@ this list runs no capture form."
                         :form-complete complete
                         :form-omitted-chars omitted))))
 
-(defun %contract-cases (cases max-chars)
+(defun exact-case-selector (name)
+  "Return a selector for the keyword NAME that identifies it in any contract.
+Use readable keyword syntax for an empty name and for names beginning with a colon,
+so the empty keyword also has a non-empty selector and that syntax stays unambiguous."
+  (let ((spelling (symbol-name name)))
+    (if (or (zerop (length spelling)) (char= (char spelling 0) #\:))
+        (with-standard-io-syntax (prin1-to-string name))
+        spelling)))
+
+(defun case-selectors (cases)
+  "Return a selector for each case row, preserving order and keyword identity.
+An ordinary, unambiguous name uses its familiar lowercase spelling. Case-folding
+collisions keep the exact names so each displayed selector retrieves its own guard."
+  (let ((names (loop for case in cases collect (exact-case-selector (getf case :name))))
+        (counts (make-hash-table :test #'equalp)))
+    (dolist (name names)
+      (incf (gethash name counts 0)))
+    (loop for name in names
+          collect (if (or (> (gethash name counts) 1) (char= (char name 0) #\:))
+                      name
+                      (string-downcase name)))))
+
+(defun %contract-cases (cases max-chars &optional (selectors (case-selectors cases)))
   "Return a contract's ordered named cases as report plists.
 
 Order is the contract's, because case selection is exclusive and the author
@@ -926,7 +983,7 @@ source forms; their compiled counterparts are not projected and are not run.
 %CLAUSE-TEXT, so each arrives as a form a reader can paste back and each
 carries the complete/omitted pair beside it.  A :STATE-POST that was cut with
 no such pair is a clause a reader takes for the whole condition."
-  (loop for case in cases
+  (loop for case in cases for selector in selectors
         collect
         (multiple-value-bind (guard guard-complete guard-omitted)
             (%print-bounded-form (getf case :when) max-chars)
@@ -934,7 +991,7 @@ no such pair is a clause a reader takes for the whole condition."
               (%clause-text (getf case :postconditions) max-chars)
             (multiple-value-bind (state-text state-complete state-omitted)
                 (%clause-text (getf case :state-post) max-chars)
-              (list :name (getf case :name)
+              (list :name (getf case :name) :selector selector
                     :documentation (getf case :documentation)
                     :guard guard
                     :guard-complete guard-complete
@@ -951,7 +1008,44 @@ no such pair is a clause a reader takes for the whole condition."
                     :state-post-complete state-complete
                     :state-post-omitted-chars state-omitted))))))
 
-(defun %describe-function-spec (api name registry max-chars)
+(defun %focused-function-spec (name data max-chars case-name)
+  "Summarize validated contract DATA or expand just the case named by CASE-NAME."
+  (let* ((cases (getf data :cases))
+         (selectors (case-selectors cases)))
+    (if case-name
+        (let* ((matches (loop for row in cases for selector in selectors
+                              when (string-equal case-name selector) collect (cons selector row)))
+               (selected (or (assoc case-name matches :test #'string=)
+                             (and (null (rest matches)) (first matches)))))
+          (if selected
+              (list :status :ok :kind "function-spec" :name (symbol-data name)
+                    :detail "case" :selected-case (car selected)
+                    :case-selection (getf data :case-selection)
+                    :cases (%contract-cases (list (cdr selected)) max-chars (list (car selected))))
+              (list :status :invalid-arguments :kind "function-spec" :name (symbol-data name)
+                    :message (cond (matches
+                                    (format nil "Ambiguous case ~S. Use an exact spelling from ~
+~{~S~^, ~}." case-name (mapcar #'car matches)))
+                                   (cases
+                                    (format nil "Unknown case ~S. Choose one of ~{~S~^, ~}."
+                                            case-name selectors))
+                                   (t (format nil "This contract declares no named cases. ~
+Omit case ~S." case-name))))))
+        (list :status :ok :kind "function-spec" :name (symbol-data name) :detail "summary"
+              :arguments (%contract-arguments (getf data :arguments))
+              :outcome (cond (cases :cases)
+                             ((getf data :returns) :returns)
+                             ((getf data :signals) :signals)
+                             (t :unspecified))
+              :returns (%spec-tree (getf data :returns))
+              :signals (%spec-tree (getf data :signals))
+              :fixture-present (and (getf data :fixture) t)
+              :case-selection (getf data :case-selection)
+              :cases (loop for row in cases for selector in selectors
+                           collect (list :name (getf row :name) :selector selector
+                                         :outcome (getf row :outcome)))))))
+
+(defun %describe-function-spec (api name registry max-chars &key (detail "full") case-name)
   "Return the detail plist for the contract registered for NAME.
 
 Built from cl-spec's own FUNCTION-SPEC-DATA.  The two halves a caller asks
@@ -983,6 +1077,8 @@ versions." reason))))
                 :message (format nil "cl-spec returned a contract projection ~
 this adapter cannot read: ~A. An empty description would read as a contract ~
 with no arguments and no :returns." reason)))))
+    (when (or case-name (equal detail "summary"))
+      (return-from %describe-function-spec (%focused-function-spec name data max-chars case-name)))
     (flet ((clause (forms)
              (multiple-value-list (%clause-text forms max-chars))))
       (let ((pre (clause (getf data :preconditions)))
@@ -1082,7 +1178,8 @@ with no arguments and no :returns." reason)))))
             :source-form-omitted-chars omitted
             :source-location (getf data :source-location)))))
 
-(defun describe-report (api api-status kind name &key package (max-chars 8000))
+(defun describe-report (api api-status kind name &key package (max-chars 8000)
+                                                 (detail "full") ((:case case-name)))
   "Return the plist behind the spec-describe tool.
 
 KIND is \"property\", \"spec\" or \"function-spec\"."
@@ -1096,6 +1193,17 @@ KIND is \"property\", \"spec\" or \"function-spec\"."
               :message (format nil "kind must be one of property, spec or ~
 function-spec; got ~S" kind)
               :environment environment)))
+    (let ((message (cond ((not (member detail '("full" "summary") :test #'equal))
+                          "detail must be full or summary for spec-describe")
+                         ((and case-name
+                               (not (and (stringp case-name) (plusp (length case-name)))))
+                          "case must be a non-empty string naming a declared case")
+                         ((and (not (equal kind "function-spec"))
+                               (or case-name (equal detail "summary")))
+                          "case and detail=summary require kind=function-spec"))))
+      (when message
+        (return-from describe-report
+          (list :status :invalid-arguments :message message :environment environment))))
     (multiple-value-bind (symbol reason)
         (resolve-symbol-designator name :package package)
       (unless symbol
@@ -1115,7 +1223,8 @@ function-spec; got ~S" kind)
                       ((string= kind "property")
                        (%describe-property api symbol registry max-chars))
                       ((string= kind "function-spec")
-                       (%describe-function-spec api symbol registry max-chars))
+                       (%describe-function-spec api symbol registry max-chars
+                                                :detail detail :case-name case-name))
                       (t (%describe-spec api symbol registry max-chars)))
                     (list :environment environment)))
         (error (condition)

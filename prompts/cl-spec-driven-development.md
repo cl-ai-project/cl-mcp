@@ -123,7 +123,7 @@ Then read only the definitions you need with `spec-describe`.
 | A Property's inputs, body and declaration | `spec-describe kind="property" name=...` |
 | A named data spec | `spec-describe kind="spec" name=...` |
 
-A Function Spec is named by its target function's symbol, and `spec-list`'s `package` filter matches the home package of each name. To find a Function Spec, filter by the target's package or leave `package` out; the package of the file that declares it does not match.
+A Function Spec is named by its target function's symbol. By default `spec-list` filters by its home package. Use `package_mode="external"` and `package` to search a public package's exports, including re-exports. Use `detail="compact"` to get the qualified names for an explicit batch.
 In `spec-symbol`, read both the definitions named by the symbol itself and the related Properties under `properties_about`.
 
 In a Function Spec, read not only the types and shapes of the inputs but also `:pre`, `:returns` (including multiple values), `:post` or `:post-values`, `:signals`, `:cases`, `:capture`, `:state-post` and the argument generator.
@@ -355,11 +355,10 @@ Run the relevant unit and integration tests with `run-tests`, and widen to the w
 
 ## 9. Auxiliary Operations Through the Public API, and Recovery
 
-The cl-spec tools are exactly `spec-list`, `spec-symbol`, `spec-describe` and `spec-check`; use them and the ordinary cl-mcp tools first.
+Use `spec-check-batch` with `symbol` for its contract and directly registered properties, or pass explicit `functions` and `properties` arrays. Set `trials` for contracts and `profile` for properties. Read the status and replay arguments of each item.
 For an operation none of them provides, check the public API of the cl-spec in use and call it through `repl-eval`.
 
-To check one arbitrary concrete argument list, consider `cl-spec:check-call` and `cl-spec:call-check-data`.
-This is a separate check from re-running a generated test; do not merge its result into, or overwrite, the original `spec-check` tally or `verified`.
+`spec-check-input` accepts a caller-owned argument list or one fixture recipe. Use `{"object_id":"…"}` for a live argument from this worker. Its result describes the single input. Keep the original generated run's tally and `verified` when reporting a concrete check alongside it.
 Keep any important regression example you find in source, as an ordinary test or a Property.
 
 To use a saved counterexample artifact, check the inputs and constraints of that public API.

@@ -2011,6 +2011,32 @@ the gap, not only the body a reader may never reach"
       ;; The forbidden rendering: a clean verdict beside an unreached branch.
       (ok (not (search "✓ VERIFIED" headline))))))
 
+(deftest summary-distinguishes-trials-cases-and-selection
+  (let* ((report (%contract-check-report-with-cases))
+         (selection (getf report :selection)))
+    (setf (getf selection :properties-not-run-read) t
+          (getf selection :properties-not-run) (list (%symbol-data "PROBE" "BALANCE-LAW"))
+          (getf report :selection) selection
+          (getf report :verification-gaps) '(:cases-never-called :properties-not-run
+                                             :input-coverage-unmeasured)
+          (getf report :detail) "summary")
+    (let* ((response (build-spec-check-response report))
+           (text (first-text response))
+           (row (aref (gethash "results" response) 0))
+           (coverage (gethash "case_coverage" row)))
+      (ok (equal "summary" (gethash "detail" response)))
+      (ok (equal 2 (gethash "executed" (gethash "trials" row))))
+      (ok (and coverage (= 1 (gethash "reached" coverage)) (= 2 (gethash "declared" coverage))))
+      (when coverage
+        (ok (equal '(2 0) (map 'list (lambda (case) (gethash "called" case))
+                                (gethash "cases" coverage)))))
+      (ok (search "2 trials executed" text))
+      (ok (search "1/2 cases reached" text))
+      (ok (search "PROBE::BALANCE-LAW" text))
+      (ok (search "Input coverage: unmeasured" text))
+      (ok (not (nth-value 1 (gethash "core_result" row))))
+      (ok (eq 'false (gethash "verified" response))))))
+
 (deftest shrinking-that-could-not-run-does-not-read-as-shrinking-that-found-nothing
   ;; :STATE-RESTORATION-UNAVAILABLE says no search happened.  "no smaller
   ;; input was found" is a claim about a search, so neither of the two

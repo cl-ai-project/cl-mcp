@@ -40,7 +40,7 @@ system loading, file operations, code introspection, and structure-aware editing
 | | `clos-describe` | Classes, slots and generic-function methods | worker, verified against source by the parent |
 | Reference | `clhs-lookup` | Common Lisp HyperSpec | parent |
 | Pool | `pool-status` / `pool-kill-worker` | Diagnose or replace the session's worker | parent |
-| `cl-spec` (opt-in) | `spec-list` / `spec-symbol` / `spec-describe` / `spec-check` | List, read and check contracts | worker |
+| `cl-spec` (opt-in) | `spec-list`, `spec-symbol`, `spec-describe`, `spec-check`, `spec-check-input`, `spec-check-batch` | Discover contracts, check a concrete input, or run generated checks | worker |
 
 For every tool's input/output schema, see [docs/tools.md](docs/tools.md).
 

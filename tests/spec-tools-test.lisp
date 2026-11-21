@@ -49,15 +49,6 @@
     (ok (search "spec entry debugger snapshot" (getf record :message)))
     (ok (getf record :environment))))
 
-(defvar *tools-loaded* nil
-  "True once cl-mcp/main has been loaded into this image.")
-
-(defun %ensure-tools ()
-  "Load the tool definitions so process-json-line can dispatch to them."
-  (unless *tools-loaded*
-    (asdf:load-system "cl-mcp/main")
-    (setf *tools-loaded* t)))
-
 (defmacro with-cl-spec-group (&body body)
   "Run BODY with the optional :CL-SPEC tool group switched on.
 
@@ -72,7 +63,6 @@ ones that drive a spec tool have to turn it on the way a deployment would."
 The whole object, not its result: argument validation on a protocol version
 older than 2025-11-25 answers with a JSON-RPC error rather than a result, and
 a helper that returned only the result would hide exactly those messages."
-  (%ensure-tools)
   (let ((*use-worker-pool* nil)
         (*enabled-tool-groups* (list "CL-SPEC"))
         (line (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",~
@@ -96,7 +86,6 @@ are what a test about the message has to look at."
       (t ""))))
 
 (deftest spec-tools-are-hidden-until-the-group-is-enabled
-  (%ensure-tools)
   (let ((*enabled-tool-groups* (parse-tool-groups nil))
         (*use-worker-pool* nil))
     (testing "an absent group setting leaves optional tools off"
@@ -104,7 +93,8 @@ are what a test about the message has to look at."
                         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
              (tools (gethash "tools" (gethash "result" (parse response))))
              (names (map 'list (lambda (tool) (gethash "name" tool)) tools)))
-        (dolist (name '("spec-list" "spec-symbol" "spec-describe" "spec-check"))
+        (dolist (name '("spec-list" "spec-symbol" "spec-describe" "spec-check"
+                         "spec-check-input" "spec-check-batch"))
           (ok (not (member name names :test #'string=))))
         (testing "and the tools that are not optional are still there"
           (ok (member "repl-eval" names :test #'string=)))))
@@ -128,23 +118,39 @@ are what a test about the message has to look at."
         (ok (null (disabled-tool-group "spec-check")))))))
 
 (deftest spec-tools-are-registered
-  (testing "all four tools appear in tools/list once the group is on"
-    (%ensure-tools)
+  (testing "all cl-spec tools appear in tools/list once the group is on"
     (let* ((*use-worker-pool* nil)
            (*enabled-tool-groups* (list "CL-SPEC"))
            (response (process-json-line
                       "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}"))
            (tools (gethash "tools" (gethash "result" (parse response))))
            (names (map 'list (lambda (tool) (gethash "name" tool)) tools)))
-      (dolist (name '("spec-list" "spec-symbol" "spec-describe" "spec-check"))
+      (dolist (name '("spec-list" "spec-symbol" "spec-describe" "spec-check"
+                       "spec-check-input" "spec-check-batch"))
         (ok (member name names :test #'string=)))
       (testing "and each carries an inputSchema"
         (loop for tool across tools
               when (member (gethash "name" tool)
                            '("spec-list" "spec-symbol" "spec-describe"
-                             "spec-check")
+                             "spec-check" "spec-check-input" "spec-check-batch")
                            :test #'string=)
                 do (ok (hash-table-p (gethash "inputSchema" tool))))))))
+
+(deftest concrete-input-schema-accepts-heterogeneous-lisp-values
+  (with-cl-spec-group
+    (let* ((response (parse (process-json-line
+                             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")))
+           (descriptors (gethash "tools" (gethash "result" response)))
+           (tool (find "spec-check-input" descriptors :test #'equal
+                       :key (lambda (entry) (gethash "name" entry)))))
+      (ok tool)
+      (when tool
+        (let* ((fields (gethash "properties" (gethash "inputSchema" tool)))
+               (recipe (gethash "recipe" fields))
+               (arguments (gethash "arguments" fields)))
+          (ok (and recipe (not (gethash "type" recipe))))
+          (ok (equal "array" (gethash "type" arguments)))
+          (ok (not (gethash "type" (gethash "items" arguments)))))))))
 
 (deftest spec-symbol-requires-a-symbol
   (testing "a missing symbol argument is a validation error, not a crash"
@@ -189,7 +195,6 @@ are what a test about the message has to look at."
   (testing "and the entry point refuses one too, for callers below the schema"
     ;; SPEC-CHECK-RESPONSE is exported and the worker handler calls it with a
     ;; params table directly, so the refusal cannot live only in the schema.
-    (%ensure-tools)
     (let* ((params (make-hash-table :test #'equal))
            (response (progn (setf (gethash "property" params) "cl:car"
                                   (gethash "seed" params) 12345)
@@ -228,7 +233,6 @@ are what a test about the message has to look at."
     ;; anyway.  A numeric default here would send cl-spec a budget the caller
     ;; never asked for, and "the call was not refused" cannot see that: the
     ;; status is cl-spec-not-loaded or not-registered either way.
-    (%ensure-tools)
     (let ((params (make-hash-table :test #'equal))
           (read-arg (find-symbol "%POSITIVE-INTEGER-ARG"
                                  "CL-MCP/SRC/TOOLS/SPEC-ENTRY")))
@@ -252,7 +256,6 @@ are what a test about the message has to look at."
 
 (deftest read-tools-accept-a-timeout
   (testing "spec-symbol and spec-describe take timeout_seconds"
-    (%ensure-tools)
     (let* ((*use-worker-pool* nil)
            (*enabled-tool-groups* (list "CL-SPEC"))
            (response (process-json-line
@@ -282,7 +285,6 @@ are what a test about the message has to look at."
     ;; The tool description is the only documentation a model ever sees, and
     ;; it silently drifted behind three rounds of changes. Checked against the
     ;; code's own list so the next status cannot be added without saying so.
-    (%ensure-tools)
     (let* ((*use-worker-pool* nil)
            (*enabled-tool-groups* (list "CL-SPEC"))
            (response (process-json-line
@@ -320,7 +322,6 @@ are what a test about the message has to look at."
 
 (deftest spec-check-description-states-the-current-rules
   (testing "verified's third condition and the four-valued match are stated"
-    (%ensure-tools)
     (let* ((*use-worker-pool* nil)
            (*enabled-tool-groups* (list "CL-SPEC"))
            (response (process-json-line
@@ -342,7 +343,6 @@ are what a test about the message has to look at."
       (ok (search "positive" (string-downcase (%text response)))))))
 
 (deftest spec-list-is-in-the-optional-group
-  (%ensure-tools)
   (let ((*enabled-tool-groups* nil))
     (testing "the listing tool is opt-in like the other three"
       (ok (eq :cl-spec (disabled-tool-group "spec-list")))
@@ -356,7 +356,6 @@ are what a test about the message has to look at."
     ;; refused every generated input, and RUN-PROPERTY for a budget that
     ;; resolved to zero.  A model told the status cannot happen has no reading
     ;; for it when it does, and the one reading it must not reach is "passed".
-    (%ensure-tools)
     (let* ((*use-worker-pool* nil)
            (*enabled-tool-groups* (list "CL-SPEC"))
            (response (process-json-line
@@ -388,7 +387,6 @@ are what a test about the message has to look at."
     ;; A caller reading it takes not-checked beside an expect_definition_digest
     ;; it did pass for a contradiction, and takes the call's unknown for a
     ;; digest that could not be read when nothing had looked at one.
-    (%ensure-tools)
     (let* ((*use-worker-pool* nil)
            (*enabled-tool-groups* (list "CL-SPEC"))
            (response (process-json-line

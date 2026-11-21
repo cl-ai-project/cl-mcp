@@ -66,6 +66,7 @@
 (defun %type-to-json-type (type)
   "Convert Lisp type keyword to JSON Schema type string."
   (ecase type
+    (:any nil)
     (:string "string")
     (:integer "integer")
     (:number "number")
@@ -90,20 +91,18 @@
        `(,name (extract-arg ,args-var ,json-name :type ,type :required ,required))))))
 
 (defun %generate-schema-property (parsed-spec)
-  "Generate schema property setter form for a parsed argument spec."
-  (let ((json-name (getf parsed-spec :json-name))
-        (type (getf parsed-spec :type))
-        (enum (getf parsed-spec :enum))
-        (item-type (getf parsed-spec :item-type))
-        (description (getf parsed-spec :description)))
-    `(setf (gethash ,json-name properties)
-           (make-ht "type" ,(%type-to-json-type type)
+  "Generate the schema setter for an argument. :ANY accepts every JSON type."
+  (let* ((type (getf parsed-spec :type))
+         (json-type (%type-to-json-type type))
+         (item-type (%type-to-json-type (getf parsed-spec :item-type)))
+         (enum (getf parsed-spec :enum))
+         (description (getf parsed-spec :description)))
+    `(setf (gethash ,(getf parsed-spec :json-name) properties)
+           (make-ht ,@(when json-type (list "type" json-type))
                     ,@(when (eq type :array)
-                        `("items" (make-ht "type" ,(%type-to-json-type item-type))))
-                    ,@(when enum
-                        `("enum" (vector ,@enum)))
-                    ,@(when description
-                        `("description" ,description))))))
+                        `("items" (make-ht ,@(when item-type (list "type" item-type)))))
+                    ,@(when enum `("enum" (vector ,@enum)))
+                    ,@(when description `("description" ,description))))))
 
 (defun %collect-required-args (parsed-specs)
   "Return a list of JSON names for required arguments."
@@ -125,7 +124,7 @@ ARGS is a list of argument specifications. Each spec can be:
   - A list: (name &key json-name type required default enum item-type description)
     - name: Symbol used in BODY
     - json-name: JSON key (default: snake_case of name)
-    - type: :string :integer :number :boolean :array :object
+    - type: :string :integer :number :boolean :array :object :any
     - required: T if required
     - default: Default value (for :boolean only)
     - enum: List of allowed string values (e.g., '(\"a\" \"b\" \"c\"))
@@ -143,6 +142,7 @@ BODY is the handler body. It has access to:
   - All argument names as local variables
   - ID: The request ID for result/error responses
   - STATE: The connection state
+  - ARGS: The input object, including whether optional arguments were supplied
 
 Example:
   (define-tool \"fs-list-directory\"
@@ -183,6 +183,7 @@ Example:
              (let (,@(mapcar (lambda (spec)
                                (%generate-extraction-form spec args-sym))
                              parsed-specs))
+               (declare (ignorable ,@(mapcar (lambda (spec) (getf spec :name)) parsed-specs)))
                ,body)
            (arg-validation-error (e)
              (tool-error ,id-sym (validation-message e)

@@ -183,6 +183,8 @@ cl-mcp: ~A"
               (list-report api status
                            :kind (or (%string-arg params "kind") "both")
                            :package (%string-arg params "package")
+                           :package-mode (or (gethash "package_mode" params) "home")
+                           :detail (or (gethash "detail" params) "full")
                            :tag (%string-arg params "tag")
                            :limit limit))))))))
 
@@ -214,6 +216,8 @@ cl-mcp: ~A"
                                (gethash "kind" params)
                                (gethash "name" params)
                                :package (%string-arg params "package")
+                               :detail (or (gethash "detail" params) "full")
+                               :case (gethash "case" params)
                                :max-chars max-chars))))))))
 
 (defun spec-check-response (params)
@@ -238,20 +242,24 @@ without complaint -- zero trials, reported as \"-5 executed of -5 budget\"."
       ;; CHECK-REPORT expects to see.
       (multiple-value-bind (trials trials-error)
           (%bounded-integer-arg params "trials" *maximum-trials*)
-        (let ((message (or seed-error chars-error trials-error)))
+        (let* ((detail (or (gethash "detail" params) "full"))
+               (message (or seed-error chars-error trials-error
+                            (unless (member detail '("full" "summary") :test #'equal)
+                              "detail must be full or summary"))))
           (if message
               (%argument-error-response message #'build-spec-check-response)
               (multiple-value-bind (api status) (resolve-cl-spec-api)
                 (build-spec-check-response
-                 (check-report api status
-                               :property (%string-arg params "property")
-                               :symbol (%string-arg params "symbol")
-                               :function (%string-arg params "function")
-                               :trials trials
-                               :package (%string-arg params "package")
-                               :profile (%string-arg params "profile")
-                               :seed seed
-                               :expect-definition-digest
-                               (%string-arg params "expect_definition_digest")
-                               :timeout-seconds (gethash "timeout_seconds" params)
-                               :max-value-chars max-value-chars)))))))))
+                 (list* :detail detail
+                        (check-report api status
+                                      :property (%string-arg params "property")
+                                      :symbol (%string-arg params "symbol")
+                                      :function (%string-arg params "function")
+                                      :trials trials
+                                      :package (%string-arg params "package")
+                                      :profile (%string-arg params "profile")
+                                      :seed seed
+                                      :expect-definition-digest
+                                      (%string-arg params "expect_definition_digest")
+                                      :timeout-seconds (gethash "timeout_seconds" params)
+                                      :max-value-chars max-value-chars))))))))))

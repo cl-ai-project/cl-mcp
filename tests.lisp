@@ -75,6 +75,9 @@
   (:import-from #:cl-mcp/tests/spec-responses-test)
   (:import-from #:cl-mcp/tests/spec-tools-test)
   (:import-from #:cl-mcp/tests/spec-integration-test)
+  (:import-from #:cl-mcp/tests/spec-discovery-views-test)
+  (:import-from #:cl-mcp/tests/spec-input-test)
+  (:import-from #:cl-mcp/tests/spec-batch-test)
   (:import-from #:cl-mcp/tests/lisp-macroexpand-test)
   (:import-from #:cl-mcp/tests/source-snapshot-test))
 
@@ -86,6 +89,7 @@
     "cl-mcp/tests/pool-ownership-test"
     "cl-mcp/tests/debugger-boundary-worker-test"
     "cl-mcp/tests/spec-worker-test"
+    "cl-mcp/tests/spec-workflow-wire-test"
     "cl-mcp/tests/pool-kill-worker-test"
     "cl-mcp/tests/pool-startup-latency-test"
     "cl-mcp/tests/concurrency-test"
