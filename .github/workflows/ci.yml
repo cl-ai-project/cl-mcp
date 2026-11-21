@@ -132,8 +132,10 @@ jobs:
 
       - name: Real cl-spec wire tests
         run: |
-          CL_MCP_SPECS_MODE=integration CL_MCP_SPECS_SUITE=cl-mcp/tests/spec-wire-test \
-            timeout 900 ros run --load scripts/check-specs.lisp
+          for suite in spec-wire-test spec-workflow-wire-test; do
+            CL_MCP_SPECS_MODE=integration CL_MCP_SPECS_SUITE="cl-mcp/tests/$suite" \
+              timeout 900 ros run --load scripts/check-specs.lisp
+          done
 
       # The opposite requirement: this one needs a process with no cl-spec in
       # it, because it builds a CL-SPEC package of its own to resolve against.
@@ -153,6 +155,10 @@ jobs:
           git -C "$dir" fetch --quiet --depth 1 "$CL_SPEC_REPOSITORY" "$SELF_SPEC_REVISION"
           git -C "$dir" checkout --quiet --detach FETCH_HEAD
           test "$(git -C "$dir" rev-parse HEAD)" = "$SELF_SPEC_REVISION"
+          # The wire test compares every discovered and executed name to these manifests.
+          ros run -s cl-spec/specs \
+            -e '(assert (= 36 (length (cl-spec/specs:contract-names))))' \
+            -e '(assert (= 41 (length (cl-spec/specs:property-names))))' -q
           for suite in spec-discovery-views-test spec-input-test spec-batch-test spec-workflow-wire-test; do
             CL_MCP_SPECS_SUITE="cl-mcp/tests/$suite" timeout 900 ros run --load scripts/check-specs.lisp
           done

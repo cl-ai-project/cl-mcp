@@ -4,6 +4,7 @@
   (:import-from #:cl-mcp/src/tools/helpers #:make-ht)
   (:import-from #:cl-mcp/specs/spec-response-fixtures
                 #:json-at #:json-true-p #:json-false-p)
+  (:import-from #:cl-mcp/tests/spec-batch-test #:qualified)
   (:import-from #:cl-mcp/tests/spec-input-test #:with-self-specs)
   (:import-from #:cl-mcp/tests/spec-wire-test
                 #:with-wire-server #:with-session #:%tool #:%load-fixture))
@@ -66,6 +67,12 @@
       (ok (search (format nil "~D/3 cases reached" reached) text))
       (ok (search "Input coverage: unmeasured" text)))))
 
+(defun self-spec-names-match-p (symbols names)
+  "Return true when NAMES contains each of the declared SYMBOLS exactly once."
+  (and symbols
+       (equal (sort (mapcar #'qualified symbols) #'string<)
+              (sort (map 'list #'identity names) #'string<))))
+
 (defun exercise-self-spec-workflows ()
   "Run the self-bundle acceptance examples in one client session."
   (with-wire-server (port :worker-pool t)
@@ -81,20 +88,26 @@
              (laws (%tool client "spec-list" "kind" "properties" "package" "cl-spec/specs"
                           "detail" "compact"))
              (functions (json-at external "function_specs"))
-             (properties (json-at laws "properties")))
+             (properties (json-at laws "properties"))
+             (expected-functions (uiop:symbol-call :cl-spec/specs :contract-names))
+             (expected-properties (uiop:symbol-call :cl-spec/specs :property-names)))
         (testing "discovery can supply exact membership to one batch call"
-          (ok (= 36 (length functions)))
+          (ok (self-spec-names-match-p expected-functions functions)
+              (format nil "Discover all ~D self contracts" (length expected-functions)))
           (ok (= 0 (length (json-at home "function_specs"))))
-          (ok (= 41 (length properties)))
+          (ok (self-spec-names-match-p expected-properties properties)
+              (format nil "Discover all ~D self properties" (length expected-properties)))
           (let* ((response (%tool client "spec-check-batch" "functions" functions
                                   "properties" properties "trials" 50 "profile" "smoke"
                                   "seed" "42" "timeout_seconds" 180))
                  (rows (json-at response "results")))
-            (ok (= 77 (length rows)))
-            (ok (= 36 (count "contract" rows :test #'equal
-                             :key (lambda (row) (json-at row "kind")))))
-            (ok (= 41 (count "property" rows :test #'equal
-                             :key (lambda (row) (json-at row "kind")))))
+            (ok (= (+ (length expected-functions) (length expected-properties)) (length rows)))
+            (loop for kind in '("contract" "property")
+                  for expected in (list expected-functions expected-properties)
+                  for names = (loop for row across rows
+                                    when (equal kind (json-at row "kind"))
+                                      collect (json-at row "name"))
+                  do (ok (self-spec-names-match-p expected names)))
             (ok (every (lambda (row)
                          (and (equal "passed" (json-at row "status"))
                               (equal "42" (json-at row "seed"))
