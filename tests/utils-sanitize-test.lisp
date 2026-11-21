@@ -223,6 +223,99 @@
                  (sanitize-error-message
                   (format nil "failed Stream: #<SB-SYS:FD-STREAM {1}>~%  more"))))))
 
+(deftest sanitize-error-message-removes-complete-printed-objects
+  (testing "the matching outer delimiter ends a nested printed object"
+    (ok (string= "x y" (sanitize-error-message "x #<A #<B {1}> {2}> y")))
+    (ok (string= "a>b" (sanitize-error-message "a#<A #<B #<C>>>#<D>>b"))))
+  (testing "delimiters inside printed strings and quoted symbol names stay inside"
+    (ok (string= "x y" (sanitize-error-message "x #<THREAD \"a>b\" {1}> y")))
+    (ok (string= "x y" (sanitize-error-message "x #<RESOURCE #P\"a>b\" {1}> y")))
+    (ok (string= "x y" (sanitize-error-message "x #<FUNCTION |A\\|B>C| {1}> y")))
+    (ok (string= "left right"
+                 (sanitize-error-message "left #<A \"a\\\"#<b>\\\\\" {1}> right"))))
+  (testing "adjacent complete Lisp fields can introduce another object or quoted field"
+    (dolist (field '("\"field\"" "#P\"a\"" "|field|" "#\\\"" "#\\|" "#\\\\" "#\\Newline"))
+      (dolist (next '("\"a>b\"" "#<READTABLE {2}>"))
+        (ok (string= "left right"
+                     (sanitize-error-message (format nil "left #<PAIR ~A~A {1}> right"
+                                                     field next)))))))
+  (testing "a printed character does not open a string or close an object"
+    (ok (string= "left right" (sanitize-error-message "left #<A #\\\" #\\> {1}> right"))))
+  (testing "a short object cannot borrow a later object's identity"
+    (ok (string= "left keep right"
+                 (sanitize-error-message
+                  "left #<THREAD \"normal\" FINISHED values: 42> keep #<READTABLE {1}> right")))
+    (ok (string= "left keep > right"
+                 (sanitize-error-message "left #<A (unfinished> keep #<READTABLE {1}> > right"))))
+  (testing "outside text and incomplete printed forms stay visible"
+    (ok (string= "keep > #<unfinished"
+                 (sanitize-error-message "#<DONE> keep > #<unfinished")))
+    (ok (string= "keep #<unfinished tail"
+                 (sanitize-error-message "keep #<unfinished #<DONE> tail")))))
+
+(deftest sanitize-error-message-handles-long-runs-of-short-objects
+  #+sbcl
+  (testing "each header is inspected locally in a diagnostic containing many objects"
+    (let ((message (with-output-to-string (out)
+                     (write-string "left " out)
+                     (dotimes (i 16000) (write-string "#<A>#<THREAD \"worker\" RUNNING>" out))
+                     (write-string " right" out))))
+      (ok (handler-case
+              (sb-ext:with-timeout 5 (string= "left right" (sanitize-error-message message)))
+            (sb-ext:timeout () nil))
+          "a long run of short objects is removed within five seconds"))))
+
+(defclass |A\|B| () ()
+  (:documentation "A class whose name SBCL prints verbatim with PRINC."))
+
+(defclass sanitize-arg->result () ()
+  (:documentation "A class with an angle bracket in its printed type name."))
+
+(deftest sanitize-error-message-keeps-text-around-sbcl-names
+  #+sbcl
+  (testing "waitqueue names are printed verbatim, including apparent Lisp syntax"
+    (dolist (name '("A|B" "A\"B" "A#<B" "|unfinished" "a name > here"
+                    "A>B" "A>B#<C" "A>private #<B"))
+      (let ((queue (sb-thread:make-waitqueue :name name)))
+        (ok (string= "left keep| > right"
+                     (sanitize-error-message (format nil "left ~A keep| > right" queue)))))))
+  #+sbcl
+  (testing "a thread's returned function can have a delimiter in its name"
+    (dolist (thunk (list (lambda () #'>) (lambda () #'string>)
+                         (lambda () (values #'string> 12)) (lambda () (list #'string>))
+                         (lambda () 'string>) (lambda () :arg->result)
+                         (lambda () (values 'string> 12)) (lambda () (list #'string> 'string>))
+                         (lambda () (compile nil '(lambda (x->y) x->y)))))
+      (let ((thread (sb-thread:make-thread thunk :name "normal")))
+        (unwind-protect
+             (progn
+               (sb-thread:join-thread thread)
+               (ok (string= "left right"
+                            (sanitize-error-message (format nil "left ~A right" thread)))))
+          (when (sb-thread:thread-alive-p thread)
+            (ignore-errors (sb-thread:terminate-thread thread)))
+          (sb-thread:join-thread thread :default nil)))))
+  (testing "a raw class name and adjacent printed values keep the separating text"
+    (ok (string= "left keep| > right"
+                 (sanitize-error-message
+                  (format nil "left ~A keep| > right" (make-instance '|A\|B|)))))
+    (ok (string= "left right"
+                 (sanitize-error-message
+                  (format nil "left ~A right" (make-instance 'sanitize-arg->result)))))
+    (ok (string= "left ,keep, right"
+                 (sanitize-error-message
+                   (format nil "left ~S,keep,~S right" #'car (copy-readtable nil))))))
+  (testing "angle brackets inside a function name and after a printed object"
+    (dolist (name '("COMMON-LISP:>" "COMMON-LISP:>="))
+      (ok (string= "left right"
+                   (sanitize-error-message (format nil "left #<FUNCTION ~A> right" name)))))
+    (ok (string= "left right"
+                 (sanitize-error-message "left #<FUNCTION #:NUMBER->TEXT {1}> right")))
+    (ok (string= "left bar> right"
+                 (sanitize-error-message "left #<FUNCTION FOO>bar> right")))
+    (ok (string= "left > right"
+                 (sanitize-error-message "left #<FUNCTION STRING>> right")))))
+
 (deftest sanitize-for-json-strips-escape-sequence-cut-at-end
   (testing "a CSI sequence cut off by the end of the input leaves no fragment"
     (let ((esc (code-char 27)))

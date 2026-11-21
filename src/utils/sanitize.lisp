@@ -122,6 +122,173 @@ princ-to-string then sanitized."
                 (t (vector-push-extend char result) (incf i)))))
     (coerce result 'string)))
 
+(defun %after-printed-prefix (prefix text start)
+  "Return the first index after PREFIX when it starts at START in TEXT."
+  (let ((end (+ start (length prefix))))
+    (and (<= end (length text)) (string-equal prefix text :start2 start :end2 end) end)))
+
+(defun %printed-field-separator-p (ch)
+  "True when CH separates values or introduces a quoted field in printed Lisp text."
+  (or (find ch '(#\Space #\Tab #\Newline #\Return #\Page))
+      (find ch "([{'`,:=<>#)")))
+
+(defstruct (%printed-frame (:constructor %make-printed-frame (start finished-thread-p)))
+  "A pending object and its position in the retained message."
+  start
+  finished-thread-p
+  (list-depth 0)
+  (tentatively-closed-p nil))
+
+(setf (documentation '%printed-frame-start 'function)
+      "Index of this object's opening # in the retained output."
+      (documentation '%printed-frame-finished-thread-p 'function)
+      "True when SBCL's finished-thread header identifies the enclosing value list."
+      (documentation '%printed-frame-list-depth 'function)
+      "Number of open Lisp list parentheses inside this printed object."
+      (documentation '%printed-frame-tentatively-closed-p 'function)
+      "True after the first possible short close has been applied to the output.")
+
+(defun %printed-name-character-p (ch)
+  (or (alphanumericp ch) (find ch "-+:<>=*/_&!%?$.")))
+
+(defun %printed-character-end (message start)
+  "Return the exclusive end of the character or character name at START."
+  (if (alphanumericp (char message start))
+      (or (position-if-not (lambda (ch) (or (alphanumericp ch) (find ch "-_+")))
+                           message :start (1+ start))
+          (length message))
+      (1+ start)))
+
+(defun %printed-function-end (message start address thread-p single-parent-p)
+  "Return the end of a named function when its name or context identifies it.
+Only look inside a bare name. Reader punctuation and a new #< start other values."
+  (let* ((symbol-start (or (%after-printed-prefix "#:" message start) start))
+         (end (or (position-if-not #'%printed-name-character-p message :start symbol-start)
+                  (length message)))
+         (angle (position #\> message :start symbol-start :end end)))
+    (when angle
+      (cond
+        ;; A named function with an identity, e.g. #:NUMBER->TEXT {123}>.
+        ((and (eql end (first address)) (char/= (char message (1- end)) #\>))
+         (second address))
+        ;; An initial > names the function, as in #<FUNCTION >> or #<FUNCTION >=>.
+        ((or (= angle symbol-start) (char= (char message (1- angle)) #\:))
+         (let ((close (position #\> message :start (1+ angle) :end end)))
+           (when close (1+ close))))
+        ;; A thread prints its return values before its own identity. A
+        ;; bare function name can end at a comma, list delimiter or space.
+        ;; Standalone, preserve ambiguous trailing diagnostic punctuation.
+        ((and (char= (char message (1- end)) #\>)
+              (or thread-p (and single-parent-p (eql end (first address)))))
+         end)))))
+
+(defun %opaque-printed-object-end (message start addresses parents)
+  "Return the end when a printed name and its identity identify an entire object."
+  (let ((identity (first addresses))
+        (name (%after-printed-prefix "#<FUNCTION " message start)))
+    (cond
+      ((and identity (or (%after-printed-prefix "#<WAITQUEUE " message start)
+                         (%after-printed-prefix "#<SB-THREAD:WAITQUEUE " message start)))
+       ;; Waitqueue names are printed verbatim. A short close before a separate
+       ;; printed object must not borrow that object's identity.
+       (let ((close (position #\> message :start start :end identity)))
+         (if (and close (%printed-field-separator-p (char message (1+ close)))
+                  (search "#<" message :start2 (1+ close) :end2 identity))
+             (1+ close)
+             (second addresses))))
+      (name
+       (%printed-function-end message name addresses
+                              (and parents (%printed-frame-finished-thread-p (first parents)))
+                              (and parents (null (cdr parents)))))
+      ;; The default CLOS printer writes a single type name before its identity.
+      ;; A delimiter within that name, as in ARG->RESULT, belongs to the type.
+      ((and identity (< (+ start 2) identity)
+            (or (null parents) (char/= (char message (1- identity)) #\>))
+            (loop for i from (+ start 2) below identity
+                  for ch = (char message i)
+                  always (or (%printed-name-character-p ch) (find ch "\"|\\"))))
+       (second addresses)))))
+
+(defun %finished-thread-p (message start)
+  "Match SBCL's result header at START, examining only the type and optional name."
+  (let ((name (or (%after-printed-prefix "#<THREAD " message start)
+                  (%after-printed-prefix "#<SB-THREAD:THREAD " message start))))
+    (when name
+      (if (and (< name (length message)) (char= (char message name) #\"))
+          (loop for i from (1+ name) below (length message)
+                for ch = (char message i)
+                do (case ch
+                     (#\\ (incf i))
+                     (#\" (return (%after-printed-prefix " FINISHED values:" message (1+ i))))))
+          (%after-printed-prefix "FINISHED values:" message name)))))
+
+(defun %strip-printed-objects (message)
+  "Remove complete #<...> representations, preserving the surrounding diagnostic."
+  (let ((first (search "#<" message)))
+    (if (null first)
+        message
+        (let* ((end (length message))
+               (out (make-array end :element-type 'character :fill-pointer first))
+               (addresses (cl-ppcre:all-matches " \\{[0-9A-Fa-f]+\\}>" message :start first))
+               (openings nil)
+               (quote-delimiter nil)
+               (field-end nil))
+          (replace out message :end2 first)
+          ;; Keep unfinished objects in OUT. Closing a frame drops only its own text.
+          (loop for i from first below end
+                for ch = (char message i)
+                for frame = (first openings)
+                for field-start-p = (and frame (or (eql i field-end)
+                                                   (%printed-field-separator-p
+                                                    (char message (1- i)))))
+                do (vector-push ch out)
+                   (loop while (and addresses (<= (second addresses) i))
+                         do (setf addresses (cddr addresses)))
+                   (cond
+                     (quote-delimiter
+                      (cond ((and (char= ch #\\) (< (1+ i) end))
+                             (vector-push (char message (incf i)) out))
+                            ((char= ch quote-delimiter)
+                             (setf quote-delimiter nil field-end (1+ i)))))
+                     ((and frame (char= ch #\\) (char= (char message (1- i)) #\#)
+                           (< (1+ i) end))
+                      (setf field-end (%printed-character-end message (1+ i)))
+                      (loop while (< (1+ i) field-end)
+                            do (vector-push (char message (incf i)) out)))
+                     ((and frame (find ch "\"|")
+                           (or field-start-p
+                               ;; A printed pathname introduces its string with #P.
+                               (and (char= ch #\") (>= i 2)
+                                    (char-equal (char message (1- i)) #\P)
+                                    (char= (char message (- i 2)) #\#))))
+                      (setf quote-delimiter ch))
+                     ((and (char= ch #\#) (< (1+ i) end) (char= (char message (1+ i)) #\<)
+                           (or (null frame) field-start-p))
+                      (let ((opaque-end (%opaque-printed-object-end message i addresses openings)))
+                        (if opaque-end
+                            (progn (decf (fill-pointer out)) (setf i (1- opaque-end)))
+                            (push (%make-printed-frame (1- (fill-pointer out))
+                                                       (%finished-thread-p message i))
+                                  openings))))
+                     ((and frame (char= ch #\() (or field-start-p
+                                                    (plusp (%printed-frame-list-depth frame))))
+                      (incf (%printed-frame-list-depth frame)))
+                     ((and frame (char= ch #\)) (plusp (%printed-frame-list-depth frame)))
+                      (decf (%printed-frame-list-depth frame))
+                      (setf field-end (1+ i)))
+                     ((and frame (char= ch #\>))
+                      (cond ((or (eql (1+ i) (second addresses))
+                                 (and (zerop (%printed-frame-list-depth frame))
+                                      (not (%printed-frame-finished-thread-p frame))))
+                             (pop openings)
+                             (setf (fill-pointer out) (%printed-frame-start frame)))
+                            ;; Keep text after the first possible short close. If a matching
+                            ;; enclosing close arrives later, the same frame removes it.
+                            ((not (%printed-frame-tentatively-closed-p frame))
+                             (setf (fill-pointer out) (%printed-frame-start frame)
+                                   (%printed-frame-tentatively-closed-p frame) t))))))
+          out))))
+
 (defun sanitize-error-message (msg)
   "Sanitize an error message for external consumption.
 Strips SBCL internal object representations (#<...>), multi-line
@@ -130,8 +297,7 @@ clean string suitable for JSON-RPC error responses."
   (when (null msg) (return-from sanitize-error-message ""))
   (unless (stringp msg)
     (setf msg (princ-to-string msg)))
-  ;; Remove #<...> object representations (SBCL stream objects, etc.)
-  (setf msg (cl-ppcre:regex-replace-all "#<[^>]*>" msg ""))
+  (setf msg (%strip-printed-objects msg))
   ;; Unwrap #P"..." pathname literals (SBCL file error messages) to show the actual path
   (setf msg (cl-ppcre:regex-replace-all "#P\"([^\"]*)\"" msg "\\1"))
   ;; Remove multi-line "Stream:" sections that SBCL appends

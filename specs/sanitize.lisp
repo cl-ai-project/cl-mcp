@@ -25,11 +25,13 @@
 ;;;; by runs of space, tab, newline, return or page, optionally followed by a
 ;;;; "Stream:" section; single-spaced text of 0-40, 480-500 and 501-1500
 ;;;; characters; and strings of fragments that put those markers out of place.
-;;;; Not covered: nested #<...> or ones containing ">", messages whose words
-;;;; contain "Stream:" or "#", and whitespace outside cl-ppcre's \s class.
+;;;; Object details include nested objects and quoted names with delimiters.
+;;;; Words containing "Stream:" or "#" and whitespace outside cl-ppcre's \s
+;;;; class are outside the generated domain.
 
 (defpackage #:cl-mcp/specs/sanitize
   (:use #:cl)
+  (:import-from #:cl-ppcre #:regex-replace-all)
   (:import-from #:cl-spec/main
                 #:defspec
                 #:defspec-function
@@ -221,12 +223,36 @@ and the properties' do not."
 
 (defparameter *object-types*
   (list "SB-SYS:FD-STREAM" "HASH-TABLE" "STANDARD-OBJECT"
-        "SB-IMPL::STRING-OUTPUT-STREAM" "FUNCTION FOO")
+        "SB-IMPL::STRING-OUTPUT-STREAM" "FUNCTION FOO"
+        "WAITQUEUE" "THREAD" "A|B" "A\"B" "A#<B" "ARG->RESULT")
   "Type names a drawn #<...> representation shows.")
 
 (defparameter *object-details*
-  (list nil ":TEST EQUAL :COUNT 0" "for \"file /tmp/x.lisp\"" "RUNNING")
+  (list nil ":TEST EQUAL :COUNT 0" "for \"file /tmp/x.lisp\"" "RUNNING"
+        "#<INNER {1}>" "#<MIDDLE #<INNER {2}> {1}>" "\"name>with>delimiters\""
+        "\"escaped\\\"#<text>\\\\\"" "|A\\|B>C|" "#P\"a>b\"" "#<WAITQUEUE A|B {3}>"
+        "#<FUNCTION >>" "#<THREAD \"normal\" FINISHED values: #<FUNCTION STRING>> {4}>"
+        "#<FUNCTION #:NUMBER->TEXT {5}>" "\"field\"#<READTABLE {6}>" "|field|\"a>b\""
+        "#\\Newline#<X {7}>" "#<FUNCTION (LAMBDA (X->Y) X->Y) {8}>")
   "Text a drawn #<...> representation shows after its type, or none.")
+
+(defparameter *printed-object-examples*
+  '(("x #<A #<B {1}> {2}> y" . "x y")
+    ("x #<THREAD \"a>b\" {1}> y" . "x y")
+    ("left #<WAITQUEUE A|B {1}> keep| > right" . "left keep| > right")
+    ("left #<THREAD \"normal\" FINISHED values: #<FUNCTION >> {2}> right" . "left right")
+    ("left #<THREAD \"normal\" FINISHED values: #<FUNCTION STRING>>, 12 {2}> right" . "left right")
+    ("left #<WAITQUEUE A>B#<C {1}> keep| > right" . "left keep| > right")
+    ("left #<SB-THREAD:WAITQUEUE A>B#<C {1}> keep| > right" . "left keep| > right")
+    ("left #<SB-THREAD:THREAD \"normal\" FINISHED values: #<FUNCTION STRING>>, 12 {2}> right"
+     . "left right")
+    ("left #<A|B {1}> keep| > right" . "left keep| > right")
+    ("left #<ARG->RESULT {1}> right" . "left right")
+    ("left #<THREAD \"normal\" FINISHED values: (#<FUNCTION STRING>> STRING>) {2}> right"
+     . "left right")
+    ("left #<PAIR \"field\"#<READTABLE {2}> {1}> right" . "left right")
+    ("left #<FUNCTION CAR>,keep,#<READTABLE {1}> right" . "left ,keep, right"))
+  "Concrete messages and their visible text after removing a complete printed object.")
 
 (defun draw-normalized-text (length)
   "Return a fresh single-spaced string of exactly LENGTH word characters and
@@ -239,6 +265,31 @@ spaces, with no space at either end and no two in a row."
                      (chance 15))
                 #\Space
                 (pick *message-word-characters*))))))
+
+(defun %printed-example-visible-text (message)
+  "Return the known visible text for an example, allowing SBCL's identities to vary."
+  (when (and (stringp message) (search "#<" message))
+    (flet ((mask-identities (text)
+             (regex-replace-all " \\{[0-9A-Fa-f]+\\}>" text " {}>")))
+      (cdr (assoc (mask-identities message) *printed-object-examples*
+                  :key #'mask-identities :test #'string=)))))
+
+(defun %draw-object-token ()
+  "Draw a printed object as a message token so its removal is visible to the oracle."
+  (let ((type (pick *object-types*)))
+    (list :object type
+          (cond ((string= type "WAITQUEUE")
+                 (pick '("A|B" "A\"B" "A#<B" "|unfinished" "a name > here"
+                         "A>B#<C" "A>private #<B")))
+                ((string= type "THREAD")
+                 (pick '("\"normal\" FINISHED values: #<FUNCTION >>"
+                         "\"normal\" FINISHED values: #<FUNCTION STRING>>, 12"
+                         "\"normal\" FINISHED values: (#<FUNCTION STRING>>)"
+                         "\"normal\" FINISHED values: :ARG->RESULT, 12"
+                         "\"normal\" FINISHED values: (#<FUNCTION STRING>> STRING>)")))
+                ((string= type "ARG->RESULT") nil)
+                (t (pick *object-details*)))
+          (random #x100000))))
 
 (defun draw-message ()
   "Return a message descriptor
@@ -257,9 +308,7 @@ the last, and a trailing run."
                                         (list :pathname
                                               (draw-string *pathname-characters*
                                                            (1+ (random 16)))))
-                                       (t (list :object (pick *object-types*)
-                                                (pick *object-details*)
-                                                (random #x100000)))))))
+                                       (t (%draw-object-token))))))
          (separators (loop for index from 0 to count
                            collect (draw-string *message-whitespace*
                                                 (if (< 0 index count)
@@ -316,6 +365,7 @@ message, long single-spaced text, or a string of *MESSAGE-FRAGMENTS*."
   (let ((roll (random 100)))
     (cond ((< roll 10) nil)
           ((< roll 20) (- (random 2000000) 1000000))
+          ((< roll 25) (copy-seq (car (pick *printed-object-examples*))))
           ((< roll 55) (render-message (draw-message)))
           ((< roll 75) (draw-normalized-text (+ 480 (random 300))))
           (t (format nil "~{~A~}" (loop repeat (random 40)
@@ -352,29 +402,30 @@ message, long single-spaced text, or a string of *MESSAGE-FRAGMENTS*."
     error-message-generator sanitize-error-message-arguments))
 
 (defun call-examples ()
-  "Return concrete calls, as (FUNCTION ARGUMENTS [CASE]), that CHECK-CALL runs
-against the contracts apart from generated trials: NIL, the empty string and
-an integer; a lone ESC, a lone BEL and a colored word; text above U+FFFF; and
-single-spaced messages one below, at and one above the 500-character limit."
+  "Return concrete (FUNCTION ARGUMENTS [CASE]) inputs for CHECK-CALL.
+These cover NIL, empty text, an integer, terminal controls, supplementary
+Unicode, printed objects and messages around the 500-character limit."
   (flet ((text (&rest codes-or-strings)
            (format nil "~{~A~}"
                    (mapcar (lambda (part)
                              (if (integerp part) (string (code-character part)) part))
                            codes-or-strings))))
-    (list (list 'sanitize-for-json (list nil) :absent)
-          (list 'sanitize-for-json (list "") :text)
-          (list 'sanitize-for-json (list 42) :printed)
-          (list 'sanitize-for-json (list (text 27)) :text)
-          (list 'sanitize-for-json (list (text 7)) :text)
-          (list 'sanitize-for-json (list (text 27 "[31mred" 27 "[0m")) :text)
-          (list 'sanitize-for-json (list (text "日本語" #x1F600)) :text)
-          (list 'sanitize-error-message (list nil))
-          (list 'sanitize-error-message (list ""))
-          (list 'sanitize-error-message (list 42))
-          (list 'sanitize-error-message (list (make-string 499 :initial-element #\a)))
-          (list 'sanitize-error-message (list (make-string 500 :initial-element #\a)))
-          (list 'sanitize-error-message (list (make-string 501 :initial-element #\a)))
-          (list 'sanitize-error-message (list (text " a " 9 " b " 10))))))
+    (list* (list 'sanitize-for-json (list nil) :absent)
+           (list 'sanitize-for-json (list "") :text)
+           (list 'sanitize-for-json (list 42) :printed)
+           (list 'sanitize-for-json (list (text 27)) :text)
+           (list 'sanitize-for-json (list (text 7)) :text)
+           (list 'sanitize-for-json (list (text 27 "[31mred" 27 "[0m")) :text)
+           (list 'sanitize-for-json (list (text "日本語" #x1F600)) :text)
+           (list 'sanitize-error-message (list nil))
+           (list 'sanitize-error-message (list ""))
+           (list 'sanitize-error-message (list 42))
+           (list 'sanitize-error-message (list (make-string 499 :initial-element #\a)))
+           (list 'sanitize-error-message (list (make-string 500 :initial-element #\a)))
+           (list 'sanitize-error-message (list (make-string 501 :initial-element #\a)))
+           (list 'sanitize-error-message (list (text " a " 9 " b " 10)))
+           (loop for (message) in *printed-object-examples*
+                 collect (list 'sanitize-error-message (list (copy-seq message)))))))
 
 (defun register-specifications ()
   "Install this file's generators, specs, Function Specs and properties in
@@ -517,24 +568,26 @@ Whether the result is the argument itself or a copy is not specified."
   (defspec long-normalized-text string
     (:generator long-normalized-text-generator))
   (defgenerator error-message-generator ()
-    "Draw a message descriptor (see DRAW-MESSAGE)."
+    "Draw words, paths and printed objects with nested values, quotes and raw SBCL names."
     (draw-message))
   (defspec error-message list
     (:generator error-message-generator))
   (defgenerator sanitize-error-message-arguments ()
-    "Draw a one-element argument list (see DRAW-ERROR-MESSAGE-ARGUMENT)."
+    "Draw a message, including the framed objects with known visible text."
     (:shrink (arguments) (%shrink-argument-list arguments))
     (list (draw-error-message-argument)))
   (defspec-function sanitize-error-message
     "Whatever it is given, the result is a string of at most 500 characters on
-one line, with no run of whitespace and none at either end.  Checked over
-SANITIZE-ERROR-MESSAGE-ARGUMENTS; other non-string objects are outside this
-contract."
+one line, with no run of whitespace and none at either end. The framed
+printed-object examples retain exactly their surrounding text for any hexadecimal identity.
+Checked over NIL, strings and integers drawn by SANITIZE-ERROR-MESSAGE-ARGUMENTS."
     (:args (message (or null string integer)))
     (:args-generator sanitize-error-message-arguments)
+    (:capture (expected (%printed-example-visible-text message)))
     (:returns string)
     (:post (and (<= (length result) 500)
-                (single-line-normalized-p result))))
+                (single-line-normalized-p result)
+                (or (null expected) (string= result expected)))))
   (defproperty sanitize-error-message-keeps-normalized-text
       ((text short-normalized-text))
     "Single-spaced text of at most 500 characters, with no #<, #P\" or Stream:
@@ -562,8 +615,9 @@ its first 497 characters as they were before the call, then \"...\"."
       ((message error-message))
     "A message of words, #P\"...\" pathnames and #<...> representations, joined
 by any whitespace and perhaps followed by a Stream: section, comes back as its
-words and paths one space apart: representations and the Stream: section go,
-pathnames lose their #P\"\" wrapper, and whitespace collapses."
+words and paths one space apart. Complete representations, including nested
+objects and names with quoted delimiters, and the Stream: section disappear.
+Pathnames lose their #P\"\" wrapper, and whitespace collapses."
     (:about sanitize-error-message)
     (:kind :composition)
     (:trials (:smoke 25 :normal 200))

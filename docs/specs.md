@@ -17,7 +17,7 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 |---|---|---|
 | `cl-mcp/src/utils/strings:ensure-trailing-newline` | ends in a newline, starts with the whole argument as it was before the call, at most one character longer, and leaves the argument as it was | `ensure-trailing-newline-keeps-terminated-text` |
 | `cl-mcp/src/utils/sanitize:sanitize-for-json` | `NIL` gives `NIL`. A string gives a string no longer than the argument and free of DEL and C0 controls other than tab/LF/CR. An integer gives its printed form. The preservation property includes supplementary Unicode characters. | `…-keeps-allowed-text`, `…-is-idempotent`, `…-removes-complete-escape-sequences`, `…-removes-truncated-escape-sequence`, `…-leaves-its-argument-unmodified` |
-| `cl-mcp/src/utils/sanitize:sanitize-error-message` | a string of at most 500 characters, on one line, with no whitespace run and none at either end | `…-keeps-normalized-text`, `…-truncates-long-text`, `…-keeps-only-visible-words` |
+| `cl-mcp/src/utils/sanitize:sanitize-error-message` | a single line of at most 500 characters with normalized whitespace. The printed-object examples keep exactly their surrounding text. | `…-keeps-normalized-text`, `…-truncates-long-text`, `…-keeps-only-visible-words` |
 | `cl-mcp/src/utils/paths:allowed-read-path` | none (see *Read access*) | `read-allows-project-files-as-themselves`, `read-follows-dependency-registration`, `read-denies-unlisted-regions`, `read-judges-symlinks-by-their-target` |
 | `cl-mcp/src/utils/paths:resolve-readable-path` | none | the same four |
 | `cl-mcp/src/utils/paths:ensure-write-path` | none (see *Write access*) | `write-resolves-project-targets-without-creating`, `write-refuses-outside-and-absolute`, `write-follows-existing-links`, `writer-changes-only-the-expected-entries`, `write-preserves-safe-spellings` |
@@ -106,14 +106,33 @@ function under test.
 |---|---|---|
 | `ensure-trailing-newline` | up to ~22 characters (printable ASCII, a few non-ASCII BMP characters, tab, CR) with newlines inside and one of five endings (none, LF, CRLF, LF LF, CR); simple strings, strings with a fill pointer hiding a newline, base strings | other element types, long strings, non-strings (excluded by the function's `ftype`) |
 | `sanitize-for-json` | `NIL`; integers up to ±5·10^19; up to 8 segments of allowed text, forbidden C0 controls, DEL, U+10000/U+1F600/U+10FFFF, complete ECMA-48 sequences (CSI, OSC ended by BEL or ST, DCS/SOS/PM/APC ended by ST, ESC Fe), or a proper prefix of one | other non-string objects, C1 controls, **surrogates** (see *Known issues*), other Unicode ranges, sequences whose bytes stray outside ECMA-48's parameter/intermediate/final ranges |
-| `sanitize-error-message` | `NIL`; integers; up to 10 words, `#P"..."` paths and `#<...>` representations separated by runs of space/tab/LF/CR/page, optionally followed by a `Stream:` section; single-spaced text of 0–40, 480–500 (499 and 500 often) and 501–1500 (501 often) characters; strings of fragments that misplace `#<`, `>`, `#P"`, quotes and `Stream:` | nested `#<...>` or ones containing `>`, words containing `Stream:` or `#`, whitespace outside cl-ppcre's `\s` |
+| `sanitize-error-message` | `NIL`; integers; up to 10 words, `#P"..."` paths and `#<...>` representations with flat or nested objects and quoted delimiters in their details, separated by runs of space/tab/LF/CR/page, optionally followed by a `Stream:` section; single-spaced text of 0–40, 480–500 (499 and 500 often) and 501–1500 (501 often) characters; strings of fragments that misplace `#<`, `>`, `#P"`, quotes and `Stream:` | words containing `Stream:` or `#`, whitespace outside cl-ppcre's `\s` |
 
 Boundaries are also covered by fixed inputs, apart from generated trials:
 `call-examples` in each spec file lists concrete calls that the runner checks
 with `cl-spec:check-call`, and the default Rove suite has exact-value tests for
-the 499/500/501-character limit, whitespace collapse, `Stream:` removal and a
-CSI sequence cut off at the end of the input
+the 499/500/501-character limit, whitespace collapse, `Stream:` removal,
+nested printed objects, quoted names with escaped characters, and a CSI
+sequence cut off at the end of the input
 (`tests/utils-sanitize-test.lisp`, `tests/utils-strings-test.lisp`).
+
+A closed string, quoted symbol or printed character can be followed
+immediately by the next field. An angle bracket inside a parenthesized
+Lisp value or a type name such as `ARG->RESULT` stays part of that value.
+For a standalone bare type followed by a braced hexadecimal identity,
+the sanitizer treats the identity as the end of the printed instance.
+SBCL writes waitqueue names verbatim. The sanitizer recognizes their
+space and braced hexadecimal identity followed by `>`. If a raw name
+itself contains the same identity-shaped text, the first such terminator
+wins. When a short closing delimiter is followed by a separator and
+another printed object, the intervening diagnostic text stays visible.
+
+Bare function names also admit `>`. SBCL prints both `#'string>` and
+`#'string` followed by an ordinary `>` as `#<FUNCTION STRING>>`.
+Standalone, the sanitizer keeps the extra `>` as diagnostic text.
+In SBCL's `FINISHED values:` display, the enclosing thread's own identity
+ends the object. This also covers multiple return values, lists, and
+symbols such as `STRING>`.
 
 ## Read access
 
@@ -2358,11 +2377,6 @@ These are recorded here, not fixed in this change:
   `*runtime-owner*` forgets a dead worker and is cleared on release and
   shutdown (see *Reset events*).
 
-- `sanitize-error-message` does not fully remove a nested `#<...>`, or one with
-  `>` inside a quoted name, although its docstring says it strips `#<...>`.
-  `"x #<A #<B {1}> {2}> y"` gives `"x {2}> y"`, and
-  `"x #<THREAD \"a>b\" {1}> y"` gives `"x b\" {1}> y"`. The generators leave
-  both shapes out, and this file says so.
 - `sanitize-error-message` removes `Stream:` wherever it appears, so
   `"UpStream: closed"` gives `"Up"`.
 - The display sanitizer passes lone surrogates (U+D800–U+DFFF) through. They
