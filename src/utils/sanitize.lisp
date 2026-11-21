@@ -127,29 +127,34 @@ princ-to-string then sanitized."
   (let ((end (+ start (length prefix))))
     (and (<= end (length text)) (string-equal prefix text :start2 start :end2 end) end)))
 
-(defun %printed-function-end (message start address enclosing-identity-p)
-  "Recognize a bare function name containing >. Return the position after
-the object when the function's name or a printed identity identifies it."
-  (let* ((end (or (position-if (lambda (ch)
-                                 (find ch '(#\Space #\Tab #\Newline #\Return #\Page
-                                            #\( #\) #\" #\|)))
-                               message :start start)
+(defun %printed-field-separator-p (ch)
+  "True when CH separates values or introduces a quoted field in printed Lisp text."
+  (or (find ch '(#\Space #\Tab #\Newline #\Return #\Page))
+      (find ch "([{'`,:=<>#)")))
+
+(defun %printed-function-end (message start address thread-p single-parent-p)
+  "Return the end of a named function when its name or context identifies it.
+Only look inside a bare name. Reader punctuation and a new #< start other values."
+  (let* ((symbol-start (or (%after-printed-prefix "#:" message start) start))
+         (end (or (position-if-not (lambda (ch)
+                                     (or (alphanumericp ch) (find ch "-+:<>=*/_&!%?$.")))
+                                   message :start symbol-start)
                   (length message)))
-         (angle (position #\> message :start start :end end)))
+         (angle (position #\> message :start symbol-start :end end)))
     (when angle
       (cond
         ;; A named function with an identity, e.g. #:NUMBER->TEXT {123}>.
         ((and (eql end (first address)) (char/= (char message (1- end)) #\>))
          (second address))
         ;; An initial > names the function, as in #<FUNCTION >> or #<FUNCTION >=>.
-        ((= angle start)
-         (let ((close (position #\> message :start (1+ start) :end end)))
+        ((= angle symbol-start)
+         (let ((close (position #\> message :start (1+ angle) :end end)))
            (when close (1+ close))))
-        ;; In FINISHED values: #<FUNCTION STRING>> {123}>, the identity
-        ;; closes the enclosing thread. The final > of the name token closes
-        ;; the function. Standalone, preserve ambiguous trailing punctuation.
-        ((and enclosing-identity-p (eql end (first address))
-              (char= (char message (1- end)) #\>))
+        ;; A thread prints its return values before its own identity. A
+        ;; bare function name can end at a comma, list delimiter or space.
+        ;; Standalone, preserve ambiguous trailing diagnostic punctuation.
+        ((and (char= (char message (1- end)) #\>)
+              (or thread-p (and single-parent-p (eql end (first address)))))
          end)))))
 
 (defun %opaque-printed-object-end (message start addresses parents output)
@@ -164,7 +169,8 @@ space, braced hexadecimal identity and closing delimiter."
      ;; starts after it, so a short #<WAITQUEUE ...> keeps its suffix.
      (let* ((address-start (first addresses))
             (close (position #\> message :start start :end address-start)))
-       (if (and close (search "#<" message :start2 (1+ close) :end2 address-start))
+       (if (and close (%printed-field-separator-p (char message (1+ close)))
+                (search "#<" message :start2 (1+ close) :end2 address-start))
            (1+ close)
            (second addresses))))
     (t
@@ -173,9 +179,9 @@ space, braced hexadecimal identity and closing delimiter."
          (%printed-function-end
           message name addresses
           (and parents
-               (or (null (cdr parents))
-                   (%after-printed-prefix "#<THREAD " output (first parents))
-                   (%after-printed-prefix "#<SB-THREAD:THREAD " output (first parents))))))))))
+               (or (%after-printed-prefix "#<THREAD " output (first parents))
+                   (%after-printed-prefix "#<SB-THREAD:THREAD " output (first parents))))
+          (and parents (null (cdr parents)))))))))
 
 (defun %strip-printed-objects (message)
   "Remove balanced #<...> representations from MESSAGE. Keep text outside
@@ -203,9 +209,15 @@ them, including unfinished representations and unmatched delimiters."
                      (quote-delimiter
                       (when (char= ch quote-delimiter)
                         (setf quote-delimiter nil)))
-                     ((and openings (find ch "\"|"))
+                     ((and openings (find ch "\"|")
+                           (or (%printed-field-separator-p (char message (1- i)))
+                               ;; Pathname literals introduce their string with #P.
+                               (and (char= ch #\") (>= i 2)
+                                    (char-equal (char message (1- i)) #\P)
+                                    (char= (char message (- i 2)) #\#))))
                       (setf quote-delimiter ch))
-                     ((and (char= ch #\#) (< (1+ i) end) (char= (char message (1+ i)) #\<))
+                     ((and (char= ch #\#) (< (1+ i) end) (char= (char message (1+ i)) #\<)
+                           (or (null openings) (%printed-field-separator-p (char message (1- i)))))
                       (loop while (and addresses (< (first addresses) i))
                             do (setf addresses (cddr addresses)))
                       (let ((opaque-end (%opaque-printed-object-end message i addresses openings out)))

@@ -229,6 +229,7 @@
     (ok (string= "a>b" (sanitize-error-message "a#<A #<B #<C>>>#<D>>b"))))
   (testing "delimiters inside printed strings and quoted symbol names stay inside"
     (ok (string= "x y" (sanitize-error-message "x #<THREAD \"a>b\" {1}> y")))
+    (ok (string= "x y" (sanitize-error-message "x #<RESOURCE #P\"a>b\" {1}> y")))
     (ok (string= "x y" (sanitize-error-message "x #<FUNCTION |A\\|B>C| {1}> y")))
     (ok (string= "left right"
                  (sanitize-error-message "left #<A \"a\\\"#<b>\\\\\" {1}> right"))))
@@ -240,20 +241,30 @@
     (ok (string= "keep #<unfinished tail"
                  (sanitize-error-message "keep #<unfinished #<DONE> tail")))))
 
+(defclass |A\|B| () ()
+  (:documentation "A class whose name SBCL prints verbatim with PRINC."))
+
 (deftest sanitize-error-message-keeps-text-around-sbcl-names
   #+sbcl
   (testing "waitqueue names are printed verbatim, including apparent Lisp syntax"
-    (dolist (name '("A|B" "A\"B" "A#<B" "|unfinished" "a name > here" "A>B"))
+    (dolist (name '("A|B" "A\"B" "A#<B" "|unfinished" "a name > here" "A>B" "A>B#<C" "A>private #<B"))
       (let ((queue (sb-thread:make-waitqueue :name name)))
         (ok (string= "left keep| > right"
                      (sanitize-error-message (format nil "left ~A keep| > right" queue)))))))
   #+sbcl
   (testing "a thread's returned function can have a delimiter in its name"
-    (dolist (function (list #'> #'string>))
-      (let ((thread (sb-thread:make-thread (lambda () function) :name "normal")))
+    (dolist (thunk (list (lambda () #'>) (lambda () #'string>)
+                         (lambda () (values #'string> 12)) (lambda () (list #'string>))))
+      (let ((thread (sb-thread:make-thread thunk :name "normal")))
         (sb-thread:join-thread thread)
         (ok (string= "left right"
                      (sanitize-error-message (format nil "left ~A right" thread)))))))
+  (testing "a raw class name and adjacent printed values keep the separating text"
+    (ok (string= "left keep| > right"
+                 (sanitize-error-message
+                  (format nil "left ~A keep| > right" (make-instance '|A\|B|)))))
+    (ok (string= "left ,keep, right"
+                 (sanitize-error-message (format nil "left ~S,keep,~S right" #'car *readtable*)))))
   (testing "angle brackets inside a function name and after a printed object"
     (ok (string= "left right"
                  (sanitize-error-message "left #<FUNCTION #:NUMBER->TEXT {1}> right")))

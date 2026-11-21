@@ -31,6 +31,7 @@
 
 (defpackage #:cl-mcp/specs/sanitize
   (:use #:cl)
+  (:import-from #:cl-ppcre #:regex-replace-all)
   (:import-from #:cl-spec/main
                 #:defspec
                 #:defspec-function
@@ -222,13 +223,14 @@ and the properties' do not."
 
 (defparameter *object-types*
   (list "SB-SYS:FD-STREAM" "HASH-TABLE" "STANDARD-OBJECT"
-        "SB-IMPL::STRING-OUTPUT-STREAM" "FUNCTION FOO")
+        "SB-IMPL::STRING-OUTPUT-STREAM" "FUNCTION FOO"
+        "WAITQUEUE" "THREAD" "A|B" "A\"B" "A#<B")
   "Type names a drawn #<...> representation shows.")
 
 (defparameter *object-details*
   (list nil ":TEST EQUAL :COUNT 0" "for \"file /tmp/x.lisp\"" "RUNNING"
         "#<INNER {1}>" "#<MIDDLE #<INNER {2}> {1}>" "\"name>with>delimiters\""
-        "\"escaped\\\"#<text>\\\\\"" "|A\\|B>C|" "#<WAITQUEUE A|B {3}>"
+        "\"escaped\\\"#<text>\\\\\"" "|A\\|B>C|" "#P\"a>b\"" "#<WAITQUEUE A|B {3}>"
         "#<FUNCTION >>" "#<THREAD \"normal\" FINISHED values: #<FUNCTION STRING>> {4}>"
         "#<FUNCTION #:NUMBER->TEXT {5}>")
   "Text a drawn #<...> representation shows after its type, or none.")
@@ -237,7 +239,11 @@ and the properties' do not."
   '(("x #<A #<B {1}> {2}> y" . "x y")
     ("x #<THREAD \"a>b\" {1}> y" . "x y")
     ("left #<WAITQUEUE A|B {1}> keep| > right" . "left keep| > right")
-    ("left #<THREAD \"normal\" FINISHED values: #<FUNCTION >> {2}> right" . "left right"))
+    ("left #<THREAD \"normal\" FINISHED values: #<FUNCTION >> {2}> right" . "left right")
+    ("left #<THREAD \"normal\" FINISHED values: #<FUNCTION STRING>>, 12 {2}> right" . "left right")
+    ("left #<WAITQUEUE A>B#<C {1}> keep| > right" . "left keep| > right")
+    ("left #<A|B {1}> keep| > right" . "left keep| > right")
+    ("left #<FUNCTION CAR>,keep,#<READTABLE {1}> right" . "left ,keep, right"))
   "Concrete messages and their visible text after removing a complete printed object.")
 
 (defun draw-normalized-text (length)
@@ -251,6 +257,28 @@ spaces, with no space at either end and no two in a row."
                      (chance 15))
                 #\Space
                 (pick *message-word-characters*))))))
+
+(defun %printed-example-visible-text (message)
+  "Return the known visible text for an example, allowing SBCL's identities to vary."
+  (when (and (stringp message) (search "#<" message))
+    (flet ((mask-identities (text)
+             (regex-replace-all " \\{[0-9A-Fa-f]+\\}>" text " {}>")))
+      (cdr (assoc (mask-identities message) *printed-object-examples*
+                  :key #'mask-identities :test #'string=)))))
+
+(defun %draw-object-token ()
+  "Draw a printed object as a message token so its removal is visible to the oracle."
+  (let ((type (pick *object-types*)))
+    (list :object type
+          (cond ((string= type "WAITQUEUE")
+                 (pick '("A|B" "A\"B" "A#<B" "|unfinished" "a name > here"
+                         "A>B#<C" "A>private #<B")))
+                ((string= type "THREAD")
+                 (pick '("\"normal\" FINISHED values: #<FUNCTION >>"
+                         "\"normal\" FINISHED values: #<FUNCTION STRING>>, 12"
+                         "\"normal\" FINISHED values: (#<FUNCTION STRING>>)")))
+                (t (pick *object-details*)))
+          (random #x100000))))
 
 (defun draw-message ()
   "Return a message descriptor
@@ -269,9 +297,7 @@ the last, and a trailing run."
                                         (list :pathname
                                               (draw-string *pathname-characters*
                                                            (1+ (random 16)))))
-                                       (t (list :object (pick *object-types*)
-                                                (pick *object-details*)
-                                                (random #x100000)))))))
+                                       (t (%draw-object-token))))))
          (separators (loop for index from 0 to count
                            collect (draw-string *message-whitespace*
                                                 (if (< 0 index count)
@@ -542,11 +568,11 @@ Whether the result is the argument itself or a copy is not specified."
   (defspec-function sanitize-error-message
     "Whatever it is given, the result is a string of at most 500 characters on
 one line, with no run of whitespace and none at either end. The framed
-printed-object examples retain exactly their surrounding text.
+printed-object examples retain exactly their surrounding text for any hexadecimal identity.
 Checked over NIL, strings and integers drawn by SANITIZE-ERROR-MESSAGE-ARGUMENTS."
     (:args (message (or null string integer)))
     (:args-generator sanitize-error-message-arguments)
-    (:capture (expected (cdr (assoc message *printed-object-examples* :test #'equal))))
+    (:capture (expected (%printed-example-visible-text message)))
     (:returns string)
     (:post (and (<= (length result) 500)
                 (single-line-normalized-p result)
