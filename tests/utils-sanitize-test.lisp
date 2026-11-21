@@ -253,6 +253,18 @@
     (ok (string= "keep #<unfinished tail"
                  (sanitize-error-message "keep #<unfinished #<DONE> tail")))))
 
+(deftest sanitize-error-message-handles-long-runs-of-short-objects
+  #+sbcl
+  (testing "each header is inspected locally in a diagnostic containing many objects"
+    (let ((message (with-output-to-string (out)
+                     (write-string "left " out)
+                     (dotimes (i 16000) (write-string "#<A>#<THREAD \"worker\" RUNNING>" out))
+                     (write-string " right" out))))
+      (ok (handler-case
+              (sb-ext:with-timeout 5 (string= "left right" (sanitize-error-message message)))
+            (sb-ext:timeout () nil))
+          "a long run of short objects is removed within five seconds"))))
+
 (defclass |A\|B| () ()
   (:documentation "A class whose name SBCL prints verbatim with PRINC."))
 

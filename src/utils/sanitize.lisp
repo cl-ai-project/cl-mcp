@@ -210,10 +210,17 @@ Only look inside a bare name. Reader punctuation and a new #< start other values
        (second addresses)))))
 
 (defun %finished-thread-p (message start)
-  "Recognize SBCL's thread result header at START, including an optional quoted name."
-  (not (null (cl-ppcre:scan
-              "(?is)^#<(?:SB-THREAD:)?THREAD (?:\"(?:\\\\.|[^\"\\\\])*\" )?FINISHED values:"
-              message :start start))))
+  "Match SBCL's result header at START, examining only the type and optional name."
+  (let ((name (or (%after-printed-prefix "#<THREAD " message start)
+                  (%after-printed-prefix "#<SB-THREAD:THREAD " message start))))
+    (when name
+      (if (and (< name (length message)) (char= (char message name) #\"))
+          (loop for i from (1+ name) below (length message)
+                for ch = (char message i)
+                do (case ch
+                     (#\\ (incf i))
+                     (#\" (return (%after-printed-prefix " FINISHED values:" message (1+ i))))))
+          (%after-printed-prefix "FINISHED values:" message name)))))
 
 (defun %strip-printed-objects (message)
   "Remove complete #<...> representations, preserving the surrounding diagnostic."
