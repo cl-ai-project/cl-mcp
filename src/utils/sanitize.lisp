@@ -134,7 +134,19 @@ princ-to-string then sanitized."
 
 (defstruct (%printed-frame (:constructor %make-printed-frame (start finished-thread-p)))
   "A pending object and its position in the retained message."
-  start finished-thread-p (list-depth 0) (tentatively-closed-p nil))
+  start
+  finished-thread-p
+  (list-depth 0)
+  (tentatively-closed-p nil))
+
+(setf (documentation '%printed-frame-start 'function)
+      "Index of this object's opening # in the retained output."
+      (documentation '%printed-frame-finished-thread-p 'function)
+      "True when SBCL's finished-thread header identifies the enclosing value list."
+      (documentation '%printed-frame-list-depth 'function)
+      "Number of open Lisp list parentheses inside this printed object."
+      (documentation '%printed-frame-tentatively-closed-p 'function)
+      "True after the first possible short close has been applied to the output.")
 
 (defun %printed-name-character-p (ch)
   (or (alphanumericp ch) (find ch "-+:<>=*/_&!%?$.")))
