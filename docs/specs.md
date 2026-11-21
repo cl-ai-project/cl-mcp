@@ -17,7 +17,7 @@ seeds and budgets that ran. It is not a proof, and a cl-spec type in `:args` or
 |---|---|---|
 | `cl-mcp/src/utils/strings:ensure-trailing-newline` | ends in a newline, starts with the whole argument as it was before the call, at most one character longer, and leaves the argument as it was | `ensure-trailing-newline-keeps-terminated-text` |
 | `cl-mcp/src/utils/sanitize:sanitize-for-json` | `NIL` gives `NIL`. A string gives a string no longer than the argument and free of DEL and C0 controls other than tab/LF/CR. An integer gives its printed form. The preservation property includes supplementary Unicode characters. | `…-keeps-allowed-text`, `…-is-idempotent`, `…-removes-complete-escape-sequences`, `…-removes-truncated-escape-sequence`, `…-leaves-its-argument-unmodified` |
-| `cl-mcp/src/utils/sanitize:sanitize-error-message` | a single line of at most 500 characters with normalized whitespace. The nested-object and quoted-name examples keep exactly their surrounding words. | `…-keeps-normalized-text`, `…-truncates-long-text`, `…-keeps-only-visible-words` |
+| `cl-mcp/src/utils/sanitize:sanitize-error-message` | a single line of at most 500 characters with normalized whitespace. The printed-object examples keep exactly their surrounding text. | `…-keeps-normalized-text`, `…-truncates-long-text`, `…-keeps-only-visible-words` |
 | `cl-mcp/src/utils/paths:allowed-read-path` | none (see *Read access*) | `read-allows-project-files-as-themselves`, `read-follows-dependency-registration`, `read-denies-unlisted-regions`, `read-judges-symlinks-by-their-target` |
 | `cl-mcp/src/utils/paths:resolve-readable-path` | none | the same four |
 | `cl-mcp/src/utils/paths:ensure-write-path` | none (see *Write access*) | `write-resolves-project-targets-without-creating`, `write-refuses-outside-and-absolute`, `write-follows-existing-links`, `writer-changes-only-the-expected-entries`, `write-preserves-safe-spellings` |
@@ -114,6 +114,14 @@ the 499/500/501-character limit, whitespace collapse, `Stream:` removal,
 nested printed objects, quoted names with escaped characters, and a CSI
 sequence cut off at the end of the input
 (`tests/utils-sanitize-test.lisp`, `tests/utils-strings-test.lisp`).
+
+SBCL writes waitqueue names verbatim. Their hexadecimal identity marks the
+end of the printed object even when the name contains quotes or brackets.
+For bare function names, a trailing `>` can also be part of the name.
+SBCL prints both `#'string>` and `#'string` followed by an ordinary `>`
+as `#<FUNCTION STRING>>`. Standalone, the sanitizer keeps the extra `>`
+as diagnostic text. An enclosing thread's printed identity can resolve
+that ambiguity when it reports its return values.
 
 ## Read access
 

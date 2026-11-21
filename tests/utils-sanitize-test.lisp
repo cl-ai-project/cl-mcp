@@ -240,6 +240,28 @@
     (ok (string= "keep #<unfinished tail"
                  (sanitize-error-message "keep #<unfinished #<DONE> tail")))))
 
+(deftest sanitize-error-message-keeps-text-around-sbcl-names
+  #+sbcl
+  (testing "waitqueue names are printed verbatim, including apparent Lisp syntax"
+    (dolist (name '("A|B" "A\"B" "A#<B" "|unfinished" "a name > here" "A>B"))
+      (let ((queue (sb-thread:make-waitqueue :name name)))
+        (ok (string= "left keep| > right"
+                     (sanitize-error-message (format nil "left ~A keep| > right" queue)))))))
+  #+sbcl
+  (testing "a thread's returned function can have a delimiter in its name"
+    (dolist (function (list #'> #'string>))
+      (let ((thread (sb-thread:make-thread (lambda () function) :name "normal")))
+        (sb-thread:join-thread thread)
+        (ok (string= "left right"
+                     (sanitize-error-message (format nil "left ~A right" thread)))))))
+  (testing "angle brackets inside a function name and after a printed object"
+    (ok (string= "left right"
+                 (sanitize-error-message "left #<FUNCTION #:NUMBER->TEXT {1}> right")))
+    (ok (string= "left bar> right"
+                 (sanitize-error-message "left #<FUNCTION FOO>bar> right")))
+    (ok (string= "left > right"
+                 (sanitize-error-message "left #<FUNCTION STRING>> right")))))
+
 (deftest sanitize-for-json-strips-escape-sequence-cut-at-end
   (testing "a CSI sequence cut off by the end of the input leaves no fragment"
     (let ((esc (code-char 27)))

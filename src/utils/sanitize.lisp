@@ -122,6 +122,61 @@ princ-to-string then sanitized."
                 (t (vector-push-extend char result) (incf i)))))
     (coerce result 'string)))
 
+(defun %after-printed-prefix (prefix text start)
+  "Return the first index after PREFIX when it starts at START in TEXT."
+  (let ((end (+ start (length prefix))))
+    (and (<= end (length text)) (string-equal prefix text :start2 start :end2 end) end)))
+
+(defun %printed-function-end (message start address enclosing-identity-p)
+  "Recognize a bare function name containing >. Return the position after
+the object when the function's name or a printed identity identifies it."
+  (let* ((end (or (position-if (lambda (ch)
+                                 (find ch '(#\Space #\Tab #\Newline #\Return #\Page
+                                            #\( #\) #\" #\|)))
+                               message :start start)
+                  (length message)))
+         (angle (position #\> message :start start :end end)))
+    (when angle
+      (cond
+        ;; A named function with an identity, e.g. #:NUMBER->TEXT {123}>.
+        ((and (eql end (first address)) (char/= (char message (1- end)) #\>))
+         (second address))
+        ;; An initial > names the function, as in #<FUNCTION >> or #<FUNCTION >=>.
+        ((= angle start)
+         (let ((close (position #\> message :start (1+ start) :end end)))
+           (when close (1+ close))))
+        ;; In FINISHED values: #<FUNCTION STRING>> {123}>, the identity
+        ;; closes the enclosing thread. The final > of the name token closes
+        ;; the function. Standalone, preserve ambiguous trailing punctuation.
+        ((and enclosing-identity-p (eql end (first address))
+              (char= (char message (1- end)) #\>))
+         end)))))
+
+(defun %opaque-printed-object-end (message start addresses parents output)
+  "Return the end of an SBCL object with a verbatim or bare name, when its
+printed layout identifies the boundary. ADDRESSES begins with the next
+space, braced hexadecimal identity and closing delimiter."
+  (cond
+    ((and addresses (or (%after-printed-prefix "#<WAITQUEUE " message start)
+                        (%after-printed-prefix "#<SB-THREAD:WAITQUEUE " message start)))
+     ;; A waitqueue's name is written with PRINC. Quotes, bars and #< in
+     ;; it are ordinary text. Prefer a preceding close if another object
+     ;; starts after it, so a short #<WAITQUEUE ...> keeps its suffix.
+     (let* ((address-start (first addresses))
+            (close (position #\> message :start start :end address-start)))
+       (if (and close (search "#<" message :start2 (1+ close) :end2 address-start))
+           (1+ close)
+           (second addresses))))
+    (t
+     (let ((name (%after-printed-prefix "#<FUNCTION " message start)))
+       (when name
+         (%printed-function-end
+          message name addresses
+          (and parents
+               (or (null (cdr parents))
+                   (%after-printed-prefix "#<THREAD " output (first parents))
+                   (%after-printed-prefix "#<SB-THREAD:THREAD " output (first parents))))))))))
+
 (defun %strip-printed-objects (message)
   "Remove balanced #<...> representations from MESSAGE. Keep text outside
 them, including unfinished representations and unmatched delimiters."
@@ -130,6 +185,7 @@ them, including unfinished representations and unmatched delimiters."
         message
         (let* ((end (length message))
                (out (make-array end :element-type 'character :fill-pointer first))
+               (addresses (cl-ppcre:all-matches " \\{[0-9A-Fa-f]+\\}>" message :start first))
                (openings nil)
                (quote-delimiter nil))
           (replace out message :end2 first)
@@ -150,7 +206,12 @@ them, including unfinished representations and unmatched delimiters."
                      ((and openings (find ch "\"|"))
                       (setf quote-delimiter ch))
                      ((and (char= ch #\#) (< (1+ i) end) (char= (char message (1+ i)) #\<))
-                      (push (1- (fill-pointer out)) openings))
+                      (loop while (and addresses (< (first addresses) i))
+                            do (setf addresses (cddr addresses)))
+                      (let ((opaque-end (%opaque-printed-object-end message i addresses openings out)))
+                        (if opaque-end
+                            (progn (decf (fill-pointer out)) (setf i (1- opaque-end)))
+                            (push (1- (fill-pointer out)) openings))))
                      ((and openings (char= ch #\>))
                       (setf (fill-pointer out) (pop openings)))))
           out))))

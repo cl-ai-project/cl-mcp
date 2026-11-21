@@ -228,12 +228,16 @@ and the properties' do not."
 (defparameter *object-details*
   (list nil ":TEST EQUAL :COUNT 0" "for \"file /tmp/x.lisp\"" "RUNNING"
         "#<INNER {1}>" "#<MIDDLE #<INNER {2}> {1}>" "\"name>with>delimiters\""
-        "\"escaped\\\"#<text>\\\\\"" "|A\\|B>C|")
+        "\"escaped\\\"#<text>\\\\\"" "|A\\|B>C|" "#<WAITQUEUE A|B {3}>"
+        "#<FUNCTION >>" "#<THREAD \"normal\" FINISHED values: #<FUNCTION STRING>> {4}>"
+        "#<FUNCTION #:NUMBER->TEXT {5}>")
   "Text a drawn #<...> representation shows after its type, or none.")
 
 (defparameter *printed-object-examples*
   '(("x #<A #<B {1}> {2}> y" . "x y")
-    ("x #<THREAD \"a>b\" {1}> y" . "x y"))
+    ("x #<THREAD \"a>b\" {1}> y" . "x y")
+    ("left #<WAITQUEUE A|B {1}> keep| > right" . "left keep| > right")
+    ("left #<THREAD \"normal\" FINISHED values: #<FUNCTION >> {2}> right" . "left right"))
   "Concrete messages and their visible text after removing a complete printed object.")
 
 (defun draw-normalized-text (length)
@@ -527,7 +531,7 @@ Whether the result is the argument itself or a copy is not specified."
   (defspec long-normalized-text string
     (:generator long-normalized-text-generator))
   (defgenerator error-message-generator ()
-    "Draw words, paths and printed objects with flat, nested or quoted details."
+    "Draw words, paths and printed objects with nested values, quotes and raw SBCL names."
     (draw-message))
   (defspec error-message list
     (:generator error-message-generator))
@@ -538,7 +542,7 @@ Whether the result is the argument itself or a copy is not specified."
   (defspec-function sanitize-error-message
     "Whatever it is given, the result is a string of at most 500 characters on
 one line, with no run of whitespace and none at either end. The framed
-nested-object and quoted-name examples retain exactly their surrounding text.
+printed-object examples retain exactly their surrounding text.
 Checked over NIL, strings and integers drawn by SANITIZE-ERROR-MESSAGE-ARGUMENTS."
     (:args (message (or null string integer)))
     (:args-generator sanitize-error-message-arguments)
