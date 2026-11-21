@@ -2199,6 +2199,12 @@ construction is supported; it does not guarantee successful draws or reductions.
     and snapshots of the actual call in `call_evidence`. Each snapshot records
     its availability. An aborting fixture error appears in `run_error`, which
     can accompany a counterexample found before a shrink candidate aborted.
+    A named-case check needs one measured row for each declared case. The
+    adapter checks each outcome count against the call count, the zero-call
+    rows against `never_called`, and a passed run’s calls against its total
+    trials minus refusals. Missing or inconsistent measurements produce
+    `case-coverage-unknown`. Display limits still allow verification from
+    the full saved record.
   - Four rules decide how one value inside `data` is rendered, and each one
     exists because a shape cl-spec did not declare must never be invented.
     A field cl-spec declares and did not measure is **`null`**, never `{}`:

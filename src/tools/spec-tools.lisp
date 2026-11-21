@@ -311,7 +311,8 @@ verification_gaps names what the run could not establish. Values:
                               least one was never reached. status stays
                               passed -- cl-spec judged the trials that ran --
                               but the unreached branch was not verified.
-  case-coverage-unknown       cases are declared and no case report came back.
+  case-coverage-unknown       declared cases lack a usable measurement: a missing
+                              report, incomplete rows, or inconsistent names or counts.
   generation-incomplete       the run stopped in generation and never reached
                               a verdict. NOT a finding about the code.
   core-schema-unsupported     the result record declares a schema version this

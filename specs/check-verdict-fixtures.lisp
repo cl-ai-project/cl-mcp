@@ -341,6 +341,8 @@ when NIL."
       (if (eq runs :contract)
           (multiple-value-bind (executed rejected precondition rejection-status)
               (%count-numbers (getf row :count))
+            (when (and (eq :all-reached (getf row :cases)) (< (- executed rejected) 2))
+              (incf executed))
             (setf descriptor (append descriptor
                                      (list :executed executed :rejected rejected
                                            :precondition precondition
@@ -391,7 +393,7 @@ for a missing key, :NOT-COLLECTED for the bare marker in a sentinel field, and
                               :not-collected)
                              (t :collected))))))
 
-(defun %case-report (cases executed)
+(defun %case-report (cases admitted)
   "Return the case report a record carries for CASES, or :NOT-COLLECTED."
   (flet ((case-entry (name called)
            (list :name name :documentation nil :called called :passed called
@@ -399,16 +401,16 @@ for a missing key, :NOT-COLLECTED for the bare marker in a sentinel field, and
     (ecase cases
       ((:none :report-missing) :not-collected)
       (:all-reached
-       (let ((small (max 1 (floor (or executed 2) 2))))
+       (let ((small (floor admitted 2)))
          (list :selection :exclusive :unit :normal-trials
                :declared-cases (list :small :large)
-               :cases (list (case-entry :small small) (case-entry :large 1))
+               :cases (list (case-entry :small small) (case-entry :large (- admitted small)))
                :case-selection-errors 0 :capture-errors 0
                :never-called (list))))
       (:never-called
        (list :selection :exclusive :unit :normal-trials
              :declared-cases (list :small :large)
-             :cases (list (case-entry :small (or executed 1)) (case-entry :large 0))
+             :cases (list (case-entry :small admitted) (case-entry :large 0))
              :case-selection-errors 0 :capture-errors 0
              :never-called (list :large))))))
 
@@ -441,7 +443,9 @@ for a missing key, :NOT-COLLECTED for the bare marker in a sentinel field, and
       (if (and (eq cases :report-missing)
                (eq :absent (getf descriptor :case-report-form)))
           (record-without record :case-report)
-          (record-with record :case-report (%case-report cases executed))))))
+          (record-with record :case-report
+                       (%case-report cases (when (member cases '(:all-reached :never-called))
+                                             (- executed (getf descriptor :rejected)))))))))
 
 (defun %core-record (row descriptor)
   "Return the core record report %RESULT-PLIST carries for DESCRIPTOR."

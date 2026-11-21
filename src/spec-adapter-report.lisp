@@ -31,7 +31,8 @@
   (:import-from #:cl-mcp/src/spec-core-record
                 #:project-core-record
                 #:validate-versioned-record
-                #:field-availability)
+                #:field-availability
+                #:measured-case-report)
   (:import-from #:cl-mcp/src/object-registry
                 #:register-object)
   (:import-from #:cl-mcp/src/utils/bounded-stream
@@ -56,6 +57,7 @@
            #:symbol-report
            #:describe-report
            #:check-report
+           #:result-case-report
            #:*default-check-timeout-seconds*))
 
 (in-package #:cl-mcp/src/spec-adapter-report)
@@ -2067,6 +2069,10 @@ this adapter cannot read: ~A." core-record-reason))))
               ;; From the contract facts, because the verdict is about this run
               ;; of that contract.  A property run has no cases and answers NIL.
               :declares-cases (getf facts :declares-cases)
+              :measured-case-report
+              (when (eq t (getf facts :declares-cases))
+                (measured-case-report source (mapcar (lambda (entry) (getf entry :name))
+                                                     (getf (getf facts :data) :cases))))
               :contract (when (eq kind :contract)
                           (%contract-plist api result executed max-value-chars
                                            source (getf facts :precondition-p)))
@@ -2357,25 +2363,30 @@ counted more refusals than trials."
   "Return the raw cl-spec record behind RESULT, or NIL."
   (getf (getf result :core-record) :source))
 
+(defun result-case-report (result)
+  "Return the measured case report RESULT can use for verdicts and display."
+  (multiple-value-bind (key report) (get-properties result '(:measured-case-report))
+    (if key
+        report
+        (let ((core (getf result :core-record)))
+          (when (eq :collected (getf (getf core :field-availability) :case-report))
+            (measured-case-report (getf core :source)))))))
+
 (defun %never-called-cases (result)
   "Return the declared cases this run never reached, or NIL.
 
 Only a measured case report answers.  A report that did not come back says
 nothing about coverage, which is a different shortfall and has its own gap."
-  (when (eq :collected (getf (getf (getf result :core-record) :field-availability)
-                             :case-report))
-    (getf (getf (%core-source result) :case-report) :never-called)))
+  (getf (result-case-report result) :never-called))
 
 (defun %case-coverage-unknown-p (result)
-  "Return true when cases are declared and their run report is missing.
+  "Return true when declared cases lack a consistent measurement for every named case.
 
 Keyed on :DECLARES-CASES being exactly T.  :UNKNOWN means the contract record
 could not be read, and claiming a coverage gap there would be this adapter
 asserting that cases exist -- which is what it could not find out."
   (and (eq t (getf result :declares-cases))
-       (not (eq :collected
-                (getf (getf (getf result :core-record) :field-availability)
-                      :case-report)))))
+       (null (result-case-report result))))
 
 (defun %schema-unsupported-p (result)
   "Return true when the result record declares a schema version this adapter

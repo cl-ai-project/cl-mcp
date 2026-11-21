@@ -30,11 +30,12 @@
                 #:%contract-plist
                 #:%verified-p
                 #:%verification-gaps)
+  (:import-from #:cl-mcp/src/tools/spec-response-builders #:build-spec-check-response)
   (:import-from #:cl-mcp/src/object-registry
                 #:registry-count)
   (:import-from #:cl-mcp/specs/core-record-fixtures
                 #:make-result-record
-                #:record-with)
+                #:record-with #:record-without)
   (:import-from #:cl-mcp/specs/check-verdict-fixtures
                 #:+all-statuses+
                 #:result-kind
@@ -328,7 +329,8 @@ contract half is %CONTRACT-PLIST's own reading of INSTANCE."
         :capabilities (list :generation :available :shrinking :available
                             :instrumentation :none)
         :name 'verdict-subject :arguments nil :preconditions preconditions
-        :case-selection case-selection :cases nil))
+        :case-selection case-selection
+        :cases (when case-selection '((:name :small) (:name :large)))))
 
 (defun %recording-api (&key records about contract)
   "Return (values API CALLS): a CL-SPEC-API whose runs answer from RECORDS.
@@ -534,6 +536,72 @@ itself -- and the gap property allows the helper either way."
         (ok (equal '(:passed) (%statuses report)) "cl-spec's passed stands")
         (ok (not (getf report :verified)) "but the unreached branch is not verified")
         (%gaps-are '(:cases-never-called :input-coverage-unmeasured) report)))))
+
+(defun %fixture-case-response (record &key (max-value-chars 2000))
+  "Return the JSON-decoded response for a named-case contract and supplied core RECORD."
+  (let* ((definition (list* :cases '((:name :a) (:name :b))
+                            (%contract-definition :case-selection :exclusive
+                                                  :preconditions '((plusp x)))))
+         (api (%recording-api :contract definition
+                              :records (list (cons 'verdict-subject record))))
+         (report (check-report api :ok :function +subject+ :trials 3
+                               :max-value-chars max-value-chars)))
+    (yason:parse (with-output-to-string (stream)
+                   (yason:encode (build-spec-check-response report) stream))
+                 :json-arrays-as-vectors t :json-booleans-as-symbols t)))
+
+(deftest incomplete-case-measurements-cannot-verify-the-contract
+  (let* ((a '(:name :a :called 1 :passed 1 :failed 0 :error 0))
+         (b '(:name :b :called 1 :passed 1 :failed 0 :error 0))
+         (report (list :selection :exclusive :unit :normal-trials
+                       :declared-cases '(:a :b) :cases (list a b)
+                       :never-called nil :fixture-errors 0 :case-selection-errors 0
+                       :capture-errors 0))
+         (base (list* :schema-version 2 :input-kind :fixture-recipe
+                      :fixture '(:isolation :fresh :version 1 :recipe-name x
+                                 :setup ((list x)) :cleanup (nil))
+                      :rejected 1 (make-result-record :entity-kind :function-spec :trials 3))))
+    (let* ((record (record-with base :case-report report))
+           (clipped (%fixture-case-response record :max-value-chars 4))
+           (result (aref (gethash "results" clipped) 0)))
+      (ok (eq yason:true (gethash "verified" clipped)))
+      (ok (eq yason:false (gethash "complete" (gethash "projection"
+                                                       (gethash "core_result" result)))))
+      (ok (eq yason:true (gethash "verified" (%fixture-case-response
+                                     (record-with record :schema-version 1))))))
+    (dolist (invalid (list nil :not-collected :unknown (record-without report :cases)
+                           (record-without report :declared-cases)
+                           (record-without report :never-called)
+                           (record-with report :never-called '(:absent))
+                           (record-with report :capture-errors -1)
+                           (record-with report :fixture-errors 1)
+                           (record-with report :declared-cases '(:a :b :missing))
+                           (record-with report :cases (list a a))
+                           (record-with report :cases (list a (record-with b :name :other)))
+                           (record-with report :cases (list a (record-without b :called)))
+                           (record-with report :cases (list a (record-with b :passed -1)))
+                           (record-with report :cases (list a (record-with b :called 0)))
+                           (record-with report :cases
+                                        (list a (list* :called 0 :passed 0 b)))
+                           (record-with report :cases
+                                        (list a (list* :called 2 :passed 2 b)))
+                           (list* :declared-cases '(:a) :cases (list a) report)))
+      (let* ((response (%fixture-case-response (record-with base :case-report invalid)))
+             (gaps (gethash "verification_gaps" response))
+             (text (gethash "text" (aref (gethash "content" response) 0))))
+        (ok (eq yason:false (gethash "verified" response)))
+        (ok (find "case-coverage-unknown" gaps :test #'equal))
+        (ok (not (search "NEVER CALLED" text)))))
+    (let* ((response (%fixture-case-response (record-without base :case-report)))
+           (gaps (gethash "verification_gaps" response)))
+      (ok (find "case-coverage-unknown" gaps :test #'equal)))
+    (dolist (key '(:setup :cleanup))
+      (dolist (invalid (list 5 (cons '(list x) :dotted)))
+        (let* ((bad (record-with (getf base :fixture) key invalid))
+               (response (%fixture-case-response (record-with (record-with base :case-report report) :fixture bad)))
+               (result (aref (gethash "results" response) 0)))
+          (ok (eq yason:false (gethash "verified" response)))
+          (ok (equal "internal-error" (gethash "status" result))))))))
 
 (deftest check-report-with-nothing-selected-runs-nothing-and-verifies-nothing
   (with-registry-unchanged ()

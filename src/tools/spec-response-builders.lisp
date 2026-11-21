@@ -20,7 +20,8 @@
                 #:print-form-bounded)
   (:import-from #:cl-mcp/src/spec-adapter-report
                 #:+listing-kinds+
-                #:listing-kind-wanted-p)
+                #:listing-kind-wanted-p
+                #:result-case-report)
   (:export #:build-spec-list-response
            #:build-spec-symbol-response
            #:build-spec-describe-response
@@ -1036,8 +1037,8 @@ bare WITH-OUTPUT-TO-STRING with no printer bindings of its own."
          (fixture-p (eql 2 (getf source :schema-version)))
          (contract-p (eq :contract (getf result :kind))))
     (when source
-      (let ((case-report (getf source :case-report)))
-        (when (and case-report (not (eq :not-collected case-report)))
+      (let ((case-report (result-case-report result)))
+        (when case-report
           (let ((cases (getf case-report :cases))
                 (never (getf case-report :never-called)))
             (when cases
@@ -1467,18 +1468,10 @@ claiming what the run did not establish."
          (properties (append (getf selection :properties-not-run)
                              (let ((own (getf selection :own-property-not-run)))
                                (when own (list own)))))
-         ;; Guarded the same way %FORMAT-CORE-EVIDENCE guards it: cl-spec's
-         ;; own :NOT-COLLECTED sentinel for an uncollected case report is a
-         ;; bare keyword, and GETF on it (rather than on a plist) signals a
-         ;; TYPE-ERROR.
          (never-called
            (remove-duplicates
             (loop for result in (getf report :results)
-                  for case-report
-                    = (getf (getf (getf result :core-record) :source)
-                            :case-report)
-                  when (and case-report (not (eq :not-collected case-report)))
-                    append (getf case-report :never-called))))
+                  append (getf (result-case-report result) :never-called))))
          (coverage
            (cond
              ;; First: the headline is where a reader stops, and a declared
