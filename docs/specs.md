@@ -116,8 +116,11 @@ nested printed objects, quoted names with escaped characters, and a CSI
 sequence cut off at the end of the input
 (`tests/utils-sanitize-test.lisp`, `tests/utils-strings-test.lisp`).
 
-Within a printed object, quotes and nested objects can introduce fields.
-Delimiters embedded in an unquoted word can also be part of a raw name.
+A closed string, quoted symbol or printed character can be followed
+immediately by the next field. An angle bracket inside a parenthesized
+Lisp value or a type name such as `ARG->RESULT` stays part of that value.
+For a standalone bare type followed by a braced hexadecimal identity,
+the sanitizer treats the identity as the end of the printed instance.
 SBCL writes waitqueue names verbatim. The sanitizer recognizes their
 space and braced hexadecimal identity followed by `>`. If a raw name
 itself contains the same identity-shaped text, the first such terminator
@@ -127,8 +130,9 @@ another printed object, the intervening diagnostic text stays visible.
 Bare function names also admit `>`. SBCL prints both `#'string>` and
 `#'string` followed by an ordinary `>` as `#<FUNCTION STRING>>`.
 Standalone, the sanitizer keeps the extra `>` as diagnostic text.
-Within a finished thread, the printed value separators and enclosing
-object identify the boundary for single, multiple and list return values.
+In SBCL's `FINISHED values:` display, the enclosing thread's own identity
+ends the object. This also covers multiple return values, lists, and
+symbols such as `STRING>`.
 
 ## Read access
 

@@ -233,8 +233,20 @@
     (ok (string= "x y" (sanitize-error-message "x #<FUNCTION |A\\|B>C| {1}> y")))
     (ok (string= "left right"
                  (sanitize-error-message "left #<A \"a\\\"#<b>\\\\\" {1}> right"))))
+  (testing "adjacent complete Lisp fields can introduce another object or quoted field"
+    (dolist (field '("\"field\"" "#P\"a\"" "|field|" "#\\\"" "#\\|" "#\\\\" "#\\Newline"))
+      (dolist (next '("\"a>b\"" "#<READTABLE {2}>"))
+        (ok (string= "left right"
+                     (sanitize-error-message (format nil "left #<PAIR ~A~A {1}> right"
+                                                     field next)))))))
   (testing "a printed character does not open a string or close an object"
     (ok (string= "left right" (sanitize-error-message "left #<A #\\\" #\\> {1}> right"))))
+  (testing "a short object cannot borrow a later object's identity"
+    (ok (string= "left keep right"
+                 (sanitize-error-message
+                  "left #<THREAD \"normal\" FINISHED values: 42> keep #<READTABLE {1}> right")))
+    (ok (string= "left keep > right"
+                 (sanitize-error-message "left #<A (unfinished> keep #<READTABLE {1}> > right"))))
   (testing "outside text and incomplete printed forms stay visible"
     (ok (string= "keep > #<unfinished"
                  (sanitize-error-message "#<DONE> keep > #<unfinished")))
@@ -244,17 +256,24 @@
 (defclass |A\|B| () ()
   (:documentation "A class whose name SBCL prints verbatim with PRINC."))
 
+(defclass sanitize-arg->result () ()
+  (:documentation "A class with an angle bracket in its printed type name."))
+
 (deftest sanitize-error-message-keeps-text-around-sbcl-names
   #+sbcl
   (testing "waitqueue names are printed verbatim, including apparent Lisp syntax"
-    (dolist (name '("A|B" "A\"B" "A#<B" "|unfinished" "a name > here" "A>B" "A>B#<C" "A>private #<B"))
+    (dolist (name '("A|B" "A\"B" "A#<B" "|unfinished" "a name > here"
+                    "A>B" "A>B#<C" "A>private #<B"))
       (let ((queue (sb-thread:make-waitqueue :name name)))
         (ok (string= "left keep| > right"
                      (sanitize-error-message (format nil "left ~A keep| > right" queue)))))))
   #+sbcl
   (testing "a thread's returned function can have a delimiter in its name"
     (dolist (thunk (list (lambda () #'>) (lambda () #'string>)
-                         (lambda () (values #'string> 12)) (lambda () (list #'string>))))
+                         (lambda () (values #'string> 12)) (lambda () (list #'string>))
+                         (lambda () 'string>) (lambda () :arg->result)
+                         (lambda () (values 'string> 12)) (lambda () (list #'string> 'string>))
+                         (lambda () (compile nil '(lambda (x->y) x->y)))))
       (let ((thread (sb-thread:make-thread thunk :name "normal")))
         (sb-thread:join-thread thread)
         (ok (string= "left right"
@@ -263,9 +282,16 @@
     (ok (string= "left keep| > right"
                  (sanitize-error-message
                   (format nil "left ~A keep| > right" (make-instance '|A\|B|)))))
+    (ok (string= "left right"
+                 (sanitize-error-message
+                  (format nil "left ~A right" (make-instance 'sanitize-arg->result)))))
     (ok (string= "left ,keep, right"
-                 (sanitize-error-message (format nil "left ~S,keep,~S right" #'car *readtable*)))))
+                 (sanitize-error-message
+                   (format nil "left ~S,keep,~S right" #'car (copy-readtable nil))))))
   (testing "angle brackets inside a function name and after a printed object"
+    (dolist (name '("COMMON-LISP:>" "COMMON-LISP:>="))
+      (ok (string= "left right"
+                   (sanitize-error-message (format nil "left #<FUNCTION ~A> right" name)))))
     (ok (string= "left right"
                  (sanitize-error-message "left #<FUNCTION #:NUMBER->TEXT {1}> right")))
     (ok (string= "left bar> right"

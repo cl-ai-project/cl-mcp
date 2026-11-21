@@ -224,7 +224,7 @@ and the properties' do not."
 (defparameter *object-types*
   (list "SB-SYS:FD-STREAM" "HASH-TABLE" "STANDARD-OBJECT"
         "SB-IMPL::STRING-OUTPUT-STREAM" "FUNCTION FOO"
-        "WAITQUEUE" "THREAD" "A|B" "A\"B" "A#<B")
+        "WAITQUEUE" "THREAD" "A|B" "A\"B" "A#<B" "ARG->RESULT")
   "Type names a drawn #<...> representation shows.")
 
 (defparameter *object-details*
@@ -232,7 +232,8 @@ and the properties' do not."
         "#<INNER {1}>" "#<MIDDLE #<INNER {2}> {1}>" "\"name>with>delimiters\""
         "\"escaped\\\"#<text>\\\\\"" "|A\\|B>C|" "#P\"a>b\"" "#<WAITQUEUE A|B {3}>"
         "#<FUNCTION >>" "#<THREAD \"normal\" FINISHED values: #<FUNCTION STRING>> {4}>"
-        "#<FUNCTION #:NUMBER->TEXT {5}>")
+        "#<FUNCTION #:NUMBER->TEXT {5}>" "\"field\"#<READTABLE {6}>" "|field|\"a>b\""
+        "#\\Newline#<X {7}>" "#<FUNCTION (LAMBDA (X->Y) X->Y) {8}>")
   "Text a drawn #<...> representation shows after its type, or none.")
 
 (defparameter *printed-object-examples*
@@ -242,7 +243,14 @@ and the properties' do not."
     ("left #<THREAD \"normal\" FINISHED values: #<FUNCTION >> {2}> right" . "left right")
     ("left #<THREAD \"normal\" FINISHED values: #<FUNCTION STRING>>, 12 {2}> right" . "left right")
     ("left #<WAITQUEUE A>B#<C {1}> keep| > right" . "left keep| > right")
+    ("left #<SB-THREAD:WAITQUEUE A>B#<C {1}> keep| > right" . "left keep| > right")
+    ("left #<SB-THREAD:THREAD \"normal\" FINISHED values: #<FUNCTION STRING>>, 12 {2}> right"
+     . "left right")
     ("left #<A|B {1}> keep| > right" . "left keep| > right")
+    ("left #<ARG->RESULT {1}> right" . "left right")
+    ("left #<THREAD \"normal\" FINISHED values: (#<FUNCTION STRING>> STRING>) {2}> right"
+     . "left right")
+    ("left #<PAIR \"field\"#<READTABLE {2}> {1}> right" . "left right")
     ("left #<FUNCTION CAR>,keep,#<READTABLE {1}> right" . "left ,keep, right"))
   "Concrete messages and their visible text after removing a complete printed object.")
 
@@ -276,7 +284,10 @@ spaces, with no space at either end and no two in a row."
                 ((string= type "THREAD")
                  (pick '("\"normal\" FINISHED values: #<FUNCTION >>"
                          "\"normal\" FINISHED values: #<FUNCTION STRING>>, 12"
-                         "\"normal\" FINISHED values: (#<FUNCTION STRING>>)")))
+                         "\"normal\" FINISHED values: (#<FUNCTION STRING>>)"
+                         "\"normal\" FINISHED values: :ARG->RESULT, 12"
+                         "\"normal\" FINISHED values: (#<FUNCTION STRING>> STRING>)")))
+                ((string= type "ARG->RESULT") nil)
                 (t (pick *object-details*)))
           (random #x100000))))
 
