@@ -1532,9 +1532,10 @@ in a fresh process.  A package-inferred system's own package is found by its
 name, but its same-prefix dependencies (x/tests importing x/tests/helper) go
 through the table too, and were left out.  Called after every Lisp file ASDF
 loads (the PERFORM method below), so whatever calls Rove next -- run-tests, a
-test-op, (rove:run …) in repl-eval -- finds the source path.  The cache mirrors the root's
-absolute path below it, so the source is the key with the cache's prefix
-taken off, as RESOLVE-FILE takes off ASDF:*USER-CACHE*'s."
+test-op, (rove:run …) in repl-eval -- finds the source path, and once more by
+RUN-ROVE-TESTS before ROVE:RUN, for a file whose load did not finish.  The
+cache mirrors the root's absolute path below it, so the source is the key with
+the cache's prefix taken off, as RESOLVE-FILE takes off ASDF:*USER-CACHE*'s."
   (let* ((cache *worker-fasl-cache*)
          (variable (uiop:find-symbol* '#:*file-package* '#:rove/core/suite/file nil))
          (table (and variable (boundp variable) (symbol-value variable))))
@@ -1557,8 +1558,13 @@ taken off, as RESOLVE-FILE takes off ASDF:*USER-CACHE*'s."
 (defmethod asdf:perform :after ((operation asdf:load-op) (component asdf:cl-source-file))
   ;; Rove makes a package's suite, and keys its file, while the file loads;
   ;; re-keyed here, the entry is right before anything asks for it.  Outside
-  ;; a worker, or before Rove is loaded, this does nothing.
-  (%rove-key-files-by-source))
+  ;; a worker, or before Rove is loaded, this does nothing.  Every Lisp file
+  ;; ASDF loads passes here, so a failure is logged, never let through to fail
+  ;; the load.
+  (handler-case (%rove-key-files-by-source)
+    (error (condition)
+      (log-event :warn "test.runner.rove-rekey-failed"
+                 "error" (princ-to-string condition)))))
 
 (defun run-rove-tests (system-name)
   "Run tests using Rove and return structured results.
