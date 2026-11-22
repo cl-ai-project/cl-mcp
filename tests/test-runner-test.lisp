@@ -631,6 +631,13 @@ is stopped and waited for."
   "A structure whose slot can point at itself, for the printer's walk."
   next)
 
+(defstruct %ring-node
+  "A structure whose PRINT-OBJECT prints its slot, which can be itself."
+  next)
+
+(defmethod print-object ((node %ring-node) stream)
+  (format stream "#<RING ~S>" (%ring-node-next node)))
+
 (deftest failure-detail-prints-whatever-the-printer-settings
   ;; A test runs on a thread of its own, which sees the worker's global printer
   ;; settings.  A circular value printed forever under *PRINT-CIRCLE* NIL and
@@ -661,14 +668,15 @@ is stopped and waited for."
     ;; process ends it.  The walk finds the cycle without recursing.
     (ok (nth-value 1 (cl-mcp/src/test-runner-core::%nesting car-circular))
         "the walk finds a cycle through a car")
-    (dolist (pretty '(nil t))
-      (let ((result (%within-seconds
-                     10 (lambda ()
-                          (let ((*print-circle* nil) (*print-pretty* pretty))
-                            (gethash "form" (funcall detail :form car-circular)))))))
-        (ok (equal "#1=(#1# 2)" result)
-            (format nil "a value circular through its car prints as one (pretty ~A): ~A"
-                    pretty result))))
+    ;; Both printer settings on one thread: a regression exhausts its stack
+    ;; once, which SBCL survives, rather than twice, which it does not.
+    (let ((results (%within-seconds
+                    10 (lambda ()
+                         (loop for pretty in '(nil t)
+                               collect (let ((*print-circle* nil) (*print-pretty* pretty))
+                                         (gethash "form" (funcall detail :form car-circular))))))))
+      (ok (equal '("#1=(#1# 2)" "#1=(#1# 2)") results)
+          (format nil "a value circular through its car prints as one: ~S" results)))
     ;; Nested past the level, a value is printed to it and cut.  Just past
     ;; it, so a regression fails here instead of exhausting the stack.
     (dolist (pretty '(nil t))
@@ -678,9 +686,36 @@ is stopped and waited for."
                             (dotimes (i 1000) (setf deep (list deep)))
                             (gethash "form" (funcall detail :form deep)))))))
         (ok (and (stringp result)
-                 (search "[nested deeper than 500 levels, cut there]" result))
-            (format nil "a value nested too deep is printed to a level and cut (pretty ~A)"
+                 (search "[nested deeper than 500 levels, cut there]" result)
+                 (= 500 (count #\( result)))
+            (format nil "a value nested too deep is printed to 500 levels and cut (pretty ~A)"
                     pretty))))
+    ;; A PRINT-OBJECT that prints its slot with FORMAT ~S starts counting levels
+    ;; afresh; the stream stops it before the stack runs out.
+    (let ((result (%within-seconds
+                   10 (lambda ()
+                        (let ((ring (make-%ring-node)))
+                          (setf (%ring-node-next ring) ring)
+                          (gethash "form" (funcall detail :form ring)))))))
+      (ok (and (stringp result)
+               (search "[printing stopped: nested too deeply to print]" result))
+          "an object printing itself without end is stopped before the stack runs out"))
+    ;; A condition's report printed with *PRINT-CIRCLE* T labelled every repeated
+    ;; subform of an ASSERT; it is printed so only when the walk finds a cycle.
+    (let* ((items (list 1 2 3))
+           (reason (gethash "reason"
+                            (funcall detail
+                                     :reason (handler-case
+                                                 (assert (= (reduce #'+ items) (length items)))
+                                               (error (condition) condition))))))
+      (ok (and (search "ITEMS) = 3" reason) (null (search "#1" reason)))
+          "a condition's report repeats its subforms without labels"))
+    ;; A cycle past the walk's limit overflows, and is printed again with labels.
+    (let ((cl-mcp/src/test-runner-core::*failure-print-walk-limit* 3)
+          (long (loop for i below 50 collect i)))
+      (setf (cdr (last long)) long)
+      (ok (eql 0 (search "#1=(0 1 2" (gethash "form" (funcall detail :form long))))
+          "a cycle the walk did not reach is printed with labels after the overflow"))
     ;; A structure is walked through the slots it prints, and a hash table,
     ;; printed as #<HASH-TABLE ...>, is not entered.
     (let ((node (make-%walk-node)))
@@ -689,7 +724,7 @@ is stopped and waited for."
           "a structure pointing at itself is a cycle"))
     (let ((table (make-hash-table)))
       (setf (gethash :self table) table)
-      (ok (equal '(0 nil) (multiple-value-list
+      (ok (equal '(0 nil nil) (multiple-value-list
                            (cl-mcp/src/test-runner-core::%nesting table)))
           "a hash table is not entered"))
     (let ((d (let ((*print-length* 2) (*print-level* 1) (*print-lines* 1)
