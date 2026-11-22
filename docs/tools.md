@@ -1678,7 +1678,11 @@ Notes:
 ## `run-tests`
 Run tests for a system and return structured results with pass/fail counts and failure details.
 
-Clients using MCP 2025-06-18 or later receive the report in `structuredContent`.
+Clients using MCP 2025-06-18 or later receive the report in `structuredContent`, together with
+`summary`, the text summary itself: some clients (Claude Code among them) show `structuredContent`
+in place of `content`, and the summary's headline and advice exist nowhere else. For the same
+reason `structuredContent` keeps only the last 4000 characters of `stdout` and `stderr`, headed by
+a line counting what was left out; the result's top-level fields keep the whole capture.
 All supported versions receive a text summary in `content` and the individual report fields
 at the top level of the tool result.
 
@@ -1693,6 +1697,12 @@ Input:
   `pool-kill-worker` before retrying
 
 Output:
+- `verdict` (string): the summary's headline as a value -- `pass`, `fail`, `load-failed`,
+  `unresolved`, `timeout`, `no-tests-ran`, `result-unknown`, `all-skipped`, or `pass-incomplete`
+  (`⚠ PASS, BUT ...`: tests that did not run, or suites outside the root suite). Only `pass` is a
+  clean pass; branch on this rather than on the counts, which read zero/zero for both
+  `no-tests-ran` and `result-unknown`
+- `summary` (string, `structuredContent` only): the text summary, as in `content`
 - `passed` (integer): Number of passed tests. Rove and FiveAM count tests, not assertions, and
   count them the same way whether the whole system or a `test`/`tests` selection ran; prove
   counts assertions (a prove test file has no named tests)
@@ -1747,11 +1757,12 @@ Output:
 - `duration_ms` (integer): Execution time in milliseconds. For an aggregate Rove system this
   includes its test sub-systems. Their output contributes to the same bounded streams.
 - `stdout` / `stderr` (string, present when non-empty): the run's captured output. JSON only:
-  the summary text does not show them
+  the summary text does not show them, and `structuredContent` carries only their last 4000
+  characters
 - `debug_output` (string, present when non-empty): what the tests wrote to
   `cl-mcp/src/test-runner-core:*test-debug-output*`; shown in the summary text too
 
-The summary line in `content[].text` is `✓ PASS`, `✗ FAIL`, `✗ LOAD FAILED`, `✗ UNRESOLVED`, `✗ TIMEOUT`, `⚠ NO TESTS RAN`, `⚠ ALL SKIPPED`, `⚠ RAN, RESULT UNKNOWN`, or, for a FiveAM run with nothing failed, `⚠ PASS, BUT N TESTS DID NOT RUN` / `⚠ PASS, BUT N SUITES ARE OUTSIDE THE ROOT SUITE` (see `unreached_tests` and `suites_outside_root`). `⚠ ALL SKIPPED` means every test that ran only skipped: nothing was checked, so it is not a pass. `⚠ NO TESTS RAN` means the run completed but executed nothing — a system with no tests, or a selection that matched none. It is not a failure, but it is not a pass either. `⚠ RAN, RESULT UNKNOWN` is the ASDF fallback's: `asdf:test-system` returned without signalling, but it reports no counts, and a runner that reports failures by its return value (prove, `rove:run`) returns normally from a failing suite too. The text shows the last lines of the runner's `stdout` under that headline, since the runner's own summary is the only verdict there is.
+The summary line in `content[].text` (and `summary`), named by `verdict`, is `✓ PASS`, `✗ FAIL`, `✗ LOAD FAILED`, `✗ UNRESOLVED`, `✗ TIMEOUT`, `⚠ NO TESTS RAN`, `⚠ ALL SKIPPED`, `⚠ RAN, RESULT UNKNOWN`, or, for a FiveAM run with nothing failed, `⚠ PASS, BUT N TESTS DID NOT RUN` / `⚠ PASS, BUT N SUITES ARE OUTSIDE THE ROOT SUITE` (see `unreached_tests` and `suites_outside_root`). `⚠ ALL SKIPPED` means every test that ran only skipped: nothing was checked, so it is not a pass. `⚠ NO TESTS RAN` means the run completed but executed nothing — a system with no tests, or a selection that matched none. It is not a failure, but it is not a pass either. `⚠ RAN, RESULT UNKNOWN` is the ASDF fallback's: `asdf:test-system` returned without signalling, but it reports no counts, and a runner that reports failures by its return value (prove, `rove:run`) returns normally from a failing suite too. The text shows the last lines of the runner's `stdout` under that headline, since the runner's own summary is the only verdict there is.
 
 Prove is supported for prove-asdf test systems (`:defsystem-depends-on ("prove-asdf")` and `(:test-file ...)` components): each test file is run and every assertion counted, a `subtest`'s one by one, with a failure detail per failed assertion (`description`, the tested `form`, `values` got and expected, `reason`). A prove system that runs its tests some other way falls back to ASDF. `test`/`tests` selection is not supported for prove.
 
