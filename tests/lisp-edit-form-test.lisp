@@ -970,7 +970,17 @@ above its first definition.")
                                 :operation "insert_after"
                                 :content "(defun d () (format nil \"a; b #\\\\;\"))")
                  (format nil "(progn (defun c () 1) ~
-                              (defun d () (format nil \"a; b #\\\\;\")))~%"))))
+                              (defun d () (format nil \"a; b #\\\\;\")))~%")))
+      (ok (equal (%default-edit (format nil "(progn (defun c () 1))~%")
+                                :form-type "defun" :form-name "c"
+                                :operation "insert_after" :content "(defun d (c) (char= c #\\;))")
+                 (format nil "(progn (defun c () 1) (defun d (c) (char= c #\\;)))~%"))
+          "a #\\; character in the content")
+      (ok (equal (%default-edit (format nil "(progn (defun d (c) (char= c #\\;))~%~
+                                             ~2@T(defun y () 2))~%")
+                                :form-type "defun" :form-name "y" :operation "delete")
+                 (format nil "(progn (defun d (c) (char= c #\\;)))~%"))
+          "a #\\; character ending the definition before"))
     (testing "delete of the last definition under a comment of its own"
       (let ((updated (%default-edit (format nil "(in-package :cl-user)~%~%(progn~%~
                                                  ~2@T(defun x () 1)~%~2@T;; about y~%~
