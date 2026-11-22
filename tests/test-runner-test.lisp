@@ -610,6 +610,175 @@
       (ok (null (cl-mcp/src/test-runner-core::%test-name-package
                  (make-symbol "SOME-TEST")))))))
 
+(defun %within-seconds (seconds thunk)
+  "Call THUNK on a thread of its own and return its value, the condition it
+signalled, or :TIMED-OUT when it has not returned within SECONDS -- so a printer
+that never ends, or ends in an error, fails the test instead of hanging the
+suite or reaching the debugger.  However this returns, a thread still running
+is stopped and waited for."
+  (let ((thread (sb-thread:make-thread
+                 (lambda ()
+                   (handler-case (funcall thunk)
+                     (serious-condition (condition) condition)))
+                 :name "printer probe")))
+    (unwind-protect
+         (sb-thread:join-thread thread :timeout seconds :default :timed-out)
+      (when (sb-thread:thread-alive-p thread)
+        (ignore-errors (sb-thread:terminate-thread thread))
+        (sb-thread:join-thread thread :timeout 10 :default nil)))))
+
+(defstruct %walk-node
+  "A structure whose slot can point at itself, for the printer's walk."
+  ;; NEXT: the node this one points at, itself to make a cycle.
+  next)
+
+(defstruct %ring-node
+  "A structure whose PRINT-OBJECT prints its slot, which can be itself."
+  ;; NEXT: the node PRINT-OBJECT prints inside this one, itself to make a ring.
+  next)
+
+(defmethod print-object ((node %ring-node) stream)
+  (format stream "#<RING ~S>" (%ring-node-next node)))
+
+(deftest failure-detail-prints-whatever-the-printer-settings
+  ;; A test runs on a thread of its own, which sees the worker's global printer
+  ;; settings.  A circular value printed forever under *PRINT-CIRCLE* NIL and
+  ;; held run-tests until its deadline, and a *PRINT-LENGTH* set in repl-eval
+  ;; cut the values a failure reports, under an object-id said to hold them
+  ;; whole.
+  (let ((circular (let ((list (list 1 2 3))) (setf (cdr (last list)) list) list))
+        (car-circular (let ((list (list 1 2))) (setf (car list) list) list))
+        (detail (lambda (&rest arguments)
+                  (apply #'cl-mcp/src/test-runner-core::make-failure-detail
+                         :test-name "t" arguments))))
+    (let ((result (%within-seconds
+                   10 (lambda ()
+                        (let ((*print-circle* nil))
+                          (funcall detail :form circular :values (list circular)
+                                          :reason (make-condition 'type-error
+                                                                  :datum circular
+                                                                  :expected-type 'string)))))))
+      (ok (hash-table-p result) "a circular value is printed, not printed forever")
+      (when (hash-table-p result)
+        (ok (equal "#1=(1 2 3 . #1#)" (gethash "form" result)) "as a circular list")
+        (ok (equal '("#1=(1 2 3 . #1#)") (coerce (gethash "values" result) 'list))
+            "a value too")
+        (ok (search "#1=(1 2 3 . #1#)" (gethash "reason" result))
+            "and a condition's report")))
+    ;; Circular through its CAR, the value recurses instead of running on, and
+    ;; ran out of stack under *PRINT-CIRCLE* NIL; a second exhaustion in one
+    ;; process ends it.  The walk finds the cycle without recursing.
+    (ok (nth-value 1 (cl-mcp/src/test-runner-core::%nesting car-circular))
+        "the walk finds a cycle through a car")
+    ;; Both printer settings on one thread: a regression exhausts its stack
+    ;; once, which SBCL survives, rather than twice, which it does not.
+    (let ((results (%within-seconds
+                    10 (lambda ()
+                         (loop for pretty in '(nil t)
+                               collect (let ((*print-circle* nil) (*print-pretty* pretty))
+                                         (gethash "form" (funcall detail :form car-circular))))))))
+      (ok (equal '("#1=(#1# 2)" "#1=(#1# 2)") results)
+          (format nil "a value circular through its car prints as one: ~S" results)))
+    ;; Nested past the level, a value is printed to it and cut.  Just past
+    ;; it, so a regression fails here instead of exhausting the stack.
+    (dolist (pretty '(nil t))
+      (let ((result (%within-seconds
+                     10 (lambda ()
+                          (let ((deep nil) (*print-pretty* pretty))
+                            (dotimes (i 1000) (setf deep (list deep)))
+                            (gethash "form" (funcall detail :form deep)))))))
+        (ok (and (stringp result)
+                 (search "[nested deeper than 500 levels, cut there]" result)
+                 (= 500 (count #\( result)))
+            (format nil "a value nested too deep is printed to 500 levels and cut (pretty ~A)"
+                    pretty))))
+    (let ((result (%within-seconds
+                   10 (lambda ()
+                        (let ((shallow nil))
+                          (dotimes (i 499) (setf shallow (list shallow)))
+                          (gethash "form" (funcall detail :form shallow)))))))
+      (ok (and (stringp result) (= 499 (count #\( result))
+               (null (search "nested deeper" result)))
+          "a value inside the level prints whole and unmarked"))
+    ;; The stack left is counted from the stack's size, whichever way it grows:
+    ;; counted from the wrong end, every field was cut.
+    (ok (< cl-mcp/src/test-runner-core::*print-stack-reserve*
+           (%within-seconds 10 #'cl-mcp/src/test-runner-core::%stack-room))
+        "a fresh thread has more stack left than a print must keep")
+    ;; A PRINT-OBJECT that prints its slot with FORMAT ~S adds no level of its
+    ;; own; the stream stops a chain of them before the stack runs out.
+    (let ((result (%within-seconds
+                   10 (lambda ()
+                        (let ((ring (make-%ring-node)))
+                          (setf (%ring-node-next ring) ring)
+                          (gethash "form" (funcall detail :form ring)))))))
+      (ok (and (stringp result)
+               (search "[printing stopped: nested too deeply to print]" result))
+          "an object printing itself without end is stopped before the stack runs out"))
+    ;; A condition's report printed with *PRINT-CIRCLE* T labelled every repeated
+    ;; subform of an ASSERT; it is printed so only when the walk finds a cycle.
+    (let* ((items (list 1 2 3))
+           (reason (gethash "reason"
+                            (funcall detail
+                                     :reason (handler-case
+                                                 (assert (= (reduce #'+ items) (length items)))
+                                               (error (condition) condition))))))
+      (ok (and (search "ITEMS) = 3" reason) (null (search "#1" reason)))
+          "a condition's report repeats its subforms without labels"))
+    ;; A condition holding a deep value: in Form: or Got:, where SBCL prints its
+    ;; datum by its own code, it is named; as a reason, its report is printed,
+    ;; with no "cut there", since the report chooses what of its data it shows.
+    (let ((deep-error (let ((deep nil))
+                        (dotimes (i 600) (setf deep (list deep)))
+                        (make-condition 'type-error :datum deep :expected-type 'string))))
+      (ok (equal "TYPE-ERROR, not printed: it holds data nested 500 levels or more"
+                 (%within-seconds 10 (lambda ()
+                                       (gethash "form" (funcall detail :form deep-error)))))
+          "a condition with deep data in a form is named, not printed")
+      (let ((reason (%within-seconds 10 (lambda ()
+                                          (gethash "reason"
+                                                   (funcall detail :reason deep-error))))))
+        (ok (and (stringp reason) (search "The value" reason)
+                 (null (search "cut there" reason)))
+            "and as a reason its report is printed, unmarked")))
+    ;; A cycle past the walk's limit overflows, and is printed again with labels.
+    (let ((cl-mcp/src/test-runner-core::*failure-print-walk-limit* 3)
+          (long (loop for i below 50 collect i)))
+      (setf (cdr (last long)) long)
+      (ok (eql 0 (search "#1=(0 1 2" (gethash "form" (funcall detail :form long))))
+          "a cycle the walk did not reach is printed with labels after the overflow"))
+    ;; A structure is walked through the slots it prints, and a hash table,
+    ;; printed as #<HASH-TABLE ...>, is not entered.
+    (let ((node (make-%walk-node)))
+      (setf (%walk-node-next node) node)
+      (ok (nth-value 1 (cl-mcp/src/test-runner-core::%nesting node))
+          "a structure pointing at itself is a cycle"))
+    (let ((table (make-hash-table)))
+      (setf (gethash :self table) table)
+      (ok (equal '(0 nil nil) (multiple-value-list
+                           (cl-mcp/src/test-runner-core::%nesting table)))
+          "a hash table is not entered"))
+    (let ((d (let ((*print-length* 2) (*print-level* 1) (*print-lines* 1)
+                   (*print-base* 16) (*print-radix* t) (*print-case* :downcase)
+                   (*print-pretty* t))
+               (funcall detail :form '(equal (list 1 2 3) (list 1 2 (3 4) 17))
+                               :values (list (list 1 2 (list 3 (list 4)) 17)
+                                             (loop for i below 60 collect i))))))
+      (ok (equal "(EQUAL (LIST 1 2 3) (LIST 1 2 (3 4) 17))" (gethash "form" d))
+          "printer variables set elsewhere do not cut or recast the form")
+      (ok (equal "(1 2 (3 (4)) 17)" (aref (gethash "values" d) 0))
+          "nor a value")
+      (ok (search "58 59)" (aref (gethash "values" d) 1))
+          "and a value over several lines is not cut to the first"))
+    (let ((same "a"))
+      (ok (equal "(EQUAL \"a\" \"a\")"
+                 (gethash "form" (funcall detail :form (list 'equal same same))))
+          "one string met twice prints as source does, without #1= labels"))
+    (let ((cl-mcp/src/test-runner-core::*failure-print-max-chars* 20))
+      (ok (equal "(0 1 2 3 4 5 6 7 8 9 … [printing stopped at 20 characters]"
+                 (gethash "form" (funcall detail :form (loop for i below 100 collect i))))
+          "a value too long to print stops at the limit and says so"))))
+
 (deftest run-tests-keeps-the-quotes-on-a-string-assertion-form
   (testing "a real Rove failure whose form is a bare string reports it quoted"
     ;; The whole path, not just MAKE-FAILURE-DETAIL: Rove's ASSERTION-FORM
@@ -2630,6 +2799,29 @@ in ASDF and as left by a root change --, their packages and the directory."
            (ok (search "KNOWN" reason :test #'char-equal))))
        (ok (= 1 (symbol-value runs)) "no test from the mixed selection ran")
        (ok (null (find-symbol "ABSENT" package)))))))
+
+(deftest run-tests-reports-a-circular-value-of-a-failing-assertion
+  ;; The run ends with the failure reported, instead of printing the value
+  ;; until the run's deadline.
+  (%call-with-inferred-test-fixture
+   "clmcp-circular" "rove"
+   "(defpackage #:clmcp-circular/tests/a (:use #:cl #:rove))
+(in-package #:clmcp-circular/tests/a)
+(defun circular () (let ((list (list 1 2 3))) (setf (cdr (last list)) list) list))
+(deftest circular-value (ok (eq (circular) :nope)))
+"
+   (lambda (dir)
+     (declare (ignore dir))
+     (let ((result (%within-seconds
+                    30 (lambda ()
+                         (let ((*print-circle* nil) (*print-length* nil))
+                           (run-tests "clmcp-circular/tests/a"))))))
+       (ok (hash-table-p result) "the run ends")
+       (when (hash-table-p result)
+         (ok (= 1 (gethash "failed" result)) "with the failure counted")
+         (let ((failure (aref (gethash "failed_tests" result) 0)))
+           (ok (find "#1=(1 2 3 . #1#)" (gethash "values" failure) :test #'equal)
+               "and its circular value printed as one")))))))
 
 (deftest rove-file-keys-move-from-the-worker-cache-to-the-source
   ;; Rove keys a test file's package by the FASL that was loading, turned back
