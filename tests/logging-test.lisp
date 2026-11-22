@@ -64,7 +64,9 @@
        (make-condition 'simple-error)
        (lambda ()
          (let ((s (log-of "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")))
-           (ok (search "\"event\":\"rpc.internal\"" s) "rpc.internal is written")))))))
+           (ok (search "\"event\":\"rpc.internal\"" s) "rpc.internal is written")
+           (ok (search "unprintable" s) "naming the failure as unprintable")
+           (ok (search "SIMPLE-ERROR" s) "with the condition's type")))))))
 
 (deftest should-log-p-level-filtering
   (testing "warn and error are visible at default debug level"

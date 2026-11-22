@@ -7,6 +7,8 @@
                 #:version)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
+  (:import-from #:cl-mcp/src/utils/printing
+                #:bounded-princ-to-string)
   (:import-from #:cl-mcp/src/state
                 #:server-state
                 #:initialized-p
@@ -461,9 +463,10 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
              (prog1 (handle-request state id method (unless (eq params :absent) params))
                (log-event :debug "rpc.result" "id" id "method" method)))))
       (error (e)
-        ;; A condition whose report signals must not take the line with it.
+        ;; A condition whose report signals, or prints without end, must not
+        ;; take the line (or the thread) with it.
         (ignore-errors (log-event :error "rpc.internal" "id" logged-id "method" logged-method
-                                  "error" (or (ignore-errors (princ-to-string e))
+                                  "error" (or (ignore-errors (bounded-princ-to-string e))
                                               (format nil "unprintable ~S"
                                                       (type-of e)))))
         (when valid-id (rpc-error id -32603 "Internal error")))
