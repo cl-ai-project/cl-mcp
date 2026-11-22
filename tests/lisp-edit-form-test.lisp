@@ -947,6 +947,57 @@ above its first definition.")
                                     :operation "replace"
                                     :content "(defun e () 2) ; changed")))
         (ok (equal (wrapper updated) '(progn (defun e () 2))) updated)))
+    (testing "content ending in a comment adds no line break where the ) has one"
+      (ok (equal (%default-edit (format nil "(progn~%~2@T(defun c () 1)~%~2@T)~%")
+                                :form-type "defun" :form-name "c"
+                                :operation "insert_after" :content "(defun d () 2) ; why")
+                 (format nil "(progn~%~2@T(defun c () 1)~%~2@T(defun d () 2) ; why~%~2@T)~%"))))
+    (testing "a block of forms ending in a comment keeps the ) out of it"
+      (let ((updated (%default-edit (format nil "(in-package :cl-user)~%~%~
+                                                 (progn (defun c () 1))~%")
+                                    :form-type "defun" :form-name "c"
+                                    :operation "insert_after"
+                                    :content (format nil "(defun d () 2)~%(defun f () 3) ; why"))))
+        (ok (equal (wrapper updated) '(progn (defun c () 1) (defun d () 2) (defun f () 3)))
+            updated)))
+    (testing "a ; that starts no comment adds no line break"
+      (ok (equal (%default-edit (format nil "(progn (defparameter *sep* \";\")~%~
+                                             ~2@T(defun y () 2))~%")
+                                :form-type "defun" :form-name "y" :operation "delete")
+                 (format nil "(progn (defparameter *sep* \";\"))~%")))
+      (ok (equal (%default-edit (format nil "(progn (defun c () 1))~%")
+                                :form-type "defun" :form-name "c"
+                                :operation "insert_after"
+                                :content "(defun d () (format nil \"a; b #\\\\;\"))")
+                 (format nil "(progn (defun c () 1) (defun d () (format nil \"a; b #\\\\;\")))~%"))))
+    (testing "delete of the last definition under a comment of its own"
+      (let ((updated (%default-edit (format nil "(in-package :cl-user)~%~%(progn~%~
+                                                 ~2@T(defun x () 1)~%~2@T;; about y~%~
+                                                 ~2@T(defun y () 2))~%")
+                                    :form-type "defun" :form-name "y" :operation "delete")))
+        (ok (equal (wrapper updated) '(progn (defun x () 1))) updated)))
+    (testing "deleting what insert_after added gives the file back"
+      (let* ((source (format nil "(eval-when (:execute) (defun a () 1) ; note~%~2@T)~%"))
+             (inserted (%default-edit source :form-type "defun" :form-name "a"
+                                             :operation "insert_after"
+                                             :content "(defun b () 2)")))
+        (ok (equal (%default-edit inserted :form-type "defun" :form-name "b"
+                                           :operation "delete")
+                   source)
+            inserted)))
+    (testing "the new line takes the target's indentation, tabs kept"
+      (ok (equal (%default-edit (format nil "(progn~C(defun a () 1) ; n~%~C)~%" #\Tab #\Tab)
+                                :form-type "defun" :form-name "a"
+                                :operation "insert_after" :content "(defun b () 2)")
+                 (format nil "(progn~C(defun a () 1) ; n~%~6@T~C(defun b () 2)~%~C)~%"
+                         #\Tab #\Tab #\Tab))))
+    (testing "in a CRLF file an insert_after breaks the lines with CRLF"
+      (ok (equal (%default-edit (format nil "(progn (defun a () 1) ; n~C~C)~C~C"
+                                        #\Return #\Newline #\Return #\Newline)
+                                :form-type "defun" :form-name "a"
+                                :operation "insert_after" :content "(defun b () 2) ; m")
+                 (format nil "(progn (defun a () 1) ; n~C~C~7@T(defun b () 2) ; m~C~C)~C~C"
+                         #\Return #\Newline #\Return #\Newline #\Return #\Newline))))
     (testing "in a CRLF file the added line breaks are CRLF"
       (let ((updated (%default-edit (format nil "(in-package :cl-user)~C~C~C~C~
                                                  (progn (defun x () 1) ; keep~C~C~

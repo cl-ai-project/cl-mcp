@@ -611,9 +611,10 @@ that is not an ambiguous [ or {) is not repaired at all."
 (defun %validate-and-repair-block (content &optional readtable-designator
                                              package-name source-path)
   "Validate CONTENT for insert_before/insert_after, which take one or more
-top-level forms.  Returns the five values of %VALIDATE-AND-REPAIR-CONTENT,
-then the number of forms and, for a block of several, their spans in the
-validated text.
+top-level forms.  Returns the first five values of
+%VALIDATE-AND-REPAIR-CONTENT, then the number of forms, for a block of several
+their spans in the validated text, and whether adjoining source needs a line
+break after the trimmed content (a ; comment at its end).
 
 A block that reads as complete forms is taken as given: parinfer never runs on
 it, since it would change content that is accepted unchanged today.  One form,
@@ -631,16 +632,18 @@ error are never taken on their own."
          (*read-with-cl-reader* (and custom-rt t))
          (nonstandard-rt (%nonstandard-readtable-p readtable-designator)))
     (flet ((one-form ()
-             (multiple-value-bind (validated warning fixes bracket reparented)
+             (multiple-value-bind (validated warning fixes bracket reparented
+                                   line-comment-p)
                  (%validate-and-repair-content content readtable-designator
                                                package-name source-path)
-               (values validated warning fixes bracket reparented 1 nil))))
+               (values validated warning fixes bracket reparented 1 nil line-comment-p))))
       (multiple-value-bind (spans read-error)
           (%block-spans content package-name source-path)
         (cond
           ((and (null read-error) (rest spans))
            (values content nil nil (%bracket-warning content nonstandard-rt) nil
-                   (length spans) spans))
+                   (length spans) spans
+                   (%line-comment-at-end-p content (cdr (car (last spans))))))
           ((null read-error)
            (one-form))
           (t
@@ -661,7 +664,9 @@ error are never taken on their own."
                            (and (not nonstandard-rt)
                                 (reparented-forms content repaired))
                            (length repaired-spans)
-                           repaired-spans)))))))))))
+                           repaired-spans
+                           (%line-comment-at-end-p
+                            repaired (cdr (car (last repaired-spans)))))))))))))))
 
 (defun %target-feature-prefix (text node)
   "Return the #+/#- feature expressions written in front of NODE's form in TEXT,
@@ -1064,18 +1069,24 @@ The line break itself is outside the comment."
              (%source-line-comment-end text comment readtable))
         start)))
 
-(defun %last-line-may-end-in-comment-p (text readtable)
-  "True when TEXT's last line may end inside a ; line comment under READTABLE,
-so that source joined on after TEXT needs a line break first.  Errs towards
-true: a ; inside a string or a #\\; on that line only costs a line break."
-  (let* ((line-start (1+ (or (position #\Newline text :from-end t) -1)))
-         (first (position #\; text :start line-start)))
-    (and first
-         (or (%standard-line-comment-p readtable)
-             (loop for semicolon = first then (position #\; text :start (1+ semicolon))
-                   while semicolon
-                   thereis (%source-line-comment-end text semicolon readtable)))
-         t)))
+(defun %ends-in-line-comment-p (text from)
+  "True when TEXT, whose part from FROM holds no form, ends inside a ; line
+comment, so that source joined on after TEXT needs a line break first.  That
+part is read with standard gap syntax: a wrapper's definitions, the only place
+this is asked, are found only under it.  When the part does not split into
+whitespace and comments (FROM is not past a form: just inside a wrapper's
+paren), any ; on TEXT's last line counts, since a line break too many before
+the wrapper's ) is harmless and one too few comments it out."
+  (let* ((gap (subseq text (min from (length text))))
+         (segments (%gap-segments gap)))
+    (cond (segments
+           (let ((last (car (last segments))))
+             (and (eq (first last) :comment)
+                  (char= (char gap (second last)) #\;))))
+          ((zerop (length gap)) nil)
+          (t (and (find #\; text
+                        :start (1+ (or (position #\Newline text :from-end t) -1)))
+                  t)))))
 
 (defun %apply-operation-preserve-spacing (text node end operation content
                                           readtable comment-floor replacement-line-comment-p)
@@ -1170,7 +1181,7 @@ file's own (CRLF in a CRLF file)."
                                      (concatenate 'string newline (line-indent start)))
                                     (t (string #\Space)))
                               snippet
-                              (if (and (%last-line-may-end-in-comment-p snippet readtable)
+                              (if (and replacement-line-comment-p
                                        rest-of-line
                                        (not (member (char suffix rest-of-line)
                                                     '(#\Newline #\Return))))
@@ -1199,10 +1210,13 @@ file's own (CRLF in a CRLF file)."
              ;; ) follows the child before it.
              (let ((before-core (gap-before start)))
                (cond (closing (concatenate 'string before-core
-                                           (if (%last-line-may-end-in-comment-p
-                                                before-core readtable)
-                                               newline
-                                               "")
+                                           ;; The line break the ) had, if
+                                           ;; any, so an insert undoes.
+                                           (cond ((not (%ends-in-line-comment-p
+                                                        before-core comment-floor))
+                                                  "")
+                                                 ((find #\Newline gap-after) gap-after)
+                                                 (t newline))
                                            following))
                      ((plusp (length before-core))
                       (concatenate 'string before-core newline))
@@ -1281,8 +1295,8 @@ file's own (CRLF in a CRLF file)."
                          &optional (comment-floor 0) replacement-line-comment-p)
   "Apply OPERATION to NODE within TEXT, optionally normalizing blank lines.
 END includes the target's same-line comment. COMMENT-FLOOR bounds the comment
-block above NODE. REPLACEMENT-LINE-COMMENT-P indicates a line break may be
-needed after CONTENT."
+block above NODE: where the form before it ends. REPLACEMENT-LINE-COMMENT-P
+says CONTENT ends in a ; comment, so a line break may be needed after it."
   (if normalize-blank-lines
       (%apply-operation-normalized text node end operation content readtable comment-floor
                                    replacement-line-comment-p)
@@ -1448,7 +1462,8 @@ replaced form, and the line the matched form starts on. A dry run carries the re
             ;; Delete path: no content validation needed
             (let* ((updated
                     (%apply-operation original target end op-key nil
-                                      normalize-blank-lines active-readtable))
+                                      normalize-blank-lines active-readtable
+                                      (%comment-floor nodes target)))
                    (would-change (not (string= original updated))))
               (log-event :debug "lisp.edit.form" "path" (namestring abs)
                          "operation" op-normalized "form_type" form-type
