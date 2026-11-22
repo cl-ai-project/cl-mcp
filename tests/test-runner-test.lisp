@@ -1716,6 +1716,42 @@ everything again."
             do (ok (null (nth-value 1 (gethash "failed_tests" data)))
                    (format nil "~A: a pass has no failed_tests either" path))))))
 
+(deftest build-run-tests-response-writes-index-sources-relative-to-the-root
+  ;; failures_index is what an agent reads on every failing run; an absolute
+  ;; source path repeated the checkout's prefix in each of its entries.  It
+  ;; names a file under the project root as clgrep-search does, relative to
+  ;; it, and leaves failed_tests and the failures themselves as recorded.
+  (let ((root (uiop:ensure-directory-pathname
+               (uiop:parse-native-namestring "/srv/clmcp-index-root/")))
+        (under "/srv/clmcp-index-root/tests/a[1]-test.lisp")
+        (outside "/opt/clmcp-elsewhere/dep-test.lisp")
+        (cl-mcp/src/object-registry::*object-registry*
+          (cl-mcp/src/object-registry::make-object-registry)))
+    (flet ((failure (name file)
+             (let ((ht (cl-mcp/src/test-runner-core::make-failure-detail
+                        :test-name name :form '(= 1 2) :values '(1 2))))
+               (setf (gethash "source" ht)
+                     (cl-mcp/src/tools/helpers:make-ht "file" file "line" 3))
+               ht))
+           (index-files (failures)
+             (map 'list (lambda (entry) (gethash "file" (gethash "source" entry)))
+                  (gethash "failures_index"
+                           (build-run-tests-response
+                            (cl-mcp/src/test-runner-core::make-test-result
+                             :passed 0 :failed (length failures) :pending 0
+                             :failed-tests failures :framework :rove :duration 1))))))
+      (let ((failures (list (failure "under" under) (failure "outside" outside)
+                            (failure "relative" "r.lisp"))))
+        (let ((cl-mcp/src/project-root:*project-root* root))
+          (ok (equal '("tests/a[1]-test.lisp" "/opt/clmcp-elsewhere/dep-test.lisp" "r.lisp")
+                     (index-files failures))
+              "a file under the root is relative to it, one outside absolute, a relative one kept"))
+        (ok (equal under (gethash "file" (gethash "source" (first failures))))
+            "the failure keeps its source as recorded, for failed_tests and its object-id")
+        (let ((cl-mcp/src/project-root:*project-root* nil))
+          (ok (equal (list under outside "r.lisp") (index-files failures))
+              "without a project root every file is as recorded"))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; FiveAM Suite Matching
 ;;; ---------------------------------------------------------------------------

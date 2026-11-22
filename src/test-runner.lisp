@@ -165,7 +165,8 @@ NOTE: stdout/stderr are in structured fields only, NOT shown in the summary text
 To include debug prints in the visible summary, write to *test-debug-output*:
   (format cl-mcp/src/test-runner-core:*test-debug-output* \"debug: ~A~%\" value)
 - failures_index (array) -- one entry per failing test, the first 30: test_name,
-  failures (its failed assertions), object_id, source (Rove)
+  failures (its failed assertions), object_id, source (Rove; its file relative to
+  the project root when under it, as clgrep-search writes one)
 - failures_index_rest (object, when more tests failed) -- failures, tests,
   object_id
 - failed_tests (array of objects with fields:)

@@ -15,6 +15,8 @@
                 #:format-inspect-elements)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:normalize-path-for-display)
   ;; No cycle: macroexpand-core imports only cl-mcp/src/utils/sanitize and
   ;; cl-mcp/src/utils/printing.
   (:import-from #:cl-mcp/src/macroexpand-core
@@ -850,6 +852,28 @@ FiveAM reason reads `X ... which is not EQUAL to Y'."
   (let ((source (gethash "source" failure)))
     (and (hash-table-p source) (gethash "file" source))))
 
+(defun %index-source (source)
+  "Return SOURCE, a failure's source, as a failures_index entry carries it: its
+file relative to the project root when the file lies under it, as clgrep-search
+writes a match's file (NORMALIZE-PATH-FOR-DISPLAY), else as recorded.  SOURCE
+itself is left alone, for failed_tests and the failures under an object-id.
+
+The index is what an agent reads on every failing run, and an absolute path
+repeated the checkout's whole prefix, the user's home directory with it, in
+each entry: a quarter of the index on a deep checkout."
+  (let* ((file (and (hash-table-p source) (gethash "file" source)))
+         ;; Native: a recorded file is a filesystem path, and parsed as a
+         ;; namestring a [ or * in it would make a wild pathname.
+         (shown (and (stringp file)
+                     (ignore-errors
+                      (normalize-path-for-display (uiop:parse-native-namestring file))))))
+    (if (and shown (string/= shown file))
+        (let ((copy (make-hash-table :test 'equal)))
+          (maphash (lambda (key value) (setf (gethash key copy) value)) source)
+          (setf (gethash "file" copy) shown)
+          copy)
+        source)))
+
 (defun %group-failures (failures detailed)
   "Return FAILURES, a vector of failure details, grouped by test in the order
 each test first failed: a list of (NAME FAILURES UNDETAILED FILES), FAILURES a
@@ -939,7 +963,7 @@ whose reason is the whole report: it is written whole and not indexed."
                                 (multiple-value-bind (source presentp)
                                     (gethash "source" (aref failures 0))
                                   (when presentp
-                                    (setf (gethash "source" entry) source)))
+                                    (setf (gethash "source" entry) (%index-source source))))
                                 entry)))
          (rest-entry
            (and rest
