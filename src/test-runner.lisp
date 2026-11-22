@@ -50,10 +50,12 @@ text goes with it as summary (the verdict headline, the advice under it, the ASD
 fallback's stdout tail), debug_output, which the summary holds verbatim, is left
 out, and stdout and stderr, which the text leaves out, are cut to their ends
 (%CLIP-OUTPUT-FOR-STRUCTURED).  failed_tests, one entry per failed assertion
-with every field whole, gives way to failures_index, one bounded entry per
-failing test whose object_id holds its failures for inspect-object; a report
-with no index (a load, resolution or timeout failure, a single entry) keeps
-it.  passed_tests, a name per passing test, is left to the count in passed.
+with every field whole, is left out, whatever the verdict, so a reader never
+mistakes its absence for no failures: failures_index stands for it, one bounded
+entry per failing test whose object_id holds its failures for inspect-object,
+and a load, resolution or timeout failure, which has no index, is written whole
+in summary.  passed_tests, a name per passing test, is left to the count in
+passed.
 The result's own fields keep everything."
   (let ((report (gethash "result" reply)))
     (when (and version (string>= version "2025-06-18") (hash-table-p report)
@@ -67,8 +69,7 @@ The result's own fields keep everything."
         (when (stringp text)
           (setf (gethash "summary" data) text)
           (remhash "debug_output" data))
-        (when (nth-value 1 (gethash "failures_index" data))
-          (remhash "failed_tests" data))
+        (remhash "failed_tests" data)
         (remhash "passed_tests" data)
         (dolist (field '("stdout" "stderr"))
           (multiple-value-bind (value presentp) (gethash field data)
@@ -118,9 +119,9 @@ Returns:
   plus summary, the content text itself -- some clients (Claude Code) show
   structuredContent in its place.  It leaves out debug_output, which summary
   holds, and its stdout and stderr keep only their last 4000 characters, headed
-  by a line counting the rest.  It carries failures_index in place of
-  failed_tests (a load, resolution or timeout report keeps its one entry) and
-  leaves out passed_tests
+  by a line counting the rest.  It leaves out failed_tests, whatever
+  the verdict, and passed_tests: failures_index stands for the first (a load,
+  resolution or timeout report, which has none, is whole in summary)
 - verdict (string) -- the headline as a value: pass, fail, load-failed,
   unresolved, timeout, no-tests-ran, result-unknown (the ASDF fallback, which
   counts nothing: read the stdout tail at the end of the summary), all-skipped,

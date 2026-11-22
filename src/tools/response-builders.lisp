@@ -824,17 +824,16 @@ failures of the tests past it are counted, under one object-id of their own.")
   "Characters of one field of a test's failure -- its name, description, form,
 values, reason or frame -- written into run-tests' text (%CLIP-FAILURE-FIELD).
 A test that compares a large structure prints all of it, and one such field can
-be as long as many failures; its whole text stays in failed_tests, and the failure is registered for
-inspect-object.  A load,
-resolution or timeout failure is not cut: its reason is the whole report, with
-the hint or the available names at its end, and is written as it was before
-this bound.")
+be as long as many failures; its whole text stays in failed_tests, and the
+failure is registered for inspect-object.  A load, resolution or timeout
+failure is not cut: its reason is the whole report, with the hint or the
+available names at its end, and is written as it was before this bound.")
 
 (defun %clip-failure-field (text)
   "Return TEXT, a failure field's printed text, or its first and last halves of
 *FAILURE-FIELD-MAX-CHARS* around a marker saying how much was cut and that the
-whole is under the object-id on the failure's first line.  Both ends are kept: a form's head names what was tested and its tail
-the last argument, and a FiveAM reason reads `X ... which is not EQUAL to Y'."
+whole is under the object-id on the failure's first line.  Both ends are kept:
+a form's head names what was tested and its tail the last argument, and a FiveAM reason reads `X ... which is not EQUAL to Y'."
   (let ((text (if (stringp text) text (princ-to-string text)))
         (half (floor *failure-field-max-chars* 2)))
     (if (<= (length text) *failure-field-max-chars*)
@@ -846,19 +845,23 @@ the last argument, and a FiveAM reason reads `X ... which is not EQUAL to Y'."
           (if (< (length cut) (length text)) cut text)))))
 
 (defun %group-failures (failures detailed)
-  "Return FAILURES, a vector of failure details, grouped by test_name in the
-order each test first failed: a list of (NAME FAILURES UNDETAILED), FAILURES a
-vector of the test's failure details and UNDETAILED how many of them come at or
-after position DETAILED, past the ones written out in full."
+  "Return FAILURES, a vector of failure details, grouped by test in the order
+each test first failed: a list of (NAME FAILURES UNDETAILED), FAILURES a vector
+of the test's failure details and UNDETAILED how many of them come at or after
+position DETAILED, past the ones written out in full.  A test is its test_name
+and the file its source names: Rove names a test without its package, so two
+packages' tests of one name stay apart when the runner recorded where they are."
   (let ((index (make-hash-table :test 'equal))
         (groups '()))
     (loop for fail across failures
           for position from 0
           for name = (gethash "test_name" fail)
-          for group = (or (gethash name index)
+          for source = (gethash "source" fail)
+          for key = (list name (and (hash-table-p source) (gethash "file" source)))
+          for group = (or (gethash key index)
                           (let ((new (list name (make-array 1 :adjustable t :fill-pointer 0) 0)))
                             (push new groups)
-                            (setf (gethash name index) new)))
+                            (setf (gethash key index) new)))
           do (vector-push-extend fail (second group))
              (when (>= position detailed)
                (incf (third group))))
@@ -870,14 +873,16 @@ heading, and return the failure index as two values: a list of entries for
 failures_index and an entry for failures_index_rest, or NIL.
 
 The first *FAILURES-DETAILED* failures are written with their details, each
-field cut by %CLIP-FAILURE-FIELD; one with a field cut carries the object-id
-of its failure, which holds it whole.  The failures are then grouped by test, in
-the order the tests first failed (a test fails once per failed assertion), and
-the first *FAILURES-INDEXED* tests are indexed: each gets an object-id holding
-all its failures (the failure itself for a test with one, else a vector of them), and those with failures past the detailed ones are listed
-under them.  The failures of the remaining tests are counted, under one
-object-id.  The ids are this image's (inspect-object, stale once the worker is
-gone); failed_tests keeps every failure whole too.
+field cut by %CLIP-FAILURE-FIELD; one with a field cut carries the object-id of
+its failure, which holds it whole.  The failures are then grouped by test
+(%GROUP-FAILURES; a test fails once per failed assertion), and the first
+*FAILURES-INDEXED* tests are indexed.  Each gets an object-id holding all its
+failures: the failure itself for a test with one, else a vector of them.  Those
+with failures past the detailed ones are listed under them.  The failures of the
+remaining tests are counted, under one object-id: a table from test name to its
+failures.  The ids are this image's object registry's (inspect-object), so they
+go stale with the worker, and a run registers at most *FAILURES-INDEXED* + 1 +
+*FAILURES-DETAILED* objects; failed_tests keeps every failure whole too.
 
 Unbounded, a run whose shared fixture broke wrote every failure in full, and
 twice in structuredContent, whose summary is this text beside failed_tests.
@@ -892,29 +897,39 @@ whose reason is the whole report: it is written whole and not indexed."
          (rest (nthcdr (length indexed) tests))
          (ids (make-hash-table :test 'eq))
          (index (loop for group in indexed
-                      collect (let* ((id (register-object
-                                          ;; A test's one failure itself, so
-                                          ;; one inspect-object shows it.
-                                          (if (= 1 (length (second group)))
-                                              (aref (second group) 0)
-                                              (coerce (second group) 'simple-vector))))
-                                     (first-failure (aref (second group) 0))
-                                     (entry (make-ht "test_name" (first group)
-                                                     "failures" (length (second group))
+                      collect (let* ((failures (second group))
+                                     ;; A test's one failure itself, so one
+                                     ;; inspect-object shows it.
+                                     (object (if (= 1 (length failures))
+                                                 (aref failures 0)
+                                                 (coerce failures 'simple-vector)))
+                                     (id (register-object object))
+                                     (entry (make-ht "test_name" (%clip-failure-field
+                                                                  (first group))
+                                                     "failures" (length failures)
                                                      "object_id" id)))
-                                (setf (gethash group ids) id)
+                                ;; Keyed by group, and by the failure for a test
+                                ;; with one, so a cut detailed failure reuses it.
+                                (setf (gethash group ids) id
+                                      (gethash object ids) id)
                                 (multiple-value-bind (source presentp)
-                                    (gethash "source" first-failure)
+                                    (gethash "source" (aref failures 0))
                                   (when presentp
                                     (setf (gethash "source" entry) source)))
                                 entry)))
-         (rest-failures (and rest (coerce (loop for group in rest
-                                                append (coerce (second group) 'list))
-                                          'vector)))
-         (rest-entry (and rest
-                          (make-ht "failures" (length rest-failures)
-                                   "tests" (length rest)
-                                   "object_id" (register-object rest-failures)))))
+         (rest-entry
+           (and rest
+                (let ((table (make-hash-table :test 'equal))
+                      (count 0))
+                  (dolist (group rest)
+                    (let ((name (princ-to-string (first group))))
+                      (setf (gethash name table)
+                            (concatenate 'simple-vector (gethash name table #())
+                                         (second group)))
+                      (incf count (length (second group)))))
+                  (make-ht "failures" count
+                           "tests" (length rest)
+                           "object_id" (register-object table))))))
     (flet ((field (text)
              (if clip
                  (%clip-failure-field text)
@@ -936,7 +951,7 @@ whose reason is the whole report: it is written whole and not indexed."
                                      raw shown)))
                  (destructuring-bind (name description form got reason frame) shown
                    (format stream "  ~D. ~A~@[ [object-id: ~A]~]~%" (1+ i) name
-                           (and cut (register-object fail)))
+                           (and cut (or (gethash fail ids) (register-object fail))))
                    (when description (format stream "     ~A~%" description))
                    (when form (format stream "     Form: ~A~%" form))
                    (when got (format stream "     Got: ~A~%" got))
@@ -948,7 +963,7 @@ whose reason is the whole report: it is written whole and not indexed."
         (format stream "  ~D more failure~:P without details, from:~%" (- total detailed))
         (dolist (group indexed)
           (when (plusp (third group))
-            (format stream "    ~A~@[ (~D failures)~] [object-id: ~A]~%"
+            (format stream "    ~A~@[ (~D failures in all)~] [object-id: ~A]~%"
                     (field (first group))
                     (let ((count (length (second group)))) (and (> count 1) count))
                     (gethash group ids))))
@@ -957,14 +972,17 @@ whose reason is the whole report: it is written whole and not indexed."
                           [object-id: ~A]~%"
                   (gethash "failures" rest-entry) (gethash "tests" rest-entry)
                   (gethash "object_id" rest-entry)))
-        (format stream "  inspect-object an object-id to read a test's failures whole.~%")))
+        (format stream "  inspect-object an object-id to read those failures whole; ~
+                        a vector or table lists each failure's own id.~%")))
     (values index rest-entry)))
 
 (defun build-run-tests-response (test-result)
   "Build the standard run-tests response with summary text.
 TEST-RESULT is the hash-table returned by run-tests core.
 Returns a new hash-table with content, verdict (%RUN-TESTS-VERDICT, decided with
-the summary's headline), counts, and failure details.
+the summary's headline), counts, and failure details, with failures_index and
+failures_index_rest for a run with real failures: writing the failures
+(%WRITE-FAILURES) registers them in this image's object registry.
 Includes rich failure details (description, form, values), bounded by
 %WRITE-FAILURES, and debug output in the summary text so MCP clients rendering
 only content[].text see them; failed_tests keeps every failure whole.

@@ -420,14 +420,15 @@ being LOOKUP-OBJECT's third value."
               "code" "OBJECT_STALE"
               "message" (format nil "Object ~A is stale: it was registered by an ~
 earlier worker image, or before its registry was cleared, and the object it named ~
-went with that state. Evaluate the expression again for a current object id."
+went with that state. Run again what gave the id -- evaluate the expression, or ~
+re-run the tests -- for a current object id."
                                 id)))
     (:evicted
      (make-ht "error" t
               "code" "OBJECT_NOT_FOUND"
               "message" (format nil "Object ~A is no longer registered: only the ~
-most recently registered objects are kept. Evaluate the expression again for a ~
-current object id."
+most recently registered objects are kept. Run again what gave the id -- evaluate ~
+the expression, or re-run the tests -- for a current object id."
                                 id)))
     (:invalid
      (make-ht "error" t
@@ -612,7 +613,8 @@ the JSON."
 
 (define-tool "inspect-object"
   :description "Inspect an object's internal structure by ID.
-Objects are registered when repl-eval returns non-primitive values (result_object_id field).
+Objects are registered when repl-eval returns non-primitive values (result_object_id field),
+and by run-tests for its failures (failures_index and the [object-id: ...] markers in its text).
 Use this to drill down into complex data structures like CLOS instances, structures, lists, arrays, and hash-tables.
 An object id is an opaque string such as \"o-4f1c9a0e7b2d58c3a91e06f2d7b48c5e-17\", valid only in the
 worker image that issued it: once that worker is replaced -- a crash, a timeout,
