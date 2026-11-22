@@ -610,6 +610,57 @@
       (ok (null (cl-mcp/src/test-runner-core::%test-name-package
                  (make-symbol "SOME-TEST")))))))
 
+(defun %within-seconds (seconds thunk)
+  "Call THUNK on a thread of its own and return its value, or :TIMED-OUT when it
+has not returned within SECONDS -- the thread is then stopped -- so a printer
+that never ends fails the test instead of hanging the suite."
+  (let ((thread (sb-thread:make-thread thunk :name "printer probe")))
+    (let ((value (sb-thread:join-thread thread :timeout seconds :default :timed-out)))
+      (when (eq value :timed-out)
+        (ignore-errors (sb-thread:terminate-thread thread)))
+      value)))
+
+(deftest failure-detail-prints-whatever-the-printer-settings
+  ;; A test runs on a thread of its own, which sees the worker's global printer
+  ;; settings.  A circular value printed forever under *PRINT-CIRCLE* NIL and
+  ;; held run-tests until its deadline, and a *PRINT-LENGTH* set in repl-eval
+  ;; cut the values a failure reports, under an object-id said to hold them
+  ;; whole.
+  (let ((circular (let ((list (list 1 2 3))) (setf (cdr (last list)) list) list))
+        (detail (lambda (&rest arguments)
+                  (apply #'cl-mcp/src/test-runner-core::make-failure-detail
+                         :test-name "t" arguments))))
+    (let ((result (%within-seconds
+                   20 (lambda ()
+                        (let ((*print-circle* nil))
+                          (funcall detail :form circular :values (list circular)
+                                          :reason (make-condition 'type-error
+                                                                  :datum circular
+                                                                  :expected-type 'string)))))))
+      (ok (hash-table-p result) "a circular value is printed, not printed forever")
+      (when (hash-table-p result)
+        (ok (equal "#1=(1 2 3 . #1#)" (gethash "form" result)) "as a circular list")
+        (ok (equal '("#1=(1 2 3 . #1#)") (coerce (gethash "values" result) 'list))
+            "a value too")
+        (ok (search "#1=(1 2 3 . #1#)" (gethash "reason" result))
+            "and a condition's report")))
+    (let ((d (let ((*print-length* 2) (*print-level* 1) (*print-lines* 1)
+                   (*print-base* 16) (*print-radix* t) (*print-case* :downcase))
+               (funcall detail :form '(equal (list 1 2 3) (list 1 2 (3 4) 17))
+                               :values (list (list 1 2 (list 3 (list 4)) 17))))))
+      (ok (equal "(EQUAL (LIST 1 2 3) (LIST 1 2 (3 4) 17))" (gethash "form" d))
+          "printer variables set elsewhere do not cut or recast the form")
+      (ok (equal '("(1 2 (3 (4)) 17)") (coerce (gethash "values" d) 'list))
+          "nor a value"))
+    (let ((same "a"))
+      (ok (equal "(EQUAL \"a\" \"a\")"
+                 (gethash "form" (funcall detail :form (list 'equal same same))))
+          "one string met twice prints as source does, without #1= labels"))
+    (let ((cl-mcp/src/test-runner-core::*failure-print-max-chars* 20))
+      (ok (equal "(0 1 2 3 4 5 6 7 8 9 … [printing stopped at 20 characters]"
+                 (gethash "form" (funcall detail :form (loop for i below 100 collect i))))
+          "a value too long to print stops at the limit and says so"))))
+
 (deftest run-tests-keeps-the-quotes-on-a-string-assertion-form
   (testing "a real Rove failure whose form is a bare string reports it quoted"
     ;; The whole path, not just MAKE-FAILURE-DETAIL: Rove's ASSERTION-FORM
@@ -2630,6 +2681,29 @@ in ASDF and as left by a root change --, their packages and the directory."
            (ok (search "KNOWN" reason :test #'char-equal))))
        (ok (= 1 (symbol-value runs)) "no test from the mixed selection ran")
        (ok (null (find-symbol "ABSENT" package)))))))
+
+(deftest run-tests-reports-a-circular-value-of-a-failing-assertion
+  ;; The run ends with the failure reported, instead of printing the value
+  ;; until the run's deadline.
+  (%call-with-inferred-test-fixture
+   "clmcp-circular" "rove"
+   "(defpackage #:clmcp-circular/tests/a (:use #:cl #:rove))
+(in-package #:clmcp-circular/tests/a)
+(defun circular () (let ((list (list 1 2 3))) (setf (cdr (last list)) list) list))
+(deftest circular-value (ok (eq (circular) :nope)))
+"
+   (lambda (dir)
+     (declare (ignore dir))
+     (let ((result (%within-seconds
+                    60 (lambda ()
+                         (let ((*print-circle* nil) (*print-length* nil))
+                           (run-tests "clmcp-circular/tests/a"))))))
+       (ok (hash-table-p result) "the run ends")
+       (when (hash-table-p result)
+         (ok (= 1 (gethash "failed" result)) "with the failure counted")
+         (let ((failure (aref (gethash "failed_tests" result) 0)))
+           (ok (find "#1=(1 2 3 . #1#)" (gethash "values" failure) :test #'equal)
+               "and its circular value printed as one")))))))
 
 (deftest run-tests-suggests-registered-fiveam-targets
   (%call-with-fiveam-fixture

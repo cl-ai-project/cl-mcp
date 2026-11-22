@@ -251,19 +251,101 @@ per test that skipped anything, whether it passed or checked nothing."
       (setf (gethash "skipped_tests" ht) (coerce skipped-tests 'vector)))
     ht))
 
+(defparameter *failure-print-max-chars* 1000000
+  "Characters one printed field of a failure may run to.  Printing stops there,
+so a value with no end -- a circular one that even *PRINT-CIRCLE* cannot
+shorten, a structure printing itself forever -- costs this much and no more.
+The report's text shows a field cut to *FAILURE-FIELD-MAX-CHARS*; this bounds
+the whole copy kept under its object-id.")
+
+(define-condition %print-overflow (serious-condition) ()
+  (:documentation "Signalled by a %CAPPED-TEXT-STREAM written past its room.  Not an
+ERROR, so an IGNORE-ERRORS or (HANDLER-CASE … (ERROR …)) inside a PRINT-OBJECT
+method does not swallow it and print on."))
+
+(defclass %capped-text-stream (sb-gray:fundamental-character-output-stream)
+  ((sink :initform (make-string-output-stream) :reader %sink)
+   (room :initarg :room :accessor %room)
+   (column :initform 0 :accessor %column))
+  (:documentation "A character sink that keeps ROOM characters and then signals
+%PRINT-OVERFLOW, stopping the printer that writes to it.  The column is kept,
+since the pretty printer and FRESH-LINE ask for it."))
+
+(defun %note-written (stream string start end)
+  "Count STRING[START,END), just written to STREAM, against its room and column."
+  (decf (%room stream) (- end start))
+  (let ((newline (position #\Newline string :start start :end end :from-end t)))
+    (if newline
+        (setf (%column stream) (- end newline 1))
+        (incf (%column stream) (- end start)))))
+
+(defmethod sb-gray:stream-write-char ((stream %capped-text-stream) character)
+  (when (<= (%room stream) 0)
+    (error '%print-overflow))
+  (write-char character (%sink stream))
+  (%note-written stream (string character) 0 1)
+  character)
+
+(defmethod sb-gray:stream-write-string ((stream %capped-text-stream) string
+                                        &optional (start 0) end)
+  (let* ((end (or end (length string)))
+         (taken (min (- end start) (max 0 (%room stream)))))
+    (write-string string (%sink stream) :start start :end (+ start taken))
+    (%note-written stream string start (+ start taken))
+    (when (< (+ start taken) end)
+      (error '%print-overflow)))
+  string)
+
+(defmethod sb-gray:stream-line-column ((stream %capped-text-stream))
+  (%column stream))
+
+(defun %printed (object &key (escape t))
+  "Return OBJECT printed for a failure report, with ESCAPE as PRIN1 (true) or
+PRINC (false) print it, whatever printer settings the worker holds.
+
+A test runs on a thread of its own, which sees the worker's global printer
+variables: a circular value printed forever under *PRINT-CIRCLE* NIL and held
+the run until its deadline, and a *PRINT-LENGTH* set in repl-eval cut a list to
+(1 2 ...) in a report whose object-id was said to hold it whole.  So length,
+level, lines, base, radix and case are fixed here, and the text is printed into
+a stream of *FAILURE-PRINT-MAX-CHARS* characters.  It is printed with
+*PRINT-CIRCLE* NIL first, as source reads -- with it on, two string constants
+the compiler made one object print as #1=\"a\" #1# -- and only when that
+overflows is it printed again with *PRINT-CIRCLE* T, which ends a circular
+value.  A value too long either way is cut, and says so."
+  (flet ((attempt (circle)
+           (let ((stream (make-instance '%capped-text-stream
+                                        :room *failure-print-max-chars*)))
+             (handler-case
+                 (let ((*read-default-float-format* 'single-float))
+                   (write object :stream stream :escape escape :readably nil
+                                 :circle circle :length nil :level nil :lines nil
+                                 :base 10 :radix nil :case :upcase :array t :gensym t)
+                   (values (get-output-stream-string (%sink stream)) t))
+               (%print-overflow ()
+                 (values (get-output-stream-string (%sink stream)) nil))))))
+    (multiple-value-bind (text whole) (attempt nil)
+      (if whole
+          text
+          (multiple-value-bind (circular whole) (attempt t)
+            (if whole
+                circular
+                (format nil "~A … [printing stopped at ~D characters]"
+                        text *failure-print-max-chars*)))))))
+
 (defun %source-text (object)
   "Return OBJECT printed the way source is written: escapes on, so a string
 keeps its quotes and a keyword its colon, and *PRINT-READABLY* off, so an
 object with no readable representation still prints as #<...> instead of
-signaling PRINT-NOT-READABLE.
+signaling PRINT-NOT-READABLE.  The printer is set by %PRINTED, not by whatever
+the worker holds, and stops at *FAILURE-PRINT-MAX-CHARS*.
 
 PRINC-TO-STRING stood here once, and it made failure reports contradict their
 own verdict: with escapes off it printed the string \"6\" and the number 6 as
 the same token and dropped the colon from every keyword, so a failing
 (equal \"6\" 6) was reported as the visibly true (EQUAL 6 6), under a ✗ FAIL,
 beside a MAKE-INSTANCE call whose initargs had lost their colons."
-  (let ((*print-readably* nil))
-    (prin1-to-string object)))
+  (%printed object))
 
 (defun %test-name-package (name)
   "Return the home package of NAME, a test's name, or NIL when it has none.
@@ -318,11 +400,11 @@ comparison is exactly where it matters."
               (condition
                ;; On one line: SBCL's pretty-printed reports otherwise break
                ;; flush left under the "Error: " they follow.
-               (let ((report (let ((*print-pretty* nil)) (princ-to-string reason))))
+               (let ((report (let ((*print-pretty* nil)) (%printed reason :escape nil))))
                  (if (search (symbol-name (type-of reason)) report :test #'char-equal)
                      report
                      (format nil "~S: ~A" (type-of reason) report))))
-              (t (princ-to-string reason)))))
+              (t (%printed reason :escape nil)))))
     (when source
       (setf (gethash "source" ht)
             (if (listp source)
@@ -421,7 +503,7 @@ test.  NIL when no frame of the test's code is above it, or dissect is absent."
                                                "ASDF/"))))
                 (t
                  (let ((text (ignore-errors (let ((*print-pretty* nil))
-                                              (prin1-to-string call))))
+                                              (%printed call))))
                        (file (and file-fn (ignore-errors (funcall file-fn frame))))
                        (line (and line-fn (ignore-errors (funcall line-fn frame)))))
                    (when text
@@ -1800,7 +1882,7 @@ the test file FILE-NAME."
      :values (list got expected)
      :reason (if (and errorp (typep got 'condition))
                  (format nil "raised ~A: ~A" (type-of got)
-                         (or (ignore-errors (princ-to-string got)) "(unprintable)"))
+                         (or (ignore-errors (%printed got :escape nil)) "(unprintable)"))
                  (format nil "got ~A, expected ~:[~;not ~]~A"
                          (%source-text got) notp (%source-text expected))))))
 
@@ -1940,8 +2022,7 @@ was being asserted, and leaving it out reduced the report to a bare test name."
                            :reason
                            (%collapse-blank-lines
                             (or (and (stringp reason) reason)
-                                (princ-to-string
-                                 (or reason "no reason given"))))))))
+                                (%printed (or reason "no reason given") :escape nil)))))))
 
 (defun %fiveam-result-test-case (result)
   "Return the FiveAM TEST-CASE object that RESULT belongs to, or NIL.
