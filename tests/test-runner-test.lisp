@@ -1745,14 +1745,14 @@ everything again."
                                  :failed-tests failures :framework :rove :duration 1))))))
              (files (sources)
                (mapcar (lambda (source) (gethash "file" source)) sources)))
+      (ok (search "\\[" (funcall recorded "/srv/clmcp-index-root/tests/a[1]-test.lisp"))
+          "Rove's file is a namestring escaped for the reader")
       (let* ((under (at "under" "/srv/clmcp-index-root/tests/a[1]-test.lisp"))
              (failures (list under
                              (at "outside" "/opt/clmcp-else[2]/star*.lisp")
                              (failure "relative" (cl-mcp/src/tools/helpers:make-ht
                                                   "file" "repl-eval" "line" 3))))
              (sources (index failures "/srv/clmcp-index-root/")))
-        (ok (search "\\[" (gethash "file" (gethash "source" under)))
-            "Rove's file is a namestring escaped for the reader")
         (ok (equal '("tests/a[1]-test.lisp" "/opt/clmcp-else[2]/star*.lisp" "repl-eval")
                    (files sources))
             "under the root relative, outside it absolute, both unescaped; a bare name kept")
@@ -1765,9 +1765,17 @@ everything again."
                  (files (index (list (at "b" "/srv/clmcp[old]/tests/b.lisp"))
                                "/srv/clmcp[old]/")))
           "a root with [ in its name holds its files")
-      (ok (equal '("/srv/clmcp-index-root/tests/a.lisp")
-                 (files (index (list (at "a" "/srv/clmcp-index-root/tests/a.lisp")) nil)))
-          "without a project root a file is absolute")
+      (ok (equal '("/srv/clmcp-index-root/tests/a[1].lisp")
+                 (files (index (list (at "a" "/srv/clmcp-index-root/tests/a[1].lisp")) nil)))
+          "without a project root a file is absolute, unescaped")
+      ;; An unbalanced [ does not parse as a namestring: the file is kept as
+      ;; recorded rather than failing the response.
+      (let ((unparsed "/srv/clmcp-index-root/tests/a[1.lisp"))
+        (ok (equal (list unparsed)
+                   (files (index (list (failure "unparsed" (cl-mcp/src/tools/helpers:make-ht
+                                                            "file" unparsed)))
+                                 "/srv/clmcp-index-root/")))
+            "a file that does not parse is kept as recorded"))
       (ok (equal '("somewhere")
                  (index (list (failure "string" "somewhere")) "/srv/clmcp-index-root/"))
           "a source that is no table is kept"))))
