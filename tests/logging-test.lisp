@@ -9,7 +9,8 @@
                 #:*log-level* #:*log-stream* #:*log-context*
                 #:*log-file-stream* #:should-log-p #:log-event
                 #:setup-log-file)
-  (:import-from #:cl-mcp/src/worker-client))
+  (:import-from #:cl-mcp/src/worker-client)
+  (:import-from #:bordeaux-threads))
 
 (in-package #:cl-mcp/tests/logging-test)
 
@@ -24,6 +25,84 @@
           (ok (> (length s) 0))
           (ok (search "\"event\":\"rpc.dispatch\"" s))
           (ok (search "\"event\":\"rpc.result\"" s)))))))
+
+(define-condition circular-report-error (error)
+  ((object :initarg :object :reader circular-report-object))
+  (:report (lambda (condition stream)
+             (format stream "cannot use ~S" (circular-report-object condition))))
+  (:documentation "An error whose report prints an object it was given: printed
+without bounds, a circular one never ends."))
+
+(deftest logging-messages-without-an-id-or-a-method
+  ;; Issue #393: an absent member reached LOG-EVENT as :ABSENT, which yason
+  ;; cannot encode, and the whole line was dropped without a trace.
+  (flet ((log-of (line)
+           (let ((sink (make-string-output-stream)))
+             (let ((*log-level* :debug)
+                   (*log-stream* sink))
+               (process-json-line line))
+             (get-output-stream-string sink)))
+         (call-with-failing-handler (condition thunk)
+           (let ((original (fdefinition 'cl-mcp/src/protocol:handle-notification)))
+             (unwind-protect
+                  (progn
+                    (setf (fdefinition 'cl-mcp/src/protocol:handle-notification)
+                          (lambda (&rest arguments)
+                            (declare (ignore arguments))
+                            (error condition)))
+                    (funcall thunk))
+               (setf (fdefinition 'cl-mcp/src/protocol:handle-notification) original)))))
+    (testing "a notification is logged, its id null"
+      (let ((s (log-of "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")))
+        (ok (search "\"event\":\"rpc.dispatch\"" s) "rpc.dispatch is written")
+        (ok (search "\"id\":null" s) "the id is null")))
+    (testing "a client's response is logged, its method null"
+      (let ((s (log-of "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}")))
+        (ok (search "\"event\":\"rpc.dispatch\"" s) "rpc.dispatch is written")
+        (ok (search "\"method\":null" s) "the method is null")))
+    (testing "a notification handler that fails is logged as rpc.internal"
+      (call-with-failing-handler
+       (make-condition 'simple-error :format-control "the handler broke")
+       (lambda ()
+         (let ((s (log-of "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")))
+           (ok (search "\"event\":\"rpc.internal\"" s) "rpc.internal is written")
+           (ok (search "the handler broke" s) "with the condition's message")))))
+    (testing "a failure whose condition cannot be printed is still logged"
+      (call-with-failing-handler
+       (make-condition 'simple-error)
+       (lambda ()
+         (let ((s (log-of "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")))
+           (ok (search "\"event\":\"rpc.internal\"" s) "rpc.internal is written")
+           (ok (search "unprintable" s) "naming the failure as unprintable")
+           (ok (search "SIMPLE-ERROR" s) "with the condition's type")))))
+    (testing "a failure whose report prints a circular object is logged, cut short"
+      ;; Its car and its cdr are both itself: printed without bounds the report
+      ;; never ends.
+      (let ((object (list 1 2))
+            (s nil)
+            (thread nil))
+        (setf (cddr object) (cons object object))
+        (call-with-failing-handler
+         (make-condition 'circular-report-error :object object)
+         (lambda ()
+           (unwind-protect
+                (progn
+                  (setf thread (bordeaux-threads:make-thread
+                                (lambda ()
+                                  (setf s (log-of (format nil "{\"jsonrpc\":\"2.0\",~
+                                                   \"method\":\"notifications/initialized\"}"))))
+                                :name "logging-test-circular-report"))
+                  (loop repeat 500
+                        while (bordeaux-threads:thread-alive-p thread)
+                        do (sleep 0.01d0)))
+             ;; A hang must fail the test, not leave a thread looping behind it.
+             (when (and thread (bordeaux-threads:thread-alive-p thread))
+               (ignore-errors (bordeaux-threads:destroy-thread thread))))))
+        (ok (stringp s) "answered")
+        (ok (and (stringp s) (search "\"event\":\"rpc.internal\"" s))
+            "rpc.internal is written")
+        (ok (and (stringp s) (search "cannot use #1=" s))
+            "with the report, its cycle labelled")))))
 
 (deftest should-log-p-level-filtering
   (testing "warn and error are visible at default debug level"
