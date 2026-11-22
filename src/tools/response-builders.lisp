@@ -15,6 +15,10 @@
                 #:format-inspect-elements)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
+  (:import-from #:cl-mcp/src/utils/paths
+                #:normalize-path-for-display)
+  (:import-from #:alexandria
+                #:copy-hash-table)
   ;; No cycle: macroexpand-core imports only cl-mcp/src/utils/sanitize and
   ;; cl-mcp/src/utils/printing.
   (:import-from #:cl-mcp/src/macroexpand-core
@@ -850,6 +854,31 @@ FiveAM reason reads `X ... which is not EQUAL to Y'."
   (let ((source (gethash "source" failure)))
     (and (hash-table-p source) (gethash "file" source))))
 
+(defun %index-source (source)
+  "Return SOURCE, a failure's source, as a failures_index entry carries it: its
+file as a filesystem path, relative to the project root when the file lies under
+it and absolute otherwise, as clgrep-search writes a match's file
+(NORMALIZE-PATH-FOR-DISPLAY).  A file that does not read as a namestring is kept
+as recorded, and a relative one is unescaped but not re-rooted.  SOURCE itself
+is left alone, for failed_tests and the failures under an object-id.
+
+The index is what an agent reads on every failing run, and an absolute path
+repeated the checkout's whole prefix, the user's home directory with it, in
+each entry: a quarter of the index on a deep checkout."
+  (let* ((file (and (hash-table-p source) (gethash "file" source)))
+         ;; PARSE-NAMESTRING, not a native parse: Rove records SBCL's
+         ;; definition-source namestring, which escapes [ * ? and \ for the
+         ;; pathname reader.  Parsed natively, a\[1].lisp named a file called
+         ;; that, under no root, and was printed with its backslash.
+         (shown (and (stringp file)
+                     (ignore-errors
+                      (normalize-path-for-display (parse-namestring file))))))
+    (if (and shown (string/= shown file))
+        (let ((copy (copy-hash-table source)))
+          (setf (gethash "file" copy) shown)
+          copy)
+        source)))
+
 (defun %group-failures (failures detailed)
   "Return FAILURES, a vector of failure details, grouped by test in the order
 each test first failed: a list of (NAME FAILURES UNDETAILED FILES), FAILURES a
@@ -939,7 +968,7 @@ whose reason is the whole report: it is written whole and not indexed."
                                 (multiple-value-bind (source presentp)
                                     (gethash "source" (aref failures 0))
                                   (when presentp
-                                    (setf (gethash "source" entry) source)))
+                                    (setf (gethash "source" entry) (%index-source source))))
                                 entry)))
          (rest-entry
            (and rest

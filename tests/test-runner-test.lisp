@@ -1716,6 +1716,70 @@ everything again."
             do (ok (null (nth-value 1 (gethash "failed_tests" data)))
                    (format nil "~A: a pass has no failed_tests either" path))))))
 
+(deftest build-run-tests-response-writes-index-sources-relative-to-the-root
+  ;; failures_index is what an agent reads on every failing run; an absolute
+  ;; source path repeated the checkout's prefix in each of its entries.  It
+  ;; names a file as clgrep-search does: a filesystem path, relative to the
+  ;; project root under it.  failed_tests and the failures keep what Rove
+  ;; recorded, SBCL's namestring, which escapes [ and * for the reader.
+  (let ((recorded (lambda (native) (namestring (uiop:parse-native-namestring native))))
+        (cl-mcp/src/object-registry::*object-registry*
+          (cl-mcp/src/object-registry::make-object-registry)))
+    (labels ((failure (name source)
+               (let ((ht (cl-mcp/src/test-runner-core::make-failure-detail
+                          :test-name name :form '(= 1 2) :values '(1 2))))
+                 (setf (gethash "source" ht) source)
+                 ht))
+             (at (name native)
+               (failure name (cl-mcp/src/tools/helpers:make-ht
+                              "file" (funcall recorded native) "line" 3)))
+             (index (failures root)
+               (let ((cl-mcp/src/project-root:*project-root*
+                       (and root (uiop:ensure-directory-pathname
+                                  (uiop:parse-native-namestring root)))))
+                 (map 'list (lambda (entry) (gethash "source" entry))
+                      (gethash "failures_index"
+                               (build-run-tests-response
+                                (cl-mcp/src/test-runner-core::make-test-result
+                                 :passed 0 :failed (length failures) :pending 0
+                                 :failed-tests failures :framework :rove :duration 1))))))
+             (files (sources)
+               (mapcar (lambda (source) (gethash "file" source)) sources)))
+      (ok (search "\\[" (funcall recorded "/srv/clmcp-index-root/tests/a[1]-test.lisp"))
+          "Rove's file is a namestring escaped for the reader")
+      (let* ((under (at "under" "/srv/clmcp-index-root/tests/a[1]-test.lisp"))
+             (failures (list under
+                             (at "outside" "/opt/clmcp-else[2]/star*.lisp")
+                             (failure "relative" (cl-mcp/src/tools/helpers:make-ht
+                                                  "file" "repl-eval" "line" 3))))
+             (sources (index failures "/srv/clmcp-index-root/")))
+        (ok (equal '("tests/a[1]-test.lisp" "/opt/clmcp-else[2]/star*.lisp" "repl-eval")
+                   (files sources))
+            "under the root relative, outside it absolute, both unescaped; a bare name kept")
+        (ok (every (lambda (source) (eql 3 (gethash "line" source))) sources)
+            "an entry's source keeps its line")
+        (ok (equal (funcall recorded "/srv/clmcp-index-root/tests/a[1]-test.lisp")
+                   (gethash "file" (gethash "source" under)))
+            "the failure keeps its source as recorded, for failed_tests and its object-id"))
+      (ok (equal '("tests/b.lisp")
+                 (files (index (list (at "b" "/srv/clmcp[old]/tests/b.lisp"))
+                               "/srv/clmcp[old]/")))
+          "a root with [ in its name holds its files")
+      (ok (equal '("/srv/clmcp-index-root/tests/a[1].lisp")
+                 (files (index (list (at "a" "/srv/clmcp-index-root/tests/a[1].lisp")) nil)))
+          "without a project root a file is absolute, unescaped")
+      ;; An unbalanced [ does not parse as a namestring: the file is kept as
+      ;; recorded rather than failing the response.
+      (let ((unparsed "/srv/clmcp-index-root/tests/a[1.lisp"))
+        (ok (equal (list unparsed)
+                   (files (index (list (failure "unparsed" (cl-mcp/src/tools/helpers:make-ht
+                                                            "file" unparsed)))
+                                 "/srv/clmcp-index-root/")))
+            "a file that does not parse is kept as recorded"))
+      (ok (equal '("somewhere")
+                 (index (list (failure "string" "somewhere")) "/srv/clmcp-index-root/"))
+          "a source that is no table is kept"))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; FiveAM Suite Matching
 ;;; ---------------------------------------------------------------------------
