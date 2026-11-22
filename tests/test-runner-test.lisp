@@ -844,7 +844,8 @@ suites, and the directory."
                 (ok (hash-table-p data))
                 (when data
                   (ok (equalp (gethash "skipped_tests" data) (gethash "skipped_tests" report)))
-                  (ok (equalp (gethash "failed_tests" data) #()))
+                  ;; Left out whatever the verdict: failures_index stands for it.
+                  (ok (null (nth-value 1 (gethash "failed_tests" data))))
                   (ok (eql 0 (gethash "failed" data)))
                   (ok (eql 1 (gethash "pending" data)))
                   (ok (equal "all-skipped" (gethash "verdict" data)))
@@ -1459,10 +1460,11 @@ everything again."
   ;; A broken shared fixture fails dozens of tests.  Written out whole, the
   ;; list went into the text and, as summary, into structuredContent beside
   ;; failed_tests, with no bound.  The text details the first failures with
-  ;; each long field cut at its middle, names the tests the next ones come
-  ;; from, counts the rest; failed_tests keeps every failure whole.
+  ;; each long field cut at its middle, lists the tests the next ones come
+  ;; from and counts the rest, each under an object-id that holds them whole;
+  ;; structuredContent carries that index in place of failed_tests.
   (let* ((detailed cl-mcp/src/tools/response-builders::*failures-detailed*)
-         (named cl-mcp/src/tools/response-builders::*failures-named*)
+         (indexed cl-mcp/src/tools/response-builders::*failures-indexed*)
          (field-max cl-mcp/src/tools/response-builders::*failure-field-max-chars*)
          (half (floor field-max 2))
          (long (lambda (char)
@@ -1473,7 +1475,14 @@ everything again."
          (long-value (funcall long #\v))
          (long-reason (funcall long #\r))
          (long-frame (funcall long #\i))
-         (long-name (concatenate 'string "pkg::" (funcall long #\n))))
+         (long-name (concatenate 'string "pkg::" (funcall long #\n)))
+         ;; The undetailed tests the index reaches: it holds the detailed
+         ;; failures' tests and pkg::repeated first.
+         (last-listed (- indexed detailed 1))
+         ;; A registry of the test's own: the ids are checked against it, and
+         ;; a live worker's is left alone.
+         (cl-mcp/src/object-registry::*object-registry*
+           (cl-mcp/src/object-registry::make-object-registry)))
     (labels ((detail (name &rest fields)
                (let ((ht (cl-mcp/src/test-runner-core::make-failure-detail
                           :test-name name :description "Expect (= 1 2) to be true."
@@ -1486,21 +1495,41 @@ everything again."
              (response (failures &key (framework :rove))
                (build-run-tests-response
                 (cl-mcp/src/test-runner-core::make-test-result
-                 :passed 0 :failed (length failures) :pending 0 :failed-tests failures
-                 :framework framework :duration 1)))
+                 :passed 1 :failed (length failures) :pending 0 :failed-tests failures
+                 :passed-tests (list "pkg::green") :framework framework :duration 1)))
              (text (response)
                (gethash "text" (aref (gethash "content" response) 0)))
              (cut (text)
-               (format nil "~A … [~D of ~D chars cut; whole in failed_tests] … ~A"
+               (format nil "~A … [~D of ~D chars cut; whole under its object-id] … ~A"
                        (subseq text 0 half) (- (length text) (* 2 half)) (length text)
                        (subseq text (- (length text) half))))
              (occurrences (part text)
                (loop for start = 0 then (1+ at)
                      for at = (search part text :start2 start)
-                     while at count t)))
+                     while at count t))
+             (id-after (prefix text)
+               ;; The object-id on the line PREFIX starts, or NIL.
+               (let* ((line (search prefix text))
+                      (end (and line (position #\Newline text :start line)))
+                      (open (and line (search "[object-id: " text :start2 line :end2 end))))
+                 (and open (subseq text (+ open 12) (position #\] text :start open)))))
+             (object (id)
+               (cl-mcp/src/object-registry::lookup-object id))
+             (structured (response)
+               (let* ((inline (cl-mcp/src/tools/helpers:result 7 response))
+                      (pooled (yason:parse (with-output-to-string (s) (yason:encode inline s))
+                                           :json-arrays-as-vectors t
+                                           :json-booleans-as-symbols t
+                                           :json-nulls-as-keyword t)))
+                 (loop for (path reply) in (list (list "inline" inline) (list "pooled" pooled))
+                       collect (list path
+                                     (gethash "structuredContent"
+                                              (gethash "result"
+                                                       (cl-mcp/src/test-runner::%publish-test-report
+                                                        reply "2025-06-18"))))))))
       ;; Detailed: the first ones, each with one long field.  Then one test
-      ;; failing five assertions, a test with a long name, and more distinct
-      ;; tests than are named.
+      ;; failing five assertions, the long-named test failing again, and more
+      ;; distinct tests than are indexed, the last failing twice.
       (let* ((failures
                (append
                 (list (detail "pkg::long-description" "description" long-description)
@@ -1511,38 +1540,66 @@ everything again."
                       (detail long-name))
                 (loop for i from 6 to detailed
                       collect (detail (format nil "pkg::detailed-~D" i)))
-                (loop repeat 5 collect (detail "pkg::repeated"))
+                (loop repeat 5 collect (detail "pkg::repeated"
+                                               "source" (cl-mcp/src/tools/helpers:make-ht "file" "r.lisp" "line" 7)))
                 (list (detail long-name))
-                (loop for i from 1 to (+ named 3)
+                (loop for i from 1 to (+ last-listed 4)
                       collect (detail (format nil "pkg::undetailed-~D" i)))
-                ;; An unnamed test with two failures, so the counted line's
-                ;; failures and tests differ.
-                (list (detail (format nil "pkg::undetailed-~D" (+ named 3))))))
+                (list (detail (format nil "pkg::undetailed-~D" (+ last-listed 4))))))
              (total (length failures))
              (response (response failures))
-             (text (text response)))
+             (text (text response))
+             (index (gethash "failures_index" response))
+             (rest (gethash "failures_index_rest" response)))
         (ok (= detailed (occurrences "     Form: " text))
             "the first failures are written out with their details")
-        (ok (search (format nil "  ~D more failures without details (all are in ~
-                                 failed_tests), from:~%"
+        (ok (search (format nil "  ~D more failures without details, from:~%"
                             (- total detailed))
                     text)
-            "the text says how many follow without details and where they are")
-        (ok (= 1 (occurrences "    pkg::repeated (×5)" text))
-            "a test failing several assertions is named once, with its count")
-        (ok (search (format nil "    ~A~%" (cut long-name)) text)
-            "a long name in the named list is cut")
-        (ok (search (format nil "  1. pkg::long-description~%") text)
-            "detailed failures are numbered from one")
-        (ok (search (format nil "  5. ~A~%" (cut long-name)) text)
+            "the text says how many follow without details")
+        (ok (search (format nil "  1. pkg::long-description [object-id: ") text)
+            "detailed failures are numbered from one, and one with a cut field has an id")
+        (ok (search (format nil "  ~D. pkg::detailed-~D~%" detailed detailed) text)
+            "one with nothing cut has none")
+        (ok (search (format nil "  5. ~A [object-id: " (cut long-name)) text)
             "a long name in the detailed part is cut")
-        (ok (search (format nil "    pkg::undetailed-~D~%" (- named 2)) text)
-            "the named list reaches its limit")
-        (ok (null (search (format nil "pkg::undetailed-~D~%" (1- named)) text))
+        (let ((failure (object (id-after "  2. pkg::long-form" text))))
+          (ok (eq failure (nth 1 failures))
+              "the id of a cut failure is that failure")
+          (ok (equal long-form (gethash "form" failure))
+              "which holds the field whole"))
+        (ok (= 1 (occurrences "    pkg::repeated (5 failures in all) [object-id: " text))
+            "a test failing several assertions is listed once, with its count")
+        (ok (search (format nil "    ~A (2 failures in all) [object-id: " (cut long-name))
+                    text)
+            "a detailed test failing again is listed, its name cut")
+        (let ((both (object (id-after (format nil "    ~A" (cut long-name)) text))))
+          (ok (and (= 2 (length both)) (eq (nth 4 failures) (aref both 0)))
+              "its id holds its detailed failure too"))
+        (ok (null (search (format nil "    pkg::detailed-~D [" detailed) text))
+            "a test whose failures are all detailed is not listed again")
+        (ok (search (format nil "    pkg::undetailed-~D [object-id: " last-listed) text)
+            "the list reaches the index's limit")
+        (ok (null (search (format nil "pkg::undetailed-~D " (1+ last-listed)) text))
             "and stops there")
-        (ok (search (format nil "    ... and 6 more failures from 5 more tests, not named~%")
+        (ok (search (format nil "    ... and 5 more failures from 4 more tests [object-id: ")
                     text)
             "the rest are counted")
+        (ok (search (format nil "  inspect-object an object-id to read those failures ~
+                                 whole: a vector lists each failure's own id, a table ~
+                                 each test's.~%")
+                    text)
+            "the text says how to read them")
+        ;; One per indexed test and one for the rest; the cut detailed
+        ;; failures reuse their tests' ids, but for the long-named test's,
+        ;; whose test failed twice.
+        (ok (= (cl-mcp/src/object-registry::registry-count) (+ indexed 2))
+            "a run registers its tests, the rest, and a cut failure of a test with several")
+        (ok (eq (nth 4 failures) (object (id-after "  5. " text)))
+            "that cut failure's id is the failure itself, not its test's vector")
+        (ok (equal (id-after "  1. pkg::long-description" text)
+                   (gethash "object_id" (aref index 0)))
+            "a cut failure that is its test's only one shares that test's id")
         (loop for (label whole) in (list (list "a description" long-description)
                                          (list "a form" long-form)
                                          (list "a value" (format nil "1, ~A" long-value))
@@ -1555,48 +1612,109 @@ everything again."
             "an escaped error keeps its label")
         (ok (null (search (subseq long-form 0 (1+ half)) text))
             "nothing past a field's limit reaches the text")
+        ;; The index.
+        (ok (= indexed (length index)) "the index holds as many tests as it may")
+        (let ((repeated (find "pkg::repeated" index
+                              :key (lambda (e) (gethash "test_name" e)) :test #'equal)))
+          (ok (eql 5 (gethash "failures" repeated)) "an entry counts its test's failures")
+          (ok (equal "r.lisp" (gethash "file" (gethash "source" repeated)))
+              "and says where the test is")
+          (ok (equal (gethash "object_id" repeated) (id-after "    pkg::repeated" text))
+              "under the id the text gives")
+          (ok (equalp (coerce (subseq failures detailed (+ detailed 5)) 'vector)
+                      (object (gethash "object_id" repeated)))
+              "which holds those failures"))
+        (ok (eq (nth 0 failures) (object (gethash "object_id" (aref index 0))))
+            "a test with one failure is indexed as that failure")
+        (let ((long-entry (aref index 4)))
+          (ok (and (equal (cut long-name) (gethash "test_name" long-entry))
+                   (eql 2 (gethash "failures" long-entry)))
+              "an entry's name is cut, and its count covers detailed failures too"))
+        (let ((table (object (gethash "object_id" rest))))
+          (ok (and (= 4 (hash-table-count table))
+                   (= 2 (length (gethash (format nil "pkg::undetailed-~D" (+ last-listed 4))
+                                         table))))
+              "the rest's id is a table from test name to its failures"))
+        (ok (and (eql 5 (gethash "failures" rest)) (eql 4 (gethash "tests" rest))
+                 (equal (gethash "object_id" rest)
+                        (id-after "    ... and 5 more failures" text)))
+            "the rest are counted under one id that holds them")
         (let ((kept (gethash "failed_tests" response)))
-          (ok (= total (length kept)) "failed_tests keeps every failure")
+          (ok (= total (length kept)) "the result's failed_tests keeps every failure")
           (ok (equal long-form (gethash "form" (aref kept 1)))
               "and every field whole"))
-        (let* ((inline (cl-mcp/src/tools/helpers:result 7 response))
-               (pooled (yason:parse (with-output-to-string (s) (yason:encode inline s))
-                                    :json-arrays-as-vectors t
-                                    :json-booleans-as-symbols t
-                                    :json-nulls-as-keyword t)))
-          (loop for (path reply) in (list (list "inline" inline) (list "pooled" pooled))
-                do (let ((data (gethash "structuredContent"
-                                        (gethash "result"
-                                                 (cl-mcp/src/test-runner::%publish-test-report
-                                                  reply "2025-06-18")))))
-                     (ok (equal text (gethash "summary" data))
-                         (format nil "~A: the structured summary is the bounded text"
-                                 path))))))
-      (let ((text (text (response (loop for i from 1 to detailed
-                                        collect (detail (format nil "pkg::t~D" i)))))))
+        (loop for (path data) in (structured response)
+              do (ok (equal text (gethash "summary" data))
+                     (format nil "~A: the structured summary is the bounded text" path))
+                 (ok (= indexed (length (gethash "failures_index" data)))
+                     (format nil "~A: structuredContent carries the index" path))
+                 (ok (gethash "failures_index_rest" data)
+                     (format nil "~A: and the rest" path))
+                 (ok (null (nth-value 1 (gethash "failed_tests" data)))
+                     (format nil "~A: in place of failed_tests" path))
+                 (ok (null (nth-value 1 (gethash "passed_tests" data)))
+                     (format nil "~A: and without passed_tests" path))))
+      (let* ((few (loop for i from 1 to detailed collect (detail (format nil "pkg::t~D" i))))
+             (response (response few))
+             (text (text response)))
         (ok (= detailed (occurrences "     Form: " text))
             "up to the limit every failure is written out")
         (ok (null (search "more failure" text))
-            "and nothing is said to be left out"))
+            "and nothing is said to be left out")
+        (ok (null (search "[object-id" text))
+            "nor is an id given when nothing is cut")
+        (ok (= detailed (length (gethash "failures_index" response)))
+            "though the index lists every test"))
       (let ((just-over (make-string (1+ field-max) :initial-element #\j)))
         (ok (search (format nil "Form: ~A~%" just-over)
                     (text (response (list (detail "pkg::just-over" "form" just-over)))))
             "a field the marker would lengthen is left whole"))
-      (let ((text (text (response (loop for i from 1 to (+ detailed 2)
-                                        collect (detail (format nil "pkg::t~D" i)))))))
-        (ok (search (format nil "    pkg::t~D~%" (+ detailed 2)) text)
-            "a few past the limit are named")
-        (ok (null (search "not named" text))
-            "with none left only counted"))
       ;; A load or resolution failure is one synthetic failure whose reason is
-      ;; the whole report, its hint at the end: never cut.
+      ;; the whole report, its hint at the end: never cut, and not indexed.
       (let ((report (concatenate 'string (make-string (* 2 field-max) :initial-element #\c)
                                  (format nil "~%~%Hint: fix the file it names."))))
-        (dolist (framework '(:load-error :unresolved))
-          (ok (search report
-                      (text (response (list (detail "pkg::load" "reason" report))
-                                      :framework framework)))
-              (format nil "a ~(~A~) reason is written whole, hint and all" framework)))))))
+        (dolist (framework '(:load-error :unresolved :timeout))
+          (let ((response (response (list (detail "pkg::load" "reason" report))
+                                    :framework framework)))
+            (ok (search report (text response))
+                (format nil "a ~(~A~) reason is written whole, hint and all" framework))
+            (ok (null (gethash "failures_index" response))
+                (format nil "a ~(~A~) report has no index" framework))
+            (loop for (path data) in (structured response)
+                  do (ok (and (search report (gethash "summary" data))
+                              (null (nth-value 1 (gethash "failed_tests" data))))
+                         (format nil "~A: its structured report has it whole in summary, ~
+                                      and no failed_tests"
+                                 path))))))
+      ;; Rove names a test without its package: two packages' tests of one
+      ;; name are told apart by their source files.  A test's own failures
+      ;; come one after another, whatever source each assertion names.
+      (flet ((in (file name)
+               (detail name "source" (cl-mcp/src/tools/helpers:make-ht "file" file))))
+        (let ((index (gethash "failures_index"
+                              (response (list (in "a.lisp" "same") (detail "other")
+                                              (in "b.lisp" "same"))))))
+          (ok (= 3 (length index)) "tests of one name in two files are indexed apart"))
+        (let ((index (gethash "failures_index"
+                              (response (list (in "a.lisp" "mixed") (detail "mixed")
+                                              (in "helper.lisp" "mixed"))))))
+          (ok (and (= 1 (length index)) (eql 3 (gethash "failures" (aref index 0))))
+              "one test's failures stay one entry, whatever their sources"))
+        (let* ((cl-mcp/src/tools/response-builders::*failures-indexed* 1)
+               (rest (gethash "failures_index_rest"
+                              (response (list (detail "first") (in "a.lisp" "dup")
+                                              (detail "between") (in "b.lisp" "dup")))))
+               (table (object (gethash "object_id" rest))))
+          (ok (and (eql 3 (gethash "tests" rest)) (= 3 (hash-table-count table))
+                   (gethash "dup" table) (gethash "dup (b.lisp)" table))
+              "past the index, a second test of one name keeps its own key")))
+      (let ((text (text (response (loop for i from 1 to (1+ detailed)
+                                        collect (detail (format nil "pkg::t~D" i)))))))
+        (ok (search (format nil "    pkg::t~D [object-id: " (1+ detailed)) text)
+            "the first failure past the detailed ones is listed"))
+      (loop for (path data) in (structured (response '()))
+            do (ok (null (nth-value 1 (gethash "failed_tests" data)))
+                   (format nil "~A: a pass has no failed_tests either" path))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; FiveAM Suite Matching
