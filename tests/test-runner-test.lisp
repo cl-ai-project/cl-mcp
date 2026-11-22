@@ -723,6 +723,22 @@ is stopped and waited for."
                                                (error (condition) condition))))))
       (ok (and (search "ITEMS) = 3" reason) (null (search "#1" reason)))
           "a condition's report repeats its subforms without labels"))
+    ;; A condition holding a deep value: in Form: or Got:, where SBCL prints its
+    ;; datum by its own code, it is named; as a reason, its report is printed,
+    ;; with no "cut there", since the report chooses what of its data it shows.
+    (let ((deep-error (let ((deep nil))
+                        (dotimes (i 600) (setf deep (list deep)))
+                        (make-condition 'type-error :datum deep :expected-type 'string))))
+      (ok (equal "TYPE-ERROR, not printed: it holds data nested 500 levels or more"
+                 (%within-seconds 10 (lambda ()
+                                       (gethash "form" (funcall detail :form deep-error)))))
+          "a condition with deep data in a form is named, not printed")
+      (let ((reason (%within-seconds 10 (lambda ()
+                                          (gethash "reason"
+                                                   (funcall detail :reason deep-error))))))
+        (ok (and (stringp reason) (search "The value" reason)
+                 (null (search "cut there" reason)))
+            "and as a reason its report is printed, unmarked")))
     ;; A cycle past the walk's limit overflows, and is printed again with labels.
     (let ((cl-mcp/src/test-runner-core::*failure-print-walk-limit* 3)
           (long (loop for i below 50 collect i)))

@@ -266,6 +266,17 @@ whole copy kept under its object-id.")
 ERROR, so an IGNORE-ERRORS or (HANDLER-CASE … (ERROR …)) inside a PRINT-OBJECT
 method does not swallow it and print on."))
 
+(defun %internal-function (package &rest names)
+  "Return the function the first of NAMES, fbound in PACKAGE, names, or NIL.  For
+an SBCL internal that was renamed between releases -- LAYOUT-INFO was
+WRAPPER-INFO in SBCL 2.1 to 2.3 -- which written as PACKAGE::NAME would stop
+this file from reading at all where the name is missing.  Defined before the
+LOAD-TIME-VALUE forms that call it, which run as this file's FASL loads."
+  (loop for name in names
+        for symbol = (find-symbol name package)
+        when (and symbol (fboundp symbol))
+          return (fdefinition symbol)))
+
 (defparameter *print-stack-reserve* (* 512 1024)
   "Bytes of control stack a failure's print must leave free.  A print that gets
 closer is stopped (%PRINT-TOO-DEEP) at its next write.  *PRINT-LEVEL* bounds the
@@ -282,14 +293,20 @@ the process ends it -- the worker.")
 
 (defun %stack-room ()
   "Return how many bytes of this thread's control stack are left: its size less
-what is in use.  Counted this way, not from the stack pointer to one end, since
-the stack grows down on x86-64 but up on ARM64, where the pointer starts at the
-stack's start.  Read from the exported per-thread stack bounds that
-CONTROL-STACK-USAGE itself reads: a thread-structure slot constant used for the
-end is missing from SBCL 2.0, and naming it kept this file from loading there."
-  (- (- (sb-kernel:get-lisp-obj-address sb-vm:*control-stack-end*)
-        (sb-kernel:get-lisp-obj-address sb-vm:*control-stack-start*))
-     (sb-kernel::control-stack-usage)))
+what is in use, or MOST-POSITIVE-FIXNUM when this SBCL does not say.  Counted
+this way, not from the stack pointer to one end, since the stack grows down on
+x86-64 but up on ARM64, where the pointer starts at the stack's start.  Read
+from the exported per-thread stack bounds that CONTROL-STACK-USAGE itself
+reads: a thread-structure slot constant used for the end is missing from SBCL
+2.0, and naming it kept this file from loading there.  CONTROL-STACK-USAGE,
+internal, is looked up by name for the same reason."
+  (let ((usage (load-time-value
+                (%internal-function "SB-KERNEL" "CONTROL-STACK-USAGE"))))
+    (if usage
+        (- (- (sb-kernel:get-lisp-obj-address sb-vm:*control-stack-end*)
+              (sb-kernel:get-lisp-obj-address sb-vm:*control-stack-start*))
+           (funcall usage))
+        most-positive-fixnum)))
 
 (defclass %capped-text-stream (sb-gray:fundamental-character-output-stream)
   ((sink :initform (make-string-output-stream) :reader %sink)
@@ -342,22 +359,15 @@ field is printed with.  The printer recurses once per level, and a test's
 thread that runs out of its stack twice in one process ends it (SBCL leaves the
 guard page down after the first).  Pretty printing one level costs at most about
 1.5 KB of stack, so 500 levels stay well inside a thread's 2 MB.  A value the
-walk finds nested this deep is printed to this level and says it was cut.")
+walk finds nested this deep is printed to this level and says it was cut, except
+a condition, whose report prints only what it chooses of its data: one cut
+there shows the printer's # alone, as does nesting inside an object that prints
+its own slots, which the walk does not enter.")
 
 (defparameter *failure-print-walk-limit* 1000000
   "Conses and array elements %NESTING looks at before it stops with what it has
 found and says it is unsure: it walks before every print, so a value of tens of
 millions of elements must not cost a walk of all of them.")
-
-(defun %internal-function (package &rest names)
-  "Return the function the first of NAMES, fbound in PACKAGE, names, or NIL.  For
-an SBCL internal that was renamed between releases -- LAYOUT-INFO was
-WRAPPER-INFO in SBCL 2.1 to 2.3 -- which written as PACKAGE::NAME would stop
-this file from reading at all where the name is missing."
-  (loop for name in names
-        for symbol = (find-symbol name package)
-        when (and symbol (fboundp symbol))
-          return (fdefinition symbol)))
 
 (defun %walked-p (item)
   "True when %NESTING walks into ITEM: a cons, an array that is not a string, a
@@ -503,7 +513,9 @@ report shows each subform twice -- and printed again with it on only when it
 overflows and the walk was unsure, as with a cycle past the walk's limit.  A
 cyclic value, or one nested to the level, is printed without the pretty
 printer, which recurses through quoted forms without counting a level.  A value
-cut says so; a walk that fails leaves the value to the level and the stream."
+cut says so, but for a cut the walk cannot see -- inside a condition's report or
+an object printing its own slots -- which shows the printer's # alone; a walk
+that fails leaves the value to the level and the stream."
   (multiple-value-bind (depth cyclic unsure)
       (handler-case (%nesting object)
         (error () (values 0 nil t)))
