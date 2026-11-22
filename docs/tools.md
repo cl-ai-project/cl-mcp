@@ -1681,8 +1681,11 @@ Run tests for a system and return structured results with pass/fail counts and f
 Clients using MCP 2025-06-18 or later receive the report in `structuredContent`, together with
 `summary`, the text summary itself: some clients (Claude Code among them) show `structuredContent`
 in place of `content`, and the summary's headline and advice exist nowhere else. For the same
-reason `structuredContent` keeps only the last 4000 characters of `stdout` and `stderr`, headed by
-a line counting what was left out; the result's top-level fields keep the whole capture.
+reason `structuredContent` leaves out `debug_output`, which `summary` holds verbatim, and keeps only
+the last 4000 characters of `stdout` and `stderr`, headed by a line counting what was left out;
+the result's top-level fields keep the whole capture. That capture is itself bounded at 50000
+characters, its head, so for a longer run the 4000 end at the truncation note, not at the
+runner's last line (the ASDF fallback's summary shows that line from the true end).
 All supported versions receive a text summary in `content` and the individual report fields
 at the top level of the tool result.
 
@@ -1702,7 +1705,8 @@ Output:
   (`⚠ PASS, BUT ...`: tests that did not run, or suites outside the root suite). Only `pass` is a
   clean pass; branch on this rather than on the counts, which read zero/zero for both
   `no-tests-ran` and `result-unknown`
-- `summary` (string, `structuredContent` only): the text summary, as in `content`
+- `summary` (string, `structuredContent` only): the text summary, as in `content`; it holds
+  `debug_output`, which `structuredContent` therefore leaves out
 - `passed` (integer): Number of passed tests. Rove and FiveAM count tests, not assertions, and
   count them the same way whether the whole system or a `test`/`tests` selection ran; prove
   counts assertions (a prove test file has no named tests)
@@ -1757,8 +1761,8 @@ Output:
 - `duration_ms` (integer): Execution time in milliseconds. For an aggregate Rove system this
   includes its test sub-systems. Their output contributes to the same bounded streams.
 - `stdout` / `stderr` (string, present when non-empty): the run's captured output. JSON only:
-  the summary text does not show them, and `structuredContent` carries only their last 4000
-  characters
+  the summary text does not show them, and `structuredContent` carries only the last 4000
+  characters of each
 - `debug_output` (string, present when non-empty): what the tests wrote to
   `cl-mcp/src/test-runner-core:*test-debug-output*`; shown in the summary text too
 

@@ -813,7 +813,8 @@ list, UNREACHED and OUTSIDE the FiveAM tests and suites a pass left out."
 (defun build-run-tests-response (test-result)
   "Build the standard run-tests response with summary text.
 TEST-RESULT is the hash-table returned by run-tests core.
-Returns a new hash-table with content, counts, and failure details.
+Returns a new hash-table with content, verdict (%RUN-TESTS-VERDICT, decided with
+the summary's headline), counts, and failure details.
 Includes rich failure details (description, form, values) and debug output
 in the summary text so MCP clients rendering only content[].text see them.
 Raw stdout/stderr are kept in structured fields only (not in content text)."

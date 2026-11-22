@@ -857,35 +857,63 @@ suites, and the directory."
                   (ok (null (gethash "content" data)))
                   (ok (null (gethash "structuredContent" data)))))))))))
 
-(deftest run-tests-structured-report-stays-as-small-as-the-text
+(deftest run-tests-structured-report-clips-output-and-carries-the-summary
   ;; Claude Code shows structuredContent in place of the text, which leaves
   ;; stdout out: a chatty suite's whole capture there filled the client's
-  ;; window.  The structured copy keeps the end; the result keeps it all.
+  ;; window.  The structured copy keeps the end of stdout and stderr, drops
+  ;; debug_output (the summary holds it), and the result keeps it all.  The
+  ;; bug was met through the pool, so the reply is also published the way a
+  ;; worker's comes back: encoded, then parsed with the proxy's options.
   (let* ((limit cl-mcp/src/test-runner::*structured-output-max-chars*)
          (long (concatenate 'string (make-string (* 3 limit) :initial-element #\a)
                             "runner summary at the end"))
-         (short "a short stderr")
+         (exact (make-string limit :initial-element #\e))
+         (debug "debug: a line written for the reader")
          (report (build-run-tests-response
                   (let ((result (cl-mcp/src/test-runner-core::make-test-result
                                  :passed 2 :failed 0 :pending 0 :framework :rove
                                  :duration 1)))
                     (setf (gethash "stdout" result) long
-                          (gethash "stderr" result) short)
+                          (gethash "stderr" result) exact
+                          (gethash "debug_output" result) debug)
                     result)))
-         (reply (cl-mcp/src/test-runner::%publish-test-report
-                 (cl-mcp/src/tools/helpers:result 7 report) "2025-06-18"))
-         (data (gethash "structuredContent" (gethash "result" reply)))
-         (clipped (gethash "stdout" data)))
-    (ok (equal long (gethash "stdout" report)) "the result keeps the whole capture")
-    (ok (< (length clipped) (+ limit 100)) "the structured copy is cut")
-    (ok (search "runner summary at the end" clipped) "to its end")
-    (ok (eql 0 (search (format nil "[... ~D earlier characters omitted]"
-                               (- (length long) limit))
-                       clipped))
-        "and says how much it left out")
-    (ok (equal short (gethash "stderr" data)) "short output is kept as it is")
-    (ok (equal "pass" (gethash "verdict" data)))
-    (ok (eql 0 (search "✓ PASS" (gethash "summary" data))))))
+         (inline (cl-mcp/src/tools/helpers:result 7 report))
+         (pooled (yason:parse (with-output-to-string (s) (yason:encode inline s))
+                              :json-arrays-as-vectors t
+                              :json-booleans-as-symbols t
+                              :json-nulls-as-keyword t)))
+    (loop for (path reply) in (list (list "inline" inline) (list "pooled" pooled))
+          do (let* ((published (cl-mcp/src/test-runner::%publish-test-report
+                                reply "2025-06-18"))
+                    (result (gethash "result" published))
+                    (data (gethash "structuredContent" result))
+                    (clipped (gethash "stdout" data))
+                    (text (gethash "text" (aref (gethash "content" result) 0))))
+               (ok (equal long (gethash "stdout" result))
+                   (format nil "~A: the result keeps the whole capture" path))
+               (ok (equal debug (gethash "debug_output" result))
+                   (format nil "~A: and its debug output" path))
+               (ok (= (length clipped)
+                      (+ limit (length (format nil "[... ~D earlier characters omitted]~%"
+                                               (- (length long) limit)))))
+                   (format nil "~A: the structured stdout is cut to the limit and a marker"
+                           path))
+               (ok (eql 0 (search (format nil "[... ~D earlier characters omitted]"
+                                          (- (length long) limit))
+                                  clipped))
+                   (format nil "~A: which says how much it left out" path))
+               (ok (search "runner summary at the end" clipped)
+                   (format nil "~A: and keeps the end" path))
+               (ok (equal exact (gethash "stderr" data))
+                   (format nil "~A: output at the limit is kept as it is" path))
+               (ok (null (nth-value 1 (gethash "debug_output" data)))
+                   (format nil "~A: debug output is left to the summary" path))
+               (ok (search debug (gethash "summary" data))
+                   (format nil "~A: which holds it" path))
+               (ok (equal text (gethash "summary" data))
+                   (format nil "~A: the summary is the text" path))
+               (ok (equal "pass" (gethash "verdict" data))
+                   (format nil "~A: the verdict travels" path))))))
 
 (defun %rove-suite-test-names (package-name)
   "Return the names of the tests Rove's suite for PACKAGE-NAME holds, as

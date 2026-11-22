@@ -29,7 +29,9 @@
 
 (defparameter *structured-output-max-chars* 4000
   "Characters of a run's stdout or stderr kept in run-tests' structuredContent:
-the last ones, where a runner prints its summary and an error its report.")
+the last ones of the capture, where a runner prints its summary and an error its
+report.  The capture is itself bounded (*MAX-TEST-OUTPUT-LENGTH*, its head), so
+for a longer run these end at its truncation note.")
 
 (defun %clip-output-for-structured (text)
   "Return TEXT, or its last *STRUCTURED-OUTPUT-MAX-CHARS* characters headed by a
@@ -43,11 +45,11 @@ line saying how many were left out."
 (defun %publish-test-report (reply version)
   "Attach the test report as structured content for clients that negotiated it.
 Some clients -- Claude Code -- show structuredContent in place of content[].text,
-so it has to stand on its own and stay as small as the text: the summary text
-goes with it as summary (the verdict headline, the advice under it, the ASDF
-fallback's stdout tail), and stdout and stderr, which the text leaves out, are
-cut to their ends (%CLIP-OUTPUT-FOR-STRUCTURED).  The result's own stdout and
-stderr fields keep the whole capture."
+so it has to stand on its own without growing far past the text: the summary
+text goes with it as summary (the verdict headline, the advice under it, the ASDF
+fallback's stdout tail), debug_output, which the summary holds verbatim, is left
+out, and stdout and stderr, which the text leaves out, are cut to their ends
+(%CLIP-OUTPUT-FOR-STRUCTURED).  The result's own fields keep everything."
   (let ((report (gethash "result" reply)))
     (when (and version (string>= version "2025-06-18") (hash-table-p report)
                (nth-value 1 (gethash "passed" report)))
@@ -58,7 +60,8 @@ stderr fields keep the whole capture."
              (text (and (hash-table-p part) (gethash "text" part))))
         (remhash "content" data)
         (when (stringp text)
-          (setf (gethash "summary" data) text))
+          (setf (gethash "summary" data) text)
+          (remhash "debug_output" data))
         (dolist (field '("stdout" "stderr"))
           (multiple-value-bind (value presentp) (gethash field data)
             (when presentp
