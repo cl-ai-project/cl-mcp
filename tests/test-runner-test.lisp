@@ -2650,6 +2650,13 @@ in ASDF and as left by a root change --, their packages and the directory."
         "leaving no key in the cache")
     (ok (eq package (gethash "/home/u/other/b.lisp" table))
         "a key outside the cache is left alone")
+    (let ((other (find-package '#:cl-user)))
+      (setf (gethash "/var/clmcp-cache/1-ABC/home/u/proj/tests/a.lisp" table) other
+            (gethash "/var/clmcp-cache/1-ABCD/home/u/proj/tests/c.lisp" table) other)
+      (ok (= 1 (cl-mcp/src/test-runner-core::%rove-key-files-by-source))
+          "a sibling cache whose name begins the same is not this worker's")
+      (ok (eq other (gethash "/home/u/proj/tests/a.lisp" table))
+          "and a newer entry replaces the source key's older one"))
     (let ((cl-mcp/src/worker/fasl-cache:*worker-fasl-cache* nil))
       (setf (gethash "/var/clmcp-cache/1-ABC/x.lisp" table) package)
       (ok (zerop (cl-mcp/src/test-runner-core::%rove-key-files-by-source))
@@ -2690,6 +2697,13 @@ in ASDF and as left by a root change --, their packages and the directory."
                                         (uiop:merge-pathnames* "tests.fasl" (truename root)))
                                        own)
                         "the fixture compiles into the worker's own cache")
+                    ;; Keyed as it loads, so (rove:run …) in repl-eval or a
+                    ;; test-op finds it as well as run-tests.
+                    (asdf:load-system "clmcp-classic")
+                    (ok (eq (find-package '#:clmcp-classic-tests)
+                            (rove/core/suite/file:file-package
+                             (uiop:merge-pathnames* "tests.lisp" (truename root)) nil))
+                        "a plain ASDF load leaves the file keyed by its source")
                     (let ((result (run-tests "clmcp-classic")))
                       (ok (equal '(1 1) (list (gethash "passed" result) (gethash "failed" result)))
                           (format nil "both tests ran: ~A passed, ~A failed"

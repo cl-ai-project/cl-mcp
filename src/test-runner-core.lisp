@@ -1525,11 +1525,14 @@ Rove records which package a test file defines under the file that was
 loading when the package's suite was made, a FASL, and turns that back into
 the source path only for a FASL under ASDF:*USER-CACHE* (RESOLVE-FILE).  A
 worker compiles its project root's files into *WORKER-FASL-CACHE* instead
-(issue #317), so the entry was keyed by a path inside that cache.  For a
-classic system ROVE:RUN finds suites only by looking each source file up in
-that table, found none, and ran no test: NO TESTS RAN for a project whose tests
-ran in a fresh process.  A package-inferred system was not touched, its
-package being found by the system's name.  The cache mirrors the root's
+(issue #317), so the entry was keyed by a path inside that cache.  ROVE:RUN
+finds a classic system's suites only by looking each source file up in that
+table, found none, and ran no test: NO TESTS RAN for a project whose tests ran
+in a fresh process.  A package-inferred system's own package is found by its
+name, but its same-prefix dependencies (x/tests importing x/tests/helper) go
+through the table too, and were left out.  Called after every Lisp file ASDF
+loads (the PERFORM method below), so whatever calls Rove next -- run-tests, a
+test-op, (rove:run …) in repl-eval -- finds the source path.  The cache mirrors the root's
 absolute path below it, so the source is the key with the cache's prefix
 taken off, as RESOLVE-FILE takes off ASDF:*USER-CACHE*'s."
   (let* ((cache *worker-fasl-cache*)
@@ -1550,6 +1553,12 @@ taken off, as RESOLVE-FILE takes off ASDF:*USER-CACHE*'s."
                          package))
           (length moves))
         0)))
+
+(defmethod asdf:perform :after ((operation asdf:load-op) (component asdf:cl-source-file))
+  ;; Rove makes a package's suite, and keys its file, while the file loads;
+  ;; re-keyed here, the entry is right before anything asks for it.  Outside
+  ;; a worker, or before Rove is loaded, this does nothing.
+  (%rove-key-files-by-source))
 
 (defun run-rove-tests (system-name)
   "Run tests using Rove and return structured results.
