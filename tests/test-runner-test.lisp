@@ -2631,6 +2631,97 @@ in ASDF and as left by a root change --, their packages and the directory."
        (ok (= 1 (symbol-value runs)) "no test from the mixed selection ran")
        (ok (null (find-symbol "ABSENT" package)))))))
 
+(deftest rove-file-keys-move-from-the-worker-cache-to-the-source
+  ;; Rove keys a test file's package by the FASL that was loading, turned back
+  ;; into a source path only under ASDF:*USER-CACHE*; a worker's own cache left
+  ;; the key inside it, and a classic system then ran no test.
+  (let* ((cache #p"/var/clmcp-cache/1-ABC/")
+         (cl-mcp/src/worker/fasl-cache:*worker-fasl-cache* cache)
+         (rove/core/suite/file::*file-package* (make-hash-table :test 'equal))
+         (table rove/core/suite/file::*file-package*)
+         (package (find-package '#:cl-mcp/tests/test-runner-test)))
+    (setf (gethash "/var/clmcp-cache/1-ABC/home/u/proj/tests/a.lisp" table) package
+          (gethash "/home/u/other/b.lisp" table) package)
+    (ok (= 1 (cl-mcp/src/test-runner-core::%rove-key-files-by-source))
+        "the one key inside the worker's cache moves")
+    (ok (eq package (gethash "/home/u/proj/tests/a.lisp" table))
+        "to the source path the cache mirrors")
+    (ok (null (gethash "/var/clmcp-cache/1-ABC/home/u/proj/tests/a.lisp" table))
+        "leaving no key in the cache")
+    (ok (eq package (gethash "/home/u/other/b.lisp" table))
+        "a key outside the cache is left alone")
+    (let ((other (find-package '#:cl-user)))
+      (setf (gethash "/var/clmcp-cache/1-ABC/home/u/proj/tests/a.lisp" table) other
+            (gethash "/var/clmcp-cache/1-ABCD/home/u/proj/tests/c.lisp" table) other)
+      (ok (= 1 (cl-mcp/src/test-runner-core::%rove-key-files-by-source))
+          "a sibling cache whose name begins the same is not this worker's")
+      (ok (eq other (gethash "/home/u/proj/tests/a.lisp" table))
+          "and a newer entry replaces the source key's older one"))
+    (let ((cl-mcp/src/worker/fasl-cache:*worker-fasl-cache* nil))
+      (setf (gethash "/var/clmcp-cache/1-ABC/x.lisp" table) package)
+      (ok (zerop (cl-mcp/src/test-runner-core::%rove-key-files-by-source))
+          "outside a worker nothing moves"))))
+
+(deftest run-tests-runs-a-classic-rove-system-compiled-into-the-worker-cache
+  ;; End to end: a classic (not package-inferred) Rove system whose files a
+  ;; worker compiles into its own cache runs its tests.
+  (let* ((dir (uiop:ensure-directory-pathname
+               (uiop:merge-pathnames* (format nil "cl-mcp-classic-~A-~A/" (get-universal-time)
+                                              (random 100000))
+                                      (uiop:temporary-directory))))
+         (base (uiop:merge-pathnames* "cache-base/" dir))
+         (root (uiop:merge-pathnames* "root/" dir))
+         (saved (asdf/output-translations:output-translations)))
+    (unwind-protect
+         (let ((cl-mcp/src/worker/fasl-cache:*worker-fasl-cache* nil)
+               (cl-mcp/src/worker/fasl-cache:*worker-cache-lock-fd* nil)
+               (cl-mcp/src/worker/fasl-cache:*isolated-roots* '()))
+           (ensure-directories-exist root)
+           (%write-fixture-file root "clmcp-classic.asd"
+                                "(asdf:defsystem \"clmcp-classic\"
+  :depends-on (\"rove\") :components ((:file \"tests\")))
+")
+           (%write-fixture-file root "tests.lisp"
+                                "(defpackage #:clmcp-classic-tests (:use #:cl #:rove))
+(in-package #:clmcp-classic-tests)
+(deftest passes (ok (= 1 1)))
+(deftest fails (ok (= 1 2)))
+")
+           (unwind-protect
+                (let ((own (cl-mcp/src/worker/fasl-cache:prepare-worker-fasl-cache base)))
+                  (cl-mcp/src/worker/fasl-cache:isolate-project-fasls root)
+                  (let ((asdf:*central-registry* (cons root asdf:*central-registry*))
+                        (asdf/session:*asdf-session* nil))
+                    (asdf:load-asd (uiop:merge-pathnames* "clmcp-classic.asd" root))
+                    (ok (uiop:subpathp (asdf:apply-output-translations
+                                        (uiop:merge-pathnames* "tests.fasl" (truename root)))
+                                       own)
+                        "the fixture compiles into the worker's own cache")
+                    ;; Keyed as it loads, so (rove:run …) in repl-eval or a
+                    ;; test-op finds it as well as run-tests.
+                    (asdf:load-system "clmcp-classic")
+                    (ok (eq (find-package '#:clmcp-classic-tests)
+                            (rove/core/suite/file:file-package
+                             (uiop:merge-pathnames* "tests.lisp" (truename root)) nil))
+                        "a plain ASDF load leaves the file keyed by its source")
+                    (let ((result (run-tests "clmcp-classic")))
+                      (ok (equal '(1 1) (list (gethash "passed" result) (gethash "failed" result)))
+                          (format nil "both tests ran: ~A passed, ~A failed"
+                                  (gethash "passed" result) (gethash "failed" result))))))
+             (when cl-mcp/src/worker/fasl-cache:*worker-cache-lock-fd*
+               (sb-posix:close cl-mcp/src/worker/fasl-cache:*worker-cache-lock-fd*))))
+      (setf (asdf/output-translations:output-translations) saved)
+      (ignore-errors (asdf:clear-system "clmcp-classic"))
+      (let ((package (find-package '#:clmcp-classic-tests)))
+        (when package
+          (remhash package rove/core/suite/package::*package-suites*)
+          (ignore-errors (delete-package package))))
+      (let ((table rove/core/suite/file::*file-package*))
+        (loop for key in (loop for key being the hash-keys of table
+                               when (search "cl-mcp-classic-" key) collect key)
+              do (remhash key table)))
+      (ignore-errors (uiop:delete-directory-tree dir :validate t)))))
+
 (deftest run-tests-suggests-registered-fiveam-targets
   (%call-with-fiveam-fixture
    "clmcp-fiveam-selection"
