@@ -845,7 +845,7 @@ suites, and the directory."
                 (when data
                   (ok (equalp (gethash "skipped_tests" data) (gethash "skipped_tests" report)))
                   ;; Left out whatever the verdict: failures_index stands for it.
-                    (ok (null (nth-value 1 (gethash "failed_tests" data))))
+                  (ok (null (nth-value 1 (gethash "failed_tests" data))))
                   (ok (eql 0 (gethash "failed" data)))
                   (ok (eql 1 (gethash "pending" data)))
                   (ok (equal "all-skipped" (gethash "verdict" data)))
@@ -1586,11 +1586,17 @@ everything again."
                     text)
             "the rest are counted")
         (ok (search (format nil "  inspect-object an object-id to read those failures ~
-                                 whole; a vector or table lists each failure's own id.~%")
+                                 whole: a vector lists each failure's own id, a table ~
+                                 each test's.~%")
                     text)
             "the text says how to read them")
-        (ok (<= (cl-mcp/src/object-registry::registry-count) (+ indexed 1 detailed))
-            "a run registers a bounded number of objects")
+        ;; One per indexed test and one for the rest; the cut detailed
+        ;; failures reuse their tests' ids, but for the long-named test's,
+        ;; whose test failed twice.
+        (ok (= (cl-mcp/src/object-registry::registry-count) (+ indexed 2))
+            "a run registers its tests, the rest, and a cut failure of a test with several")
+        (ok (eq (nth 4 failures) (object (id-after "  5. " text)))
+            "that cut failure's id is the failure itself, not its test's vector")
         (ok (equal (id-after "  1. pkg::long-description" text)
                    (gethash "object_id" (aref index 0)))
             "a cut failure that is its test's only one shares that test's id")
@@ -1681,14 +1687,31 @@ everything again."
                                       and no failed_tests"
                                  path))))))
       ;; Rove names a test without its package: two packages' tests of one
-      ;; name are told apart by their source files.
-      (let ((index (gethash "failures_index"
-                            (response
-                             (list (detail "same" "source"
-                                           (cl-mcp/src/tools/helpers:make-ht "file" "a.lisp"))
-                                   (detail "same" "source"
-                                           (cl-mcp/src/tools/helpers:make-ht "file" "b.lisp")))))))
-        (ok (= 2 (length index)) "tests of one name in two files are indexed apart"))
+      ;; name are told apart by their source files.  A test's own failures
+      ;; come one after another, whatever source each assertion names.
+      (flet ((in (file name)
+               (detail name "source" (cl-mcp/src/tools/helpers:make-ht "file" file))))
+        (let ((index (gethash "failures_index"
+                              (response (list (in "a.lisp" "same") (detail "other")
+                                              (in "b.lisp" "same"))))))
+          (ok (= 3 (length index)) "tests of one name in two files are indexed apart"))
+        (let ((index (gethash "failures_index"
+                              (response (list (in "a.lisp" "mixed") (detail "mixed")
+                                              (in "helper.lisp" "mixed"))))))
+          (ok (and (= 1 (length index)) (eql 3 (gethash "failures" (aref index 0))))
+              "one test's failures stay one entry, whatever their sources"))
+        (let* ((cl-mcp/src/tools/response-builders::*failures-indexed* 1)
+               (rest (gethash "failures_index_rest"
+                              (response (list (detail "first") (in "a.lisp" "dup")
+                                              (detail "between") (in "b.lisp" "dup")))))
+               (table (object (gethash "object_id" rest))))
+          (ok (and (eql 3 (gethash "tests" rest)) (= 3 (hash-table-count table))
+                   (gethash "dup" table) (gethash "dup (b.lisp)" table))
+              "past the index, a second test of one name keeps its own key")))
+      (let ((text (text (response (loop for i from 1 to (1+ detailed)
+                                        collect (detail (format nil "pkg::t~D" i)))))))
+        (ok (search (format nil "    pkg::t~D [object-id: " (1+ detailed)) text)
+            "the first failure past the detailed ones is listed"))
       (loop for (path data) in (structured (response '()))
             do (ok (null (nth-value 1 (gethash "failed_tests" data)))
                    (format nil "~A: a pass has no failed_tests either" path))))))

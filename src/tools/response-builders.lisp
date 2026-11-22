@@ -833,7 +833,8 @@ available names at its end, and is written as it was before this bound.")
   "Return TEXT, a failure field's printed text, or its first and last halves of
 *FAILURE-FIELD-MAX-CHARS* around a marker saying how much was cut and that the
 whole is under the object-id on the failure's first line.  Both ends are kept:
-a form's head names what was tested and its tail the last argument, and a FiveAM reason reads `X ... which is not EQUAL to Y'."
+a form's head names what was tested and its tail the last argument, and a
+FiveAM reason reads `X ... which is not EQUAL to Y'."
   (let ((text (if (stringp text) text (princ-to-string text)))
         (half (floor *failure-field-max-chars* 2)))
     (if (<= (length text) *failure-field-max-chars*)
@@ -844,27 +845,50 @@ a form's head names what was tested and its tail the last argument, and a FiveAM
           ;; Just past the limit, the marker would be longer than what it cuts.
           (if (< (length cut) (length text)) cut text)))))
 
+(defun %failure-file (failure)
+  "Return the file FAILURE's source names, or NIL when it names none."
+  (let ((source (gethash "source" failure)))
+    (and (hash-table-p source) (gethash "file" source))))
+
 (defun %group-failures (failures detailed)
   "Return FAILURES, a vector of failure details, grouped by test in the order
-each test first failed: a list of (NAME FAILURES UNDETAILED), FAILURES a vector
-of the test's failure details and UNDETAILED how many of them come at or after
-position DETAILED, past the ones written out in full.  A test is its test_name
-and the file its source names: Rove names a test without its package, so two
-packages' tests of one name stay apart when the runner recorded where they are."
-  (let ((index (make-hash-table :test 'equal))
-        (groups '()))
+each test first failed: a list of (NAME FAILURES UNDETAILED FILES), FAILURES a
+vector of the test's failure details, UNDETAILED how many of them come at or
+after position DETAILED, past the ones written out in full, and FILES the source
+files they name.
+
+A runner reports a test's failures one after another, so a failure with the
+name of the one before it is that test's, wherever its assertion's source is (an
+error escaping the body has none, an assertion in a helper names the helper's
+file).  A name met again later is the same test only when a file is shared or
+unknown: Rove names a test without its package, so two packages' tests of one
+name are told apart by the files their failures name."
+  (let ((by-name (make-hash-table :test 'equal))
+        (groups '())
+        (current nil))
     (loop for fail across failures
           for position from 0
           for name = (gethash "test_name" fail)
-          for source = (gethash "source" fail)
-          for key = (list name (and (hash-table-p source) (gethash "file" source)))
-          for group = (or (gethash key index)
-                          (let ((new (list name (make-array 1 :adjustable t :fill-pointer 0) 0)))
-                            (push new groups)
-                            (setf (gethash key index) new)))
+          for file = (%failure-file fail)
+          for group = (cond ((and current (equal name (first current))) current)
+                            ((find-if (lambda (candidate)
+                                        (or (null file) (null (fourth candidate))
+                                            (member file (fourth candidate)
+                                                    :test #'equal)))
+                                      (gethash name by-name)))
+                            (t (let ((new (list name
+                                                (make-array 1 :adjustable t
+                                                              :fill-pointer 0)
+                                                0 '())))
+                                 (push new groups)
+                                 (push new (gethash name by-name))
+                                 new)))
           do (vector-push-extend fail (second group))
              (when (>= position detailed)
-               (incf (third group))))
+               (incf (third group)))
+             (when file
+               (pushnew file (fourth group) :test #'equal))
+             (setf current group))
     (nreverse groups)))
 
 (defun %write-failures (stream failures &key (clip t))
@@ -922,10 +946,14 @@ whose reason is the whole report: it is written whole and not indexed."
                 (let ((table (make-hash-table :test 'equal))
                       (count 0))
                   (dolist (group rest)
+                    ;; One key per test: a second test of one name is told
+                    ;; apart by its file, as %GROUP-FAILURES told them apart.
                     (let ((name (princ-to-string (first group))))
-                      (setf (gethash name table)
-                            (concatenate 'simple-vector (gethash name table #())
-                                         (second group)))
+                      (setf (gethash (if (nth-value 1 (gethash name table))
+                                         (format nil "~A (~{~A~^, ~})" name (fourth group))
+                                         name)
+                                     table)
+                            (coerce (second group) 'simple-vector))
                       (incf count (length (second group)))))
                   (make-ht "failures" count
                            "tests" (length rest)
@@ -972,8 +1000,8 @@ whose reason is the whole report: it is written whole and not indexed."
                           [object-id: ~A]~%"
                   (gethash "failures" rest-entry) (gethash "tests" rest-entry)
                   (gethash "object_id" rest-entry)))
-        (format stream "  inspect-object an object-id to read those failures whole; ~
-                        a vector or table lists each failure's own id.~%")))
+        (format stream "  inspect-object an object-id to read those failures whole: ~
+                        a vector lists each failure's own id, a table each test's.~%")))
     (values index rest-entry)))
 
 (defun build-run-tests-response (test-result)
