@@ -1074,9 +1074,9 @@ The line break itself is outside the comment."
 comment, so that source joined on after TEXT needs a line break first.  That
 part is read with standard gap syntax: a wrapper's definitions, the only place
 this is asked, are found only under it.  When the part does not split into
-whitespace and comments (FROM is not past a form: just inside a wrapper's
-paren), any ; on TEXT's last line counts, since a line break too many before
-the wrapper's ) is harmless and one too few comments it out."
+whitespace and comments -- it holds a form the reader skipped, such as
+#+(or) (...) -- any ; on TEXT's last line counts, since a line break too many
+before the wrapper's ) is harmless and one too few comments it out."
   (let* ((gap (subseq text (min from (length text))))
          (segments (%gap-segments gap)))
     (cond (segments

@@ -969,7 +969,8 @@ above its first definition.")
                                 :form-type "defun" :form-name "c"
                                 :operation "insert_after"
                                 :content "(defun d () (format nil \"a; b #\\\\;\"))")
-                 (format nil "(progn (defun c () 1) (defun d () (format nil \"a; b #\\\\;\")))~%"))))
+                 (format nil "(progn (defun c () 1) ~
+                              (defun d () (format nil \"a; b #\\\\;\")))~%"))))
     (testing "delete of the last definition under a comment of its own"
       (let ((updated (%default-edit (format nil "(in-package :cl-user)~%~%(progn~%~
                                                  ~2@T(defun x () 1)~%~2@T;; about y~%~
@@ -991,6 +992,30 @@ above its first definition.")
                                 :operation "insert_after" :content "(defun b () 2)")
                  (format nil "(progn~C(defun a () 1) ; n~%~6@T~C(defun b () 2)~%~C)~%"
                          #\Tab #\Tab #\Tab))))
+    (testing "a block that needed repair and ends in a comment keeps the ) out of it"
+      (let ((updated (%default-edit (format nil "(in-package :cl-user)~%~%~
+                                                 (progn (defun c () 1))~%")
+                                    :form-type "defun" :form-name "c"
+                                    :operation "insert_after"
+                                    :content (format nil "(defun d () 2~%(defun f () 3) ; why"))))
+        (ok (equal (wrapper updated) '(progn (defun c () 1) (defun d () 2) (defun f () 3)))
+            updated)))
+    (testing "comment-only content keeps the ) out of it"
+      (ok (equal (%default-edit (format nil "(progn (defun c () 1))~%")
+                                :form-type "defun" :form-name "c"
+                                :operation "insert_after" :content ";; note")
+                 (format nil "(progn (defun c () 1) ;; note~%)~%"))))
+    (testing "a comment after a form the reader skips still moves the ) below it"
+      (let ((updated (%default-edit (format nil "(in-package :cl-user)~%~%~
+                                                 (progn (defun x () 1) #+(or) (defun z () 0) ; gone~%~
+                                                 ~2@T(defun y () 2))~%")
+                                    :form-type "defun" :form-name "y" :operation "delete")))
+        (ok (search (format nil "; gone~%)") updated) updated)
+        (ok (equal (wrapper updated) '(progn (defun x () 1))) updated)))
+    (testing "delete of the only definition under a comment on the wrapper's head"
+      (ok (equal (%default-edit (format nil "(progn ; setup~%~2@T(defun a () 1))~%")
+                                :form-type "defun" :form-name "a" :operation "delete")
+                 (format nil "(progn ; setup~%)~%"))))
     (testing "in a CRLF file an insert_after breaks the lines with CRLF"
       (ok (equal (%default-edit (format nil "(progn (defun a () 1) ; n~C~C)~C~C"
                                         #\Return #\Newline #\Return #\Newline)
