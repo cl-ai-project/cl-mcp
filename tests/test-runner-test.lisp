@@ -629,10 +629,12 @@ is stopped and waited for."
 
 (defstruct %walk-node
   "A structure whose slot can point at itself, for the printer's walk."
+  ;; NEXT: the node this one points at, itself to make a cycle.
   next)
 
 (defstruct %ring-node
   "A structure whose PRINT-OBJECT prints its slot, which can be itself."
+  ;; NEXT: the node PRINT-OBJECT prints inside this one, itself to make a ring.
   next)
 
 (defmethod print-object ((node %ring-node) stream)
