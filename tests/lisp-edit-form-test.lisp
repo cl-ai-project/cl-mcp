@@ -1007,7 +1007,8 @@ above its first definition.")
                  (format nil "(progn (defun c () 1) ;; note~%)~%"))))
     (testing "a comment after a form the reader skips still moves the ) below it"
       (let ((updated (%default-edit (format nil "(in-package :cl-user)~%~%~
-                                                 (progn (defun x () 1) #+(or) (defun z () 0) ; gone~%~
+                                                 (progn (defun x () 1) ~
+                                                 #+(or) (defun z () 0) ; gone~%~
                                                  ~2@T(defun y () 2))~%")
                                     :form-type "defun" :form-name "y" :operation "delete")))
         (ok (search (format nil "; gone~%)") updated) updated)
