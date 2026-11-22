@@ -1455,6 +1455,149 @@ everything again."
                  (ok (eql 0 (search headline text))
                      (format nil "and its text opens with ~A" headline)))))))
 
+(deftest build-run-tests-response-bounds-its-failure-list
+  ;; A broken shared fixture fails dozens of tests.  Written out whole, the
+  ;; list went into the text and, as summary, into structuredContent beside
+  ;; failed_tests, with no bound.  The text details the first failures with
+  ;; each long field cut at its middle, names the tests the next ones come
+  ;; from, counts the rest; failed_tests keeps every failure whole.
+  (let* ((detailed cl-mcp/src/tools/response-builders::*failures-detailed*)
+         (named cl-mcp/src/tools/response-builders::*failures-named*)
+         (field-max cl-mcp/src/tools/response-builders::*failure-field-max-chars*)
+         (half (floor field-max 2))
+         (long (lambda (char)
+                 (concatenate 'string "HEAD" (make-string (* 3 field-max) :initial-element char)
+                              "TAIL")))
+         (long-description (funcall long #\d))
+         (long-form (funcall long #\f))
+         (long-value (funcall long #\v))
+         (long-reason (funcall long #\r))
+         (long-frame (funcall long #\i))
+         (long-name (concatenate 'string "pkg::" (funcall long #\n))))
+    (labels ((detail (name &rest fields)
+               (let ((ht (cl-mcp/src/test-runner-core::make-failure-detail
+                          :test-name name :description "Expect (= 1 2) to be true."
+                          :form '(= 1 2) :values '(1 2))))
+                 ;; Printed fields as the runner records them, without the
+                 ;; quotes %SOURCE-TEXT puts on a string.
+                 (loop for (key value) on fields by #'cddr
+                       do (setf (gethash key ht) value))
+                 ht))
+             (response (failures &key (framework :rove))
+               (build-run-tests-response
+                (cl-mcp/src/test-runner-core::make-test-result
+                 :passed 0 :failed (length failures) :pending 0 :failed-tests failures
+                 :framework framework :duration 1)))
+             (text (response)
+               (gethash "text" (aref (gethash "content" response) 0)))
+             (cut (text)
+               (format nil "~A … [~D of ~D chars cut; whole in failed_tests] … ~A"
+                       (subseq text 0 half) (- (length text) (* 2 half)) (length text)
+                       (subseq text (- (length text) half))))
+             (occurrences (part text)
+               (loop for start = 0 then (1+ at)
+                     for at = (search part text :start2 start)
+                     while at count t)))
+      ;; Detailed: the first ones, each with one long field.  Then one test
+      ;; failing five assertions, a test with a long name, and more distinct
+      ;; tests than are named.
+      (let* ((failures
+               (append
+                (list (detail "pkg::long-description" "description" long-description)
+                      (detail "pkg::long-form" "form" long-form)
+                      (detail "pkg::long-value" "values" (vector "1" long-value))
+                      (detail "pkg::long-error" "reason" long-reason "signalled" t
+                              "error_frame" long-frame)
+                      (detail long-name))
+                (loop for i from 6 to detailed
+                      collect (detail (format nil "pkg::detailed-~D" i)))
+                (loop repeat 5 collect (detail "pkg::repeated"))
+                (list (detail long-name))
+                (loop for i from 1 to (+ named 3)
+                      collect (detail (format nil "pkg::undetailed-~D" i)))
+                ;; An unnamed test with two failures, so the counted line's
+                ;; failures and tests differ.
+                (list (detail (format nil "pkg::undetailed-~D" (+ named 3))))))
+             (total (length failures))
+             (response (response failures))
+             (text (text response)))
+        (ok (= detailed (occurrences "     Form: " text))
+            "the first failures are written out with their details")
+        (ok (search (format nil "  ~D more failures without details (all are in ~
+                                 failed_tests), from:~%"
+                            (- total detailed))
+                    text)
+            "the text says how many follow without details and where they are")
+        (ok (= 1 (occurrences "    pkg::repeated (×5)" text))
+            "a test failing several assertions is named once, with its count")
+        (ok (search (format nil "    ~A~%" (cut long-name)) text)
+            "a long name in the named list is cut")
+        (ok (search (format nil "  1. pkg::long-description~%") text)
+            "detailed failures are numbered from one")
+        (ok (search (format nil "  5. ~A~%" (cut long-name)) text)
+            "a long name in the detailed part is cut")
+        (ok (search (format nil "    pkg::undetailed-~D~%" (- named 2)) text)
+            "the named list reaches its limit")
+        (ok (null (search (format nil "pkg::undetailed-~D~%" (1- named)) text))
+            "and stops there")
+        (ok (search (format nil "    ... and 6 more failures from 5 more tests, not named~%")
+                    text)
+            "the rest are counted")
+        (loop for (label whole) in (list (list "a description" long-description)
+                                         (list "a form" long-form)
+                                         (list "a value" (format nil "1, ~A" long-value))
+                                         (list "an error" long-reason)
+                                         (list "a frame" long-frame)
+                                         (list "a detailed name" long-name))
+              do (ok (search (cut whole) text)
+                     (format nil "~A is cut at its middle, keeping both ends" label)))
+        (ok (search (format nil "Error: ~A" (cut long-reason)) text)
+            "an escaped error keeps its label")
+        (ok (null (search (subseq long-form 0 (1+ half)) text))
+            "nothing past a field's limit reaches the text")
+        (let ((kept (gethash "failed_tests" response)))
+          (ok (= total (length kept)) "failed_tests keeps every failure")
+          (ok (equal long-form (gethash "form" (aref kept 1)))
+              "and every field whole"))
+        (let* ((inline (cl-mcp/src/tools/helpers:result 7 response))
+               (pooled (yason:parse (with-output-to-string (s) (yason:encode inline s))
+                                    :json-arrays-as-vectors t
+                                    :json-booleans-as-symbols t
+                                    :json-nulls-as-keyword t)))
+          (loop for (path reply) in (list (list "inline" inline) (list "pooled" pooled))
+                do (let ((data (gethash "structuredContent"
+                                        (gethash "result"
+                                                 (cl-mcp/src/test-runner::%publish-test-report
+                                                  reply "2025-06-18")))))
+                     (ok (equal text (gethash "summary" data))
+                         (format nil "~A: the structured summary is the bounded text"
+                                 path))))))
+      (let ((text (text (response (loop for i from 1 to detailed
+                                        collect (detail (format nil "pkg::t~D" i)))))))
+        (ok (= detailed (occurrences "     Form: " text))
+            "up to the limit every failure is written out")
+        (ok (null (search "more failure" text))
+            "and nothing is said to be left out"))
+      (let ((just-over (make-string (1+ field-max) :initial-element #\j)))
+        (ok (search (format nil "Form: ~A~%" just-over)
+                    (text (response (list (detail "pkg::just-over" "form" just-over)))))
+            "a field the marker would lengthen is left whole"))
+      (let ((text (text (response (loop for i from 1 to (+ detailed 2)
+                                        collect (detail (format nil "pkg::t~D" i)))))))
+        (ok (search (format nil "    pkg::t~D~%" (+ detailed 2)) text)
+            "a few past the limit are named")
+        (ok (null (search "not named" text))
+            "with none left only counted"))
+      ;; A load or resolution failure is one synthetic failure whose reason is
+      ;; the whole report, its hint at the end: never cut.
+      (let ((report (concatenate 'string (make-string (* 2 field-max) :initial-element #\c)
+                                 (format nil "~%~%Hint: fix the file it names."))))
+        (dolist (framework '(:load-error :unresolved))
+          (ok (search report
+                      (text (response (list (detail "pkg::load" "reason" report))
+                                      :framework framework)))
+              (format nil "a ~(~A~) reason is written whole, hint and all" framework)))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; FiveAM Suite Matching
 ;;; ---------------------------------------------------------------------------
