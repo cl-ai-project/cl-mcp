@@ -269,9 +269,10 @@ method does not swallow it and print on."))
 (defparameter *print-stack-reserve* (* 512 1024)
   "Bytes of control stack a failure's print must leave free.  A print that gets
 closer is stopped (%PRINT-TOO-DEEP) at its next write.  *PRINT-LEVEL* bounds the
-printer's own recursion, but not a PRINT-OBJECT method that prints its slots
-with FORMAT ~S, which starts counting levels afresh, nor a rank-0 array inside
-another: those recursed until the test's thread ran out of stack.  SBCL handles
+printer's own recursion, but a PRINT-OBJECT method that prints its slots with
+FORMAT ~S adds no level of its own, so a chain of such objects is not cut, nor
+is a rank-0 array inside another: those recursed until the test's thread ran
+out of stack.  SBCL handles
 a thread's first exhaustion and leaves its guard page down, and the next one in
 the process ends it -- the worker.")
 
@@ -280,20 +281,25 @@ the process ends it -- the worker.")
 *PRINT-STACK-RESERVE* bytes of stack left."))
 
 (defun %stack-room ()
-  "Return how many bytes of this thread's control stack are left below the
-current frame.  SBCL's stack grows down from the thread's stack end towards its
-start."
-  (- (sb-sys:sap-int (sb-kernel:current-sp))
-     (sb-sys:sap-int (sb-vm::current-thread-offset-sap
-                      sb-vm::thread-control-stack-start-slot))))
+  "Return how many bytes of this thread's control stack are left: its size less
+what is in use.  Counted this way, not from the stack pointer to one end, since
+the stack grows down on x86-64 but up on ARM64, where the pointer starts at the
+stack's start."
+  (- (- (sb-sys:sap-int (sb-vm::current-thread-offset-sap
+                         sb-vm::thread-control-stack-end-slot))
+        (sb-sys:sap-int (sb-vm::current-thread-offset-sap
+                         sb-vm::thread-control-stack-start-slot)))
+     (sb-kernel::control-stack-usage)))
 
 (defclass %capped-text-stream (sb-gray:fundamental-character-output-stream)
   ((sink :initform (make-string-output-stream) :reader %sink)
    (room :initarg :room :accessor %room)
    (column :initform 0 :accessor %column))
   (:documentation "A character sink that keeps ROOM characters and then signals
-%PRINT-OVERFLOW, stopping the printer that writes to it.  The column is kept,
-since the pretty printer and FRESH-LINE ask for it."))
+%PRINT-OVERFLOW, stopping the printer that writes to it, and that signals
+%PRINT-TOO-DEEP at a write made with less than *PRINT-STACK-RESERVE* bytes of
+stack left.  The column is kept, since the pretty printer and FRESH-LINE ask for
+it."))
 
 (defun %note-written (stream string start end)
   "Count STRING[START,END), just written to STREAM, against its room and column."
@@ -339,9 +345,19 @@ guard page down after the first).  Pretty printing one level costs at most about
 walk finds nested this deep is printed to this level and says it was cut.")
 
 (defparameter *failure-print-walk-limit* 1000000
-  "Conses and array elements %NESTING looks at before it stops and calls the value
-neither circular nor deep: it walks before every print, so a value of tens of
+  "Conses and array elements %NESTING looks at before it stops with what it has
+found and says it is unsure: it walks before every print, so a value of tens of
 millions of elements must not cost a walk of all of them.")
+
+(defun %internal-function (package &rest names)
+  "Return the function the first of NAMES, fbound in PACKAGE, names, or NIL.  For
+an SBCL internal that was renamed between releases -- LAYOUT-INFO was
+WRAPPER-INFO in SBCL 2.1 to 2.3 -- which written as PACKAGE::NAME would stop
+this file from reading at all where the name is missing."
+  (loop for name in names
+        for symbol = (find-symbol name package)
+        when (and symbol (fboundp symbol))
+          return (fdefinition symbol)))
 
 (defun %walked-p (item)
   "True when %NESTING walks into ITEM: a cons, an array that is not a string, a
@@ -391,8 +407,15 @@ definition read past its end."
                                                     (list (find-class 'structure-object)
                                                           (find-class t))))))))))
              (if prints
-                 (let ((description (sb-kernel:layout-info (sb-kernel:%instance-layout item)))
-                       (length (sb-kernel:%instance-length item)))
+                 (let* ((layout-of (load-time-value
+                                    (%internal-function "SB-KERNEL" "%INSTANCE-LAYOUT"
+                                                        "%INSTANCE-WRAPPER")))
+                        (info-of (load-time-value
+                                  (%internal-function "SB-KERNEL" "LAYOUT-INFO"
+                                                      "WRAPPER-INFO")))
+                        (description (and layout-of info-of
+                                          (funcall info-of (funcall layout-of item))))
+                        (length (sb-kernel:%instance-length item)))
                    (walked (and (typep description 'sb-kernel:defstruct-description)
                                 (loop for slot in (sb-kernel:dd-slots description)
                                       for index = (sb-kernel:dsd-index slot)
@@ -440,8 +463,12 @@ towards *FAILURE-PRINT-WALK-LIMIT*, an array's included."
                             (gethash item on-path) t)
                       (push (list :exit item depth) stack)
                       (if (consp item)
-                          (progn (push (list :enter (cdr item) depth) stack)
-                                 (push (list :enter (car item) (1+ depth)) stack))
+                          ;; Atoms are not pushed: a long list of numbers
+                          ;; would cons an entry for each.
+                          (progn (when (%walked-p (cdr item))
+                                   (push (list :enter (cdr item) depth) stack))
+                                 (when (%walked-p (car item))
+                                   (push (list :enter (car item) (1+ depth)) stack)))
                           (multiple-value-bind (children scanned)
                               (%children item printing-slots
                                          (- *failure-print-walk-limit* visits))
@@ -508,15 +535,15 @@ cut says so; a walk that fails leaves the value to the level and the stream."
                          (:overflow (format nil "printing stopped at ~D characters"
                                             *failure-print-max-chars*))
                          (:too-deep "printing stopped: nested too deeply to print")
-                         (:exhausted "printing stopped: out of memory")
+                         (:exhausted "printing stopped: out of stack or memory")
                          (:level (format nil "nested deeper than ~D levels, cut there"
                                          *failure-print-max-depth*))))))
-        ;; A condition's report runs code of its own, which binds the printer
-        ;; as it likes -- SBCL's own reports pretty print their data inside
-        ;; ~@<...~:> -- so neither the level nor the stream's stack check
-        ;; reaches what it recurses through.  One whose data nest that deep is
-        ;; named, not printed.
-        (when (and deep (typep object 'condition))
+        ;; Printed with escapes, a condition prints its data by code of its
+        ;; own: SBCL's TYPE-ERROR writes its datum with WRITE-TO-STRING :PRETTY
+        ;; T into a string of its own, out of reach of the level and of the
+        ;; stream's stack check.  One whose data nest that deep is named, not
+        ;; printed.  Its report, printed without escapes, writes to the stream.
+        (when (and escape deep (typep object 'condition))
           (return-from %printed
             (format nil "~S, not printed: what it would show nests ~D levels or more"
                     (type-of object) *failure-print-max-depth*)))

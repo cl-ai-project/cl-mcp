@@ -690,8 +690,21 @@ is stopped and waited for."
                  (= 500 (count #\( result)))
             (format nil "a value nested too deep is printed to 500 levels and cut (pretty ~A)"
                     pretty))))
-    ;; A PRINT-OBJECT that prints its slot with FORMAT ~S starts counting levels
-    ;; afresh; the stream stops it before the stack runs out.
+    (let ((result (%within-seconds
+                   10 (lambda ()
+                        (let ((shallow nil))
+                          (dotimes (i 499) (setf shallow (list shallow)))
+                          (gethash "form" (funcall detail :form shallow)))))))
+      (ok (and (stringp result) (= 499 (count #\( result))
+               (null (search "nested deeper" result)))
+          "a value inside the level prints whole and unmarked"))
+    ;; The stack left is counted from the stack's size, whichever way it grows:
+    ;; counted from the wrong end, every field was cut.
+    (ok (< cl-mcp/src/test-runner-core::*print-stack-reserve*
+           (%within-seconds 10 #'cl-mcp/src/test-runner-core::%stack-room))
+        "a fresh thread has more stack left than a print must keep")
+    ;; A PRINT-OBJECT that prints its slot with FORMAT ~S adds no level of its
+    ;; own; the stream stops a chain of them before the stack runs out.
     (let ((result (%within-seconds
                    10 (lambda ()
                         (let ((ring (make-%ring-node)))
