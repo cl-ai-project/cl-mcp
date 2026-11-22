@@ -815,56 +815,87 @@ list, UNREACHED and OUTSIDE the FiveAM tests and suites a pass left out."
 *FAILURES-NAMED* are named and the rest counted; failed_tests keeps them all.")
 
 (defparameter *failures-named* 20
-  "Failures past *FAILURES-DETAILED* named in run-tests' text, one per line,
-before the rest are only counted.")
+  "Tests named in run-tests' text for the failures past *FAILURES-DETAILED*, one
+per line with how many failures each holds, before the rest are only counted.")
 
 (defparameter *failure-field-max-chars* 1000
-  "Characters of one field of a failure -- its name, description, form, values,
-reason or frame -- written into run-tests' text.  A test that compares a large
-structure prints all of it, and one such field can be as long as many failures;
-its whole text stays in failed_tests.")
+  "Characters of one field of a test's failure -- its name, description, form,
+values, reason or frame -- written into run-tests' text (%CLIP-FAILURE-FIELD).
+A test that compares a large structure prints all of it, and one such field can
+be as long as many failures; its whole text stays in failed_tests.  A load,
+resolution or timeout failure is not cut: its reason is the whole report, with
+the hint at its end, and is bounded where it is made.")
 
-(defun %write-failures (stream failures)
+(defun %clip-failure-field (text)
+  "Return TEXT, a failure field's printed text, or its first and last halves of
+*FAILURE-FIELD-MAX-CHARS* around a marker saying how much was cut and where the
+whole is.  Both ends are kept: a form's head names what was tested and its tail
+the last argument, and a FiveAM reason reads `X ... which is not EQUAL to Y'."
+  (let ((text (if (stringp text) text (princ-to-string text)))
+        (half (floor *failure-field-max-chars* 2)))
+    (if (<= (length text) *failure-field-max-chars*)
+        text
+        (format nil "~A … [~D of ~D chars cut; whole in failed_tests] … ~A"
+                (subseq text 0 half) (- (length text) (* 2 half)) (length text)
+                (subseq text (- (length text) half))))))
+
+(defun %write-failures (stream failures &key (clip t))
   "Write FAILURES, a vector of failure details, to STREAM under a Failures:
-heading: the first *FAILURES-DETAILED* with their details, each field cut to
-*FAILURE-FIELD-MAX-CHARS*, the next *FAILURES-NAMED* by name, and the rest
-counted.  Unbounded, a run whose shared fixture broke wrote every failure in
-full -- and twice in structuredContent, whose summary is this text beside
-failed_tests -- past what a client accepts.  failed_tests holds every failure
-whole, and the text says so wherever it leaves something out."
-  (flet ((clip (text)
-           (%clip-local-text (if (stringp text) text (princ-to-string text))
-                             *failure-field-max-chars*)))
+heading: the first *FAILURES-DETAILED* with their details, each field cut by
+%CLIP-FAILURE-FIELD unless CLIP is false, then the tests the rest come from --
+the first *FAILURES-NAMED* of them by name, with how many failures each holds
+when more than one, since a test fails once per failed assertion -- and a count
+of the others.  Unbounded, a run whose shared fixture broke wrote every failure
+in full, and twice in structuredContent, whose summary is this text beside
+failed_tests.  failed_tests holds every failure whole, and the text says so
+wherever it leaves something out.  CLIP is false for the single synthetic
+failure of a load, resolution or timeout, whose reason is the whole report."
+  (flet ((field (text)
+           (if clip
+               (%clip-failure-field text)
+               (if (stringp text) text (princ-to-string text)))))
     (let* ((total (length failures))
            (detailed (min total *failures-detailed*))
-           (named (min (- total detailed) *failures-named*))
-           (unnamed (- total detailed named)))
+           ;; The tests the undetailed failures come from, in order of first
+           ;; appearance: (name . failures).
+           (tests (let ((groups '()))
+                    (loop for i from detailed below total
+                          for name = (gethash "test_name" (aref failures i))
+                          for group = (assoc name groups :test #'equal)
+                          do (if group
+                                 (incf (cdr group))
+                                 (push (cons name 1) groups)))
+                    (nreverse groups)))
+           (named (subseq tests 0 (min (length tests) *failures-named*)))
+           (unnamed (nthcdr (length named) tests)))
       (format stream "~%Failures:~%")
       (loop for i from 0 below detailed
             for fail = (aref failures i)
-            do (format stream "  ~D. ~A~%" (1+ i) (clip (gethash "test_name" fail)))
+            do (format stream "  ~D. ~A~%" (1+ i) (field (gethash "test_name" fail)))
                (when (gethash "description" fail)
-                 (format stream "     ~A~%" (clip (gethash "description" fail))))
+                 (format stream "     ~A~%" (field (gethash "description" fail))))
                (when (gethash "form" fail)
-                 (format stream "     Form: ~A~%" (clip (gethash "form" fail))))
+                 (format stream "     Form: ~A~%" (field (gethash "form" fail))))
                (let ((vals (gethash "values" fail)))
                  (when (and vals (plusp (length vals)))
                    (format stream "     Got: ~A~%"
-                           (clip (format nil "~{~A~^, ~}" (coerce vals 'list))))))
+                           (field (format nil "~{~A~^, ~}" (coerce vals 'list))))))
                (when (gethash "reason" fail)
                  (format stream "     ~:[Reason~;Error~]: ~A~%"
-                         (gethash "signalled" fail) (clip (gethash "reason" fail))))
+                         (gethash "signalled" fail) (field (gethash "reason" fail))))
                (when (gethash "error_frame" fail)
-                 (format stream "     In: ~A~%" (clip (gethash "error_frame" fail)))))
-      (when (plusp named)
-        (format stream "  ~D more failure~:P without details (all are in ~
-                        failed_tests):~%"
-                (+ named unnamed))
-        (loop for i from detailed below (+ detailed named)
-              do (format stream "  ~D. ~A~%" (1+ i)
-                         (clip (gethash "test_name" (aref failures i))))))
-      (when (plusp unnamed)
-        (format stream "  ... and ~D more, not named~%" unnamed)))))
+                 (format stream "     In: ~A~%" (field (gethash "error_frame" fail)))))
+      (when tests
+        (format stream "  ~D more failure~:P without details (all are in failed_tests)~
+                        ~:[, from:~;:~]~%"
+                (- total detailed) (null named))
+        (loop for (name . count) in named
+              do (format stream "    ~A~@[ (×~D)~]~%" (field name) (and (> count 1) count)))
+        (when unnamed
+          (format stream "    ... and ~D more failure~:P from ~D ~:[~;more ~]test~P, ~
+                          not named~%"
+                  (reduce #'+ unnamed :key #'cdr) (length unnamed) named
+                  (length unnamed)))))))
 
 (defun build-run-tests-response (test-result)
   "Build the standard run-tests response with summary text.
@@ -932,7 +963,10 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                          <the root suite file's package>) to its file's defpackage.~%"
                       (length outside) outside))
             (when (plusp (length failed-tests-vector))
-              (%write-failures s failed-tests-vector))
+              (%write-failures s failed-tests-vector
+                               :clip (not (member framework-name
+                                                  '("load-error" "unresolved" "timeout")
+                                                  :test #'string=))))
             ;; A test system refused for a warning: the warning with its
             ;; place, written as load-system writes it.
             (let ((refusing (remove-if-not
