@@ -1064,6 +1064,19 @@ The line break itself is outside the comment."
              (%source-line-comment-end text comment readtable))
         start)))
 
+(defun %last-line-may-end-in-comment-p (text readtable)
+  "True when TEXT's last line may end inside a ; line comment under READTABLE,
+so that source joined on after TEXT needs a line break first.  Errs towards
+true: a ; inside a string or a #\\; on that line only costs a line break."
+  (let* ((line-start (1+ (or (position #\Newline text :from-end t) -1)))
+         (first (position #\; text :start line-start)))
+    (and first
+         (or (%standard-line-comment-p readtable)
+             (loop for semicolon = first then (position #\; text :start (1+ semicolon))
+                   while semicolon
+                   thereis (%source-line-comment-end text semicolon readtable)))
+         t)))
+
 (defun %apply-operation-preserve-spacing (text node end operation content
                                           readtable comment-floor replacement-line-comment-p)
   "Apply OPERATION to NODE within TEXT changing nothing but the form's own text
@@ -1095,7 +1108,12 @@ file's own (CRLF in a CRLF file)."
            (gap-before (from)
              ;; The whitespace in front of FROM, back to the text before it.
              (let ((core (string-right-trim whitespace (subseq text 0 from))))
-               (values core (subseq text (length core) from)))))
+               (values core (subseq text (length core) from))))
+           (line-indent (at)
+             ;; Blank space as wide as AT's line up to AT, tabs kept.
+             (map 'string (lambda (ch) (if (char= ch #\Tab) #\Tab #\Space))
+                  (subseq text (1+ (or (position #\Newline text :end at :from-end t) -1))
+                          at))))
       (ecase operation
         ((:replace)
          (let ((rest (subseq text (cst-node-end node))))
@@ -1138,12 +1156,27 @@ file's own (CRLF in a CRLF file)."
         ((:insert-after)
          (if closing
              ;; After the last child: on its own line at the child's
-             ;; indentation, the wrapper's ) still closing right after.
+             ;; indentation, the wrapper's ) still closing right after.  A ;
+             ;; comment on the child's line, or at the end of CONTENT, runs to
+             ;; the line end: a line break keeps the new form, or the
+             ;; wrapper's ), out of it.
              (multiple-value-bind (before-core before-gap) (gap-before start)
                (declare (ignore before-core))
-               (concatenate 'string (subseq text 0 end)
-                            (if (find #\Newline before-gap) before-gap (string #\Space))
-                            snippet suffix))
+               (let ((rest-of-line (position-if-not (lambda (ch) (member ch horizontal))
+                                                    suffix)))
+                 (concatenate 'string (subseq text 0 end)
+                              (cond ((find #\Newline before-gap) before-gap)
+                                    ((< (cst-node-end node) end)
+                                     (concatenate 'string newline (line-indent start)))
+                                    (t (string #\Space)))
+                              snippet
+                              (if (and (%last-line-may-end-in-comment-p snippet readtable)
+                                       rest-of-line
+                                       (not (member (char suffix rest-of-line)
+                                                    '(#\Newline #\Return))))
+                                  newline
+                                  "")
+                              suffix)))
          (let ((gap (cond ((plusp (length following)) gap-after)
                           (t
                            ;; The last form: the gap in front of it (its comment
@@ -1165,7 +1198,12 @@ file's own (CRLF in a CRLF file)."
              ;; one final line break -- or, inside a wrapper, the wrapper's
              ;; ) follows the child before it.
              (let ((before-core (gap-before start)))
-               (cond (closing (concatenate 'string before-core following))
+               (cond (closing (concatenate 'string before-core
+                                           (if (%last-line-may-end-in-comment-p
+                                                before-core readtable)
+                                               newline
+                                               "")
+                                           following))
                      ((plusp (length before-core))
                       (concatenate 'string before-core newline))
                      (t "")))))))))

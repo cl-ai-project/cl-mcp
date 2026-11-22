@@ -899,6 +899,67 @@ above its first definition.")
                      (error (e) (princ-to-string e)))))
       (ok (and message (search "(defclass pt)" message)) (or message "no error")))))
 
+(deftest lisp-edit-form-keeps-line-comments-off-a-wrapper-s-forms
+  ;; A ; comment on the line where a wrapper's last definition ends swallowed
+  ;; whatever was spliced after it on that line: an inserted form, or the
+  ;; wrapper's own ).  The tool reported success.
+  (flet ((wrapper (text)
+           ;; The wrapper as read: TEXT after its (in-package ...), in this
+           ;; package so that it compares with the forms quoted below.
+           (with-input-from-string (in text)
+             (let ((*package* (symbol-package 'wrapper)))
+               (read in)
+               (read in)))))
+    (testing "insert_after a definition with a comment on its line goes below the comment"
+      (let ((updated (%default-edit (format nil "(in-package :cl-user)~%~%~
+                                                 (eval-when (:execute) (defun a () 1) ; note~%~
+                                                 ~2@T)~%")
+                                    :form-type "defun" :form-name "a"
+                                    :operation "insert_after" :content "(defun b () 2)")))
+        (ok (equal updated (format nil "(in-package :cl-user)~%~%~
+                                        (eval-when (:execute) (defun a () 1) ; note~%~
+                                        ~22@T(defun b () 2)~%~2@T)~%"))
+            updated)
+        (ok (equal (wrapper updated) '(eval-when (:execute) (defun a () 1) (defun b () 2))))))
+    (testing "insert_after content ending in a comment keeps the wrapper's ) out of it"
+      (let ((updated (%default-edit (format nil "(in-package :cl-user)~%~%~
+                                                 (progn (defun c () 1))~%")
+                                    :form-type "defun" :form-name "c"
+                                    :operation "insert_after"
+                                    :content "(defun d () 2) ; why")))
+        (ok (equal updated (format nil "(in-package :cl-user)~%~%~
+                                        (progn (defun c () 1) (defun d () 2) ; why~%)~%"))
+            updated)
+        (ok (equal (wrapper updated) '(progn (defun c () 1) (defun d () 2))))))
+    (testing "delete of the last definition keeps the wrapper's ) out of the comment before"
+      (let ((updated (%default-edit (format nil "(in-package :cl-user)~%~%~
+                                                 (progn (defun x () 1) ; keep~%~
+                                                 ~2@T(defun y () 2))~%")
+                                    :form-type "defun" :form-name "y" :operation "delete")))
+        (ok (equal updated (format nil "(in-package :cl-user)~%~%~
+                                        (progn (defun x () 1) ; keep~%)~%"))
+            updated)
+        (ok (equal (wrapper updated) '(progn (defun x () 1))))))
+    (testing "replace with content ending in a comment keeps the wrapper's ) out of it"
+      (let ((updated (%default-edit (format nil "(in-package :cl-user)~%~%~
+                                                 (progn (defun e () 1))~%")
+                                    :form-type "defun" :form-name "e"
+                                    :operation "replace"
+                                    :content "(defun e () 2) ; changed")))
+        (ok (equal (wrapper updated) '(progn (defun e () 2))) updated)))
+    (testing "in a CRLF file the added line breaks are CRLF"
+      (let ((updated (%default-edit (format nil "(in-package :cl-user)~C~C~C~C~
+                                                 (progn (defun x () 1) ; keep~C~C~
+                                                 ~2@T(defun y () 2))~C~C"
+                                            #\Return #\Newline #\Return #\Newline
+                                            #\Return #\Newline #\Return #\Newline)
+                                    :form-type "defun" :form-name "y" :operation "delete")))
+        (ok (equal updated (format nil "(in-package :cl-user)~C~C~C~C~
+                                        (progn (defun x () 1) ; keep~C~C)~C~C"
+                                   #\Return #\Newline #\Return #\Newline
+                                   #\Return #\Newline #\Return #\Newline))
+            updated)))))
+
 (deftest lisp-edit-form-replace-defun
   (testing "replace updates function body"
     (with-temp-file "tests/tmp/edit-form-replace.lisp"
