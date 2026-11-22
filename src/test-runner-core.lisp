@@ -254,9 +254,12 @@ per test that skipped anything, whether it passed or checked nothing."
 (defparameter *failure-print-max-chars* 1000000
   "Characters one printed field of a failure may run to.  Printing stops there,
 so a value with no end -- a circular one that even *PRINT-CIRCLE* cannot
-shorten, a structure printing itself forever -- costs this much and no more.
-The report's text shows a field cut to *FAILURE-FIELD-MAX-CHARS*; this bounds
-the whole copy kept under its object-id.")
+shorten, a structure printing itself forever -- keeps this much text and no
+more.  It bounds the text, not every cost: a print with *PRINT-CIRCLE* T walks
+the whole object first, and a PRINT-OBJECT method that builds a string of its
+own before writing is outside it.  The report's text shows a field cut to
+*FAILURE-FIELD-MAX-CHARS*; this bounds the whole copy kept under its
+object-id.")
 
 (define-condition %print-overflow (serious-condition) ()
   (:documentation "Signalled by a %CAPPED-TEXT-STREAM written past its room.  Not an
@@ -299,6 +302,68 @@ since the pretty printer and FRESH-LINE ask for it."))
 (defmethod sb-gray:stream-line-column ((stream %capped-text-stream))
   (%column stream))
 
+(defparameter *failure-print-max-depth* 500
+  "Levels of nesting a failure's printed field may reach.  The printer recurses
+once per level, and a test's thread has a stack of its own: run out of stack
+while pretty printing there, SBCL does not unwind but ends the process -- the
+worker, with every session's state in it.  A value nested deeper is printed to
+this level and says it was cut.")
+
+(defparameter *failure-print-walk-limit* 1000000
+  "Conses and array elements %NESTING looks at before it stops and calls the value
+neither circular nor deep: it walks before every print, so a value of tens of
+millions of elements must not cost a walk of all of them.")
+
+(defun %children (item)
+  "Return what the printer prints inside ITEM, a level deeper, or NIL: an array's
+elements (not a string's characters), or a structure's boxed slots, which its
+default printing shows.  A list is walked by %NESTING itself."
+  (cond ((and (arrayp item) (not (stringp item)) (eq (array-element-type item) t))
+         (loop for index from 0 below (min (array-total-size item) *failure-print-walk-limit*)
+               collect (row-major-aref item index)))
+        ((typep item 'structure-object)
+         (let ((description (ignore-errors
+                             (sb-kernel:find-defstruct-description (type-of item) nil))))
+           (and description
+                (loop for slot in (sb-kernel:dd-slots description)
+                      when (eq (sb-kernel:dsd-raw-type slot) t)
+                        collect (sb-kernel:%instance-ref item (sb-kernel:dsd-index slot))))))))
+
+(defun %nesting (object)
+  "Return two values for OBJECT, a failure's value: how deep its lists, arrays
+and structures nest, and whether they hold a cycle.  Walked with a stack of its
+own, not by recursion, so a value that would exhaust the printer's stack is
+measured without exhausting this one.  A list's CDR is the same level as the
+list, as the printer sees it, and its CAR one deeper.  Stops after
+*FAILURE-PRINT-WALK-LIMIT* elements with what it has found."
+  (let ((on-path (make-hash-table :test 'eq))
+        (done (make-hash-table :test 'eq))
+        (stack (list (list :enter object 0)))
+        (deepest 0)
+        (visits 0))
+    (loop while (and stack (< visits *failure-print-walk-limit*))
+          do (destructuring-bind (action item depth) (pop stack)
+               (cond ((eq action :exit)
+                      (remhash item on-path)
+                      (setf (gethash item done) t))
+                     ((not (or (consp item)
+                               (and (arrayp item) (not (stringp item)))
+                               (typep item 'structure-object))))
+                     ((gethash item on-path)
+                      (return-from %nesting (values deepest t)))
+                     ((gethash item done))
+                     (t
+                      (incf visits)
+                      (setf deepest (max deepest depth)
+                            (gethash item on-path) t)
+                      (push (list :exit item depth) stack)
+                      (if (consp item)
+                          (progn (push (list :enter (cdr item) depth) stack)
+                                 (push (list :enter (car item) (1+ depth)) stack))
+                          (dolist (child (%children item))
+                            (push (list :enter child (1+ depth)) stack)))))))
+    (values deepest nil)))
+
 (defun %printed (object &key (escape t))
   "Return OBJECT printed for a failure report, with ESCAPE as PRIN1 (true) or
 PRINC (false) print it, whatever printer settings the worker holds.
@@ -307,31 +372,50 @@ A test runs on a thread of its own, which sees the worker's global printer
 variables: a circular value printed forever under *PRINT-CIRCLE* NIL and held
 the run until its deadline, and a *PRINT-LENGTH* set in repl-eval cut a list to
 (1 2 ...) in a report whose object-id was said to hold it whole.  So length,
-level, lines, base, radix and case are fixed here, and the text is printed into
-a stream of *FAILURE-PRINT-MAX-CHARS* characters.  It is printed with
-*PRINT-CIRCLE* NIL first, as source reads -- with it on, two string constants
-the compiler made one object print as #1=\"a\" #1# -- and only when that
-overflows is it printed again with *PRINT-CIRCLE* T, which ends a circular
-value.  A value too long either way is cut, and says so."
-  (flet ((attempt (circle)
-           (let ((stream (make-instance '%capped-text-stream
-                                        :room *failure-print-max-chars*)))
-             (handler-case
-                 (let ((*read-default-float-format* 'single-float))
-                   (write object :stream stream :escape escape :readably nil
-                                 :circle circle :length nil :level nil :lines nil
-                                 :base 10 :radix nil :case :upcase :array t :gensym t)
-                   (values (get-output-stream-string (%sink stream)) t))
-               (%print-overflow ()
-                 (values (get-output-stream-string (%sink stream)) nil))))))
-    (multiple-value-bind (text whole) (attempt nil)
-      (if whole
-          text
-          (multiple-value-bind (circular whole) (attempt t)
-            (if whole
-                circular
-                (format nil "~A … [printing stopped at ~D characters]"
-                        text *failure-print-max-chars*)))))))
+lines, base, radix, case and the right margin are fixed here, and the text is
+printed into a stream of *FAILURE-PRINT-MAX-CHARS* characters.
+
+The value is walked first (%NESTING).  A cycle found there is printed with
+*PRINT-CIRCLE* T, which ends it.  Anything else is printed with *PRINT-CIRCLE*
+NIL, as source reads -- with it on, two string constants the compiler made one
+object print as #1=\"a\" #1# -- and printed again with it on only when that
+overflows, as a cycle the walk did not reach would.  Nesting deeper than
+*FAILURE-PRINT-MAX-DEPTH* is printed to that level: the printer recurses per
+level, and running out of stack while pretty printing on a test's thread ends
+the worker, not the print.  A value cut either way says so."
+  (multiple-value-bind (depth cyclic) (%nesting object)
+    (let ((level (and (> depth *failure-print-max-depth*) *failure-print-max-depth*)))
+      (flet ((attempt (circle)
+               ;; Values: the text printed, and :WHOLE, :OVERFLOW or :EXHAUSTED.
+               (let ((stream (make-instance '%capped-text-stream
+                                            :room *failure-print-max-chars*)))
+                 (handler-case
+                     (let ((*read-default-float-format* 'single-float))
+                       (write object :stream stream :escape escape :readably nil
+                                     :circle circle :length nil :level level :lines nil
+                                     :base 10 :radix nil :case :upcase :array t :gensym t
+                                     :right-margin nil :miser-width nil)
+                       (values (get-output-stream-string (%sink stream)) :whole))
+                   (%print-overflow ()
+                     (values (get-output-stream-string (%sink stream)) :overflow))
+                   (storage-condition ()
+                     (values (get-output-stream-string (%sink stream)) :exhausted)))))
+             (cut (text outcome)
+               (format nil "~A … [~A]" text
+                       (case outcome
+                         (:overflow (format nil "printing stopped at ~D characters"
+                                            *failure-print-max-chars*))
+                         (:exhausted "printing stopped: nested too deeply to print")
+                         (t (format nil "nested deeper than ~D levels, cut there"
+                                    *failure-print-max-depth*))))))
+        (multiple-value-bind (text outcome) (attempt cyclic)
+          (when (and (eq outcome :overflow) (not cyclic))
+            (multiple-value-bind (circular again) (attempt t)
+              (when (eq again :whole)
+                (setf text circular outcome :whole))))
+          (cond ((not (eq outcome :whole)) (cut text outcome))
+                (level (cut text :level))
+                (t text)))))))
 
 (defun %source-text (object)
   "Return OBJECT printed the way source is written: escapes on, so a string

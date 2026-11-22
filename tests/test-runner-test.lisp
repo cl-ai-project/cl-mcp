@@ -611,13 +611,19 @@
                  (make-symbol "SOME-TEST")))))))
 
 (defun %within-seconds (seconds thunk)
-  "Call THUNK on a thread of its own and return its value, or :TIMED-OUT when it
-has not returned within SECONDS -- the thread is then stopped -- so a printer
-that never ends fails the test instead of hanging the suite."
-  (let ((thread (sb-thread:make-thread thunk :name "printer probe")))
+  "Call THUNK on a thread of its own and return its value, the condition it
+signalled, or :TIMED-OUT when it has not returned within SECONDS -- the thread
+is then stopped and waited for -- so a printer that never ends, or ends in an
+error, fails the test instead of hanging the suite or reaching the debugger."
+  (let ((thread (sb-thread:make-thread
+                 (lambda ()
+                   (handler-case (funcall thunk)
+                     (serious-condition (condition) condition)))
+                 :name "printer probe")))
     (let ((value (sb-thread:join-thread thread :timeout seconds :default :timed-out)))
       (when (eq value :timed-out)
-        (ignore-errors (sb-thread:terminate-thread thread)))
+        (ignore-errors (sb-thread:terminate-thread thread))
+        (sb-thread:join-thread thread :timeout 10 :default nil))
       value)))
 
 (deftest failure-detail-prints-whatever-the-printer-settings
@@ -627,11 +633,12 @@ that never ends fails the test instead of hanging the suite."
   ;; cut the values a failure reports, under an object-id said to hold them
   ;; whole.
   (let ((circular (let ((list (list 1 2 3))) (setf (cdr (last list)) list) list))
+        (car-circular (let ((list (list 1 2))) (setf (car list) list) list))
         (detail (lambda (&rest arguments)
                   (apply #'cl-mcp/src/test-runner-core::make-failure-detail
                          :test-name "t" arguments))))
     (let ((result (%within-seconds
-                   20 (lambda ()
+                   10 (lambda ()
                         (let ((*print-circle* nil))
                           (funcall detail :form circular :values (list circular)
                                           :reason (make-condition 'type-error
@@ -644,14 +651,49 @@ that never ends fails the test instead of hanging the suite."
             "a value too")
         (ok (search "#1=(1 2 3 . #1#)" (gethash "reason" result))
             "and a condition's report")))
+    ;; Circular through its CAR, the value recurses instead of running on, and
+    ;; ran out of stack under *PRINT-CIRCLE* NIL, with or without pretty printing.
+    (dolist (pretty '(nil t))
+      (let ((result (%within-seconds
+                     10 (lambda ()
+                          (let ((*print-circle* nil) (*print-pretty* pretty))
+                            (gethash "form" (funcall detail :form car-circular)))))))
+        (ok (equal "#1=(#1# 2)" result)
+            (format nil "a value circular through its car prints as one (pretty ~A): ~A"
+                    pretty result))))
+    ;; Nested deeper than the printer's stack reaches, a value ran a pretty
+    ;; print on the test's thread out of stack, which ends the worker.
+    (dolist (pretty '(nil t))
+      (let ((result (%within-seconds
+                     10 (lambda ()
+                          (let ((deep nil) (*print-pretty* pretty))
+                            (dotimes (i 100000) (setf deep (list deep)))
+                            (gethash "form" (funcall detail :form deep)))))))
+        (ok (and (stringp result)
+                 (search "[nested deeper than 500 levels, cut there]" result))
+            (format nil "a value nested too deep is printed to a level and cut (pretty ~A)"
+                    pretty))))
+    ;; The pretty printer holds a line until it ends; with no right margin to
+    ;; end it, a circular value never reached the stream's limit.
+    (let ((result (%within-seconds
+                   10 (lambda ()
+                        (let ((*print-circle* nil) (*print-pretty* t)
+                              (*print-right-margin* most-positive-fixnum))
+                          (gethash "form" (funcall detail :form circular)))))))
+      (ok (equal "#1=(1 2 3 . #1#)" result)
+          "a right margin set elsewhere does not keep a circular value from ending"))
     (let ((d (let ((*print-length* 2) (*print-level* 1) (*print-lines* 1)
-                   (*print-base* 16) (*print-radix* t) (*print-case* :downcase))
+                   (*print-base* 16) (*print-radix* t) (*print-case* :downcase)
+                   (*print-pretty* t))
                (funcall detail :form '(equal (list 1 2 3) (list 1 2 (3 4) 17))
-                               :values (list (list 1 2 (list 3 (list 4)) 17))))))
+                               :values (list (list 1 2 (list 3 (list 4)) 17)
+                                             (loop for i below 60 collect i))))))
       (ok (equal "(EQUAL (LIST 1 2 3) (LIST 1 2 (3 4) 17))" (gethash "form" d))
           "printer variables set elsewhere do not cut or recast the form")
-      (ok (equal '("(1 2 (3 (4)) 17)") (coerce (gethash "values" d) 'list))
-          "nor a value"))
+      (ok (equal "(1 2 (3 (4)) 17)" (aref (gethash "values" d) 0))
+          "nor a value")
+      (ok (search "58 59)" (aref (gethash "values" d) 1))
+          "and a value over several lines is not cut to the first"))
     (let ((same "a"))
       (ok (equal "(EQUAL \"a\" \"a\")"
                  (gethash "form" (funcall detail :form (list 'equal same same))))
@@ -2695,7 +2737,7 @@ in ASDF and as left by a root change --, their packages and the directory."
    (lambda (dir)
      (declare (ignore dir))
      (let ((result (%within-seconds
-                    60 (lambda ()
+                    30 (lambda ()
                          (let ((*print-circle* nil) (*print-length* nil))
                            (run-tests "clmcp-circular/tests/a"))))))
        (ok (hash-table-p result) "the run ends")
