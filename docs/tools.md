@@ -1770,6 +1770,8 @@ The summary line in `content[].text` (and `summary`), named by `verdict`, is `�
 
 Prove is supported for prove-asdf test systems (`:defsystem-depends-on ("prove-asdf")` and `(:test-file ...)` components): each test file is run and every assertion counted, a `subtest`'s one by one, with a failure detail per failed assertion (`description`, the tested `form`, `values` got and expected, `reason`). A prove system that runs its tests some other way falls back to ASDF. `test`/`tests` selection is not supported for prove.
 
+The text's `Failures:` list is bounded so that a run where dozens of tests fail at once (a broken shared fixture, a renamed function) stays readable and within a client's tool-output limit: the first 10 failures are written out with their details, each field (name, description, `Form:`, `Got:`, `Reason`/`Error`, `In:`) cut to 1000 characters with a `… [cut, N chars]` marker giving its full length; the next 20 are named one per line under `N more failures without details (all are in failed_tests):`; any further ones are counted as `... and N more, not named`. `failed_tests` is not bounded and keeps every failure with every field whole.
+
 - `failed_tests` (array, when failures exist): Detailed failure information including:
   - `test_name`: Name of the failing test
   - `description`: Rove — the assertion's description; FiveAM — the test's docstring

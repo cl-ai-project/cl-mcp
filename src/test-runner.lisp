@@ -99,7 +99,9 @@ Supports multiple test frameworks with automatic detection:
 
 Returns:
 - content (summary text): opens with the verdict headline (PASS, FAIL, NO TESTS
-  RAN, RAN, RESULT UNKNOWN, ...)
+  RAN, RAN, RESULT UNKNOWN, ...).  Under Failures it details the first 10
+  failures, each field cut to 1000 characters, names the next 20 and counts the
+  rest; failed_tests holds every failure whole
 - structuredContent (MCP 2025-06-18 and later): the report fields listed below,
   plus summary, the content text itself -- some clients (Claude Code) show
   structuredContent in its place.  It leaves out debug_output, which summary

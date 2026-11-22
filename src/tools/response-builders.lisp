@@ -810,13 +810,70 @@ list, UNREACHED and OUTSIDE the FiveAM tests and suites a pass left out."
         ((zerop failed) (values "pass" "✓ PASS"))
         (t (values "fail" "✗ FAIL"))))
 
+(defparameter *failures-detailed* 10
+  "Failures written out with their details in run-tests' text.  The next
+*FAILURES-NAMED* are named and the rest counted; failed_tests keeps them all.")
+
+(defparameter *failures-named* 20
+  "Failures past *FAILURES-DETAILED* named in run-tests' text, one per line,
+before the rest are only counted.")
+
+(defparameter *failure-field-max-chars* 1000
+  "Characters of one field of a failure -- its name, description, form, values,
+reason or frame -- written into run-tests' text.  A test that compares a large
+structure prints all of it, and one such field can be as long as many failures;
+its whole text stays in failed_tests.")
+
+(defun %write-failures (stream failures)
+  "Write FAILURES, a vector of failure details, to STREAM under a Failures:
+heading: the first *FAILURES-DETAILED* with their details, each field cut to
+*FAILURE-FIELD-MAX-CHARS*, the next *FAILURES-NAMED* by name, and the rest
+counted.  Unbounded, a run whose shared fixture broke wrote every failure in
+full -- and twice in structuredContent, whose summary is this text beside
+failed_tests -- past what a client accepts.  failed_tests holds every failure
+whole, and the text says so wherever it leaves something out."
+  (flet ((clip (text)
+           (%clip-local-text (if (stringp text) text (princ-to-string text))
+                             *failure-field-max-chars*)))
+    (let* ((total (length failures))
+           (detailed (min total *failures-detailed*))
+           (named (min (- total detailed) *failures-named*))
+           (unnamed (- total detailed named)))
+      (format stream "~%Failures:~%")
+      (loop for i from 0 below detailed
+            for fail = (aref failures i)
+            do (format stream "  ~D. ~A~%" (1+ i) (clip (gethash "test_name" fail)))
+               (when (gethash "description" fail)
+                 (format stream "     ~A~%" (clip (gethash "description" fail))))
+               (when (gethash "form" fail)
+                 (format stream "     Form: ~A~%" (clip (gethash "form" fail))))
+               (let ((vals (gethash "values" fail)))
+                 (when (and vals (plusp (length vals)))
+                   (format stream "     Got: ~A~%"
+                           (clip (format nil "~{~A~^, ~}" (coerce vals 'list))))))
+               (when (gethash "reason" fail)
+                 (format stream "     ~:[Reason~;Error~]: ~A~%"
+                         (gethash "signalled" fail) (clip (gethash "reason" fail))))
+               (when (gethash "error_frame" fail)
+                 (format stream "     In: ~A~%" (clip (gethash "error_frame" fail)))))
+      (when (plusp named)
+        (format stream "  ~D more failure~:P without details (all are in ~
+                        failed_tests):~%"
+                (+ named unnamed))
+        (loop for i from detailed below (+ detailed named)
+              do (format stream "  ~D. ~A~%" (1+ i)
+                         (clip (gethash "test_name" (aref failures i))))))
+      (when (plusp unnamed)
+        (format stream "  ... and ~D more, not named~%" unnamed)))))
+
 (defun build-run-tests-response (test-result)
   "Build the standard run-tests response with summary text.
 TEST-RESULT is the hash-table returned by run-tests core.
 Returns a new hash-table with content, verdict (%RUN-TESTS-VERDICT, decided with
 the summary's headline), counts, and failure details.
-Includes rich failure details (description, form, values) and debug output
-in the summary text so MCP clients rendering only content[].text see them.
+Includes rich failure details (description, form, values), bounded by
+%WRITE-FAILURES, and debug output in the summary text so MCP clients rendering
+only content[].text see them; failed_tests keeps every failure whole.
 Raw stdout/stderr are kept in structured fields only (not in content text)."
   (let* ((passed (gethash "passed" test-result 0))
          (failed (gethash "failed" test-result 0))
@@ -875,24 +932,7 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
                          <the root suite file's package>) to its file's defpackage.~%"
                       (length outside) outside))
             (when (plusp (length failed-tests-vector))
-              (format s "~%Failures:~%")
-              (loop for fail across failed-tests-vector
-                    for i from 1
-                    do (format s "  ~D. ~A~%" i (gethash "test_name" fail))
-                       (when (gethash "description" fail)
-                         (format s "     ~A~%" (gethash "description" fail)))
-                       (when (gethash "form" fail)
-                         (format s "     Form: ~A~%" (gethash "form" fail)))
-                       (when (gethash "values" fail)
-                         (let ((vals (gethash "values" fail)))
-                           (when (plusp (length vals))
-                             (format s "     Got: ~{~A~^, ~}~%"
-                                     (coerce vals 'list)))))
-                       (when (gethash "reason" fail)
-                         (format s "     ~:[Reason~;Error~]: ~A~%"
-                                 (gethash "signalled" fail) (gethash "reason" fail)))
-                       (when (gethash "error_frame" fail)
-                         (format s "     In: ~A~%" (gethash "error_frame" fail)))))
+              (%write-failures s failed-tests-vector))
             ;; A test system refused for a warning: the warning with its
             ;; place, written as load-system writes it.
             (let ((refusing (remove-if-not
