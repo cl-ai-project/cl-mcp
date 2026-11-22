@@ -847,8 +847,73 @@ suites, and the directory."
                   (ok (equalp (gethash "failed_tests" data) #()))
                   (ok (eql 0 (gethash "failed" data)))
                   (ok (eql 1 (gethash "pending" data)))
+                  (ok (equal "all-skipped" (gethash "verdict" data)))
+                  ;; Claude Code shows structuredContent in place of the
+                  ;; text, so the text travels in it.
+                  (ok (equal (gethash "text" (aref (gethash "content" report) 0))
+                             (gethash "summary" data)))
+                  (ok (null (gethash "summary" report))
+                      "the summary is not duplicated beside content")
                   (ok (null (gethash "content" data)))
                   (ok (null (gethash "structuredContent" data)))))))))))
+
+(deftest run-tests-structured-report-clips-output-and-carries-the-summary
+  ;; Claude Code shows structuredContent in place of the text, which leaves
+  ;; stdout out: a chatty suite's whole capture there filled the client's
+  ;; window.  The structured copy keeps the end of stdout and stderr, drops
+  ;; debug_output (the summary holds it), and the result keeps it all.  The
+  ;; bug was met through the pool, so the reply is also published the way a
+  ;; worker's comes back: encoded, then parsed with the proxy's options.
+  (let* ((limit cl-mcp/src/test-runner::*structured-output-max-chars*)
+         (long (concatenate 'string (make-string (* 3 limit) :initial-element #\a)
+                            "runner summary at the end"))
+         (exact (make-string limit :initial-element #\e))
+         (debug "debug: a line written for the reader")
+         (report (build-run-tests-response
+                  (let ((result (cl-mcp/src/test-runner-core::make-test-result
+                                 :passed 2 :failed 0 :pending 0 :framework :rove
+                                 :duration 1)))
+                    (setf (gethash "stdout" result) long
+                          (gethash "stderr" result) exact
+                          (gethash "debug_output" result) debug)
+                    result)))
+         (inline (cl-mcp/src/tools/helpers:result 7 report))
+         (pooled (yason:parse (with-output-to-string (s) (yason:encode inline s))
+                              :json-arrays-as-vectors t
+                              :json-booleans-as-symbols t
+                              :json-nulls-as-keyword t)))
+    (loop for (path reply) in (list (list "inline" inline) (list "pooled" pooled))
+          do (let* ((published (cl-mcp/src/test-runner::%publish-test-report
+                                reply "2025-06-18"))
+                    (result (gethash "result" published))
+                    (data (gethash "structuredContent" result))
+                    (clipped (gethash "stdout" data))
+                    (text (gethash "text" (aref (gethash "content" result) 0))))
+               (ok (equal long (gethash "stdout" result))
+                   (format nil "~A: the result keeps the whole capture" path))
+               (ok (equal debug (gethash "debug_output" result))
+                   (format nil "~A: and its debug output" path))
+               (ok (= (length clipped)
+                      (+ limit (length (format nil "[... ~D earlier characters omitted]~%"
+                                               (- (length long) limit)))))
+                   (format nil "~A: the structured stdout is cut to the limit and a marker"
+                           path))
+               (ok (eql 0 (search (format nil "[... ~D earlier characters omitted]"
+                                          (- (length long) limit))
+                                  clipped))
+                   (format nil "~A: which says how much it left out" path))
+               (ok (search "runner summary at the end" clipped)
+                   (format nil "~A: and keeps the end" path))
+               (ok (equal exact (gethash "stderr" data))
+                   (format nil "~A: output at the limit is kept as it is" path))
+               (ok (null (nth-value 1 (gethash "debug_output" data)))
+                   (format nil "~A: debug output is left to the summary" path))
+               (ok (search debug (gethash "summary" data))
+                   (format nil "~A: which holds it" path))
+               (ok (equal text (gethash "summary" data))
+                   (format nil "~A: the summary is the text" path))
+               (ok (equal "pass" (gethash "verdict" data))
+                   (format nil "~A: the verdict travels" path))))))
 
 (defun %rove-suite-test-names (package-name)
   "Return the names of the tests Rove's suite for PACKAGE-NAME holds, as
@@ -1347,6 +1412,48 @@ everything again."
                                (list (cl-mcp/src/test-runner-core::make-failure-detail
                                       :test-name "x" :reason "y")))))
           "a non-empty failure list contradicts an empty run"))))
+
+(deftest build-run-tests-response-names-its-verdict
+  ;; A client shown only the structured report (Claude Code shows
+  ;; structuredContent in place of the text) must read the same judgement the
+  ;; headline gives, so each headline has a verdict, decided with it.
+  (flet ((response (passed failed pending &key (framework :rove) failed-tests unreached outside)
+           (let ((result (cl-mcp/src/test-runner-core::make-test-result
+                          :passed passed :failed failed :pending pending
+                          :failed-tests failed-tests :framework framework :duration 1)))
+             (when unreached
+               (setf (gethash "unreached_tests" result) (coerce unreached 'vector)))
+             (when outside
+               (setf (gethash "suites_outside_root" result) (coerce outside 'vector)))
+             (build-run-tests-response result))))
+    (let ((failure (list (cl-mcp/src/test-runner-core::make-failure-detail
+                          :test-name "x" :reason "y"))))
+      (loop for (expected headline response)
+              in (list (list "pass" "✓ PASS" (response 3 0 0))
+                       (list "fail" "✗ FAIL" (response 2 1 0 :failed-tests failure))
+                       (list "no-tests-ran" "⚠ NO TESTS RAN" (response 0 0 0))
+                       (list "result-unknown" "⚠ RAN, RESULT UNKNOWN"
+                             (response 0 0 0 :framework :asdf))
+                       (list "all-skipped" "⚠ ALL SKIPPED" (response 0 0 2))
+                       (list "pass-incomplete" "⚠ PASS, BUT 1 TEST DID NOT RUN"
+                             (response 3 0 0 :framework :fiveam :unreached '("a::t1")))
+                       (list "pass-incomplete" "⚠ PASS, BUT 2 SUITES ARE OUTSIDE"
+                             (response 3 0 0 :framework :fiveam :outside '("a::s1" "a::s2")))
+                       (list "fail" "✗ FAIL"
+                             (response 2 1 0 :framework :fiveam :failed-tests failure
+                                             :unreached '("a::t1")))
+                       (list "load-failed" "✗ LOAD FAILED"
+                             (response 0 1 0 :framework :load-error :failed-tests failure))
+                       (list "unresolved" "✗ UNRESOLVED"
+                             (response 0 1 0 :framework :unresolved :failed-tests failure))
+                       (list "timeout" "✗ TIMEOUT"
+                             (build-run-tests-response
+                              (cl-mcp/src/test-runner-core:make-timeout-result 5))))
+            do (let ((text (gethash "text" (aref (gethash "content" response) 0))))
+                 (ok (equal expected (gethash "verdict" response))
+                     (format nil "~A is ~A" headline expected))
+                 (ok (eql 0 (search headline text))
+                     (format nil "and its text opens with ~A" headline)))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; FiveAM Suite Matching

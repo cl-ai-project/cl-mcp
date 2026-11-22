@@ -1225,10 +1225,11 @@ the same counterexample — not merely another failure.
 
 **Where the fields actually are.** A tool result here is
 `{"content": [{"type":"text","text":…}], …}` with every structured field a
-sibling of `content`, inside the JSON-RPC `result`. cl-mcp emits no
-`structuredContent` and declares no `outputSchema` — grep for either in `src/`
-and there is nothing — so an MCP client that renders only `content[].text`,
-which is all the protocol requires of it, sees the text and nothing else.
+sibling of `content`, inside the JSON-RPC `result`. The spec tools emit no
+`structuredContent` and cl-mcp declares no `outputSchema` (only `run-tests` and
+`repl-close` attach `structuredContent`), so an MCP client that
+renders only `content[].text`, which is all the protocol requires of it, sees
+the text and nothing else.
 That is why the properties here check the text for the reservations and not
 only the payload. Moving to standard structured output is a separate
 proposal, not part of this.

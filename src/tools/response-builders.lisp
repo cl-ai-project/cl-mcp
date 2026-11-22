@@ -766,10 +766,55 @@ trailing blank lines dropped; NIL when TEXT is empty or not a string."
           (setf tail (subseq tail (- (length tail) max-chars))))
         (and (plusp (length tail)) tail)))))
 
+(defun %run-tests-verdict (framework-name passed failed pending failed-tests unreached outside)
+  "Return two values for a run-tests report: its verdict, a lower-case string a
+client can branch on, and the headline the summary text opens with.  They are
+decided together so that the two never disagree: a client shown only the
+structured report (Claude Code shows structuredContent in place of the text)
+reads the same judgement as one shown the text.  FAILED-TESTS is the failure
+list, UNREACHED and OUTSIDE the FiveAM tests and suites a pass left out."
+  (cond ((string= framework-name "load-error") (values "load-failed" "✗ LOAD FAILED"))
+        ((string= framework-name "unresolved") (values "unresolved" "✗ UNRESOLVED"))
+        ((string= framework-name "timeout") (values "timeout" "✗ TIMEOUT"))
+        ;; Nothing ran.  Zero failures is not a pass here -- that is what let a
+        ;; mis-detected framework report green while executing no test at all.
+        ;; Not an error either: a system may genuinely have none.
+        ;;
+        ;; The ASDF fallback is excluded: it shells out to ASDF:TEST-SYSTEM,
+        ;; which reports no counts at all, so its successful run is zero/zero
+        ;; too and saying nothing ran would be false.  A non-empty failed_tests
+        ;; is excluded for the same reason -- whatever produced those entries
+        ;; did run.
+        ((and (zerop failed) (zerop passed) (zerop pending)
+              (not (string= framework-name "asdf"))
+              (zerop (length failed-tests)))
+         (values "no-tests-ran" "⚠ NO TESTS RAN"))
+        ;; The ASDF fallback's successful run: it counts nothing, and a runner
+        ;; that reports failure by return value returns normally from a red
+        ;; suite too, so this is not a pass (#131).
+        ((and (string= framework-name "asdf") (zerop failed) (zerop passed))
+         (values "result-unknown"
+                 "⚠ RAN, RESULT UNKNOWN (the ASDF fallback counts nothing; read its stdout below)"))
+        ;; Every test only skipped: nothing was checked, and a pass would say
+        ;; something had been.
+        ((and (zerop failed) (zerop passed) (plusp pending))
+         (values "all-skipped" "⚠ ALL SKIPPED (no test checked anything)"))
+        ((and (zerop failed) unreached)
+         (values "pass-incomplete"
+                 (format nil "⚠ PASS, BUT ~D ~:[TESTS~;TEST~] DID NOT RUN"
+                         (length unreached) (= 1 (length unreached)))))
+        ((and (zerop failed) outside)
+         (values "pass-incomplete"
+                 (format nil "⚠ PASS, BUT ~D ~:[SUITES ARE~;SUITE IS~] OUTSIDE THE ROOT SUITE"
+                         (length outside) (= 1 (length outside)))))
+        ((zerop failed) (values "pass" "✓ PASS"))
+        (t (values "fail" "✗ FAIL"))))
+
 (defun build-run-tests-response (test-result)
   "Build the standard run-tests response with summary text.
 TEST-RESULT is the hash-table returned by run-tests core.
-Returns a new hash-table with content, counts, and failure details.
+Returns a new hash-table with content, verdict (%RUN-TESTS-VERDICT, decided with
+the summary's headline), counts, and failure details.
 Includes rich failure details (description, form, values) and debug output
 in the summary text so MCP clients rendering only content[].text see them.
 Raw stdout/stderr are kept in structured fields only (not in content text)."
@@ -789,47 +834,13 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
          ;; test-op would not reach.  Either makes a green run incomplete.
          (unreached (coerce (or (gethash "unreached_tests" test-result) #()) 'list))
          (outside (coerce (or (gethash "suites_outside_root" test-result) #()) 'list))
+         (verdict-and-headline
+          (multiple-value-list
+           (%run-tests-verdict framework-name passed failed pending failed-tests-vector
+                               unreached outside)))
          (summary
           (with-output-to-string (s)
-            (format s "~A~%"
-                    (cond ((string= framework-name "load-error") "✗ LOAD FAILED")
-                          ((string= framework-name "unresolved") "✗ UNRESOLVED")
-                          ((string= framework-name "timeout") "✗ TIMEOUT")
-                          ;; Nothing ran.  Zero failures is not a pass here --
-                          ;; that is what let a mis-detected framework report
-                          ;; green while executing no test at all.  Not an
-                          ;; error either: a system may genuinely have none.
-                          ;;
-                          ;; The ASDF fallback is excluded: it shells out to
-                          ;; ASDF:TEST-SYSTEM, which reports no counts at all,
-                          ;; so its successful run is zero/zero too and saying
-                          ;; nothing ran would be false.  A non-empty
-                          ;; failed_tests is excluded for the same reason --
-                          ;; whatever produced those entries did run.
-                          ((and (zerop failed) (zerop passed) (zerop pending)
-                                (not (string= framework-name "asdf"))
-                                (zerop (length failed-tests-vector)))
-                           "⚠ NO TESTS RAN")
-                          ;; The ASDF fallback's successful run: it counts
-                          ;; nothing, and a runner that reports failure by
-                          ;; return value returns normally from a red suite
-                          ;; too, so this is not a pass (#131).
-                          ((and (string= framework-name "asdf")
-                                (zerop failed) (zerop passed))
-                           "⚠ RAN, RESULT UNKNOWN (the ASDF fallback counts nothing; read its stdout below)")
-                          ;; Every test only skipped: nothing was checked,
-                          ;; and a pass would say something had been.
-                          ((and (zerop failed) (zerop passed) (plusp pending))
-                           "⚠ ALL SKIPPED (no test checked anything)")
-                          ((and (zerop failed) unreached)
-                           (format nil "⚠ PASS, BUT ~D ~:[TESTS~;TEST~] DID NOT RUN"
-                                   (length unreached) (= 1 (length unreached))))
-                          ((and (zerop failed) outside)
-                           (format nil "⚠ PASS, BUT ~D ~:[SUITES ARE~;SUITE IS~] OUTSIDE ~
-                                        THE ROOT SUITE"
-                                   (length outside) (= 1 (length outside))))
-                          ((zerop failed) "✓ PASS")
-                          (t "✗ FAIL")))
+            (format s "~A~%" (second verdict-and-headline))
             (format s "Passed: ~D, Failed: ~D~@[, Pending: ~D~]~%" passed
                     failed (when (plusp pending) pending))
             (format s "Duration: ~Dms~%" duration)
@@ -909,8 +920,9 @@ Raw stdout/stderr are kept in structured fields only (not in content text)."
             (when (and debug-output-str (plusp (length debug-output-str)))
               (format s "~%;; debug output~%~A" debug-output-str)))))
     (let ((response
-           (make-ht "content" (text-content summary) "passed" passed "failed"
-                    failed "pending" pending "framework" framework-name
+           (make-ht "content" (text-content summary) "verdict" (first verdict-and-headline)
+                    "passed" passed "failed" failed "pending" pending
+                    "framework" framework-name
                     "duration_ms" duration "failed_tests" failed-tests-vector)))
       (dolist (field '("success" "stdout" "stderr" "debug_output" "passed_tests"
                        "counts_available" "skipped_tests" "unreached_tests"

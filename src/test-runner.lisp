@@ -27,13 +27,45 @@
 ;;; Tool Definition
 ;;; ---------------------------------------------------------------------------
 
+(defparameter *structured-output-max-chars* 4000
+  "Characters of a run's stdout or stderr kept in run-tests' structuredContent:
+the last ones of the capture, where a runner prints its summary and an error its
+report.  The capture is itself bounded (*MAX-TEST-OUTPUT-LENGTH*, its head), so
+for a longer run these end at its truncation note.")
+
+(defun %clip-output-for-structured (text)
+  "Return TEXT, or its last *STRUCTURED-OUTPUT-MAX-CHARS* characters headed by a
+line saying how many were left out."
+  (if (or (not (stringp text)) (<= (length text) *structured-output-max-chars*))
+      text
+      (let ((omitted (- (length text) *structured-output-max-chars*)))
+        (format nil "[... ~D earlier character~:P omitted]~%~A"
+                omitted (subseq text omitted)))))
+
 (defun %publish-test-report (reply version)
-  "Attach the test report as structured content for clients that negotiated it."
+  "Attach the test report as structured content for clients that negotiated it.
+Some clients -- Claude Code -- show structuredContent in place of content[].text,
+so it has to stand on its own without growing far past the text: the summary
+text goes with it as summary (the verdict headline, the advice under it, the ASDF
+fallback's stdout tail), debug_output, which the summary holds verbatim, is left
+out, and stdout and stderr, which the text leaves out, are cut to their ends
+(%CLIP-OUTPUT-FOR-STRUCTURED).  The result's own fields keep everything."
   (let ((report (gethash "result" reply)))
     (when (and version (string>= version "2025-06-18") (hash-table-p report)
                (nth-value 1 (gethash "passed" report)))
-      (let ((data (copy-hash-table report)))
+      (let* ((data (copy-hash-table report))
+             (content (gethash "content" report))
+             (part (and (typep content 'sequence) (plusp (length content))
+                        (elt content 0)))
+             (text (and (hash-table-p part) (gethash "text" part))))
         (remhash "content" data)
+        (when (stringp text)
+          (setf (gethash "summary" data) text)
+          (remhash "debug_output" data))
+        (dolist (field '("stdout" "stderr"))
+          (multiple-value-bind (value presentp) (gethash field data)
+            (when presentp
+              (setf (gethash field data) (%clip-output-for-structured value)))))
         (setf (gethash "structuredContent" report) data))))
   reply)
 
@@ -66,8 +98,19 @@ Supports multiple test frameworks with automatic detection:
   pass: read stdout
 
 Returns:
-- content (summary text)
-- structuredContent (MCP 2025-06-18 and later): the same report fields listed below
+- content (summary text): opens with the verdict headline (PASS, FAIL, NO TESTS
+  RAN, RAN, RESULT UNKNOWN, ...)
+- structuredContent (MCP 2025-06-18 and later): the report fields listed below,
+  plus summary, the content text itself -- some clients (Claude Code) show
+  structuredContent in its place.  It leaves out debug_output, which summary
+  holds, and its stdout and stderr keep only their last 4000 characters, headed
+  by a line counting the rest
+- verdict (string) -- the headline as a value: pass, fail, load-failed,
+  unresolved, timeout, no-tests-ran, result-unknown (the ASDF fallback, which
+  counts nothing: read the stdout tail at the end of the summary), all-skipped,
+  or pass-incomplete (tests that did not run, or suites outside the root
+  suite).  Every verdict but pass means the run is not a clean pass; a pass
+  may still list skipped_tests
 - passed (integer) -- tests, not assertions (Rove and FiveAM, whether the whole
   system or a test/tests selection ran); prove counts assertions
 - failed (integer) -- same unit as passed

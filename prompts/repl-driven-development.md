@@ -200,8 +200,9 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
 - Run single test: `{"system": "my-system/tests", "test": "my-system/tests::my-specific-test"}` (`run-tests` reloads `system` before resolving the name, so the test's package needs no separate loading)
 - Run selected tests: `{"system": "my-system/tests", "tests": ["my-system/tests::first-test", "my-system/tests::second-test"]}`
 - Framework is detected from the test system's own `:depends-on`; override with `{"system": "my-system/tests", "framework": "fiveam"}`
-- A `⚠ NO TESTS RAN` summary means the run completed but executed nothing — check the system name and any `tests` selection before reading it as success
-- A `⚠ RAN, RESULT UNKNOWN` summary is the ASDF fallback's: it cannot count, so read the tail of the runner's stdout printed under it for the verdict
+- The summary's first line is the verdict, also given as the `verdict` field; a client that shows the structured result instead of the text finds the text in `summary` (which also holds `debug_output`). Anything but `✓ PASS` (`verdict: "pass"`) is not a clean pass, and a pass may still list skipped tests
+- A `⚠ NO TESTS RAN` summary (`no-tests-ran`) means the run completed but executed nothing — check the system name and any `tests` selection before reading it as success
+- A `⚠ RAN, RESULT UNKNOWN` summary (`result-unknown`) is the ASDF fallback's: it cannot count, so read the tail of the runner's stdout printed under it for the verdict
 - Failure details: `failed_tests` array with `test_name`, `description`, `form`, `values`, `reason`, `source`
 - Response includes `stdout`/`stderr` fields (structured data only, NOT shown in summary text)
 - **Print debugging**: `format t` output goes to `stdout` (not visible in summary). To see debug prints in the summary, write to `*test-debug-output*`:
