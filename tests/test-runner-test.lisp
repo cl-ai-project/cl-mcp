@@ -1719,38 +1719,58 @@ everything again."
 (deftest build-run-tests-response-writes-index-sources-relative-to-the-root
   ;; failures_index is what an agent reads on every failing run; an absolute
   ;; source path repeated the checkout's prefix in each of its entries.  It
-  ;; names a file under the project root as clgrep-search does, relative to
-  ;; it, and leaves failed_tests and the failures themselves as recorded.
-  (let ((root (uiop:ensure-directory-pathname
-               (uiop:parse-native-namestring "/srv/clmcp-index-root/")))
-        (under "/srv/clmcp-index-root/tests/a[1]-test.lisp")
-        (outside "/opt/clmcp-elsewhere/dep-test.lisp")
+  ;; names a file as clgrep-search does: a filesystem path, relative to the
+  ;; project root under it.  failed_tests and the failures keep what Rove
+  ;; recorded, SBCL's namestring, which escapes [ and * for the reader.
+  (let ((recorded (lambda (native) (namestring (uiop:parse-native-namestring native))))
         (cl-mcp/src/object-registry::*object-registry*
           (cl-mcp/src/object-registry::make-object-registry)))
-    (flet ((failure (name file)
-             (let ((ht (cl-mcp/src/test-runner-core::make-failure-detail
-                        :test-name name :form '(= 1 2) :values '(1 2))))
-               (setf (gethash "source" ht)
-                     (cl-mcp/src/tools/helpers:make-ht "file" file "line" 3))
-               ht))
-           (index-files (failures)
-             (map 'list (lambda (entry) (gethash "file" (gethash "source" entry)))
-                  (gethash "failures_index"
-                           (build-run-tests-response
-                            (cl-mcp/src/test-runner-core::make-test-result
-                             :passed 0 :failed (length failures) :pending 0
-                             :failed-tests failures :framework :rove :duration 1))))))
-      (let ((failures (list (failure "under" under) (failure "outside" outside)
-                            (failure "relative" "r.lisp"))))
-        (let ((cl-mcp/src/project-root:*project-root* root))
-          (ok (equal '("tests/a[1]-test.lisp" "/opt/clmcp-elsewhere/dep-test.lisp" "r.lisp")
-                     (index-files failures))
-              "a file under the root is relative to it, one outside absolute, a relative one kept"))
-        (ok (equal under (gethash "file" (gethash "source" (first failures))))
-            "the failure keeps its source as recorded, for failed_tests and its object-id")
-        (let ((cl-mcp/src/project-root:*project-root* nil))
-          (ok (equal (list under outside "r.lisp") (index-files failures))
-              "without a project root every file is as recorded"))))))
+    (labels ((failure (name source)
+               (let ((ht (cl-mcp/src/test-runner-core::make-failure-detail
+                          :test-name name :form '(= 1 2) :values '(1 2))))
+                 (setf (gethash "source" ht) source)
+                 ht))
+             (at (name native)
+               (failure name (cl-mcp/src/tools/helpers:make-ht
+                              "file" (funcall recorded native) "line" 3)))
+             (index (failures root)
+               (let ((cl-mcp/src/project-root:*project-root*
+                       (and root (uiop:ensure-directory-pathname
+                                  (uiop:parse-native-namestring root)))))
+                 (map 'list (lambda (entry) (gethash "source" entry))
+                      (gethash "failures_index"
+                               (build-run-tests-response
+                                (cl-mcp/src/test-runner-core::make-test-result
+                                 :passed 0 :failed (length failures) :pending 0
+                                 :failed-tests failures :framework :rove :duration 1))))))
+             (files (sources)
+               (mapcar (lambda (source) (gethash "file" source)) sources)))
+      (let* ((under (at "under" "/srv/clmcp-index-root/tests/a[1]-test.lisp"))
+             (failures (list under
+                             (at "outside" "/opt/clmcp-else[2]/star*.lisp")
+                             (failure "relative" (cl-mcp/src/tools/helpers:make-ht
+                                                  "file" "repl-eval" "line" 3))))
+             (sources (index failures "/srv/clmcp-index-root/")))
+        (ok (search "\\[" (gethash "file" (gethash "source" under)))
+            "Rove's file is a namestring escaped for the reader")
+        (ok (equal '("tests/a[1]-test.lisp" "/opt/clmcp-else[2]/star*.lisp" "repl-eval")
+                   (files sources))
+            "under the root relative, outside it absolute, both unescaped; a bare name kept")
+        (ok (every (lambda (source) (eql 3 (gethash "line" source))) sources)
+            "an entry's source keeps its line")
+        (ok (equal (funcall recorded "/srv/clmcp-index-root/tests/a[1]-test.lisp")
+                   (gethash "file" (gethash "source" under)))
+            "the failure keeps its source as recorded, for failed_tests and its object-id"))
+      (ok (equal '("tests/b.lisp")
+                 (files (index (list (at "b" "/srv/clmcp[old]/tests/b.lisp"))
+                               "/srv/clmcp[old]/")))
+          "a root with [ in its name holds its files")
+      (ok (equal '("/srv/clmcp-index-root/tests/a.lisp")
+                 (files (index (list (at "a" "/srv/clmcp-index-root/tests/a.lisp")) nil)))
+          "without a project root a file is absolute")
+      (ok (equal '("somewhere")
+                 (index (list (failure "string" "somewhere")) "/srv/clmcp-index-root/"))
+          "a source that is no table is kept"))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; FiveAM Suite Matching

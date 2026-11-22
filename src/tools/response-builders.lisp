@@ -854,19 +854,23 @@ FiveAM reason reads `X ... which is not EQUAL to Y'."
 
 (defun %index-source (source)
   "Return SOURCE, a failure's source, as a failures_index entry carries it: its
-file relative to the project root when the file lies under it, as clgrep-search
-writes a match's file (NORMALIZE-PATH-FOR-DISPLAY), else as recorded.  SOURCE
-itself is left alone, for failed_tests and the failures under an object-id.
+file as a filesystem path, relative to the project root when the file lies under
+it and absolute otherwise, as clgrep-search writes a match's file
+(NORMALIZE-PATH-FOR-DISPLAY).  A file that does not read as a path is kept as
+recorded.  SOURCE itself is left alone, for failed_tests and the failures under
+an object-id.
 
 The index is what an agent reads on every failing run, and an absolute path
 repeated the checkout's whole prefix, the user's home directory with it, in
 each entry: a quarter of the index on a deep checkout."
   (let* ((file (and (hash-table-p source) (gethash "file" source)))
-         ;; Native: a recorded file is a filesystem path, and parsed as a
-         ;; namestring a [ or * in it would make a wild pathname.
+         ;; PARSE-NAMESTRING, not a native parse: Rove records SBCL's
+         ;; definition-source namestring, which escapes [ * ? and \ for the
+         ;; pathname reader.  Parsed natively, a\[1].lisp named a file called
+         ;; that, under no root, and was printed with its backslash.
          (shown (and (stringp file)
                      (ignore-errors
-                      (normalize-path-for-display (uiop:parse-native-namestring file))))))
+                      (normalize-path-for-display (parse-namestring file))))))
     (if (and shown (string/= shown file))
         (let ((copy (make-hash-table :test 'equal)))
           (maphash (lambda (key value) (setf (gethash key copy) value)) source)
