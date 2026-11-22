@@ -284,11 +284,11 @@ the process ends it -- the worker.")
   "Return how many bytes of this thread's control stack are left: its size less
 what is in use.  Counted this way, not from the stack pointer to one end, since
 the stack grows down on x86-64 but up on ARM64, where the pointer starts at the
-stack's start."
-  (- (- (sb-sys:sap-int (sb-vm::current-thread-offset-sap
-                         sb-vm::thread-control-stack-end-slot))
-        (sb-sys:sap-int (sb-vm::current-thread-offset-sap
-                         sb-vm::thread-control-stack-start-slot)))
+stack's start.  Read from the exported per-thread stack bounds that
+CONTROL-STACK-USAGE itself reads: a thread-structure slot constant used for the
+end is missing from SBCL 2.0, and naming it kept this file from loading there."
+  (- (- (sb-kernel:get-lisp-obj-address sb-vm:*control-stack-end*)
+        (sb-kernel:get-lisp-obj-address sb-vm:*control-stack-start*))
      (sb-kernel::control-stack-usage)))
 
 (defclass %capped-text-stream (sb-gray:fundamental-character-output-stream)
@@ -545,7 +545,7 @@ cut says so; a walk that fails leaves the value to the level and the stream."
         ;; printed.  Its report, printed without escapes, writes to the stream.
         (when (and escape deep (typep object 'condition))
           (return-from %printed
-            (format nil "~S, not printed: what it would show nests ~D levels or more"
+            (format nil "~S, not printed: it holds data nested ~D levels or more"
                     (type-of object) *failure-print-max-depth*)))
         (multiple-value-bind (text outcome) (attempt cyclic)
           (when (and (eq outcome :overflow) (not cyclic) unsure)
@@ -553,7 +553,9 @@ cut says so; a walk that fails leaves the value to the level and the stream."
               (when (eq again :whole)
                 (setf text circular outcome :whole))))
           (cond ((not (eq outcome :whole)) (cut text outcome))
-                (deep (cut text :level))
+                ;; A condition's report prints what it chooses of its data, so
+                ;; one holding a deep value need not have been cut.
+                ((and deep (not (typep object 'condition))) (cut text :level))
                 (t text)))))))
 
 (defun %source-text (object)
