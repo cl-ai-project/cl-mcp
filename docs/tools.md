@@ -1685,7 +1685,7 @@ reason `structuredContent` leaves out `debug_output`, which `summary` holds verb
 the last 4000 characters of `stdout` and `stderr`, headed by a line counting what was left out;
 the result's top-level fields keep the whole capture. That capture is itself bounded at 50000
 characters, its head, so for a longer run the 4000 end at the truncation note, not at the
-runner's last line (the ASDF fallback's summary shows that line from the true end).
+runner's last line (a `⚠ RAN, RESULT UNKNOWN` summary shows the stdout tail from the true end).
 All supported versions receive a text summary in `content` and the individual report fields
 at the top level of the tool result.
 
@@ -1702,9 +1702,9 @@ Input:
 Output:
 - `verdict` (string): the summary's headline as a value -- `pass`, `fail`, `load-failed`,
   `unresolved`, `timeout`, `no-tests-ran`, `result-unknown`, `all-skipped`, or `pass-incomplete`
-  (`⚠ PASS, BUT ...`: tests that did not run, or suites outside the root suite). Only `pass` is a
-  clean pass; branch on this rather than on the counts, which read zero/zero for both
-  `no-tests-ran` and `result-unknown`
+  (`⚠ PASS, BUT ...`: tests that did not run, or suites outside the root suite). Every verdict but `pass`
+  means the run is not a clean pass (a `pass` may still list `skipped_tests`); branch on this
+  rather than on the counts, which read zero/zero for both `no-tests-ran` and `result-unknown`
 - `summary` (string, `structuredContent` only): the text summary, as in `content`; it holds
   `debug_output`, which `structuredContent` therefore leaves out
 - `passed` (integer): Number of passed tests. Rove and FiveAM count tests, not assertions, and

@@ -102,12 +102,15 @@ Returns:
   RAN, RAN, RESULT UNKNOWN, ...)
 - structuredContent (MCP 2025-06-18 and later): the report fields listed below,
   plus summary, the content text itself -- some clients (Claude Code) show
-  structuredContent in its place.  Its stdout and stderr keep only their last
-  4000 characters, headed by a line counting the rest
+  structuredContent in its place.  It leaves out debug_output, which summary
+  holds, and its stdout and stderr keep only their last 4000 characters, headed
+  by a line counting the rest
 - verdict (string) -- the headline as a value: pass, fail, load-failed,
   unresolved, timeout, no-tests-ran, result-unknown (the ASDF fallback, which
-  counts nothing: read stdout), all-skipped, or pass-incomplete (tests that did
-  not run, or suites outside the root suite).  Only pass is a clean pass
+  counts nothing: read the stdout tail at the end of the summary), all-skipped,
+  or pass-incomplete (tests that did not run, or suites outside the root
+  suite).  Every verdict but pass means the run is not a clean pass; a pass
+  may still list skipped_tests
 - passed (integer) -- tests, not assertions (Rove and FiveAM, whether the whole
   system or a test/tests selection ran); prove counts assertions
 - failed (integer) -- same unit as passed

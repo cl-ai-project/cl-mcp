@@ -1227,7 +1227,7 @@ the same counterexample — not merely another failure.
 `{"content": [{"type":"text","text":…}], …}` with every structured field a
 sibling of `content`, inside the JSON-RPC `result`. The spec tools emit no
 `structuredContent` and cl-mcp declares no `outputSchema` (only `run-tests` and
-the agent REPL sessions attach `structuredContent`), so an MCP client that
+`repl-close` attach `structuredContent`), so an MCP client that
 renders only `content[].text`, which is all the protocol requires of it, sees
 the text and nothing else.
 That is why the properties here check the text for the reservations and not
