@@ -31,6 +31,8 @@
                 #:%redefinition-warning-p)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
+  (:import-from #:cl-mcp/src/worker/fasl-cache
+                #:*worker-fasl-cache*)
   (:import-from #:cl-mcp/src/utils/bounded-stream
                 #:make-bounded-output-stream
                 #:bounded-output-string
@@ -1834,6 +1836,55 @@ sub-systems (my-proj/tests/foo-test) hold the actual Rove suites."
                           (uiop:string-prefix-p prefix dep)))
                    deps)))
 
+(defun %rove-key-files-by-source ()
+  "Re-key Rove's file-to-package table by source path where it holds a path in
+this worker's own FASL cache, and return how many entries moved.
+
+Rove records which package a test file defines under the file that was
+loading when the package's suite was made, a FASL, and turns that back into
+the source path only for a FASL under ASDF:*USER-CACHE* (RESOLVE-FILE).  A
+worker compiles its project root's files into *WORKER-FASL-CACHE* instead
+(issue #317), so the entry was keyed by a path inside that cache.  ROVE:RUN
+finds a classic system's suites only by looking each source file up in that
+table, found none, and ran no test: NO TESTS RAN for a project whose tests ran
+in a fresh process.  A package-inferred system's own package is found by its
+name, but its same-prefix dependencies (x/tests importing x/tests/helper) go
+through the table too, and were left out.  Called after every Lisp file ASDF
+loads (the PERFORM method below), so whatever calls Rove next -- run-tests, a
+test-op, (rove:run …) in repl-eval -- finds the source path, and once more by
+RUN-ROVE-TESTS before ROVE:RUN, for a file whose load did not finish.  The
+cache mirrors the root's absolute path below it, so the source is the key with
+the cache's prefix taken off, as RESOLVE-FILE takes off ASDF:*USER-CACHE*'s."
+  (let* ((cache *worker-fasl-cache*)
+         (variable (uiop:find-symbol* '#:*file-package* '#:rove/core/suite/file nil))
+         (table (and variable (boundp variable) (symbol-value variable))))
+    (if (and cache (hash-table-p table))
+        (let ((prefix (uiop:native-namestring (uiop:ensure-directory-pathname cache)))
+              (moves '()))
+          (maphash (lambda (key package)
+                     (when (and (stringp key)
+                                (> (length key) (length prefix))
+                                (uiop:string-prefix-p prefix key))
+                       (push (cons key package) moves)))
+                   table)
+          (loop for (key . package) in moves
+                do (remhash key table)
+                   (setf (gethash (concatenate 'string "/" (subseq key (length prefix))) table)
+                         package))
+          (length moves))
+        0)))
+
+(defmethod asdf:perform :after ((operation asdf:load-op) (component asdf:cl-source-file))
+  ;; Rove makes a package's suite, and keys its file, while the file loads;
+  ;; re-keyed here, the entry is right before anything asks for it.  Outside
+  ;; a worker, or before Rove is loaded, this does nothing.  Every Lisp file
+  ;; ASDF loads passes here, so a failure is logged, never let through to fail
+  ;; the load.
+  (handler-case (%rove-key-files-by-source)
+    (error (condition)
+      (log-event :warn "test.runner.rove-rekey-failed"
+                 "error" (princ-to-string condition)))))
+
 (defun run-rove-tests (system-name)
   "Run tests using Rove and return structured results.
 Uses rove:run to ensure any :around methods (e.g., test environment setup)
@@ -1868,6 +1919,7 @@ detects test sub-systems from ASDF dependencies and runs each individually."
          results
          rove-error)
     (declare (ignore successp results _))
+    (%rove-key-files-by-source)
     (handler-case
      (setf (values successp results)
            (%with-rove-output (report-stream-sym stdout-stream stderr-stream debug-stream)
