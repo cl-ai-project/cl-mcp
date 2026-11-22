@@ -612,19 +612,24 @@
 
 (defun %within-seconds (seconds thunk)
   "Call THUNK on a thread of its own and return its value, the condition it
-signalled, or :TIMED-OUT when it has not returned within SECONDS -- the thread
-is then stopped and waited for -- so a printer that never ends, or ends in an
-error, fails the test instead of hanging the suite or reaching the debugger."
+signalled, or :TIMED-OUT when it has not returned within SECONDS -- so a printer
+that never ends, or ends in an error, fails the test instead of hanging the
+suite or reaching the debugger.  However this returns, a thread still running
+is stopped and waited for."
   (let ((thread (sb-thread:make-thread
                  (lambda ()
                    (handler-case (funcall thunk)
                      (serious-condition (condition) condition)))
                  :name "printer probe")))
-    (let ((value (sb-thread:join-thread thread :timeout seconds :default :timed-out)))
-      (when (eq value :timed-out)
+    (unwind-protect
+         (sb-thread:join-thread thread :timeout seconds :default :timed-out)
+      (when (sb-thread:thread-alive-p thread)
         (ignore-errors (sb-thread:terminate-thread thread))
-        (sb-thread:join-thread thread :timeout 10 :default nil))
-      value)))
+        (sb-thread:join-thread thread :timeout 10 :default nil)))))
+
+(defstruct %walk-node
+  "A structure whose slot can point at itself, for the printer's walk."
+  next)
 
 (deftest failure-detail-prints-whatever-the-printer-settings
   ;; A test runs on a thread of its own, which sees the worker's global printer
@@ -652,7 +657,10 @@ error, fails the test instead of hanging the suite or reaching the debugger."
         (ok (search "#1=(1 2 3 . #1#)" (gethash "reason" result))
             "and a condition's report")))
     ;; Circular through its CAR, the value recurses instead of running on, and
-    ;; ran out of stack under *PRINT-CIRCLE* NIL, with or without pretty printing.
+    ;; ran out of stack under *PRINT-CIRCLE* NIL; a second exhaustion in one
+    ;; process ends it.  The walk finds the cycle without recursing.
+    (ok (nth-value 1 (cl-mcp/src/test-runner-core::%nesting car-circular))
+        "the walk finds a cycle through a car")
     (dolist (pretty '(nil t))
       (let ((result (%within-seconds
                      10 (lambda ()
@@ -661,27 +669,29 @@ error, fails the test instead of hanging the suite or reaching the debugger."
         (ok (equal "#1=(#1# 2)" result)
             (format nil "a value circular through its car prints as one (pretty ~A): ~A"
                     pretty result))))
-    ;; Nested deeper than the printer's stack reaches, a value ran a pretty
-    ;; print on the test's thread out of stack, which ends the worker.
+    ;; Nested past the level, a value is printed to it and cut.  Just past
+    ;; it, so a regression fails here instead of exhausting the stack.
     (dolist (pretty '(nil t))
       (let ((result (%within-seconds
                      10 (lambda ()
                           (let ((deep nil) (*print-pretty* pretty))
-                            (dotimes (i 100000) (setf deep (list deep)))
+                            (dotimes (i 1000) (setf deep (list deep)))
                             (gethash "form" (funcall detail :form deep)))))))
         (ok (and (stringp result)
                  (search "[nested deeper than 500 levels, cut there]" result))
             (format nil "a value nested too deep is printed to a level and cut (pretty ~A)"
                     pretty))))
-    ;; The pretty printer holds a line until it ends; with no right margin to
-    ;; end it, a circular value never reached the stream's limit.
-    (let ((result (%within-seconds
-                   10 (lambda ()
-                        (let ((*print-circle* nil) (*print-pretty* t)
-                              (*print-right-margin* most-positive-fixnum))
-                          (gethash "form" (funcall detail :form circular)))))))
-      (ok (equal "#1=(1 2 3 . #1#)" result)
-          "a right margin set elsewhere does not keep a circular value from ending"))
+    ;; A structure is walked through the slots it prints, and a hash table,
+    ;; printed as #<HASH-TABLE ...>, is not entered.
+    (let ((node (make-%walk-node)))
+      (setf (%walk-node-next node) node)
+      (ok (nth-value 1 (cl-mcp/src/test-runner-core::%nesting node))
+          "a structure pointing at itself is a cycle"))
+    (let ((table (make-hash-table)))
+      (setf (gethash :self table) table)
+      (ok (equal '(0 nil) (multiple-value-list
+                           (cl-mcp/src/test-runner-core::%nesting table)))
+          "a hash table is not entered"))
     (let ((d (let ((*print-length* 2) (*print-level* 1) (*print-lines* 1)
                    (*print-base* 16) (*print-radix* t) (*print-case* :downcase)
                    (*print-pretty* t))

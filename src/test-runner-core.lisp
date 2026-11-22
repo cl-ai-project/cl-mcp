@@ -303,31 +303,56 @@ since the pretty printer and FRESH-LINE ask for it."))
   (%column stream))
 
 (defparameter *failure-print-max-depth* 500
-  "Levels of nesting a failure's printed field may reach.  The printer recurses
-once per level, and a test's thread has a stack of its own: run out of stack
-while pretty printing there, SBCL does not unwind but ends the process -- the
-worker, with every session's state in it.  A value nested deeper is printed to
-this level and says it was cut.")
+  "Levels of nesting a failure's printed field may reach: the *PRINT-LEVEL* every
+field is printed with.  The printer recurses once per level, and a test's
+thread runs out of its stack once with a handler and the second time takes the
+process with it (SBCL leaves the guard page down).  Pretty printing one level
+costs at most about 1.5 KB of stack, so 500 levels stay well inside a thread's
+2 MB.  A value nested deeper is printed to this level and says it was cut.")
 
 (defparameter *failure-print-walk-limit* 1000000
   "Conses and array elements %NESTING looks at before it stops and calls the value
 neither circular nor deep: it walks before every print, so a value of tens of
 millions of elements must not cost a walk of all of them.")
 
-(defun %children (item)
-  "Return what the printer prints inside ITEM, a level deeper, or NIL: an array's
-elements (not a string's characters), or a structure's boxed slots, which its
-default printing shows.  A list is walked by %NESTING itself."
+(defun %children (item printing-slots)
+  "Return what the printer prints inside ITEM, a level deeper, or NIL: a
+vector's active elements or an array's (not a string's characters), or the
+boxed slots of a structure that prints them -- one whose PRINT-OBJECT is the
+default structure method, which a hash table's, say, is not.  PRINTING-SLOTS is
+an EQ table from class to that answer, filled as classes are met.  A list is
+walked by %NESTING itself.
+
+A structure's slots are read by the layout the instance itself carries, and
+only below its own length: an instance made before an incompatible DEFSTRUCT
+redefinition is shorter than the current definition, and reading it by that
+definition read past its end."
   (cond ((and (arrayp item) (not (stringp item)) (eq (array-element-type item) t))
-         (loop for index from 0 below (min (array-total-size item) *failure-print-walk-limit*)
-               collect (row-major-aref item index)))
+         (let ((size (min (if (vectorp item) (length item) (array-total-size item))
+                          *failure-print-walk-limit*)))
+           (loop for index from 0 below size
+                 collect (row-major-aref item index))))
         ((typep item 'structure-object)
-         (let ((description (ignore-errors
-                             (sb-kernel:find-defstruct-description (type-of item) nil))))
-           (and description
-                (loop for slot in (sb-kernel:dd-slots description)
-                      when (eq (sb-kernel:dsd-raw-type slot) t)
-                        collect (sb-kernel:%instance-ref item (sb-kernel:dsd-index slot))))))))
+         (let* ((class (class-of item))
+                (prints (multiple-value-bind (known present) (gethash class printing-slots)
+                          (if present
+                              known
+                              (setf (gethash class printing-slots)
+                                    (let ((method (first (compute-applicable-methods
+                                                          #'print-object
+                                                          (list item *standard-output*)))))
+                                      (and method
+                                           (equal (sb-mop:method-specializers method)
+                                                  (list (find-class 'structure-object)
+                                                        (find-class t))))))))))
+           (when prints
+             (let ((description (sb-kernel:layout-info (sb-kernel:%instance-layout item)))
+                   (length (sb-kernel:%instance-length item)))
+               (and (typep description 'sb-kernel:defstruct-description)
+                    (loop for slot in (sb-kernel:dd-slots description)
+                          for index = (sb-kernel:dsd-index slot)
+                          when (and (eq (sb-kernel:dsd-raw-type slot) t) (< index length))
+                            collect (sb-kernel:%instance-ref item index)))))))))
 
 (defun %nesting (object)
   "Return two values for OBJECT, a failure's value: how deep its lists, arrays
@@ -338,8 +363,10 @@ list, as the printer sees it, and its CAR one deeper.  Stops after
 *FAILURE-PRINT-WALK-LIMIT* elements with what it has found."
   (let ((on-path (make-hash-table :test 'eq))
         (done (make-hash-table :test 'eq))
+        (printing-slots (make-hash-table :test 'eq))
         (stack (list (list :enter object 0)))
         (deepest 0)
+        (cyclic nil)
         (visits 0))
     (loop while (and stack (< visits *failure-print-walk-limit*))
           do (destructuring-bind (action item depth) (pop stack)
@@ -350,7 +377,9 @@ list, as the printer sees it, and its CAR one deeper.  Stops after
                                (and (arrayp item) (not (stringp item)))
                                (typep item 'structure-object))))
                      ((gethash item on-path)
-                      (return-from %nesting (values deepest t)))
+                      ;; Not the end of the walk: what lies past the cycle
+                      ;; still nests, and is printed.
+                      (setf cyclic t))
                      ((gethash item done))
                      (t
                       (incf visits)
@@ -360,9 +389,9 @@ list, as the printer sees it, and its CAR one deeper.  Stops after
                       (if (consp item)
                           (progn (push (list :enter (cdr item) depth) stack)
                                  (push (list :enter (car item) (1+ depth)) stack))
-                          (dolist (child (%children item))
+                          (dolist (child (%children item printing-slots))
                             (push (list :enter child (1+ depth)) stack)))))))
-    (values deepest nil)))
+    (values deepest cyclic)))
 
 (defun %printed (object &key (escape t))
   "Return OBJECT printed for a failure report, with ESCAPE as PRIN1 (true) or
@@ -372,27 +401,42 @@ A test runs on a thread of its own, which sees the worker's global printer
 variables: a circular value printed forever under *PRINT-CIRCLE* NIL and held
 the run until its deadline, and a *PRINT-LENGTH* set in repl-eval cut a list to
 (1 2 ...) in a report whose object-id was said to hold it whole.  So length,
-lines, base, radix, case and the right margin are fixed here, and the text is
-printed into a stream of *FAILURE-PRINT-MAX-CHARS* characters.
+lines, base, radix, case, the right margin and SBCL's vector length are fixed
+here, and the text is printed into a stream of *FAILURE-PRINT-MAX-CHARS*
+characters.
 
-The value is walked first (%NESTING).  A cycle found there is printed with
-*PRINT-CIRCLE* T, which ends it.  Anything else is printed with *PRINT-CIRCLE*
+The level is always *FAILURE-PRINT-MAX-DEPTH*.  The printer recurses once per
+level, and the stack it runs out of on a test's thread is handled only once:
+SBCL leaves the guard page down, and the next exhaustion in the process ends
+it -- the worker.  So no print may exhaust it, and the level is what bounds
+every recursion the printer makes, through conditions and objects the walk
+below does not enter.
+
+The value is walked first (%NESTING) to choose how to print it.  A cycle found
+there is printed with *PRINT-CIRCLE* T, which ends it, as is a condition, whose
+report the walk does not enter.  Anything else is printed with *PRINT-CIRCLE*
 NIL, as source reads -- with it on, two string constants the compiler made one
 object print as #1=\"a\" #1# -- and printed again with it on only when that
-overflows, as a cycle the walk did not reach would.  Nesting deeper than
-*FAILURE-PRINT-MAX-DEPTH* is printed to that level: the printer recurses per
-level, and running out of stack while pretty printing on a test's thread ends
-the worker, not the print.  A value cut either way says so."
-  (multiple-value-bind (depth cyclic) (%nesting object)
-    (let ((level (and (> depth *failure-print-max-depth*) *failure-print-max-depth*)))
+overflows, as a cycle past the walk would.  A cyclic value, or one nested past
+the level, is printed without the pretty printer, which recurses through quoted
+forms without counting a level.  A value cut either way says so; a walk that
+fails leaves the value to the level and the stream."
+  (multiple-value-bind (depth cyclic)
+      (handler-case (%nesting object)
+        (error () (values 0 nil)))
+    (let ((deep (> depth *failure-print-max-depth*))
+          (circle (or cyclic (typep object 'condition))))
       (flet ((attempt (circle)
                ;; Values: the text printed, and :WHOLE, :OVERFLOW or :EXHAUSTED.
                (let ((stream (make-instance '%capped-text-stream
                                             :room *failure-print-max-chars*)))
                  (handler-case
-                     (let ((*read-default-float-format* 'single-float))
+                     (let ((*read-default-float-format* 'single-float)
+                           (sb-ext:*print-vector-length* nil))
                        (write object :stream stream :escape escape :readably nil
-                                     :circle circle :length nil :level level :lines nil
+                                     :circle circle :length nil :lines nil
+                                     :level *failure-print-max-depth*
+                                     :pretty (and *print-pretty* (not cyclic) (not deep))
                                      :base 10 :radix nil :case :upcase :array t :gensym t
                                      :right-margin nil :miser-width nil)
                        (values (get-output-stream-string (%sink stream)) :whole))
@@ -408,13 +452,13 @@ the worker, not the print.  A value cut either way says so."
                          (:exhausted "printing stopped: nested too deeply to print")
                          (t (format nil "nested deeper than ~D levels, cut there"
                                     *failure-print-max-depth*))))))
-        (multiple-value-bind (text outcome) (attempt cyclic)
-          (when (and (eq outcome :overflow) (not cyclic))
+        (multiple-value-bind (text outcome) (attempt circle)
+          (when (and (eq outcome :overflow) (not circle))
             (multiple-value-bind (circular again) (attempt t)
               (when (eq again :whole)
                 (setf text circular outcome :whole))))
           (cond ((not (eq outcome :whole)) (cut text outcome))
-                (level (cut text :level))
+                (deep (cut text :level))
                 (t text)))))))
 
 (defun %source-text (object)
