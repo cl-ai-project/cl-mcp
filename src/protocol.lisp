@@ -461,8 +461,11 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
              (prog1 (handle-request state id method (unless (eq params :absent) params))
                (log-event :debug "rpc.result" "id" id "method" method)))))
       (error (e)
+        ;; A condition whose report signals must not take the line with it.
         (ignore-errors (log-event :error "rpc.internal" "id" logged-id "method" logged-method
-                                  "error" (princ-to-string e)))
+                                  "error" (or (ignore-errors (princ-to-string e))
+                                              (format nil "unprintable ~S"
+                                                      (type-of e)))))
         (when valid-id (rpc-error id -32603 "Internal error")))
       (storage-condition ()
         (ignore-errors (log-event :error "rpc.internal" "method" logged-method

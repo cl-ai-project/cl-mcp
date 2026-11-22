@@ -33,28 +33,38 @@
              (let ((*log-level* :debug)
                    (*log-stream* sink))
                (process-json-line line))
-             (get-output-stream-string sink))))
+             (get-output-stream-string sink)))
+         (call-with-failing-handler (condition thunk)
+           (let ((original (fdefinition 'cl-mcp/src/protocol:handle-notification)))
+             (unwind-protect
+                  (progn
+                    (setf (fdefinition 'cl-mcp/src/protocol:handle-notification)
+                          (lambda (&rest arguments)
+                            (declare (ignore arguments))
+                            (error condition)))
+                    (funcall thunk))
+               (setf (fdefinition 'cl-mcp/src/protocol:handle-notification) original)))))
     (testing "a notification is logged, its id null"
       (let ((s (log-of "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")))
-        (ok (search "\"event\":\"rpc.dispatch\"" s) s)
-        (ok (search "\"id\":null" s) s)))
+        (ok (search "\"event\":\"rpc.dispatch\"" s) "rpc.dispatch is written")
+        (ok (search "\"id\":null" s) "the id is null")))
     (testing "a client's response is logged, its method null"
       (let ((s (log-of "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}")))
-        (ok (search "\"event\":\"rpc.dispatch\"" s) s)
-        (ok (search "\"method\":null" s) s)))
+        (ok (search "\"event\":\"rpc.dispatch\"" s) "rpc.dispatch is written")
+        (ok (search "\"method\":null" s) "the method is null")))
     (testing "a notification handler that fails is logged as rpc.internal"
-      (let ((original (fdefinition 'cl-mcp/src/protocol::handle-notification)))
-        (unwind-protect
-             (progn
-               (setf (fdefinition 'cl-mcp/src/protocol::handle-notification)
-                     (lambda (&rest arguments)
-                       (declare (ignore arguments))
-                       (error "the handler broke")))
-               (let ((s (log-of
-                         "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")))
-                 (ok (search "\"event\":\"rpc.internal\"" s) s)
-                 (ok (search "the handler broke" s) s)))
-          (setf (fdefinition 'cl-mcp/src/protocol::handle-notification) original))))))
+      (call-with-failing-handler
+       (make-condition 'simple-error :format-control "the handler broke")
+       (lambda ()
+         (let ((s (log-of "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")))
+           (ok (search "\"event\":\"rpc.internal\"" s) "rpc.internal is written")
+           (ok (search "the handler broke" s) "with the condition's message")))))
+    (testing "a failure whose condition cannot be printed is still logged"
+      (call-with-failing-handler
+       (make-condition 'simple-error)
+       (lambda ()
+         (let ((s (log-of "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")))
+           (ok (search "\"event\":\"rpc.internal\"" s) "rpc.internal is written")))))))
 
 (deftest should-log-p-level-filtering
   (testing "warn and error are visible at default debug level"
