@@ -426,8 +426,12 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
          (method (gethash "method" message :absent))
          (params (gethash "params" message :absent))
          (result (gethash "result" message :absent))
-         (error (gethash "error" message :absent)))
-    (log-event :debug "rpc.dispatch" "id" id "method" method)
+         (error (gethash "error" message :absent))
+         ;; Logged as null when absent: yason cannot encode :ABSENT, and
+         ;; LOG-EVENT drops a line it cannot encode (issue #393).
+         (logged-id (unless (eq id :absent) id))
+         (logged-method (unless (eq method :absent) method)))
+    (log-event :debug "rpc.dispatch" "id" logged-id "method" logged-method)
     (unless (and (equal (gethash "jsonrpc" message) "2.0")
                  (or (eq id :absent) valid-id))
       (return-from %dispatch-message (rpc-error (when valid-id id) -32600 "Invalid Request")))
@@ -457,11 +461,12 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
              (prog1 (handle-request state id method (unless (eq params :absent) params))
                (log-event :debug "rpc.result" "id" id "method" method)))))
       (error (e)
-        (ignore-errors (log-event :error "rpc.internal" "id" id "method" method
+        (ignore-errors (log-event :error "rpc.internal" "id" logged-id "method" logged-method
                                   "error" (princ-to-string e)))
         (when valid-id (rpc-error id -32603 "Internal error")))
       (storage-condition ()
-        (ignore-errors (log-event :error "rpc.internal" "method" method "error" "storage exhausted"))
+        (ignore-errors (log-event :error "rpc.internal" "method" logged-method
+                                  "error" "storage exhausted"))
         (when valid-id (rpc-error id -32603 "Internal error: the server ran out of stack or heap"))))))
 
 (defun process-json-message (message state &key wire-input-p)

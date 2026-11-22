@@ -25,6 +25,37 @@
           (ok (search "\"event\":\"rpc.dispatch\"" s))
           (ok (search "\"event\":\"rpc.result\"" s)))))))
 
+(deftest logging-messages-without-an-id-or-a-method
+  ;; Issue #393: an absent member reached LOG-EVENT as :ABSENT, which yason
+  ;; cannot encode, and the whole line was dropped without a trace.
+  (flet ((log-of (line)
+           (let ((sink (make-string-output-stream)))
+             (let ((*log-level* :debug)
+                   (*log-stream* sink))
+               (process-json-line line))
+             (get-output-stream-string sink))))
+    (testing "a notification is logged, its id null"
+      (let ((s (log-of "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")))
+        (ok (search "\"event\":\"rpc.dispatch\"" s) s)
+        (ok (search "\"id\":null" s) s)))
+    (testing "a client's response is logged, its method null"
+      (let ((s (log-of "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}")))
+        (ok (search "\"event\":\"rpc.dispatch\"" s) s)
+        (ok (search "\"method\":null" s) s)))
+    (testing "a notification handler that fails is logged as rpc.internal"
+      (let ((original (fdefinition 'cl-mcp/src/protocol::handle-notification)))
+        (unwind-protect
+             (progn
+               (setf (fdefinition 'cl-mcp/src/protocol::handle-notification)
+                     (lambda (&rest arguments)
+                       (declare (ignore arguments))
+                       (error "the handler broke")))
+               (let ((s (log-of
+                         "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}")))
+                 (ok (search "\"event\":\"rpc.internal\"" s) s)
+                 (ok (search "the handler broke" s) s)))
+          (setf (fdefinition 'cl-mcp/src/protocol::handle-notification) original))))))
+
 (deftest should-log-p-level-filtering
   (testing "warn and error are visible at default debug level"
     (let ((*log-level* :debug))
