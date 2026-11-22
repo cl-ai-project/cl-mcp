@@ -49,7 +49,12 @@ so it has to stand on its own without growing far past the text: the summary
 text goes with it as summary (the verdict headline, the advice under it, the ASDF
 fallback's stdout tail), debug_output, which the summary holds verbatim, is left
 out, and stdout and stderr, which the text leaves out, are cut to their ends
-(%CLIP-OUTPUT-FOR-STRUCTURED).  The result's own fields keep everything."
+(%CLIP-OUTPUT-FOR-STRUCTURED).  failed_tests, one entry per failed assertion
+with every field whole, gives way to failures_index, one bounded entry per
+failing test whose object_id holds its failures for inspect-object; a report
+with no index (a load, resolution or timeout failure, a single entry) keeps
+it.  passed_tests, a name per passing test, is left to the count in passed.
+The result's own fields keep everything."
   (let ((report (gethash "result" reply)))
     (when (and version (string>= version "2025-06-18") (hash-table-p report)
                (nth-value 1 (gethash "passed" report)))
@@ -62,6 +67,9 @@ out, and stdout and stderr, which the text leaves out, are cut to their ends
         (when (stringp text)
           (setf (gethash "summary" data) text)
           (remhash "debug_output" data))
+        (when (nth-value 1 (gethash "failures_index" data))
+          (remhash "failed_tests" data))
+        (remhash "passed_tests" data)
         (dolist (field '("stdout" "stderr"))
           (multiple-value-bind (value presentp) (gethash field data)
             (when presentp
@@ -101,14 +109,18 @@ Returns:
 - content (summary text): opens with the verdict headline (PASS, FAIL, NO TESTS
   RAN, RAN, RESULT UNKNOWN, ...).  Under Failures (one per failed
   assertion) it details the first 10, a field over 1000 characters cut at its
-  middle, then names the tests the rest come from, 20 at most, and counts the
-  others; failed_tests holds every failure whole.  A LOAD FAILED, UNRESOLVED or
+  middle, then lists the tests the rest come from and counts those past the
+  index.  Each listed test, the counted rest and any failure with a field cut
+  carry [object-id: ...]: inspect-object it to read those failures whole (ids
+  are the worker's; re-run to get fresh ones).  A LOAD FAILED, UNRESOLVED or
   TIMEOUT reason is never cut
 - structuredContent (MCP 2025-06-18 and later): the report fields listed below,
   plus summary, the content text itself -- some clients (Claude Code) show
   structuredContent in its place.  It leaves out debug_output, which summary
   holds, and its stdout and stderr keep only their last 4000 characters, headed
-  by a line counting the rest
+  by a line counting the rest.  It carries failures_index in place of
+  failed_tests (a load, resolution or timeout report keeps its one entry) and
+  leaves out passed_tests
 - verdict (string) -- the headline as a value: pass, fail, load-failed,
   unresolved, timeout, no-tests-ran, result-unknown (the ASDF fallback, which
   counts nothing: read the stdout tail at the end of the summary), all-skipped,
@@ -151,6 +163,10 @@ Returns:
 NOTE: stdout/stderr are in structured fields only, NOT shown in the summary text.
 To include debug prints in the visible summary, write to *test-debug-output*:
   (format cl-mcp/src/test-runner-core:*test-debug-output* \"debug: ~A~%\" value)
+- failures_index (array) -- one entry per failing test, the first 30: test_name,
+  failures (its failed assertions), object_id, source (Rove)
+- failures_index_rest (object, when more tests failed) -- failures, tests,
+  object_id
 - failed_tests (array of objects with fields:)
   - test_name (string) — name of the failing test
   - description (string) — assertion description (Rove) or the test's docstring (FiveAM)
