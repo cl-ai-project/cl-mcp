@@ -811,8 +811,9 @@ list, UNREACHED and OUTSIDE the FiveAM tests and suites a pass left out."
         (t (values "fail" "✗ FAIL"))))
 
 (defparameter *failures-detailed* 10
-  "Failures written out with their details in run-tests' text.  The next
-*FAILURES-NAMED* are named and the rest counted; failed_tests keeps them all.")
+  "Failures written out with their details in run-tests' text.  Of the rest,
+the tests they come from are named, *FAILURES-NAMED* at most, and the others
+counted; failed_tests keeps them all.")
 
 (defparameter *failures-named* 20
   "Tests named in run-tests' text for the failures past *FAILURES-DETAILED*, one
@@ -824,7 +825,8 @@ values, reason or frame -- written into run-tests' text (%CLIP-FAILURE-FIELD).
 A test that compares a large structure prints all of it, and one such field can
 be as long as many failures; its whole text stays in failed_tests.  A load,
 resolution or timeout failure is not cut: its reason is the whole report, with
-the hint at its end, and is bounded where it is made.")
+the hint or the available names at its end, and is written as it was before
+this bound.")
 
 (defun %clip-failure-field (text)
   "Return TEXT, a failure field's printed text, or its first and last halves of
@@ -835,9 +837,11 @@ the last argument, and a FiveAM reason reads `X ... which is not EQUAL to Y'."
         (half (floor *failure-field-max-chars* 2)))
     (if (<= (length text) *failure-field-max-chars*)
         text
-        (format nil "~A … [~D of ~D chars cut; whole in failed_tests] … ~A"
-                (subseq text 0 half) (- (length text) (* 2 half)) (length text)
-                (subseq text (- (length text) half))))))
+        (let ((cut (format nil "~A … [~D of ~D chars cut; whole in failed_tests] … ~A"
+                           (subseq text 0 half) (- (length text) (* 2 half))
+                           (length text) (subseq text (- (length text) half)))))
+          ;; Just past the limit, the marker would be longer than what it cuts.
+          (if (< (length cut) (length text)) cut text)))))
 
 (defun %write-failures (stream failures &key (clip t))
   "Write FAILURES, a vector of failure details, to STREAM under a Failures:
@@ -858,13 +862,15 @@ failure of a load, resolution or timeout, whose reason is the whole report."
            (detailed (min total *failures-detailed*))
            ;; The tests the undetailed failures come from, in order of first
            ;; appearance: (name . failures).
-           (tests (let ((groups '()))
+           (tests (let ((index (make-hash-table :test 'equal))
+                        (groups '()))
                     (loop for i from detailed below total
                           for name = (gethash "test_name" (aref failures i))
-                          for group = (assoc name groups :test #'equal)
+                          for group = (gethash name index)
                           do (if group
                                  (incf (cdr group))
-                                 (push (cons name 1) groups)))
+                                 (push (setf (gethash name index) (cons name 1))
+                                       groups)))
                     (nreverse groups)))
            (named (subseq tests 0 (min (length tests) *failures-named*)))
            (unnamed (nthcdr (length named) tests)))
