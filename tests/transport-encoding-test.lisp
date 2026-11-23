@@ -164,13 +164,23 @@ in its parse unchanged but for the surrogate."
         ;; yason writes a non-BMP character as \u escapes of its own, and a
         ;; yason that leaves control characters raw has them escaped by
         ;; TRANSPORT-SAFE-JSON, which wrote its hex digits with FORMAT ~X.
-        (ok (equal "[\"\\uD83D\\uDE00\"]"
-                   (encode-json-line (list (string (code-char #x1F600)))))
-            "nor a string's escapes")
+        (let ((emoji (string (code-char #x1F600))))
+          (ok (equal (list emoji)
+                     (coerce (yason:parse (encode-json-line (list emoji))) 'list))
+              "nor a string's escapes"))
         (ok (equal "[\"\\u001B\"]"
                    (cl-mcp/src/utils/sanitize:transport-safe-json
                     (format nil "[\"~C\"]" (code-char 27))))
-            "nor the escape of a raw control character")))))
+            "nor the escape of a raw control character")
+        ;; The last fallback, for an answer yason cannot encode, escapes a
+        ;; string id by hand.
+        (let ((response (make-hash-table :test 'equal)))
+          (setf (gethash "jsonrpc" response) "2.0"
+                (gethash "id" response) (format nil "a~Cz" (code-char 27))
+                (gethash "result" response) #c(1 2))
+          (ok (search "\"id\":\"a\\u001Bz\""
+                      (cl-mcp/src/protocol::%encode-json response))
+              "nor the escape in the fallback's id"))))))
 
 (defvar *inside-encoding* nil
   "True while %UNENCODABLE-PROBE's encode method runs.")
