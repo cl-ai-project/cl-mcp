@@ -2372,8 +2372,7 @@ budget computed from one backend and the trials run under another."
                    :condition (%condition-data value))))))))
 
 (defun %terminal-status-p (status)
-  "Return true when STATUS is a verdict about the property rather than about
-the run's own machinery."
+  "Return true when STATUS can complete a check."
   (member status '(:passed :failed :error :skipped :pending)))
 
 (defparameter +result-statuses+
@@ -2743,7 +2742,8 @@ anything holds."
                 (push result results)))
             (setf results (nreverse results))
             (list :status (if (every (lambda (result)
-                                       (%terminal-status-p (getf result :status)))
+                                       (and (%terminal-status-p (getf result :status))
+                                            (not (%generation-incomplete-p result))))
                                      results)
                               :completed
                               :incomplete)

@@ -223,6 +223,13 @@ failure a return-value contract cannot see and a :state-post can."
   (declare (ignore value))
   nil)
 
+(cl-spec:defproperty exhausts-input-generation
+    ((value (and (range integer 0 10) (satisfies never-satisfied-p))))
+  "The bounded generator exhausts its candidate budget before evaluating the body."
+  (:about magnitude)
+  (:trials (:smoke 1))
+  (integerp value))
+
 (defun magnitude-of-impossible (value)
   "Return the absolute value of VALUE.  Its contract's argument spec is unmeetable."
   (abs value))
