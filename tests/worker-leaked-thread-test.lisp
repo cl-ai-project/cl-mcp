@@ -560,6 +560,8 @@ initialization pool-wide for")
   (let* ((process (sb-ext:run-program "/bin/sh" '("-c" "exec sleep 30")
                                       :wait nil :search nil))
          (worker (cl-mcp/src/worker-client::make-worker
+                  ;; Other reapers can be finishing while the test captures logs.
+                  :pid (sb-ext:process-pid process)
                   :state :bound
                   :process-info process
                   :stream (make-two-way-stream
