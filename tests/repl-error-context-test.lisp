@@ -386,6 +386,46 @@ budget pressure a real response is under."
             (ok (search "\"a\" => 2" with)
                 "and those entries are the real contents")))))))
 
+#+sbcl
+(defun repl-preview-spelling-frame (items stop)
+  "Keep ITEMS live when STOP is called so it can be previewed."
+  (declare (optimize (debug 3) (speed 0)))
+  (funcall stop)
+  items)
+
+#+sbcl
+(deftest locals-preview-keeps-lisp-spelling
+  (let ((*request-debugger-boundary-active* t))
+    (loop for (stop condition-type) in
+          '(("(error \"preview probe\")" "SIMPLE-ERROR")
+            ("(invoke-debugger (make-condition 'repl-boundary-condition))"
+             "REPL-BOUNDARY-CONDITION"))
+          do (multiple-value-bind (printed raw stdout stderr context)
+                 (repl-eval
+                  (format nil "(repl-preview-spelling-frame (list :k \"s\" #\\A 2)
+                                 (lambda () ~A))" stop)
+                  :package "CL-MCP/TESTS/REPL-ERROR-CONTEXT-TEST"
+                  :locals-preview-frames 3 :timeout-seconds 3)
+               (let* ((response (cl-mcp/src/tools/response-builders:build-eval-response
+                                 printed raw stdout stderr context))
+                      (error-context (gethash "error_context" response))
+                      (frame (find "REPL-PREVIEW-SPELLING-FRAME" (gethash "frames" error-context)
+                                   :key (lambda (frame) (gethash "function" frame))
+                                   :test #'search))
+                      (local (find "ITEMS" (gethash "locals" frame)
+                                   :key (lambda (local) (gethash "name" local)) :test #'equal))
+                      (elements (gethash "elements" (gethash "preview" local)))
+                      (text (gethash "text" (aref (gethash "content" response) 0))))
+                 (ok (equal condition-type (gethash "condition_type" error-context)))
+                 (ok (equal '(("K" ":K") ("s" "\"s\"") ("A" "#\\A") (2 "2"))
+                            (loop for element in elements
+                                  collect (list (gethash "value" element)
+                                                (gethash "printed" element))))
+                     condition-type)
+                 (ok (every (lambda (row) (search row text))
+                            '("[0] :K" "[1] \"s\"" "[2] #\\A" "[3] 2"))
+                     condition-type))))))
+
 (deftest one-huge-local-does-not-evict-the-frames-below-it
   (testing "a long value is cut, so later locals and caller frames survive"
     ;; print_level and print_length bound a printed structure's depth and its

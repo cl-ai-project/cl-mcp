@@ -25,16 +25,16 @@
     (prin1-to-string object)))
 
 (defun %primitive (object)
-  (let ((result (%table "type" (if (characterp object) "CHARACTER" (%type-name object))
-                        "value" (typecase object
-                                  (symbol (symbol-name object))
-                                  (character (string object))
-                                  ;; A number JSON cannot carry goes as its text,
-                                  ;; as in the ordinary inspector (#417).
-                                  (number (if (json-number-p object)
-                                              object
-                                              (%print-preview object)))
-                                  (t object)))))
+  (let* ((printed (%print-preview object))
+         (result (%table "type" (if (characterp object) "CHARACTER" (%type-name object))
+                         "value" (typecase object
+                                   (symbol (symbol-name object))
+                                   (character (string object))
+                                   ;; A number JSON cannot carry goes as its text,
+                                   ;; as in the ordinary inspector (#417).
+                                   (number (if (json-number-p object) object printed))
+                                   (t object))
+                         "printed" printed)))
     (when (symbolp object)
       (setf (gethash "type" result) "SYMBOL")
       (when (symbol-package object)
