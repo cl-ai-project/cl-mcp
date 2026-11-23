@@ -85,7 +85,7 @@ would serialize as null.  This helper normalizes the mismatch:
 
 Typical usage in MCP tool responses:
   (make-ht \"would_change\" (json-bool changed-p))"
-  (if value t yason:false))
+  (if value t 'yason:false))
 
 ;;;; Argument Extraction Helpers
 ;;;;

@@ -52,7 +52,7 @@
 (defun %true-p (value)
   "True when VALUE, a JSON boolean, is true.  False arrives as YASON:FALSE
 in-process and as NIL after the worker's JSON round trip."
-  (and value (not (eq value yason:false))))
+  (and value (not (eq value 'yason:false))))
 
 (defun clos-report-p (object)
   "True when OBJECT is a clos-describe report rather than an error result.

@@ -15,8 +15,7 @@
   (:import-from #:cl-mcp/src/project-root #:forget-session-project-root)
   (:import-from #:bordeaux-threads #:make-lock #:with-lock-held)
   (:import-from #:hunchentoot)
-  (:import-from #:yason)
-  (:import-from #:cl-mcp/src/utils/sanitize #:encode-json-line)
+  (:import-from #:cl-mcp/src/utils/sanitize #:decode-json-text #:encode-json-line)
   (:import-from #:cl-mcp/src/utils/random #:generate-random-hex-string)
   (:import-from #:cl-mcp/src/utils/nesting #:json-too-deep-p)
   (:export
@@ -300,7 +299,7 @@ Sessions with active in-flight requests are skipped even when expired."
       (return-from parse-json-body nil))
     (when (and body (plusp (length body)))
       (handler-case
-          (values (yason:parse body) t)
+          (values (decode-json-text body) t)
         (error (e)
           (log-event :warn "http.parse-error" "error" (princ-to-string e))
           nil)

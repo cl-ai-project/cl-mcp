@@ -240,6 +240,27 @@ Host header's value, which is 127.0.0.1:PORT otherwise."
                  (ok (eql 200 (send-http-request port "POST" "/mcp" :body init :headers json))))))
         (stop-http-server))))
 
+(deftest http-post-rejects-trailing-json-text
+  (if (not (http-port-available-p))
+      (ok t "port unavailable")
+      (unwind-protect
+           (multiple-value-bind (acceptor port)
+               (start-http-server :host "127.0.0.1" :port 0 :token nil :worker-pool nil)
+             (declare (ignore acceptor))
+             (let ((init "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}")
+                   (headers '(("Content-Type" . "application/json"))))
+               (multiple-value-bind (status response-headers body)
+                   (send-http-request port "POST" "/mcp" :headers headers
+                                                        :body (concatenate 'string init " extra"))
+                 (declare (ignore response-headers))
+                 (let ((reply (yason:parse body)))
+                   (ok (eql 400 status))
+                   (ok (and (nth-value 1 (gethash "id" reply)) (null (gethash "id" reply))))
+                   (ok (eql -32700 (and (gethash "error" reply)
+                                       (gethash "code" (gethash "error" reply)))))))
+               (ok (eql 200 (send-http-request port "POST" "/mcp" :headers headers :body init)))))
+        (stop-http-server))))
+
 (deftest loopback-host-recognizes-this-machine
   (let ((host-p #'cl-mcp/src/http::%loopback-host-p))
     (ok (funcall host-p "127.0.0.1:3000"))

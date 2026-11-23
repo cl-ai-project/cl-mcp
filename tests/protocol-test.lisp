@@ -177,6 +177,41 @@
     (ok (null (process-json-line (format nil "[~A,~A]" notice response) state)))
     (ok (= -32600 (gethash "code" (gethash "error" (parse (process-json-line "[]" state))))))))
 
+(deftest batch-encoding-ignores-string-pprint-dispatch
+  (let ((state (make-state))
+        (batch (concatenate 'string
+                            "[{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"ping\"},"
+                            "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"ping\"}]")))
+    (setf (protocol-version state) "2025-03-26")
+    (let* ((reply
+             (let ((*print-pretty* t)
+                   (*print-pprint-dispatch* (copy-pprint-dispatch nil)))
+               (set-pprint-dispatch 'string
+                                    (lambda (stream string)
+                                      (write-char #\< stream)
+                                      (write-string string stream)
+                                      (write-char #\> stream)))
+               (process-json-line batch state)))
+           (parsed (ignore-errors (parse reply)))
+           (two-replies-p (and (vectorp parsed) (= 2 (length parsed)))))
+      (ok two-replies-p reply)
+      (when two-replies-p
+        (ok (equal '(10 11) (map 'list (lambda (item) (gethash "id" item)) parsed)))))))
+
+(deftest wire-json-requires-one-complete-value
+  (let ((ping "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"ping\"}"))
+    (testing "a malformed frame gives a parse error with no request ID"
+      (dolist (suffix '(" extra" " {}"))
+        (let ((reply (parse (process-json-line (concatenate 'string ping suffix)))))
+          (ok (equal "2.0" (gethash "jsonrpc" reply)))
+          (ok (and (nth-value 1 (gethash "id" reply)) (null (gethash "id" reply))))
+          (ok (eql -32700 (and (gethash "error" reply)
+                              (gethash "code" (gethash "error" reply))))))))
+    (testing "JSON whitespace at the end is allowed"
+      (let ((reply (parse (process-json-line (format nil "~A ~C~C~%" ping #\Tab #\Return)))))
+        (ok (eql 10 (gethash "id" reply)))
+        (ok (hash-table-p (gethash "result" reply)))))))
+
 (deftest unknown-tool-is-an-invalid-parameter
   (let* ((line (concatenate 'string "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
                             "\"params\":{\"name\":\"unknown-fixture-tool\"}}"))

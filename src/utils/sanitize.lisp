@@ -12,6 +12,7 @@
            #:sanitize-condition-text
            #:transport-safe-json
            #:write-json-control-escape
+           #:decode-json-text
            #:encode-json-text
            #:encode-json-line
            #:json-encoding-error
@@ -414,9 +415,48 @@ those as its printed text instead (#417)."
 Its message is text made while the failure was still in progress, so the
 condition holds nothing yason was writing to."))
 
+(defun decode-json-text (text &key preserve-json-types)
+  "Decode one JSON value from TEXT using decimal numbers, string keys and vectors.
+PRESERVE-JSON-TYPES keeps booleans and null distinct for replies relayed to a client."
+  (with-standard-io-syntax
+    (let ((*read-eval* nil)
+          ;; Older Yason uses the caller's float format. Newer releases bind their own.
+          (*read-default-float-format* 'single-float)
+          (yason:*parse-object-as-alist* nil)
+          (yason:true 'yason:true)
+          (yason:false 'yason:false))
+      (declare (special yason:true yason:false)
+               (ignorable yason:true yason:false))
+      (with-input-from-string (stream text)
+        (prog1 (yason:parse stream
+                            :object-key-fn #'identity
+                            :object-as :hash-table
+                            :json-arrays-as-vectors t
+                            :json-booleans-as-symbols preserve-json-types
+                            :json-nulls-as-keyword preserve-json-types)
+          (loop for char = (read-char stream nil)
+                while char
+                unless (find char '(#\Space #\Tab #\Newline #\Return))
+                  do (error "Unexpected text after the JSON value")))))))
+
+(defparameter *wire-encoder-bindings*
+  ;; Older Yason uses fixed encoders. Resolve the defaults by name only where
+  ;; the corresponding setting and its implementation exist.
+  (loop with literals = '(yason:true yason:false)
+        for (setting encoder) in '(("*LIST-ENCODER*" "ENCODE-PLAIN-LIST-TO-ARRAY")
+                                   ("*SYMBOL-ENCODER*" "ENCODE-SYMBOL-ERROR")
+                                   ("*SYMBOL-KEY-ENCODER*" "ENCODE-SYMBOL-KEY-ERROR"))
+        for variable = (find-symbol setting :yason)
+        for default = (find-symbol encoder :yason)
+        when (and variable default)
+          collect variable into variables
+          and collect default into defaults
+        finally (return (list (append literals variables) (append literals defaults))))
+  "Yason specials and their fixed encoder and literal values for wire JSON.")
+
 (defun encode-json-text (object)
-  "Return OBJECT encoded by yason as JSON text, whatever printer settings the
-calling thread meets, and signal JSON-ENCODING-ERROR when it cannot be encoded.
+  "Return OBJECT encoded as JSON text using the wire printer and encoder settings.
+Signal JSON-ENCODING-ERROR when it cannot be encoded.
 
 yason writes an integer with PRINC, so a *PRINT-BASE* or *PRINT-RADIX* that code
 of the session set globally -- a test's (setf *print-base* 16) -- put 2A or #x2A
@@ -439,7 +479,9 @@ its text while the stream still exists."
           ;; PRINC consults the pprint dispatch table when this is true, and
           ;; an entry the session installed for INTEGER wrote 1,234,567.
           (*print-pretty* nil))
-      (with-output-to-string (stream) (yason:encode object stream)))))
+      (destructuring-bind (variables defaults) *wire-encoder-bindings*
+        (progv variables defaults
+          (with-output-to-string (stream) (yason:encode object stream)))))))
 
 (defun encode-json-line (object)
   "Return OBJECT encoded by yason as one line of JSON that every transport can

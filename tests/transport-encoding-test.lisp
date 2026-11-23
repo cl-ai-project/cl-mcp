@@ -182,6 +182,98 @@ in its parse unchanged but for the surrogate."
                       (cl-mcp/src/protocol::%encode-json response))
               "nor the escape in the fallback's id"))))))
 
+(deftest wire-decoding-ignores-the-read-base
+  (let ((server (cl-mcp/src/worker/server::%make-worker-server :authenticated-p t))
+        (ping "{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"worker/ping\"}")
+        (reply "{\"jsonrpc\":\"2.0\",\"id\":10,\"result\":{\"n\":1e5}}")
+        (handshake "{\"tcp_port\":12345,\"swank_port\":null,\"pid\":12346}"))
+    (cl-mcp/src/worker/server:register-method
+     server "worker/ping" (lambda (params) (declare (ignore params)) (make-hash-table)))
+    (testing "requests to the worker keep their decimal ID"
+      (let ((line (let ((*read-base* 16))
+                    (cl-mcp/src/worker/server::%process-line server ping))))
+        (ok (eql 10 (gethash "id" (yason:parse line))) line)))
+    (testing "responses from the worker match the ID and parse decimal exponents"
+      (multiple-value-bind (result condition)
+          (let ((*read-base* 16))
+            (ignore-errors
+              (with-input-from-string (stream reply)
+                (cl-mcp/src/worker-client::%read-json-rpc-response stream 10 nil))))
+        (ok (and (hash-table-p result) (= 100000 (gethash "n" result)))
+            (and condition (princ-to-string condition)))))
+    (testing "the worker's handshake keeps its decimal port and PID"
+      (ok (equal '(12345 nil 12346)
+                 (let ((*read-base* 16))
+                   (with-input-from-string (stream handshake)
+                     (multiple-value-list
+                      (cl-mcp/src/worker-client::%parse-handshake-from-stream stream)))))))))
+
+(deftest wire-decoding-uses-cl-mcps-json-types
+  (let* ((state (cl-mcp/src/protocol:make-state))
+         (batch "[{\"jsonrpc\":\"2.0\",\"id\":10,\"method\":\"ping\"}]")
+         (reply (let ((yason:*parse-json-arrays-as-vectors* nil)
+                      (yason:*parse-object-key-fn* #'string-upcase))
+                  (setf (cl-mcp/src/protocol:protocol-version state) "2025-03-26")
+                  (cl-mcp/src/protocol:process-json-line batch state))))
+    (let ((parsed (yason:parse reply :json-arrays-as-vectors t)))
+      (ok (and (vectorp parsed) (= 1 (length parsed))
+               (eql 10 (gethash "id" (aref parsed 0))))
+          reply)))
+  (flet ((read-result (preserve-json-types)
+           (let ((yason:*parse-json-booleans-as-symbols* t)
+                 (yason:*parse-json-null-as-keyword* t)
+                 (yason:*parse-object-as-alist* t))
+             (ignore-errors
+               (with-input-from-string
+                   (stream "{\"id\":10,\"result\":{\"flag\":false,\"value\":null,\"items\":[]}}")
+                 (cl-mcp/src/worker-client::%read-json-rpc-response
+                  stream 10 nil :preserve-json-types preserve-json-types))))))
+    (let ((result (read-result nil))
+          (relay (read-result t)))
+      (ok (and (hash-table-p result)
+               (null (gethash "flag" result))
+               (null (gethash "value" result))
+               (vectorp (gethash "items" result))))
+      (ok (and (hash-table-p relay)
+               (eq 'yason:false (gethash "flag" relay))
+               (eq :null (gethash "value" relay))
+               (vectorp (gethash "items" relay)))))))
+
+(deftest wire-encoding-ignores-yason-customizations
+  (let ((list-encoder (find-symbol "*LIST-ENCODER*" :yason))
+        (symbol-encoder (find-symbol "*SYMBOL-ENCODER*" :yason))
+        (key-encoder (find-symbol "*SYMBOL-KEY-ENCODER*" :yason))
+        (response (make-hash-table :test 'equal)))
+    (setf (gethash "elements" response) (list "one" 2))
+    (ok (equal "{\"elements\":[\"one\",2]}" (encode-json-line response)))
+    ;; Older Yason releases use fixed encoders and have no such settings.
+    (when (and list-encoder symbol-encoder key-encoder
+               (every #'boundp (list list-encoder symbol-encoder key-encoder)))
+      (flet ((encode-symbol (symbol &optional stream)
+               (when stream (yason:encode (string symbol) stream))
+               (string symbol)))
+        (progv (list list-encoder symbol-encoder key-encoder)
+            (list 'yason:encode-plist #'encode-symbol #'encode-symbol)
+          (ok (equal "{\"elements\":[\"one\",2]}" (encode-json-line response)))
+          (ok (eq 'yason:encode-plist (symbol-value list-encoder)))
+          (ok (handler-case (progn (encode-json-line :symbol-value) nil)
+                (cl-mcp/src/utils/sanitize:json-encoding-error () t)))
+          (clrhash response)
+          (setf (gethash :symbol-key response) 1)
+          (ok (handler-case (progn (encode-json-line response) nil)
+                (cl-mcp/src/utils/sanitize:json-encoding-error () t))))))))
+
+(deftest wire-boolean-literals-ignore-yason-aliases
+  (progv '(yason:true yason:false) '(:application-true nil)
+    (let ((response (cl-mcp/src/tools/helpers:make-ht
+                     "flag" (cl-mcp/src/tools/helpers:json-bool nil)
+                     "ok" 'yason:true)))
+      (ok (equal "{\"flag\":false,\"ok\":true}" (encode-json-line response))))
+    (ok (handler-case (progn (encode-json-line :application-true) nil)
+          (cl-mcp/src/utils/sanitize:json-encoding-error () t)))
+    (ok (eq :application-true (symbol-value 'yason:true)))
+    (ok (null (symbol-value 'yason:false)))))
+
 (defvar *inside-encoding* nil
   "True while %UNENCODABLE-PROBE's encode method runs.")
 

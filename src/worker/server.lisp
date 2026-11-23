@@ -9,7 +9,7 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log #:log-event)
   (:import-from #:cl-mcp/src/utils/sanitize
-                #:sanitize-error-message #:encode-json-line)
+                #:sanitize-error-message #:decode-json-text #:encode-json-line)
   (:import-from #:cl-mcp/src/utils/nesting #:json-too-deep-p)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:leaked-threads
@@ -24,7 +24,6 @@
                 #:%read-line-limited
                 #:+max-json-line-bytes+)
   (:import-from #:usocket)
-  (:import-from #:yason)
   (:export #:worker-server
            #:make-worker-server
            #:server-port
@@ -299,7 +298,7 @@ Returns a JSON string response, or NIL for notifications."
          (%make-error nil -32700 "Parse error: nested too deeply"
                       (worker-server-authenticated-p server)))))
     (let ((msg (handler-case
-                   (yason:parse trimmed)
+                   (decode-json-text trimmed)
                  (error (e)
                    (log-event :warn "worker.parse.error"
                               "error" (princ-to-string e))

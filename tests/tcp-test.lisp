@@ -49,8 +49,8 @@
                (let ((req (concatenate
                            'string
                            "{\"jsonrpc\":\"2.0\",\"id\":1,"
-                           "\"method\":\"initialize\",\"params\":{}}\n")))
-                 (write-string req stream)
+                           "\"method\":\"initialize\",\"params\":{}}")))
+                 (write-line req stream)
                  (finish-output stream)
                  ;; Half-close our write side so the server sees EOF and exits
                  ;; the read loop even if the client crashes before closing.
@@ -84,10 +84,10 @@
                           (let ((req (concatenate
                                       'string
                                       "{\"jsonrpc\":\"2.0\",\"id\":1,"
-                                      "\"method\":\"initialize\",\"params\":{}}\n")))
+                                      "\"method\":\"initialize\",\"params\":{}}")))
                             ;; Wait longer than *tcp-read-timeout* without sending.
                             (sleep 0.3d0)
-                            (write-string req stream)
+                            (write-line req stream)
                             (finish-output stream)
                             (ignore-errors (usocket:socket-shutdown sock :output))
                             (let ((line (read-line stream nil nil)))
@@ -114,8 +114,8 @@
                       (let ((req (concatenate
                                   'string
                                   "{\"jsonrpc\":\"2.0\",\"id\":1,"
-                                  "\"method\":\"initialize\",\"params\":{}}\n")))
-                        (write-string req stream)
+                                  "\"method\":\"initialize\",\"params\":{}}")))
+                        (write-line req stream)
                         (finish-output stream)
                         ;; Signal EOF to server read loop after sending request.
                         (ignore-errors (usocket:socket-shutdown sock :output))
@@ -184,8 +184,8 @@
                                              'string
                                              "{\"jsonrpc\":\"2.0\",\"id\":1,"
                                              "\"method\":\"initialize\","
-                                             "\"params\":{}}\n")))
-                                   (write-string req stream)
+                                             "\"params\":{}}")))
+                                   (write-line req stream)
                                    (finish-output stream)
                                    (ignore-errors
                                      (usocket:socket-shutdown sock :output))

@@ -16,10 +16,9 @@
   (:import-from #:cl-mcp/src/project-root #:*project-root*)
   (:import-from #:cl-mcp/src/log #:log-event #:*log-stream* #:*log-lock*)
   (:import-from #:usocket)
-  (:import-from #:yason)
   (:import-from #:cl-mcp/src/utils/random #:generate-random-hex-string)
   (:import-from #:cl-mcp/src/utils/nesting #:json-too-deep-p #:+max-json-nesting+)
-  (:import-from #:cl-mcp/src/utils/sanitize #:encode-json-line)
+  (:import-from #:cl-mcp/src/utils/sanitize #:decode-json-text #:encode-json-line)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:*retired-leaked-thread-reason*
                 #:+leaked-thread-exit-code+)
@@ -406,16 +405,14 @@ Uses ros-run when running under Roswell, bare sbcl otherwise."
 (defun %parse-handshake-from-stream (stdout)
   "Read lines from STDOUT until a valid handshake JSON line is found.
 Skips non-JSON lines.  Returns (values tcp-port swank-port pid).
-Handles swank_port as NIL regardless of how the worker encoded null:
-YASON < 0.8 parses JSON null as NIL, YASON >= 0.8 may return :NULL
-depending on *parse-json-null-as-keyword*."
+A JSON null swank_port becomes NIL, as in the rest of the worker's handshake."
   (loop for line = (%read-line-limited stdout nil +max-json-line-bytes+)
         unless line do
           (error 'worker-spawn-failed
                  :message "Worker closed stdout before handshake")
         ;; A line nested too deeply to parse safely is not the handshake.
         do (let ((json (and (not (json-too-deep-p line))
-                            (ignore-errors (yason:parse line)))))
+                            (ignore-errors (decode-json-text line)))))
              (when (and (hash-table-p json) (gethash "tcp_port" json))
                (let ((tcp-port (gethash "tcp_port" json))
                      (swank-port (gethash "swank_port" json))
@@ -522,12 +519,7 @@ corruption."
 deep, too deep for this server to read; ask for a shallower result (a lower ~
 preview_max_depth or max_depth)."
                                        +max-json-nesting+)))
-             (let ((json (if preserve-json-types
-                             (yason:parse line
-                                          :json-arrays-as-vectors t
-                                          :json-booleans-as-symbols t
-                                          :json-nulls-as-keyword t)
-                             (yason:parse line))))
+             (let ((json (decode-json-text line :preserve-json-types preserve-json-types)))
                (unless (hash-table-p json)
                  (error "Invalid JSON-RPC response: not an object"))
                ;; Verify ID matches
