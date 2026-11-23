@@ -1500,6 +1500,37 @@ iteration proceed instead of crashing."
               (log-event :info "test.runner"
                          "message" "added TEST-NAME method for FAILED-ASSERTION"))))))))
 
+(defclass %test-system-load-plan (asdf/plan:sequential-plan) ()
+  (:documentation "An ASDF plan that initializes Rove with standard I/O syntax."))
+
+(defun %rove-main-load-action-p (action)
+  (destructuring-bind (operation . component) action
+    (and (typep operation 'asdf:load-op)
+         (typep component 'asdf:cl-source-file)
+         (string= "rove/main" (asdf:component-name (asdf:component-system component))))))
+
+(defmethod asdf/plan:perform-plan ((plan %test-system-load-plan) &key)
+  (let* ((actions (asdf/plan:plan-actions plan))
+         (rove-main-load (find-if #'%rove-main-load-action-p actions)))
+    (if rove-main-load
+        ;; ASDF's standard sequential execution, preserving action order,
+        ;; application methods, restarts, and completed-action bookkeeping.
+        (dolist (action actions)
+          (destructuring-bind (operation . component) action
+            (unless (asdf/plan:action-already-done-p plan operation component)
+              (if (eq action rove-main-load)
+                  (with-standard-io-syntax
+                    (asdf/action:perform-with-restarts operation component))
+                  (asdf/action:perform-with-restarts operation component))
+              (asdf/plan:mark-as-done plan operation component))))
+        (call-next-method))))
+
+(defun %load-test-system (system-name)
+  "Load SYSTEM-NAME in ASDF order, with standard I/O syntax for Rove's initialization."
+  (if (eq asdf/plan:*plan-class* 'asdf/plan:sequential-plan)
+      (asdf:load-system system-name :plan-class '%test-system-load-plan)
+      (asdf:load-system system-name)))
+
 (defun %ensure-system-loaded (system-name)
   "Force-reload SYSTEM-NAME so tests always run against the latest source.
 Clears ASDF's loaded state for the system, then reloads.  This ensures
@@ -1609,7 +1640,7 @@ COMPILE-FILE-ERROR."
             (setf loading t)
             (let ((*error-output* captured-stderr))
               (call-with-own-compilation-unit
-               (lambda () (asdf:load-system system-name))))))
+               (lambda () (%load-test-system system-name))))))
       (error (c)
         (let* ((warnings-text (get-output-stream-string captured-warnings))
                (stderr-text (get-output-stream-string captured-stderr))
@@ -1750,6 +1781,14 @@ a future Rove version returns them directly instead of crashing."
               (push assertion failure-details)))))
     (nreverse failure-details)))
 
+(defun %ensure-rove-none-reporter ()
+  "Register Rove's :NONE reporter by name, independent of printer settings."
+  ;; Rove otherwise prints symbols to find the reporter's package and class.
+  (unless (uiop:symbol-call :rove/reporter/registry :get-reporter :none)
+    (asdf:load-system "rove/reporter/none")
+    (uiop:symbol-call :rove/reporter/registry :add-reporter :none
+                      (find-symbol "NONE-REPORTER" "ROVE/REPORTER/NONE"))))
+
 (defmacro %with-rove-output ((report-stream-symbol stdout stderr debug) &body body)
   "Capture test output and suppress the Rove reporter while running BODY.
 Run Rove with :STYLE :NONE inside it as well: a reporter writing to a broadcast
@@ -1768,6 +1807,7 @@ report is built from the results by %PRINTED."
                               (find-symbol "*ROVE-STANDARD-OUTPUT*" :rove/core/suite)
                               (find-symbol "*ROVE-ERROR-OUTPUT*" :rove/core/suite)))
          (list (make-broadcast-stream) nil nil)
+       (%ensure-rove-none-reporter)
        ,@body)))
 
 (defun run-rove-selected-tests (test-symbols)
