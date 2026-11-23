@@ -544,6 +544,24 @@
        (ok (equal "KEYWORD" (gethash "package" (elt elements 2))))
        (ok (null (gethash "package" (elt elements 4))))))))
 
+(deftest inspect-gives-numbers-json-cannot-carry-as-their-text
+  ;; yason has no method for a complex and writes an infinity in Lisp syntax,
+  ;; so a value holding either ended the worker (#417).
+  (with-fresh-registry
+   (lambda ()
+     (let* ((object (list #c(1 2) sb-ext:double-float-positive-infinity 1/4 1.5d0 7))
+            (inspection (inspect-object-by-id (register-object object)))
+            (values (map 'list (lambda (el) (gethash "value" el))
+                         (gethash "elements" inspection))))
+       (ok (equal "#C(1 2)" (first values)) "a complex is given as its text")
+       (ok (stringp (second values)) "an infinity as its text")
+       (ok (equal '(1/4 1.5d0 7) (cddr values)) "a number JSON can carry keeps its value")
+       (let ((json (yason:parse (cl-mcp/src/utils/sanitize:encode-json-line inspection))))
+         (ok (equal "#C(1 2)" (gethash "value" (elt (gethash "elements" json) 0)))
+             "and the inspection encodes"))
+       (ok (cl-mcp/src/utils/sanitize:encode-json-line (generate-result-preview object))
+           "so does the result preview")))))
+
 (deftest inspect-content-text-includes-entries
  (testing
   "inspect-object content text includes formatted entries for hash-tables"

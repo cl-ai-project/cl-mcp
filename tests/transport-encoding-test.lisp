@@ -140,3 +140,34 @@ in its parse unchanged but for the surrogate."
                  (gethash "result"
                           (yason:parse (cl-mcp/src/worker/server::%encode-response
                                         response 1000))))))))
+
+(deftest encoding-ignores-the-printer-settings-it-meets
+  ;; A test's (setf *print-base* 16) changes the global value every thread
+  ;; sees; yason writes an integer with PRINC, so the worker's answer held
+  ;; "2A" and the parent killed the worker for it (#416).
+  (let ((object (make-hash-table :test 'equal)))
+    (setf (gethash "n" object) 255)
+    (let ((*print-base* 16) (*print-radix* t))
+      (ok (equal "{\"n\":255}" (encode-json-line object)) "a line sent between processes")
+      (ok (equal "{\"n\":255}" (cl-mcp/src/protocol::%encode-json object))
+          "and an answer to a client"))))
+
+(deftest an-unencodable-worker-answer-becomes-an-error-answer
+  ;; yason's error held the stack-allocated string stream it was writing to,
+  ;; and printing it once that stream was gone was a memory fault that ended
+  ;; the worker instead of answering (#417).
+  (let ((server (cl-mcp/src/worker/server::%make-worker-server))
+        (payload (make-hash-table :test 'equal)))
+    (setf (cl-mcp/src/worker/server::worker-server-authenticated-p server) t
+          (gethash "x" payload) #c(1 2)
+          (gethash "m" (cl-mcp/src/worker/server::worker-server-methods server))
+          (lambda (params) (declare (ignore params)) payload))
+    (let* ((line (handler-case (cl-mcp/src/worker/server::%dispatch-request server 9 "m" nil)
+                   (serious-condition (condition) (type-of condition))))
+           (json (and (stringp line) (yason:parse line))))
+      (ok (stringp line) (format nil "the worker answers: ~S" line))
+      (when json
+        (ok (eql 9 (gethash "id" json)) "the same request")
+        (ok (eql -32603 (gethash "code" (gethash "error" json))) "with an error")
+        (ok (search "JSON" (gethash "message" (gethash "error" json)))
+            (gethash "message" (gethash "error" json)))))))

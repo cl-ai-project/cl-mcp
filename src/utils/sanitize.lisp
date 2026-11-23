@@ -11,7 +11,9 @@
            #:sanitize-error-message
            #:sanitize-condition-text
            #:transport-safe-json
-           #:encode-json-line))
+           #:encode-json-text
+           #:encode-json-line
+           #:json-encoding-error))
 
 (in-package #:cl-mcp/src/utils/sanitize)
 
@@ -377,11 +379,43 @@ first such character is copied whole and only the rest is gone through."
                           (format out "\\u~4,'0X" code))
                          (t (write-char char out))))))))
 
+(define-condition json-encoding-error (error)
+  ((message :initarg :message :reader json-encoding-error-message))
+  (:report (lambda (condition stream)
+             (format stream "JSON encoding failed: ~A"
+                     (json-encoding-error-message condition))))
+  (:documentation "Signalled by ENCODE-JSON-TEXT when yason cannot encode a value.
+Its message is text made while the failure was still in progress, so the
+condition holds nothing yason was writing to."))
+
+(defun encode-json-text (object)
+  "Return OBJECT encoded by yason as JSON text, whatever printer settings the
+calling thread meets, and signal JSON-ENCODING-ERROR when it cannot be encoded.
+
+yason writes an integer with PRINC, so a *PRINT-BASE* or *PRINT-RADIX* that code
+of the session set globally -- a test's (setf *print-base* 16) -- put 2A or #x2A
+on the wire, and the parent killed the worker for it (#416).
+
+yason's own error holds the string stream it was writing to, which
+WITH-OUTPUT-TO-STRING allocates on the stack: printing that error once the
+stream is gone, as every handler of it did, was a memory fault, and the worker
+ended instead of answering (#417).  The error is turned into one holding only
+its text while the stream still exists."
+  (handler-bind ((error (lambda (condition)
+                          (unless (typep condition 'json-encoding-error)
+                            (error 'json-encoding-error
+                                   :message (or (ignore-errors
+                                                 (sanitize-condition-text condition))
+                                                (string (type-of condition))))))))
+    (let ((*print-base* 10)
+          (*print-radix* nil))
+      (with-output-to-string (stream) (yason:encode object stream)))))
+
 (defun encode-json-line (object)
   "Return OBJECT encoded by yason as one line of JSON that every transport can
-carry: the encoded text through TRANSPORT-SAFE-JSON.  Every line cl-mcp sends --
-to a client, between parent and worker, or to the log -- is made here (#344), so
-no send site can leave the safe path out; the parent's answers to a client go
-through %ENCODE-JSON in src/protocol.lisp, which adds a fallback for an object
-yason cannot encode and ends in TRANSPORT-SAFE-JSON as well."
-  (transport-safe-json (with-output-to-string (stream) (yason:encode object stream))))
+carry: ENCODE-JSON-TEXT's text through TRANSPORT-SAFE-JSON.  Every line cl-mcp
+sends -- to a client, between parent and worker, or to the log -- is made here
+(#344), so no send site can leave the safe path out; the parent's answers to a
+client go through %ENCODE-JSON in src/protocol.lisp, which adds a fallback for
+an object yason cannot encode and ends in TRANSPORT-SAFE-JSON as well."
+  (transport-safe-json (encode-json-text object)))
