@@ -140,3 +140,94 @@ in its parse unchanged but for the surrogate."
                  (gethash "result"
                           (yason:parse (cl-mcp/src/worker/server::%encode-response
                                         response 1000))))))))
+
+(deftest encoding-ignores-the-printer-settings-it-meets
+  ;; A test's (setf *print-base* 16) changes the global value every thread
+  ;; sees; yason writes an integer with PRINC, so the worker's answer held
+  ;; "2A" and the parent killed the worker for it (#416).
+  (let ((object (make-hash-table :test 'equal)))
+    (setf (gethash "n" object) 255)
+    (let ((*print-base* 16) (*print-radix* t))
+      (ok (equal "{\"n\":255}" (encode-json-line object)) "a line sent between processes")
+      (ok (equal "{\"n\":255}" (cl-mcp/src/protocol::%encode-json object))
+          "and an answer to a client"))
+    (testing "nor a pprint dispatch entry for integers"
+      (setf (gethash "n" object) 1234567)
+      (let ((*print-pprint-dispatch* (copy-pprint-dispatch))
+            (*print-pretty* t))
+        (set-pprint-dispatch 'integer
+                             (lambda (stream n)
+                               (let ((*print-pretty* nil)) (format stream "~:D" n))))
+        (ok (equal "{\"n\":1234567}" (encode-json-line object)) (encode-json-line object))
+        (ok (equal "{\"n\":1234567}" (cl-mcp/src/protocol::%encode-json object))
+            "an answer to a client too")
+        ;; yason writes a non-BMP character as \u escapes of its own, and a
+        ;; yason that leaves control characters raw has them escaped by
+        ;; TRANSPORT-SAFE-JSON, which wrote its hex digits with FORMAT ~X.
+        (let ((emoji (string (code-char #x1F600))))
+          (ok (equal (list emoji)
+                     (coerce (yason:parse (encode-json-line (list emoji))) 'list))
+              "nor a string's escapes"))
+        (ok (equal "[\"\\u001B\"]"
+                   (cl-mcp/src/utils/sanitize:transport-safe-json
+                    (format nil "[\"~C\"]" (code-char 27))))
+            "nor the escape of a raw control character")
+        ;; The last fallback, for an answer yason cannot encode, escapes a
+        ;; string id by hand.
+        (let ((response (make-hash-table :test 'equal)))
+          (setf (gethash "jsonrpc" response) "2.0"
+                (gethash "id" response) (format nil "a~Cz" (code-char 27))
+                (gethash "result" response) #c(1 2))
+          (ok (search "\"id\":\"a\\u001Bz\""
+                      (cl-mcp/src/protocol::%encode-json response))
+              "nor the escape in the fallback's id"))))))
+
+(defvar *inside-encoding* nil
+  "True while %UNENCODABLE-PROBE's encode method runs.")
+
+(define-condition %encoding-probe-error (error) ()
+  (:report (lambda (condition stream)
+             (declare (ignore condition))
+             (format stream "probe failed, inside=~A" *inside-encoding*)))
+  (:documentation "Signalled inside yason's encoding; its report says whether it is still inside."))
+
+(defstruct %unencodable-probe
+  "A value whose yason:encode method signals while *INSIDE-ENCODING* is true.")
+
+(defmethod yason:encode ((probe %unencodable-probe) &optional stream)
+  (declare (ignore probe stream))
+  (let ((*inside-encoding* t))
+    (error '%encoding-probe-error)))
+
+(deftest an-unencodable-worker-answer-becomes-an-error-answer
+  ;; yason's error held the stack-allocated string stream it was writing to,
+  ;; and printing it once that stream was gone was a memory fault that ended
+  ;; the worker instead of answering (#417).
+  (testing "the error's text is made while the encoding is still in progress"
+    ;; Made after unwinding, as before, the dead stream usually still printed,
+    ;; so only this tells the two apart.
+    (let ((message (handler-case (encode-json-line (make-%unencodable-probe))
+                     (cl-mcp/src/utils/sanitize:json-encoding-error (condition)
+                       (princ-to-string condition)))))
+      (ok (equal "JSON encoding failed: probe failed, inside=T" message) message)))
+  (testing "the worker answers with an error instead of ending"
+    (let ((server (cl-mcp/src/worker/server::%make-worker-server))
+          (payload (make-hash-table :test 'equal))
+          ;; A thread an earlier suite's deadline left running must not
+          ;; retire this process.
+          (cl-mcp/src/worker/server::*retire-action* (lambda (leaked)
+                                                       (declare (ignore leaked)))))
+      (setf (cl-mcp/src/worker/server::worker-server-authenticated-p server) t
+            (gethash "x" payload) #c(1 2)
+            (gethash "m" (cl-mcp/src/worker/server::worker-server-methods server))
+            (lambda (params) (declare (ignore params)) payload))
+      (let* ((line (handler-case
+                       (cl-mcp/src/worker/server::%dispatch-request server 9 "m" nil)
+                     (serious-condition (condition) (type-of condition))))
+             (json (and (stringp line) (yason:parse line))))
+        (ok (stringp line) (format nil "the worker answers: ~S" line))
+        (when json
+          (ok (eql 9 (gethash "id" json)) "the same request")
+          (ok (eql -32603 (gethash "code" (gethash "error" json))) "with an error")
+          (ok (search "JSON encoding failed" (gethash "message" (gethash "error" json)))
+              (gethash "message" (gethash "error" json))))))))

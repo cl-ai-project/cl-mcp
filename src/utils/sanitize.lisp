@@ -11,7 +11,11 @@
            #:sanitize-error-message
            #:sanitize-condition-text
            #:transport-safe-json
-           #:encode-json-line))
+           #:write-json-control-escape
+           #:encode-json-text
+           #:encode-json-line
+           #:json-encoding-error
+           #:json-number-p))
 
 (in-package #:cl-mcp/src/utils/sanitize)
 
@@ -334,6 +338,14 @@ newline and carriage return."
     (or (<= #xD800 code #xDFFF)
         (and (< code #x20) (/= code 9) (/= code 10) (/= code 13)))))
 
+(defun write-json-control-escape (code stream)
+  "Write CODE, a character code below #x20, to STREAM as a JSON \\u00XX escape.
+The hex digits are written as characters, not by FORMAT ~X, which goes through
+the printer and so through a pprint dispatch entry the session set for integers."
+  (write-string "\\u00" stream)
+  (write-char (char "0123456789ABCDEF" (ash code -4)) stream)
+  (write-char (char "0123456789ABCDEF" (logand code 15)) stream))
+
 (defun transport-safe-json (json)
   "Return JSON, an encoded JSON text, with every character that would break
 the transport rewritten; JSON itself when it holds none.
@@ -374,14 +386,66 @@ first such character is copied whole and only the rest is gone through."
                 do (cond ((<= #xD800 code #xDFFF)
                           (write-char (code-char #xFFFD) out))
                          ((and (< code #x20) (/= code 9) (/= code 10) (/= code 13))
-                          (format out "\\u~4,'0X" code))
+                          (write-json-control-escape code out))
                          (t (write-char char out))))))))
+
+(defun json-number-p (object)
+  "True when OBJECT is a number yason writes as a JSON number: an integer, a
+finite float, or a ratio whose double-float (what yason writes for it) is
+finite.  JSON has no complex, infinity or NaN -- yason has no method for a
+complex and writes the other two in Lisp syntax, which no parser reads -- and a
+ratio past double range signals while it is written, so a preview gives each of
+those as its printed text instead (#417)."
+  (flet ((finite-p (float)
+           (not (or (sb-ext:float-infinity-p float) (sb-ext:float-nan-p float)))))
+    (typecase object
+      (integer t)
+      (float (finite-p object))
+      (ratio (let ((double (ignore-errors (coerce object 'double-float))))
+               (and double (finite-p double))))
+      (t nil))))
+
+(define-condition json-encoding-error (error)
+  ((message :initarg :message :reader json-encoding-error-message))
+  (:report (lambda (condition stream)
+             (format stream "JSON encoding failed: ~A"
+                     (json-encoding-error-message condition))))
+  (:documentation "Signalled by ENCODE-JSON-TEXT when yason cannot encode a value.
+Its message is text made while the failure was still in progress, so the
+condition holds nothing yason was writing to."))
+
+(defun encode-json-text (object)
+  "Return OBJECT encoded by yason as JSON text, whatever printer settings the
+calling thread meets, and signal JSON-ENCODING-ERROR when it cannot be encoded.
+
+yason writes an integer with PRINC, so a *PRINT-BASE* or *PRINT-RADIX* that code
+of the session set globally -- a test's (setf *print-base* 16) -- put 2A or #x2A
+on the wire, and the parent killed the worker for it (#416); a pprint dispatch
+entry for INTEGER did the same while *PRINT-PRETTY* was true.
+
+yason's own error holds the string stream it was writing to, which
+WITH-OUTPUT-TO-STRING allocates on the stack: printing that error once the
+stream is gone, as every handler of it did, was a memory fault, and the worker
+ended instead of answering (#417).  The error is turned into one holding only
+its text while the stream still exists."
+  (handler-bind ((error (lambda (condition)
+                          (unless (typep condition 'json-encoding-error)
+                            (error 'json-encoding-error
+                                   :message (or (ignore-errors
+                                                 (sanitize-condition-text condition))
+                                                (string (type-of condition))))))))
+    (let ((*print-base* 10)
+          (*print-radix* nil)
+          ;; PRINC consults the pprint dispatch table when this is true, and
+          ;; an entry the session installed for INTEGER wrote 1,234,567.
+          (*print-pretty* nil))
+      (with-output-to-string (stream) (yason:encode object stream)))))
 
 (defun encode-json-line (object)
   "Return OBJECT encoded by yason as one line of JSON that every transport can
-carry: the encoded text through TRANSPORT-SAFE-JSON.  Every line cl-mcp sends --
-to a client, between parent and worker, or to the log -- is made here (#344), so
-no send site can leave the safe path out; the parent's answers to a client go
-through %ENCODE-JSON in src/protocol.lisp, which adds a fallback for an object
-yason cannot encode and ends in TRANSPORT-SAFE-JSON as well."
-  (transport-safe-json (with-output-to-string (stream) (yason:encode object stream))))
+carry: ENCODE-JSON-TEXT's text through TRANSPORT-SAFE-JSON.  Every line cl-mcp
+sends -- to a client, between parent and worker, or to the log -- is made here
+(#344), so no send site can leave the safe path out; the parent's answers to a
+client go through %ENCODE-JSON in src/protocol.lisp, which adds a fallback for
+an object yason cannot encode and ends in TRANSPORT-SAFE-JSON as well."
+  (transport-safe-json (encode-json-text object)))

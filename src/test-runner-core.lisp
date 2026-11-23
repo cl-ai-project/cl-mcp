@@ -517,14 +517,20 @@ cyclic value, or one nested to the level, is printed without the pretty
 printer, which recurses through quoted forms without counting a level.  A value
 cut says so, but for a cut the walk cannot see -- inside a condition's report or
 an object printing its own slots -- which shows the printer's # alone; a walk
-that fails leaves the value to the level and the stream."
+that fails leaves the value to the level and the stream.  A PRINT-OBJECT method
+that signals -- one reading an unbound slot, say -- stops the print there, and
+the text so far is kept and says which condition stopped it (#418); that text is
+printed without the pretty printer, whose buffer the error loses.  A cyclic
+value keeps none: the circle walk calls the method before anything is written."
   (multiple-value-bind (depth cyclic unsure)
       (handler-case (%nesting object)
         (error () (values 0 nil t)))
-    (let ((deep (>= depth *failure-print-max-depth*)))
-      (flet ((attempt (circle)
-               ;; Values: the text printed, and :WHOLE, :OVERFLOW, :TOO-DEEP or
-               ;; :EXHAUSTED.
+    (let* ((deep (>= depth *failure-print-max-depth*))
+           (pretty (and *print-pretty* (not cyclic) (not deep)))
+           (signalled nil))
+      (flet ((attempt (circle &optional (pretty pretty))
+               ;; Values: the text printed, and :WHOLE, :OVERFLOW, :TOO-DEEP,
+               ;; :EXHAUSTED or :SIGNALLED (SIGNALLED then names the condition).
                (let ((stream (make-instance '%capped-text-stream
                                             :room *failure-print-max-chars*)))
                  (handler-case
@@ -533,7 +539,7 @@ that fails leaves the value to the level and the stream."
                        (write object :stream stream :escape escape :readably nil
                                      :circle circle :length nil :lines nil
                                      :level *failure-print-max-depth*
-                                     :pretty (and *print-pretty* (not cyclic) (not deep))
+                                     :pretty pretty
                                      :base 10 :radix nil :case :upcase :array t :gensym t
                                      :right-margin nil :miser-width nil)
                        (values (get-output-stream-string (%sink stream)) :whole))
@@ -542,7 +548,10 @@ that fails leaves the value to the level and the stream."
                    (%print-too-deep ()
                      (values (get-output-stream-string (%sink stream)) :too-deep))
                    (storage-condition ()
-                     (values (get-output-stream-string (%sink stream)) :exhausted)))))
+                     (values (get-output-stream-string (%sink stream)) :exhausted))
+                   (error (condition)
+                     (setf signalled (type-of condition))
+                     (values (get-output-stream-string (%sink stream)) :signalled)))))
              (cut (text outcome)
                (format nil "~A … [~A]" text
                        (ecase outcome
@@ -550,6 +559,9 @@ that fails leaves the value to the level and the stream."
                                             *failure-print-max-chars*))
                          (:too-deep "printing stopped: nested too deeply to print")
                          (:exhausted "printing stopped: out of stack or memory")
+                         (:signalled
+                          (format nil "printing stopped: ~A signalled"
+                                  (with-standard-io-syntax (prin1-to-string signalled))))
                          (:level (format nil "nested deeper than ~D levels, cut there"
                                          *failure-print-max-depth*))))))
         ;; Printed with escapes, a condition prints its data by code of its
@@ -566,6 +578,11 @@ that fails leaves the value to the level and the stream."
             (multiple-value-bind (circular again) (attempt t)
               (when (eq again :whole)
                 (setf text circular outcome :whole))))
+          ;; The pretty printer buffers what it prints, and an error inside a
+          ;; list or structure lost that buffer: only the marker was left.
+          ;; Printed again without it, the text before the error is kept.
+          (when (and (eq outcome :signalled) pretty)
+            (setf (values text outcome) (attempt cyclic nil)))
           (cond ((not (eq outcome :whole)) (cut text outcome))
                 ;; A condition's report prints what it chooses of its data, so
                 ;; one holding a deep value need not have been cut.
@@ -1734,7 +1751,13 @@ a future Rove version returns them directly instead of crashing."
     (nreverse failure-details)))
 
 (defmacro %with-rove-output ((report-stream-symbol stdout stderr debug) &body body)
-  "Capture test output and suppress the Rove reporter while running BODY."
+  "Capture test output and suppress the Rove reporter while running BODY.
+Run Rove with :STYLE :NONE inside it as well: a reporter writing to a broadcast
+stream still builds its whole failure summary, printing every failing value
+under the worker's printer settings, and that discarded text alone ran a run out
+of stack on a deeply nested value and lost the whole report to a value whose
+PRINT-OBJECT signalled (#418).  The none reporter's SUMMARIZE prints nothing; the
+report is built from the results by %PRINTED."
   `(let ((*standard-output* ,stdout)
          (*error-output* ,stderr)
          (*test-debug-output* ,debug))
@@ -1771,7 +1794,7 @@ without testing wrappers crash Rove's internals with NO-APPLICABLE-METHOD)."
     (handler-case
         (setf (values successp results)
               (%with-rove-output (report-stream-sym stdout-stream stderr-stream debug-stream)
-                (funcall run-tests-fn test-symbols)))
+                (funcall run-tests-fn test-symbols :style :none)))
       (error (c)
         (setf rove-error (princ-to-string c))
         (log-event :error "test.runner" "message"
@@ -1923,7 +1946,7 @@ detects test sub-systems from ASDF dependencies and runs each individually."
     (handler-case
      (setf (values successp results)
            (%with-rove-output (report-stream-sym stdout-stream stderr-stream debug-stream)
-             (funcall run-fn (intern (string-upcase system-name) :keyword))))
+             (funcall run-fn (intern (string-upcase system-name) :keyword) :style :none)))
      (error (c) (setf rove-error (princ-to-string c))
             (log-event :error "test.runner" "message" "rove:run crashed"
                        "error" rove-error)))
@@ -2014,7 +2037,8 @@ the surrounding passed/failed/pending/skipped/failure-details bindings."
                                 (asdf/system-registry:clear-system sub-sys))
                               (%with-rove-output (report-stream-sym stdout-stream
                                                   stderr-stream debug-stream)
-                                (funcall run-fn (intern (string-upcase sub-sys) :keyword)))
+                                (funcall run-fn (intern (string-upcase sub-sys) :keyword)
+                                         :style :none))
                               (setf run-ok t))
                           (error (c)
                             (incf failed 1)

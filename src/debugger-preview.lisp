@@ -1,6 +1,7 @@
 (defpackage #:cl-mcp/src/debugger-preview
   (:use #:cl)
   (:import-from #:cl-mcp/src/object-registry #:inspectable-p #:register-object)
+  (:import-from #:cl-mcp/src/utils/sanitize #:json-number-p)
   (:export #:generate-debugger-preview))
 
 (in-package #:cl-mcp/src/debugger-preview)
@@ -28,6 +29,11 @@
                         "value" (typecase object
                                   (symbol (symbol-name object))
                                   (character (string object))
+                                  ;; A number JSON cannot carry goes as its text,
+                                  ;; as in the ordinary inspector (#417).
+                                  (number (if (json-number-p object)
+                                              object
+                                              (%print-preview object)))
                                   (t object)))))
     (when (symbolp object)
       (setf (gethash "type" result) "SYMBOL")

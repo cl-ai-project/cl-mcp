@@ -41,7 +41,9 @@
                 #:cancel-inline-request)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json
-                #:transport-safe-json)
+                #:encode-json-text
+                #:transport-safe-json
+                #:write-json-control-escape)
   (:import-from #:cl-mcp/src/utils/nesting
                 #:json-too-deep-p
                 #:+max-json-nesting+)
@@ -51,7 +53,6 @@
   (:import-from #:cl-mcp/src/server-instructions
                 #:server-instructions)
   (:import-from #:yason
-                #:encode
                 #:parse)
   (:export
    #:+protocol-version+
@@ -155,10 +156,11 @@ cyclic or extremely large structures."
 
 (defun %encode-json-unchecked (obj)
   "Encode OBJ as a JSON string with resilient error handling; see %ENCODE-JSON.
-Fast path: try normal yason:encode. On failure, sanitize all strings and retry.
+Fast path: try ENCODE-JSON-TEXT, which fixes the printer settings an integer is
+written under. On failure, sanitize all strings and retry.
 On second failure, return a hardcoded valid JSON-RPC error response."
   (handler-case
-      (with-output-to-string (stream) (yason:encode obj stream))
+      (encode-json-text obj)
     (error (e1)
       (ignore-errors
         (log-event :warn "json-encode-retry"
@@ -171,7 +173,7 @@ On second failure, return a hardcoded valid JSON-RPC error response."
             ;; which would break JSON-RPC ID correlation.
             (when (and id-preserved (hash-table-p clean))
               (setf (gethash "id" clean) id-preserved))
-            (with-output-to-string (stream) (yason:encode clean stream)))
+            (encode-json-text clean))
         (error (e2)
           (ignore-errors
             (log-event :error "json-encode-failed"
@@ -179,10 +181,7 @@ On second failure, return a hardcoded valid JSON-RPC error response."
           (let* ((id (and (hash-table-p obj) (gethash "id" obj)))
                  (id-json (cond
                             ((numberp id)
-                             (or (ignore-errors
-                                   (with-output-to-string (s)
-                                     (yason:encode id s)))
-                                 "null"))
+                             (or (ignore-errors (encode-json-text id)) "null"))
                             ((stringp id)
                              (format nil "\"~A\""
                                      (with-output-to-string (s)
@@ -200,7 +199,7 @@ On second failure, return a hardcoded valid JSON-RPC error response."
                                                       ((char= c #\Tab) (write-string "\\t" s))
                                                       ((char= c #\Return) (write-string "\\r" s))
                                                       ((< code #x20)
-                                                       (format s "\\u~4,'0X" code))
+                                                       (write-json-control-escape code s))
                                                       (t (write-char c s))))))))
                             (t "null"))))
             (format nil "{\"jsonrpc\":\"2.0\",\"id\":~A,\"error\":{\"code\":-32603,\"message\":\"Response JSON encoding failed\"}}"
@@ -208,7 +207,7 @@ On second failure, return a hardcoded valid JSON-RPC error response."
 
 (defun %encode-json (obj)
   "Encode OBJ as a JSON string with resilient error handling.
-Fast path: try normal yason:encode. On failure, sanitize all strings and retry.
+Fast path: try ENCODE-JSON-TEXT. On failure, sanitize all strings and retry.
 On second failure, return a hardcoded valid JSON-RPC error response.
 Every path's result goes through TRANSPORT-SAFE-JSON: yason writes a lone
 surrogate raw, and 0.7.x a control character too, and neither can be sent."

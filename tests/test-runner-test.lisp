@@ -640,6 +640,40 @@ is stopped and waited for."
 (defmethod print-object ((node %ring-node) stream)
   (format stream "#<RING ~S>" (%ring-node-next node)))
 
+(defclass %unprintable ()
+  ;; NAME: left unbound, so printing the object signals UNBOUND-SLOT.
+  ((name :initarg :name))
+  (:documentation "An object whose PRINT-OBJECT signals, reading an unbound slot."))
+
+(defmethod print-object ((object %unprintable) stream)
+  (print-unreadable-object (object stream :type t)
+    (princ (slot-value object 'name) stream)))
+
+(deftest failure-detail-keeps-the-text-printed-before-a-printer-signalled
+  ;; One PRINT-OBJECT that signals turned a whole Rove run into "Test runner
+  ;; crashed" (#418).  Inside a list, the pretty printer's buffer went with the
+  ;; error and left only the marker, so the text is printed again without it.
+  (dolist (pretty '(nil t))
+    (let ((form (gethash "form"
+                         (let ((*print-pretty* pretty))
+                           (cl-mcp/src/test-runner-core::make-failure-detail
+                            :test-name "t"
+                            :form (list 1 "two" (make-instance '%unprintable) 4))))))
+      (ok (and (stringp form)
+               (eql 0 (search "(1 \"two\" #<" form))
+               (search "%UNPRINTABLE" form)
+               (search "[printing stopped: UNBOUND-SLOT signalled]" form))
+          (format nil "printed up to the object, with the reason (pretty ~A): ~S"
+                  pretty form))))
+  ;; The circle walk calls the method before anything is written, so a cyclic
+  ;; value keeps no text before the marker, as the docs say.
+  (let* ((cycle (list 1 (make-instance '%unprintable)))
+         (form (progn (setf (cdr (last cycle)) cycle)
+                      (gethash "form" (cl-mcp/src/test-runner-core::make-failure-detail
+                                       :test-name "t" :form cycle)))))
+    (ok (equal " … [printing stopped: UNBOUND-SLOT signalled]" form)
+        (format nil "a cyclic value is the marker alone: ~S" form))))
+
 (deftest failure-detail-prints-whatever-the-printer-settings
   ;; A test runs on a thread of its own, which sees the worker's global printer
   ;; settings.  A circular value printed forever under *PRINT-CIRCLE* NIL and
@@ -2822,6 +2856,56 @@ in ASDF and as left by a root change --, their packages and the directory."
          (let ((failure (aref (gethash "failed_tests" result) 0)))
            (ok (find "#1=(1 2 3 . #1#)" (gethash "values" failure) :test #'equal)
                "and its circular value printed as one")))))))
+
+(deftest run-tests-reports-values-rove-could-not-print
+  ;; Rove's own summary, which run-tests throws away, printed every failing
+  ;; value (#418): one nested past what a thread's stack can print ended the
+  ;; run without a report, and a second such run ended the worker; one whose
+  ;; PRINT-OBJECT signalled turned the whole run into one "Test runner crashed",
+  ;; the passing test counted failed.
+  (%call-with-inferred-test-fixture
+   "clmcp-unprintable" "rove"
+   "(defpackage #:clmcp-unprintable/tests/a (:use #:cl #:rove))
+(in-package #:clmcp-unprintable/tests/a)
+(defclass widget () ((name :initarg :name)))
+(defmethod print-object ((widget widget) stream)
+  (print-unreadable-object (widget stream :type t)
+    (princ (slot-value widget 'name) stream)))
+(defun nested (levels)
+  (let ((value :bottom)) (dotimes (i levels value) (setf value (list value)))))
+(deftest passes (ok (= 1 1)))
+(deftest fails-plainly (ok (= 1 2)))
+(deftest fails-with-an-unprintable-value (ok (eq (make-instance 'widget) :widget)))
+(deftest fails-with-a-deeply-nested-value (ok (equal (nested 3000) :flat)))
+"
+   (lambda (dir)
+     (declare (ignore dir))
+     (flet ((values-of (result)
+              (loop for failure across (gethash "failed_tests" result)
+                    append (coerce (gethash "values" failure) 'list))))
+       (let ((result (%within-seconds
+                      60 (lambda () (run-tests "clmcp-unprintable/tests/a")))))
+         (ok (hash-table-p result) (format nil "the whole run reports: ~A" result))
+         (when (hash-table-p result)
+           (ok (eql 1 (gethash "passed" result)) "the passing test counts as passed")
+           (ok (eql 3 (gethash "failed" result)) "each failing test as failed")
+           (ok (find-if (lambda (value) (search "nested deeper than 500 levels" value))
+                        (values-of result))
+               "the deep value is printed to the level and cut")
+           (ok (find-if (lambda (value) (search "UNBOUND-SLOT signalled" value))
+                        (values-of result))
+               "the value that does not print says why")))
+       (let ((result (%within-seconds
+                      60 (lambda ()
+                           (run-tests "clmcp-unprintable/tests/a"
+                                      :tests (list "clmcp-unprintable/tests/a::passes"
+                                                   (concatenate
+                                                    'string "clmcp-unprintable/tests/a::"
+                                                    "fails-with-an-unprintable-value")))))))
+         (ok (hash-table-p result) (format nil "a selection reports: ~A" result))
+         (when (hash-table-p result)
+           (ok (and (eql 1 (gethash "passed" result)) (eql 1 (gethash "failed" result)))
+               "a selection counts the passing test as passed")))))))
 
 (deftest rove-file-keys-move-from-the-worker-cache-to-the-source
   ;; Rove keys a test file's package by the FASL that was loading, turned back
