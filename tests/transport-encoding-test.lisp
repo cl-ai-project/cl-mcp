@@ -158,7 +158,19 @@ in its parse unchanged but for the surrogate."
         (set-pprint-dispatch 'integer
                              (lambda (stream n)
                                (let ((*print-pretty* nil)) (format stream "~:D" n))))
-        (ok (equal "{\"n\":1234567}" (encode-json-line object)) (encode-json-line object))))))
+        (ok (equal "{\"n\":1234567}" (encode-json-line object)) (encode-json-line object))
+        (ok (equal "{\"n\":1234567}" (cl-mcp/src/protocol::%encode-json object))
+            "an answer to a client too")
+        ;; yason writes a non-BMP character as \u escapes of its own, and a
+        ;; yason that leaves control characters raw has them escaped by
+        ;; TRANSPORT-SAFE-JSON, which wrote its hex digits with FORMAT ~X.
+        (ok (equal "[\"\\uD83D\\uDE00\"]"
+                   (encode-json-line (list (string (code-char #x1F600)))))
+            "nor a string's escapes")
+        (ok (equal "[\"\\u001B\"]"
+                   (cl-mcp/src/utils/sanitize:transport-safe-json
+                    (format nil "[\"~C\"]" (code-char 27))))
+            "nor the escape of a raw control character")))))
 
 (defvar *inside-encoding* nil
   "True while %UNENCODABLE-PROBE's encode method runs.")

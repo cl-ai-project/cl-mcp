@@ -664,7 +664,15 @@ is stopped and waited for."
                (search "%UNPRINTABLE" form)
                (search "[printing stopped: UNBOUND-SLOT signalled]" form))
           (format nil "printed up to the object, with the reason (pretty ~A): ~S"
-                  pretty form)))))
+                  pretty form))))
+  ;; The circle walk calls the method before anything is written, so a cyclic
+  ;; value keeps no text before the marker, as the docs say.
+  (let* ((cycle (list 1 (make-instance '%unprintable)))
+         (form (progn (setf (cdr (last cycle)) cycle)
+                      (gethash "form" (cl-mcp/src/test-runner-core::make-failure-detail
+                                       :test-name "t" :form cycle)))))
+    (ok (equal " … [printing stopped: UNBOUND-SLOT signalled]" form)
+        (format nil "a cyclic value is the marker alone: ~S" form))))
 
 (deftest failure-detail-prints-whatever-the-printer-settings
   ;; A test runs on a thread of its own, which sees the worker's global printer

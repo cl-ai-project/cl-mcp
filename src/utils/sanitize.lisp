@@ -11,6 +11,7 @@
            #:sanitize-error-message
            #:sanitize-condition-text
            #:transport-safe-json
+           #:write-json-control-escape
            #:encode-json-text
            #:encode-json-line
            #:json-encoding-error
@@ -337,6 +338,14 @@ newline and carriage return."
     (or (<= #xD800 code #xDFFF)
         (and (< code #x20) (/= code 9) (/= code 10) (/= code 13)))))
 
+(defun write-json-control-escape (code stream)
+  "Write CODE, a character code below #x20, to STREAM as a JSON \\u00XX escape.
+The hex digits are written as characters, not by FORMAT ~X, which goes through
+the printer and so through a pprint dispatch entry the session set for integers."
+  (write-string "\\u00" stream)
+  (write-char (char "0123456789ABCDEF" (ash code -4)) stream)
+  (write-char (char "0123456789ABCDEF" (logand code 15)) stream))
+
 (defun transport-safe-json (json)
   "Return JSON, an encoded JSON text, with every character that would break
 the transport rewritten; JSON itself when it holds none.
@@ -377,7 +386,7 @@ first such character is copied whole and only the rest is gone through."
                 do (cond ((<= #xD800 code #xDFFF)
                           (write-char (code-char #xFFFD) out))
                          ((and (< code #x20) (/= code 9) (/= code 10) (/= code 13))
-                          (format out "\\u~4,'0X" code))
+                          (write-json-control-escape code out))
                          (t (write-char char out))))))))
 
 (defun json-number-p (object)

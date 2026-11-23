@@ -550,8 +550,9 @@
   ;; ended the worker or lost its answer (#417).
   (with-fresh-registry
    (lambda ()
+     ;; The infinity is read through SYMBOL-VALUE so the compiler cannot fold
+     ;; the NaN made from it, and warn.
      (let* ((infinity (symbol-value 'sb-ext:double-float-positive-infinity))
-            ;; Read through SYMBOL-VALUE so the compiler cannot fold the NaN.
             (nan (sb-int:with-float-traps-masked (:invalid) (- infinity infinity)))
             (huge (/ (expt 10 400) 3))
             (object (list #c(1 2) infinity nan huge 1/4 1.5d0 7))

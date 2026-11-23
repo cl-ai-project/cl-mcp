@@ -42,7 +42,8 @@
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json
                 #:encode-json-text
-                #:transport-safe-json)
+                #:transport-safe-json
+                #:write-json-control-escape)
   (:import-from #:cl-mcp/src/utils/nesting
                 #:json-too-deep-p
                 #:+max-json-nesting+)
@@ -198,7 +199,7 @@ On second failure, return a hardcoded valid JSON-RPC error response."
                                                       ((char= c #\Tab) (write-string "\\t" s))
                                                       ((char= c #\Return) (write-string "\\r" s))
                                                       ((< code #x20)
-                                                       (format s "\\u~4,'0X" code))
+                                                       (write-json-control-escape code s))
                                                       (t (write-char c s))))))))
                             (t "null"))))
             (format nil "{\"jsonrpc\":\"2.0\",\"id\":~A,\"error\":{\"code\":-32603,\"message\":\"Response JSON encoding failed\"}}"
