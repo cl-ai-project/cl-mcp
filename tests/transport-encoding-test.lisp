@@ -150,7 +150,15 @@ in its parse unchanged but for the surrogate."
     (let ((*print-base* 16) (*print-radix* t))
       (ok (equal "{\"n\":255}" (encode-json-line object)) "a line sent between processes")
       (ok (equal "{\"n\":255}" (cl-mcp/src/protocol::%encode-json object))
-          "and an answer to a client"))))
+          "and an answer to a client"))
+    (testing "nor a pprint dispatch entry for integers"
+      (setf (gethash "n" object) 1234567)
+      (let ((*print-pprint-dispatch* (copy-pprint-dispatch))
+            (*print-pretty* t))
+        (set-pprint-dispatch 'integer
+                             (lambda (stream n)
+                               (let ((*print-pretty* nil)) (format stream "~:D" n))))
+        (ok (equal "{\"n\":1234567}" (encode-json-line object)) (encode-json-line object))))))
 
 (defvar *inside-encoding* nil
   "True while %UNENCODABLE-PROBE's encode method runs.")

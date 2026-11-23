@@ -520,7 +520,8 @@ an object printing its own slots -- which shows the printer's # alone; a walk
 that fails leaves the value to the level and the stream.  A PRINT-OBJECT method
 that signals -- one reading an unbound slot, say -- stops the print there, and
 the text so far is kept and says which condition stopped it (#418); that text is
-printed without the pretty printer, whose buffer the error loses."
+printed without the pretty printer, whose buffer the error loses.  A cyclic
+value keeps none: the circle walk calls the method before anything is written."
   (multiple-value-bind (depth cyclic unsure)
       (handler-case (%nesting object)
         (error () (values 0 nil t)))

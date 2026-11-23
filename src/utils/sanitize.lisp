@@ -411,7 +411,8 @@ calling thread meets, and signal JSON-ENCODING-ERROR when it cannot be encoded.
 
 yason writes an integer with PRINC, so a *PRINT-BASE* or *PRINT-RADIX* that code
 of the session set globally -- a test's (setf *print-base* 16) -- put 2A or #x2A
-on the wire, and the parent killed the worker for it (#416).
+on the wire, and the parent killed the worker for it (#416); a pprint dispatch
+entry for INTEGER did the same while *PRINT-PRETTY* was true.
 
 yason's own error holds the string stream it was writing to, which
 WITH-OUTPUT-TO-STRING allocates on the stack: printing that error once the
@@ -425,7 +426,10 @@ its text while the stream still exists."
                                                  (sanitize-condition-text condition))
                                                 (string (type-of condition))))))))
     (let ((*print-base* 10)
-          (*print-radix* nil))
+          (*print-radix* nil)
+          ;; PRINC consults the pprint dispatch table when this is true, and
+          ;; an entry the session installed for INTEGER wrote 1,234,567.
+          (*print-pretty* nil))
       (with-output-to-string (stream) (yason:encode object stream)))))
 
 (defun encode-json-line (object)
