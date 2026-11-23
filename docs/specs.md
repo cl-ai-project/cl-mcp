@@ -763,19 +763,22 @@ They need no cl-spec:
   stub keeps its record of calls in a closure. `check-report` runs each property
   in a thread of its own, which does not see the caller's dynamic bindings.
 
-No real-cl-spec contrast was added. `tests/spec-integration-test.lisp` already
-reads a real contract through `spec-check` in each of these cases:
+`tests/spec-integration-test.lisp` reads a real contract through `spec-check`
+in each of these cases:
 - verified, with its refusals counted and no refusal gap;
 - skipped when every input is refused;
 - a case never reached;
 - generation exhaustion.
 
-That suite skips each test when the image has no cl-spec recent enough, and
-in CI it does. The default `test` job has none, and the `specs` job, which has
-the pinned cl-spec, does not run the suite. Until a job runs it with a skip
-counted as a failure, those real results are checked locally only.
+The suite also covers property generation exhaustion and a mixed batch
+selected by symbol from the real registry.
 
-Not covered: selecting from a real registry, profile/trials/seed/digest routing
+The default `test` job allows these tests to skip when it cannot load a
+compatible cl-spec. The separate `specs` job runs the suite in its own
+process with the pinned cl-spec revision and treats a skipped required test
+as a failure.
+
+Not covered here are profile, trials, seed and digest routing
 (see *Routing* below), the deadline and real timeouts, rendering and JSON-RPC,
 the legacy fallback beyond the two refusal readers, and a record availability
 of `unavailable`.
