@@ -18,6 +18,8 @@
                 #:spec-describe-response
                 #:spec-check-response
                 #:spec-list-response)
+  (:import-from #:cl-mcp/src/tools/spec-batch
+                #:spec-batch-response)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht))
 
@@ -652,20 +654,47 @@ value discarded."
   (if (not (%contracts-available-p))
       (skip +no-contracts-reason+)
       (with-fixture-registry
-        (let* ((response (spec-check-response
-                          (make-ht "function"
-                                   (%fixture-name "MAGNITUDE-OF-IMPOSSIBLE")
-                                   "trials" 1 "seed" "1")))
-               (result (%first-result response))
-               (record (gethash "data" (gethash "core_result" result)))
-               (generation (gethash "generation_report" record))
-               (text (%text response)))
-          (ok (gethash "termination" generation))
-          (ok (equal "generation" (gethash "failure_phase" record)))
-          (%ok-core-record-read-whole result)
-          (ok (find "generation-incomplete"
-                    (gethash "verification_gaps" response) :test #'equal))
-          (ok (search "did NOT complete" text))))))
+        (flet ((check-exhausted-result (result)
+                 (let* ((record (gethash "data" (gethash "core_result" result)))
+                        (generation (gethash "generation_report" record)))
+                   (ok (equal "error" (gethash "status" result)))
+                   (ok (eql 0 (gethash "executed" (gethash "trials" result))))
+                   (ok (equal "error" (gethash "status" record)))
+                   (ok (equal "generation" (gethash "failure_phase" record)))
+                   (ok (equal "budget-exhausted" (gethash "termination" generation)))
+                   (%ok-core-record-read-whole result))))
+          (testing "generation exhaustion makes a single check incomplete"
+            (dolist (options (list (make-ht "function" (%fixture-name "MAGNITUDE-OF-IMPOSSIBLE")
+                                           "trials" 1 "seed" "1")
+                                   (make-ht "property" (%fixture-name "EXHAUSTS-INPUT-GENERATION")
+                                           "profile" "smoke" "seed" "1")))
+              (let* ((response (spec-check-response options))
+                     (counts (gethash "counts" response)))
+                (ok (equal "incomplete" (gethash "status" response)))
+                (ok (eq false (gethash "verified" response)))
+                (ok (eql 1 (gethash "errored" counts)))
+                (ok (find "generation-incomplete"
+                          (gethash "verification_gaps" response) :test #'equal))
+                (ok (search "did NOT complete" (%text response)))
+                (check-exhausted-result (%first-result response)))))
+          (testing "an exhausted row makes the combined batch incomplete"
+            (let* ((response (spec-batch-response
+                              (make-ht "symbol" (%fixture-name "MAGNITUDE")
+                                       "trials" 1 "profile" "smoke" "seed" "1")))
+                   (rows (gethash "results" response))
+                   (counts (gethash "by_status" (gethash "counts" response))))
+              (ok (equal "incomplete" (gethash "status" response)))
+              (ok (search "Batch incomplete." (%text response)))
+              (ok (eq false (gethash "verified" response)))
+              (ok (eql 1 (gethash "passed" counts)))
+              (ok (eql 1 (gethash "error" counts)))
+              (ok (= 2 (length rows)))
+              (when (= 2 (length rows))
+                (ok (equal "passed" (gethash "status" (aref rows 0))))
+                (let ((exhausted (aref rows 1)))
+                  (ok (find "generation-incomplete"
+                            (gethash "verification_gaps" exhausted) :test #'equal))
+                  (check-exhausted-result exhausted)))))))))
 
 (deftest real-state-contract-says-why-it-was-not-shrunk
   (if (not (%contracts-available-p))

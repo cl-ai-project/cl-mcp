@@ -269,7 +269,9 @@ Per property, results[].status:
                   evidence about the inputs that were tried, not a proof.
   failed          a counterexample was found; both the original and the shrunk
                   arguments are reported.
-  error           the property body signalled.
+  error           cl-spec recorded an error, such as a property body signal or
+                  input generation that exhausted its budget. Read
+                  core_result.data.failure_phase and verification_gaps.
   skipped         nothing was checked, and this is NOT a pass: a contract
                   whose :pre refused every generated input, so the function
                   was never called, or a run whose trial budget resolved to
@@ -292,8 +294,10 @@ For the whole call, status:
   no-properties   ZERO properties were selected. This is NOT a successful
                   verification: nothing ran.
   unsupported     the loaded cl-spec cannot run a contract. Nothing ran.
-  completed       every selected property reached a verdict.
-  incomplete      at least one timeout, not-run, or *-error.
+  completed       each selected check reached a verdict or returned skipped
+                  or pending.
+  incomplete      at least one timeout, not-run, *-error or
+                  generation-incomplete.
   undefined-function
                   the name is registered but the function it contracts is not
                   defined in this image. Nothing ran. NOT an adapter fault.
@@ -332,10 +336,9 @@ verification_gaps names what the run could not establish. Values:
   core-schema-unsupported     the result record declares a schema version this
                               cl-mcp cannot read, so nothing in it is evidence.
   contract-schema-unsupported the same, for the Function Spec declaration.
-A result status that is not a verdict appears here as itself: skipped,
-pending, timeout, not-run, generator-error, backend-error, not-registered,
-undefined-function, unsupported, internal-error. Only passed, failed and error
-are verdicts and none of them is a gap.
+The statuses skipped, pending, timeout, not-run, generator-error, backend-error,
+not-registered, undefined-function, unsupported and internal-error each appear
+as gaps. An error during generation carries the generation-incomplete gap.
 
 counts has a field for the five common statuses plus other, and by_status,
 which covers every status that occurred; selected always equals their sum. A
@@ -599,7 +602,8 @@ Read selected_case, outcome, failure_phase and the fixture lifecycle for this on
   :description "Run a symbol's function spec and directly registered properties together,
 or give explicit functions and/or properties arrays. Each distinct contract or property runs
 once. The response reports each item's status, seed, definition digest and replay arguments
-for spec-check. Completed items survive a timeout and remaining items are marked not-run."
+for spec-check. An item with a generation-incomplete gap makes the batch incomplete.
+Completed items survive a timeout and remaining items are marked not-run."
   :args ((symbol :type :string :description "Select the symbol's contract and direct properties")
          (functions :type :array :description "Explicit function spec names")
          (properties :type :array :description "Explicit property names")

@@ -2323,7 +2323,8 @@ construction is supported; it does not guarantee successful draws or reductions.
     budget — this is **not** a verification gap. `exhaustion_phase` of
     `generation` (mirrored by `data.failure_phase` of `generation`) means
     generation itself never reached a verdict, and that **is**
-    `generation-incomplete`.
+    `generation-incomplete`. The call reports `incomplete` and the item
+    reports cl-spec's `error` status.
   - `data.provenance` records the environment the run happened in, captured
     before execution started (backend, Lisp implementation, cl-spec version,
     target revision, and which of those `collection_states` actually got

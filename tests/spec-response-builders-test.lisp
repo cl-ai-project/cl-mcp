@@ -325,8 +325,9 @@ all -- the target was never called, so there is nothing here to blame on it."
                  :failure nil :shrunk-failure nil :elapsed 0.9))
          (core-record (project-core-record record :result-data
                                             :expected-record-kind :result)))
-    (list :status :completed
+    (list :status :incomplete
           :verified nil
+          :verification-gaps '(:generation-incomplete :input-coverage-unmeasured)
           :selection
           (list :mode "contract" :kind :contract :count 1
                 :selected (list (%symbol-data "PROBE"

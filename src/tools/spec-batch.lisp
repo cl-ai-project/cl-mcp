@@ -175,9 +175,13 @@
     (dolist (row results) (incf (gethash (gethash "status" row) counts 0)))
     (let ((status (or status
                       (cond ((null results) "no-selection")
-                            ((loop for key being the hash-keys of counts
-                                   always (member key '("passed" "failed" "error" "skipped"
-                                                        "pending") :test #'equal))
+                            ((loop for row in results
+                                   always (and (member (gethash "status" row)
+                                                       '("passed" "failed" "error" "skipped"
+                                                         "pending") :test #'equal)
+                                               (not (find "generation-incomplete"
+                                                          (gethash "verification_gaps" row)
+                                                          :test #'equal))))
                              "completed")
                             (t "incomplete")))))
       (make-ht
