@@ -206,7 +206,7 @@ On second failure, return a hardcoded valid JSON-RPC error response."
 
 (defun %encode-json (obj)
   "Encode OBJ as a JSON string with resilient error handling.
-Fast path: try normal yason:encode. On failure, sanitize all strings and retry.
+Fast path: try ENCODE-JSON-TEXT. On failure, sanitize all strings and retry.
 On second failure, return a hardcoded valid JSON-RPC error response.
 Every path's result goes through TRANSPORT-SAFE-JSON: yason writes a lone
 surrogate raw, and 0.7.x a control character too, and neither can be sent."

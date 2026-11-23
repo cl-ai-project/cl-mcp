@@ -545,22 +545,32 @@
        (ok (null (gethash "package" (elt elements 4))))))))
 
 (deftest inspect-gives-numbers-json-cannot-carry-as-their-text
-  ;; yason has no method for a complex and writes an infinity in Lisp syntax,
-  ;; so a value holding either ended the worker (#417).
+  ;; yason has no method for a complex, writes an infinity or a NaN in Lisp
+  ;; syntax, and signals on a ratio past double range, so a value holding one
+  ;; ended the worker or lost its answer (#417).
   (with-fresh-registry
    (lambda ()
-     (let* ((object (list #c(1 2) sb-ext:double-float-positive-infinity 1/4 1.5d0 7))
+     (let* ((infinity sb-ext:double-float-positive-infinity)
+            (nan (sb-int:with-float-traps-masked (:invalid) (- infinity infinity)))
+            (huge (/ (expt 10 400) 3))
+            (object (list #c(1 2) infinity nan huge 1/4 1.5d0 7))
             (inspection (inspect-object-by-id (register-object object)))
             (values (map 'list (lambda (el) (gethash "value" el))
                          (gethash "elements" inspection))))
        (ok (equal "#C(1 2)" (first values)) "a complex is given as its text")
-       (ok (stringp (second values)) "an infinity as its text")
-       (ok (equal '(1/4 1.5d0 7) (cddr values)) "a number JSON can carry keeps its value")
+       (ok (every #'stringp (subseq values 1 4))
+           "so are an infinity, a NaN and a ratio past double range")
+       (ok (equal '(1/4 1.5d0 7) (subseq values 4)) "a number JSON can carry keeps its value")
        (let ((json (yason:parse (cl-mcp/src/utils/sanitize:encode-json-line inspection))))
          (ok (equal "#C(1 2)" (gethash "value" (elt (gethash "elements" json) 0)))
              "and the inspection encodes"))
        (ok (cl-mcp/src/utils/sanitize:encode-json-line (generate-result-preview object))
-           "so does the result preview")))))
+           "so does the result preview")
+       (let ((preview (cl-mcp/src/debugger-preview:generate-debugger-preview object)))
+         (ok (equal "#C(1 2)" (gethash "value" (elt (gethash "elements" preview) 0)))
+             "and the debugger's preview of a local, which has its own copy")
+         (ok (yason:parse (cl-mcp/src/utils/sanitize:encode-json-line preview))
+             "which encodes too"))))))
 
 (deftest inspect-content-text-includes-entries
  (testing

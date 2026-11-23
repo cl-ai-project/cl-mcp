@@ -10,6 +10,8 @@
                 #:qualified-symbol-name)
   (:import-from #:cl-mcp/src/utils/printing
                 #:safe-prin1)
+  (:import-from #:cl-mcp/src/utils/sanitize
+                #:json-number-p)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:text-content #:result)
   (:import-from #:cl-mcp/src/tools/define-tool
@@ -37,20 +39,14 @@
 (defun %primitive-value-repr (object)
   "Return OBJECT's data value and the Lisp spelling used in inspection text.
 The value is OBJECT itself when JSON can carry it, and its printed text when it
-cannot: a complex, an infinity, a NaN, or anything that is not a number, string,
-character or symbol."
+cannot (see JSON-NUMBER-P): a complex, an infinity, a NaN, a ratio past double
+range, or anything that is not a number, string, character or symbol."
   (let ((printed (safe-prin1 object)))
     (flet ((repr (value type)
              (make-ht "value" value "type" type "printed" printed)))
       (typecase object
-        ((or rational string) (repr object (%type-name object)))
-        ;; JSON has no infinity or NaN, and yason writes them in Lisp syntax;
-        ;; a complex, which it has no method for, falls to the T branch (#417).
-        (float (repr (if (or (sb-ext:float-infinity-p object)
-                             (sb-ext:float-nan-p object))
-                         printed
-                         object)
-                     (%type-name object)))
+        (string (repr object (%type-name object)))
+        (number (repr (if (json-number-p object) object printed) (%type-name object)))
         (character (repr (string object) "CHARACTER"))
         (symbol
          (let ((node (repr (symbol-name object) "SYMBOL"))

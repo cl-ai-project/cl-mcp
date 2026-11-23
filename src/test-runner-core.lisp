@@ -519,15 +519,17 @@ cut says so, but for a cut the walk cannot see -- inside a condition's report or
 an object printing its own slots -- which shows the printer's # alone; a walk
 that fails leaves the value to the level and the stream.  A PRINT-OBJECT method
 that signals -- one reading an unbound slot, say -- stops the print there, and
-the text so far is kept and says which condition stopped it (#418)."
+the text so far is kept and says which condition stopped it (#418); that text is
+printed without the pretty printer, whose buffer the error loses."
   (multiple-value-bind (depth cyclic unsure)
       (handler-case (%nesting object)
         (error () (values 0 nil t)))
-    (let ((deep (>= depth *failure-print-max-depth*))
-          (signalled nil))
-      (flet ((attempt (circle)
-               ;; Values: the text printed, and :WHOLE, :OVERFLOW, :TOO-DEEP or
-               ;; :EXHAUSTED.
+    (let* ((deep (>= depth *failure-print-max-depth*))
+           (pretty (and *print-pretty* (not cyclic) (not deep)))
+           (signalled nil))
+      (flet ((attempt (circle &optional (pretty pretty))
+               ;; Values: the text printed, and :WHOLE, :OVERFLOW, :TOO-DEEP,
+               ;; :EXHAUSTED or :SIGNALLED (SIGNALLED then names the condition).
                (let ((stream (make-instance '%capped-text-stream
                                             :room *failure-print-max-chars*)))
                  (handler-case
@@ -536,7 +538,7 @@ the text so far is kept and says which condition stopped it (#418)."
                        (write object :stream stream :escape escape :readably nil
                                      :circle circle :length nil :lines nil
                                      :level *failure-print-max-depth*
-                                     :pretty (and *print-pretty* (not cyclic) (not deep))
+                                     :pretty pretty
                                      :base 10 :radix nil :case :upcase :array t :gensym t
                                      :right-margin nil :miser-width nil)
                        (values (get-output-stream-string (%sink stream)) :whole))
@@ -575,6 +577,11 @@ the text so far is kept and says which condition stopped it (#418)."
             (multiple-value-bind (circular again) (attempt t)
               (when (eq again :whole)
                 (setf text circular outcome :whole))))
+          ;; The pretty printer buffers what it prints, and an error inside a
+          ;; list or structure lost that buffer: only the marker was left.
+          ;; Printed again without it, the text before the error is kept.
+          (when (and (eq outcome :signalled) pretty)
+            (setf (values text outcome) (attempt cyclic nil)))
           (cond ((not (eq outcome :whole)) (cut text outcome))
                 ;; A condition's report prints what it chooses of its data, so
                 ;; one holding a deep value need not have been cut.

@@ -152,22 +152,52 @@ in its parse unchanged but for the surrogate."
       (ok (equal "{\"n\":255}" (cl-mcp/src/protocol::%encode-json object))
           "and an answer to a client"))))
 
+(defvar *inside-encoding* nil
+  "True while %UNENCODABLE-PROBE's encode method runs.")
+
+(define-condition %encoding-probe-error (error) ()
+  (:report (lambda (condition stream)
+             (declare (ignore condition))
+             (format stream "probe failed, inside=~A" *inside-encoding*)))
+  (:documentation "Signalled inside yason's encoding; its report says whether it is still inside."))
+
+(defstruct %unencodable-probe
+  "A value whose yason:encode method signals while *INSIDE-ENCODING* is true.")
+
+(defmethod yason:encode ((probe %unencodable-probe) &optional stream)
+  (declare (ignore probe stream))
+  (let ((*inside-encoding* t))
+    (error '%encoding-probe-error)))
+
 (deftest an-unencodable-worker-answer-becomes-an-error-answer
   ;; yason's error held the stack-allocated string stream it was writing to,
   ;; and printing it once that stream was gone was a memory fault that ended
   ;; the worker instead of answering (#417).
-  (let ((server (cl-mcp/src/worker/server::%make-worker-server))
-        (payload (make-hash-table :test 'equal)))
-    (setf (cl-mcp/src/worker/server::worker-server-authenticated-p server) t
-          (gethash "x" payload) #c(1 2)
-          (gethash "m" (cl-mcp/src/worker/server::worker-server-methods server))
-          (lambda (params) (declare (ignore params)) payload))
-    (let* ((line (handler-case (cl-mcp/src/worker/server::%dispatch-request server 9 "m" nil)
-                   (serious-condition (condition) (type-of condition))))
-           (json (and (stringp line) (yason:parse line))))
-      (ok (stringp line) (format nil "the worker answers: ~S" line))
-      (when json
-        (ok (eql 9 (gethash "id" json)) "the same request")
-        (ok (eql -32603 (gethash "code" (gethash "error" json))) "with an error")
-        (ok (search "JSON" (gethash "message" (gethash "error" json)))
-            (gethash "message" (gethash "error" json)))))))
+  (testing "the error's text is made while the encoding is still in progress"
+    ;; Made after unwinding, as before, the dead stream usually still printed,
+    ;; so only this tells the two apart.
+    (let ((message (handler-case (encode-json-line (make-%unencodable-probe))
+                     (cl-mcp/src/utils/sanitize:json-encoding-error (condition)
+                       (princ-to-string condition)))))
+      (ok (equal "JSON encoding failed: probe failed, inside=T" message) message)))
+  (testing "the worker answers with an error instead of ending"
+    (let ((server (cl-mcp/src/worker/server::%make-worker-server))
+          (payload (make-hash-table :test 'equal))
+          ;; A thread an earlier suite's deadline left running must not
+          ;; retire this process.
+          (cl-mcp/src/worker/server::*retire-action* (lambda (leaked)
+                                                       (declare (ignore leaked)))))
+      (setf (cl-mcp/src/worker/server::worker-server-authenticated-p server) t
+            (gethash "x" payload) #c(1 2)
+            (gethash "m" (cl-mcp/src/worker/server::worker-server-methods server))
+            (lambda (params) (declare (ignore params)) payload))
+      (let* ((line (handler-case
+                       (cl-mcp/src/worker/server::%dispatch-request server 9 "m" nil)
+                     (serious-condition (condition) (type-of condition))))
+             (json (and (stringp line) (yason:parse line))))
+        (ok (stringp line) (format nil "the worker answers: ~S" line))
+        (when json
+          (ok (eql 9 (gethash "id" json)) "the same request")
+          (ok (eql -32603 (gethash "code" (gethash "error" json))) "with an error")
+          (ok (search "JSON encoding failed" (gethash "message" (gethash "error" json)))
+              (gethash "message" (gethash "error" json))))))))

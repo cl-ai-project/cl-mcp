@@ -13,7 +13,8 @@
            #:transport-safe-json
            #:encode-json-text
            #:encode-json-line
-           #:json-encoding-error))
+           #:json-encoding-error
+           #:json-number-p))
 
 (in-package #:cl-mcp/src/utils/sanitize)
 
@@ -378,6 +379,22 @@ first such character is copied whole and only the rest is gone through."
                          ((and (< code #x20) (/= code 9) (/= code 10) (/= code 13))
                           (format out "\\u~4,'0X" code))
                          (t (write-char char out))))))))
+
+(defun json-number-p (object)
+  "True when OBJECT is a number yason writes as a JSON number: an integer, a
+finite float, or a ratio whose double-float (what yason writes for it) is
+finite.  JSON has no complex, infinity or NaN -- yason has no method for a
+complex and writes the other two in Lisp syntax, which no parser reads -- and a
+ratio past double range signals while it is written, so a preview gives each of
+those as its printed text instead (#417)."
+  (flet ((finite-p (float)
+           (not (or (sb-ext:float-infinity-p float) (sb-ext:float-nan-p float)))))
+    (typecase object
+      (integer t)
+      (float (finite-p object))
+      (ratio (let ((double (ignore-errors (coerce object 'double-float))))
+               (and double (finite-p double))))
+      (t nil))))
 
 (define-condition json-encoding-error (error)
   ((message :initarg :message :reader json-encoding-error-message))

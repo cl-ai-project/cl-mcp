@@ -640,6 +640,32 @@ is stopped and waited for."
 (defmethod print-object ((node %ring-node) stream)
   (format stream "#<RING ~S>" (%ring-node-next node)))
 
+(defclass %unprintable ()
+  ;; NAME: left unbound, so printing the object signals UNBOUND-SLOT.
+  ((name :initarg :name))
+  (:documentation "An object whose PRINT-OBJECT signals, reading an unbound slot."))
+
+(defmethod print-object ((object %unprintable) stream)
+  (print-unreadable-object (object stream :type t)
+    (princ (slot-value object 'name) stream)))
+
+(deftest failure-detail-keeps-the-text-printed-before-a-printer-signalled
+  ;; One PRINT-OBJECT that signals turned a whole Rove run into "Test runner
+  ;; crashed" (#418).  Inside a list, the pretty printer's buffer went with the
+  ;; error and left only the marker, so the text is printed again without it.
+  (dolist (pretty '(nil t))
+    (let ((form (gethash "form"
+                         (let ((*print-pretty* pretty))
+                           (cl-mcp/src/test-runner-core::make-failure-detail
+                            :test-name "t"
+                            :form (list 1 "two" (make-instance '%unprintable) 4))))))
+      (ok (and (stringp form)
+               (eql 0 (search "(1 \"two\" #<" form))
+               (search "%UNPRINTABLE" form)
+               (search "[printing stopped: UNBOUND-SLOT signalled]" form))
+          (format nil "printed up to the object, with the reason (pretty ~A): ~S"
+                  pretty form)))))
+
 (deftest failure-detail-prints-whatever-the-printer-settings
   ;; A test runs on a thread of its own, which sees the worker's global printer
   ;; settings.  A circular value printed forever under *PRINT-CIRCLE* NIL and
