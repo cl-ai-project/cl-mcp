@@ -32,7 +32,7 @@
 
 (deftest stdio-one-message
   (testing "run processes one line from :in and writes to :out"
-    (let* ((req "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n")
+    (let* ((req (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}~%"))
            (in (make-string-input-stream req))
            (out (make-string-output-stream)))
       (ok (eq t (cl-mcp/src/run:run :transport :stdio :in in :out out)))

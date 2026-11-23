@@ -41,6 +41,7 @@
                 #:cancel-inline-request)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json
+                #:decode-json-text
                 #:encode-json-text
                 #:transport-safe-json
                 #:write-json-control-escape)
@@ -52,8 +53,7 @@
                 #:native-path-namestring)
   (:import-from #:cl-mcp/src/server-instructions
                 #:server-instructions)
-  (:import-from #:yason
-                #:parse)
+  (:import-from #:yason)
   (:export
    #:+protocol-version+
    #:+supported-protocol-versions+
@@ -76,9 +76,6 @@
 
 ;; *current-session-id*, server-state, initialized-p, client-info,
 ;; protocol-version, make-state are imported from cl-mcp/src/state
-
-(defun %decode-json (line)
-  (yason:parse line))
 
 (defparameter +sanitize-max-elements+ 10000
   "Maximum number of list/vector elements %sanitize-for-encoding will process.
@@ -485,7 +482,14 @@ array argument can be distinguished from an omitted argument."
       (let ((replies (loop for item across message
                            for reply = (%dispatch-message item state t wire-input-p)
                            when reply collect (%encode-json reply))))
-        (when replies (format nil "[~{~A~^,~}]" replies)))
+        (when replies
+          (with-output-to-string (stream)
+            (write-char #\[ stream)
+            (write-string (first replies) stream)
+            (dolist (reply (rest replies))
+              (write-char #\, stream)
+              (write-string reply stream))
+            (write-char #\] stream))))
       (let ((reply (%dispatch-message message state nil wire-input-p)))
         (when reply (values (%encode-json reply) reply)))))
 
@@ -502,7 +506,7 @@ array argument can be distinguished from an omitted argument."
         (%encode-json (rpc-error nil -32700 (format nil "Parse error: nested deeper than ~D levels"
                                                     +max-json-nesting+)))))
     (let ((msg (handler-case
-                   (%decode-json trimmed)
+                   (decode-json-text trimmed)
                  (error (e)
                    (ignore-errors
                      (log-event :warn "rpc.parse-error"
