@@ -550,8 +550,13 @@ initialization pool-wide for")
              (ok (null (cl-mcp/src/worker-client::worker-stderr-thread worker))
                  "and the slot no longer points at it"))
         (ignore-errors (bt:destroy-thread drain))
-        (ignore-errors (sb-ext:process-kill process 9))
-        (ignore-errors (sb-ext:process-wait process))))))
+        ;; Let this worker's reaper finish logging and closing the process.
+        (let ((reaper (cl-mcp/src/worker-client::worker-reaper-thread worker)))
+          (if reaper
+              (sb-thread:join-thread reaper :timeout 5)
+              (progn
+                (ignore-errors (sb-ext:process-kill process 9))
+                (ignore-errors (sb-ext:process-wait process)))))))))
 
 (deftest reaper-keeps-eof-snapshot-and-logs-terminal-diagnostics
   ;; EOF only tells the parent that the transport closed.  The child can still
