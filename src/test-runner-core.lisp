@@ -1500,6 +1500,18 @@ iteration proceed instead of crashing."
               (log-event :info "test.runner"
                          "message" "added TEST-NAME method for FAILED-ASSERTION"))))))))
 
+(defvar *loading-test-system-p* nil
+  "True while RUN-TESTS loads its target system through ASDF.")
+
+(defmethod asdf:perform :around ((operation asdf:load-op)
+                                (component asdf:cl-source-file))
+  ;; Rove initializes its default reporter while loading rove/main. Bind
+  ;; standard syntax for that file so its reporter lookup can print symbols.
+  (if (and *loading-test-system-p*
+           (string= "rove/main" (asdf:component-name (asdf:component-system component))))
+      (with-standard-io-syntax (call-next-method))
+      (call-next-method)))
+
 (defun %ensure-system-loaded (system-name)
   "Force-reload SYSTEM-NAME so tests always run against the latest source.
 Clears ASDF's loaded state for the system, then reloads.  This ensures
@@ -1607,7 +1619,8 @@ COMPILE-FILE-ERROR."
                 ;; the re-read, can tell (#328).
                 (ignore-errors (%rove-purge-ghost-suites system-name))))
             (setf loading t)
-            (let ((*error-output* captured-stderr))
+            (let ((*error-output* captured-stderr)
+                  (*loading-test-system-p* t))
               (call-with-own-compilation-unit
                (lambda () (asdf:load-system system-name))))))
       (error (c)
@@ -1750,6 +1763,14 @@ a future Rove version returns them directly instead of crashing."
               (push assertion failure-details)))))
     (nreverse failure-details)))
 
+(defun %ensure-rove-none-reporter ()
+  "Register Rove's :NONE reporter by name, independent of printer settings."
+  ;; Rove otherwise prints symbols to find the reporter's package and class.
+  (unless (uiop:symbol-call :rove/reporter/registry :get-reporter :none)
+    (asdf:load-system "rove/reporter/none")
+    (uiop:symbol-call :rove/reporter/registry :add-reporter :none
+                      (find-symbol "NONE-REPORTER" "ROVE/REPORTER/NONE"))))
+
 (defmacro %with-rove-output ((report-stream-symbol stdout stderr debug) &body body)
   "Capture test output and suppress the Rove reporter while running BODY.
 Run Rove with :STYLE :NONE inside it as well: a reporter writing to a broadcast
@@ -1768,6 +1789,7 @@ report is built from the results by %PRINTED."
                               (find-symbol "*ROVE-STANDARD-OUTPUT*" :rove/core/suite)
                               (find-symbol "*ROVE-ERROR-OUTPUT*" :rove/core/suite)))
          (list (make-broadcast-stream) nil nil)
+       (%ensure-rove-none-reporter)
        ,@body)))
 
 (defun run-rove-selected-tests (test-symbols)

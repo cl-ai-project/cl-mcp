@@ -2799,6 +2799,27 @@ in ASDF and as left by a root change --, their packages and the directory."
           (ignore-errors (delete-package package))))
       (ignore-errors (uiop:delete-directory-tree dir :validate t)))))
 
+(deftest run-tests-preserves-print-case-in-rove-tests
+  (%call-with-inferred-test-fixture
+   "clmcp-print-case" "rove"
+   "(defpackage #:clmcp-print-case/tests/a (:use #:cl #:rove))
+(in-package #:clmcp-print-case/tests/a)
+(defparameter *load-print-case* *print-case*)
+(deftest observes-print-case
+  (testing \"the test system and test body receive the caller's printer settings\"
+    (ok (eq *load-print-case* :downcase))
+    (ok (eq *print-case* :downcase))))
+"
+   (lambda (dir)
+     (declare (ignore dir))
+     (dolist (target '(nil "clmcp-print-case/tests/a::observes-print-case"))
+       (testing (if target "selected test" "whole test system")
+         (let ((*print-case* :downcase))
+           (let ((result (run-tests "clmcp-print-case/tests/a" :test target)))
+             (ok (= 1 (gethash "passed" result)))
+             (ok (zerop (gethash "failed" result)))
+             (ok (eq *print-case* :downcase)))))))))
+
 (deftest run-tests-preflights-rove-selection
   (%call-with-inferred-test-fixture
    "clmcp-selection" "rove"
