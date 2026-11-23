@@ -1500,18 +1500,36 @@ iteration proceed instead of crashing."
               (log-event :info "test.runner"
                          "message" "added TEST-NAME method for FAILED-ASSERTION"))))))))
 
+(defclass %test-system-load-plan (asdf/plan:sequential-plan) ()
+  (:documentation "An ASDF plan that initializes Rove with standard I/O syntax."))
+
+(defun %rove-main-load-action-p (action)
+  (destructuring-bind (operation . component) action
+    (and (typep operation 'asdf:load-op)
+         (typep component 'asdf:cl-source-file)
+         (string= "rove/main" (asdf:component-name (asdf:component-system component))))))
+
+(defmethod asdf/plan:perform-plan ((plan %test-system-load-plan) &key)
+  (let* ((actions (asdf/plan:plan-actions plan))
+         (rove-main-load (find-if #'%rove-main-load-action-p actions)))
+    (if rove-main-load
+        ;; ASDF's standard sequential execution, preserving action order,
+        ;; application methods, restarts, and completed-action bookkeeping.
+        (dolist (action actions)
+          (destructuring-bind (operation . component) action
+            (unless (asdf/plan:action-already-done-p plan operation component)
+              (if (eq action rove-main-load)
+                  (with-standard-io-syntax
+                    (asdf/action:perform-with-restarts operation component))
+                  (asdf/action:perform-with-restarts operation component))
+              (asdf/plan:mark-as-done plan operation component))))
+        (call-next-method))))
+
 (defun %load-test-system (system-name)
-  "Load SYSTEM-NAME, initializing Rove first if ASDF plans to load its entry point."
-  (unless (asdf:component-loaded-p (asdf:registered-system "rove/main"))
-    ;; Rove installs its default reporter during its first load. Resolve it
-    ;; with standard I/O syntax before loading the target with the caller's
-    ;; settings. Let the target load report any failure to make its plan.
-    (when (find "rove/main" (ignore-errors (%planned-loads system-name))
-                :key (lambda (file) (asdf:component-name (asdf:component-system file)))
-                :test #'string=)
-      (with-standard-io-syntax
-        (asdf:load-system "rove/main"))))
-  (asdf:load-system system-name))
+  "Load SYSTEM-NAME in ASDF order, with standard I/O syntax for Rove's initialization."
+  (if (eq asdf/plan:*plan-class* 'asdf/plan:sequential-plan)
+      (asdf:load-system system-name :plan-class '%test-system-load-plan)
+      (asdf:load-system system-name)))
 
 (defun %ensure-system-loaded (system-name)
   "Force-reload SYSTEM-NAME so tests always run against the latest source.
