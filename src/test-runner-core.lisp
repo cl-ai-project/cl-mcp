@@ -1500,17 +1500,18 @@ iteration proceed instead of crashing."
               (log-event :info "test.runner"
                          "message" "added TEST-NAME method for FAILED-ASSERTION"))))))))
 
-(defvar *loading-test-system-p* nil
-  "True while RUN-TESTS loads its target system through ASDF.")
-
-(defmethod asdf:perform :around ((operation asdf:load-op)
-                                (component asdf:cl-source-file))
-  ;; Rove initializes its default reporter while loading rove/main. Bind
-  ;; standard syntax for that file so its reporter lookup can print symbols.
-  (if (and *loading-test-system-p*
-           (string= "rove/main" (asdf:component-name (asdf:component-system component))))
-      (with-standard-io-syntax (call-next-method))
-      (call-next-method)))
+(defun %load-test-system (system-name)
+  "Load SYSTEM-NAME, initializing Rove first if ASDF plans to load its entry point."
+  (unless (asdf:component-loaded-p (asdf:registered-system "rove/main"))
+    ;; Rove installs its default reporter during its first load. Resolve it
+    ;; with standard I/O syntax before loading the target with the caller's
+    ;; settings. Let the target load report any failure to make its plan.
+    (when (find "rove/main" (ignore-errors (%planned-loads system-name))
+                :key (lambda (file) (asdf:component-name (asdf:component-system file)))
+                :test #'string=)
+      (with-standard-io-syntax
+        (asdf:load-system "rove/main"))))
+  (asdf:load-system system-name))
 
 (defun %ensure-system-loaded (system-name)
   "Force-reload SYSTEM-NAME so tests always run against the latest source.
@@ -1619,10 +1620,9 @@ COMPILE-FILE-ERROR."
                 ;; the re-read, can tell (#328).
                 (ignore-errors (%rove-purge-ghost-suites system-name))))
             (setf loading t)
-            (let ((*error-output* captured-stderr)
-                  (*loading-test-system-p* t))
+            (let ((*error-output* captured-stderr))
               (call-with-own-compilation-unit
-               (lambda () (asdf:load-system system-name))))))
+               (lambda () (%load-test-system system-name))))))
       (error (c)
         (let* ((warnings-text (get-output-stream-string captured-warnings))
                (stderr-text (get-output-stream-string captured-stderr))
