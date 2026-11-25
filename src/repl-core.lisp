@@ -519,7 +519,7 @@ Options:
 - LOCALS-PREVIEW-FRAMES: number of top frames to include local variable previews (default: 0).
 - LOCALS-PREVIEW-MAX-DEPTH: max nesting depth for local previews (default: 1).
 - LOCALS-PREVIEW-MAX-ELEMENTS: max elements per collection in local previews (default: 5).
-- LOCALS-PREVIEW-SKIP-INTERNAL: when T (default), skip internal frames when counting for preview."
+- LOCALS-PREVIEW-SKIP-INTERNAL: when T (default), skip SBCL's own frames when counting for preview."
   (let* ((effective-max-output-length
            (or max-output-length *default-max-output-length*))
          (*request-debugger-config*

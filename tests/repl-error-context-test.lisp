@@ -65,6 +65,8 @@
               "the break's message is kept")
           (ok (and names (search "REPL-BREAK-FRAME" (first names)))
               (format nil "the frame that called BREAK is the first: ~S" names))
+          (ok (= 1 (length names))
+              (format nil "and, called as the form, the only one: ~S" names))
           (ok (notany (lambda (name) (search "BREAK" name :test #'char-equal))
                       (remove-if (lambda (name) (search "REPL-BREAK-FRAME" name))
                                  names))
@@ -219,9 +221,9 @@
       (ok (eq raw :timeout))
       (ok (null error-context)))))
 
-(deftest backtrace-falls-back-when-all-frames-internal
+(deftest backtrace-text-shows-a-window-of-sbcl-frames-alone
   (testing
-   "build-eval-response shows backtrace even when every frame is internal"
+   "build-eval-response shows the backtrace when every frame is SBCL's"
    (let* ((ctx
            (list :error t
                  :condition-type "SIMPLE-ERROR"
@@ -239,9 +241,9 @@
                   (gethash "text" (aref content 0)))))
      (ok text)
      (ok (search "Backtrace:" text)
-         "Backtrace header appears despite all frames being internal")
+         "the Backtrace header appears")
      (ok (search "SB-KERNEL::ERROR" text)
-         "fallback includes the first would-be-filtered frame"))))
+         "and names the first frame"))))
 
 (deftest backtrace-text-says-what-it-leaves-out-and-keeps-the-outermost-frame
   ;; Five frames were listed and the text ended there, with no word of the
@@ -533,7 +535,7 @@ budget pressure a real response is under."
               (format nil "top-level local variable is shown: ~A" text))
           (ok (search "\"status\" => :TESTING" text)
               (format nil "top-level local preview is expanded: ~A" text))
-          (ok (null (search "%COLLECT-FRAMES" text))
+          (ok (null (search "%COLLECT-WINDOW" text))
               "capture harness frame is omitted from text")
           (ok (null (search "CAPTURE-ERROR-CONTEXT" text))
               "capture-error-context frame is omitted from text")
@@ -557,9 +559,9 @@ budget pressure a real response is under."
         (progn
           (ok (search "0: (LAMBDA () :IN \"repl-eval\")" text)
               (format nil "the form's frame is shown: ~A" text))
-          (ok (null (search "%COLLECT-FRAMES" text))
+          (ok (null (search "%COLLECT-WINDOW" text))
               "does not dump capture harness frames")
-          (ok (null (search "FILTER-INTERNAL" text))
+          (ok (null (search "PREVIEWED" text))
               "does not dump capture harness locals")
           (ok (and (vectorp json-frames) (= 1 (length json-frames)))
               "error_context.frames holds that frame alone")
@@ -651,7 +653,7 @@ budget pressure a real response is under."
               (format nil "the frame that signalled is in the text: ~A" text))
           (ok (search "DOUBLED = 4" text) "with its locals")
           (ok (search "%SKIP-INTERNAL-PROBE-OUTER" text) "and so is its caller")
-          (ok (null (search "%COLLECT-FRAMES" text)) "the capture's frames are not")
+          (ok (null (search "%COLLECT-WINDOW" text)) "the capture's frames are not")
           (ok (null (search "HANDLER-CLUSTERS" text)) "nor the signalling plumbing's locals")
           (ok (search "%SKIP-INTERNAL-PROBE-INNER" (gethash "function" (aref frames 0)))
               "error_context.frames starts at the user's frame too"))))))

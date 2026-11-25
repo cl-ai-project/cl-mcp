@@ -306,9 +306,9 @@ Output fields:
   with a line counting the frames of those left out between them. The text is cut at
   `max_output_length` from its end, so with a small budget that line and the outermost frame
   go first. Each displayed frame (not SBCL's) is followed by its locals as `NAME = VALUE`,
-  with `[object-id: ID]` on a non-primitive one, capped at 10 per frame.
-  Two variables of one name in a frame -- an inner binding shadowing an argument, or a `labels` helper's variables merged into its caller -- are named as SBCL's
-  debugger names them, `PATTERN` and `PATTERN#1`, here and in the JSON `name`; a variable the
+  with `[object-id: ID]` on a non-primitive one, capped at 10 per frame. Two variables of one
+  name in a frame -- an inner binding shadowing an argument, or a `labels` helper's variables
+  merged into its caller -- are named as SBCL's debugger names them, `PATTERN` and `PATTERN#1`, here and in the JSON `name`; a variable the
   compiler introduced or renamed, such as the key `case` binds, is written with its package,
   `SB-C::X`, and a macro's gensym (`dolist`'s list) as `#:LIST0`. `locals_preview_frames`
   expands the entries, elements or slots of a non-primitive local in the top N frames underneath

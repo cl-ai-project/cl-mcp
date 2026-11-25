@@ -57,10 +57,12 @@ were recorded (:FRAMES-TRUNCATED), and frames_total then says how many."
              "condition_type" (sanitize-for-json (getf error-context :condition-type))
              "message" (sanitize-for-json (getf error-context :message))
              "restarts"
-             (mapcar (lambda (r)
-                       (make-ht "name" (sanitize-for-json (getf r :name))
-                                "description" (sanitize-for-json (getf r :description))))
-                     (getf error-context :restarts))
+             (coerce
+              (mapcar (lambda (r)
+                        (make-ht "name" (sanitize-for-json (getf r :name))
+                                 "description" (sanitize-for-json (getf r :description))))
+                      (getf error-context :restarts))
+              'vector)
              "frames"
              (coerce
               (mapcar (lambda (f)
@@ -70,20 +72,24 @@ were recorded (:FRAMES-TRUNCATED), and frames_total then says how many."
                                     "source_file" (getf f :source-file)
                                     "source_line" (getf f :source-line)
                                     "locals"
-                                    (mapcar (lambda (l)
-                                              (let ((lht (make-ht
-                                                          "name" (sanitize-for-json
-                                                                  (getf l :name))
-                                                          "value" (sanitize-for-json
-                                                                   (getf l :value)))))
-                                                (when (getf l :object-id)
-                                                  (setf (gethash "object_id" lht)
-                                                        (getf l :object-id)))
-                                                (when (getf l :preview)
-                                                  (setf (gethash "preview" lht)
-                                                        (getf l :preview)))
-                                                lht))
-                                            (getf f :locals)))))
+                                    ;; A vector, so a frame with none is
+                                    ;; [] on the wire rather than null.
+                                    (coerce
+                                     (mapcar (lambda (l)
+                                               (let ((lht (make-ht
+                                                           "name" (sanitize-for-json
+                                                                   (getf l :name))
+                                                           "value" (sanitize-for-json
+                                                                    (getf l :value)))))
+                                                 (when (getf l :object-id)
+                                                   (setf (gethash "object_id" lht)
+                                                         (getf l :object-id)))
+                                                 (when (getf l :preview)
+                                                   (setf (gethash "preview" lht)
+                                                         (getf l :preview)))
+                                                 lht))
+                                             (getf f :locals))
+                                     'vector))))
                           (when (getf f :implementation)
                             (setf (gethash "implementation" fht) t))
                           fht))

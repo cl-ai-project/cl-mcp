@@ -578,6 +578,14 @@ printed relative to ~A" (package-name package))
       (ok (impl-p '(sb-pcl::fast-method sb-kernel::%signal (t))))
       (ok (not (impl-p '(labels frame-probe-walk :in "repl-eval"))))
       (ok (impl-p '(flet sb-kernel::%signal :in "SYS:SRC;CODE;WARM-ERROR.LISP"))))
+    (testing "a local function is its OUTER's, whoever named it"
+      ;; WITH-MUTEX, UNWIND-PROTECT and WITHOUT-INTERRUPTS wrap the user's body
+      ;; in a local function SBCL names: the body is still the user's code.
+      (ok (not (impl-p '(flet sb-kernel::%signal :in frame-probe-walk))))
+      (ok (not (impl-p '(flet "CLEANUP-FUN-0" :in frame-probe-walk))))
+      (ok (impl-p '(flet "WITHOUT-INTERRUPTS-BODY-1" :in sb-kernel::%signal)))
+      (ok (impl-p '(labels sb-kernel::%signal)) "with no OUTER, its own name decides")
+      (ok (not (impl-p '(labels frame-probe-walk)))))
     (testing "a lambda is its OUTER's, a source file SBCL's on the SYS: host"
       (ok (not (impl-p '(lambda (x) :in "repl-eval"))))
       (ok (not (impl-p '(lambda () :in "/home/user/app.lisp"))))
@@ -634,21 +642,94 @@ printed relative to ~A" (package-name package))
         (ok (not (getf ctx :frames-truncated)))
         (ok (eql 1 (getf ctx :frames-total))))))
   (testing "past MAX-FRAMES the outermost frame of the code is still recorded"
-    (labels ((deep (n) (if (zerop n) (error "deep bottom") (1+ (deep (1- n))))))
-      (let* ((ctx (%capture-in-handler
-                   (lambda ()
-                     (cl-mcp/src/frame-inspector::eval-at-user-code-boundary
-                      `(funcall ,(lambda () (deep 30)))))
-                   :max-frames 5))
-             (frames (getf ctx :frames)))
-        #+sbcl
-        (progn
-          (ok (= 5 (length frames)) "MAX-FRAMES frames are recorded")
-          (ok (getf ctx :frames-truncated) "and the capture says the code held more")
-          (ok (< 5 (getf ctx :frames-total)) "counting them")
-          (ok (= (1- (getf ctx :frames-total)) (getf (car (last frames)) :index))
-              "the last one recorded is the code's outermost")
-          ;; The closure calls DEEP in tail position, so DEEP's first call is
-          ;; the outermost frame of the code.
-          (ok (equal "30" (getf (first (getf (car (last frames)) :locals)) :value))
-              (format nil "the first call, N = 30: ~S" (car (last frames)))))))))
+    (let* ((ctx (%capture-in-handler
+                 (lambda ()
+                   (cl-mcp/src/frame-inspector::eval-at-user-code-boundary
+                    '(frame-probe-deep 30)))
+                 :max-frames 5))
+           (frames (getf ctx :frames)))
+      #+sbcl
+      (progn
+        (ok (= 5 (length frames)) "MAX-FRAMES frames are recorded")
+        (ok (getf ctx :frames-truncated) "and the capture says the code held more")
+        (ok (< 5 (getf ctx :frames-total)) "counting them")
+        (ok (= (1- (getf ctx :frames-total)) (getf (car (last frames)) :index))
+            "the last one recorded is the code's outermost")
+        ;; The evaluator applies FRAME-PROBE-DEEP itself, so its first call is
+        ;; the outermost frame of the code under any compile policy.
+        (ok (equal "30" (getf (first (getf (car (last frames)) :locals)) :value))
+            (format nil "the first call, N = 30: ~S" (car (last frames)))))))
+  (testing "a stack deeper than SBCL's default backtrace count still reaches the boundary"
+    (let ((ctx (%capture-in-handler
+                (lambda ()
+                  (cl-mcp/src/frame-inspector::eval-at-user-code-boundary
+                   '(frame-probe-deep 1500)))
+                :max-frames 5)))
+      #+sbcl
+      (ok (= 1501 (getf ctx :frames-total))
+          (format nil "every call is counted: ~S" (getf ctx :frames-total))))))
+
+(defun frame-probe-deep (n)
+  "Recurse N times, then signal; each call stays on the stack."
+  (declare (optimize (debug 3) (speed 0)))
+  (if (zerop n)
+      (error "deep bottom")
+      (1+ (frame-probe-deep (1- n)))))
+
+#+sbcl
+(defvar *frame-probe-mutex* (sb-thread:make-mutex :name "frame-probe"))
+
+#+sbcl
+(defun frame-probe-locked (x)
+  "Signal from a WITH-MUTEX body, which SBCL compiles as a local function."
+  (declare (optimize (debug 3) (speed 0)))
+  (sb-thread:with-mutex (*frame-probe-mutex*)
+    (let ((doubled (* 2 x)))
+      (error "in mutex ~A" doubled))))
+
+#+sbcl
+(deftest a-body-sbcl-wraps-in-a-local-function-is-the-users
+  (let* ((ctx (%capture-in-handler
+               (lambda ()
+                 (cl-mcp/src/frame-inspector::eval-at-user-code-boundary
+                  '(frame-probe-locked 21)))))
+         (first-frame (first (getf ctx :frames))))
+    (ok (search "FRAME-PROBE-LOCKED" (getf first-frame :function))
+        (format nil "the body's frame comes first: ~S" (getf first-frame :function)))
+    (ok (not (getf first-frame :implementation)) "and is not marked as SBCL's")
+    (ok (find "DOUBLED" (getf first-frame :locals)
+              :key (lambda (local) (getf local :name)) :test #'equal)
+        "and keeps its locals")))
+
+(deftest stack-window-is-decided-by-position
+  (flet ((window (&rest names)
+           (multiple-value-list
+            (cl-mcp/src/frame-inspector::%stack-window (coerce names 'vector)))))
+    (let ((walk 'cl-mcp/src/frame-inspector::%map-stack)
+          (collect 'cl-mcp/src/frame-inspector::%collect-window)
+          (capture 'cl-mcp/src/frame-inspector:capture-error-context)
+          (boundary 'cl-mcp/src/frame-inspector::eval-at-user-code-boundary)
+          (signal 'sb-kernel::%signal)
+          (evaluator 'sb-int:simple-eval-in-lexenv))
+      (ok (equal '(0 0) (window)) "an empty walk is an empty window")
+      (ok (equal '(6 8)
+                 (window walk collect capture 'handler signal 'error
+                         'inner 'outer evaluator boundary 'below))
+          "a handler's capture: below the signalling run, above the evaluator")
+      (ok (equal '(6 10)
+                 (window walk collect capture 'handler signal 'error 'inner 'outer
+                         'thread-bottom 'foreign))
+          "no boundary: the window runs to the bottom")
+      (ok (equal '(3 5)
+                 (window walk collect capture 'unwound-caller 'outer boundary))
+          "after HANDLER-CASE unwound: below the capture's own frames")
+      (ok (equal '(2 3)
+                 (window 'sb-int:%break 'break 'caller boundary))
+          "a walk starting elsewhere: below the leading signalling run")
+      (ok (equal '(6 6)
+                 (window walk collect capture 'handler signal 'error evaluator boundary))
+          "the form signalled itself: an empty window")
+      (ok (equal '(6 11)
+                 (window walk collect capture 'handler signal 'error
+                         'inner signal 'error 'outer 'outermost boundary))
+          "signalling frames between the code's own stay in the window"))))

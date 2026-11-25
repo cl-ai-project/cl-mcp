@@ -293,7 +293,8 @@ the handler or debugger hook that captures it.")
 (defparameter *evaluator-functions*
   (%symbols-named '("COMMON-LISP" "EVAL") '("SB-INT" "SIMPLE-EVAL-IN-LEXENV")
                   '("SB-IMPL" "SIMPLE-EVAL-PROGN-BODY") '("SB-IMPL" "SIMPLE-EVAL-LOCALLY")
-                  '("SB-IMPL" "%SIMPLE-EVAL") '("SB-IMPL" "EVAL-IN-LEXENV"))
+                  '("SB-IMPL" "%SIMPLE-EVAL") '("SB-IMPL" "EVAL-IN-LEXENV")
+                  '("SB-C" "%FUNCALL-IN-FOOMACROLET-LEXENV"))
   "The functions EVAL-AT-USER-CODE-BOUNDARY's EVAL runs through before the code
 of the form it evaluates.")
 
@@ -353,33 +354,38 @@ boundary, never about whose code a frame looks like."
 code rather than code it was given.
 A symbol is SBCL's when its home package is (%SBCL-PACKAGE-P); a COMMON-LISP
 function is the API called, not SBCL's own.  A bare string is SBCL's name for a
-foreign or trampoline frame (\"foreign function: call_into_lisp\").  A lambda,
+foreign or trampoline frame (\"foreign function: call_into_lisp\").  A local
+function or lambda, (FLET NAME :IN OUTER), (LABELS NAME :IN OUTER) or
 (LAMBDA ARGS :IN OUTER), is OUTER's: a symbol or name by the same rule, a
-string a source file, SBCL's when it is on the SYS: logical host.  Any other
-list names its second element: (SETF NAME), (LABELS NAME :IN OUTER),
-(SB-PCL::FAST-METHOD NAME ...)."
+string a source file, SBCL's when it is on the SYS: logical host.  This holds
+even when an SBCL macro made the local function: the body WITH-MUTEX or an
+UNWIND-PROTECT cleanup wraps in one is the code of the function it is written
+in.  A local function with no OUTER, and any other list, names its second
+element: (SETF NAME), (SB-PCL::FAST-METHOD NAME ...)."
   (typecase name
     (null nil)
     (symbol (let ((package (symbol-package name)))
               (and package (%sbcl-package-p package))))
     (string t)
     (cons
-     (if (eq (first name) 'lambda)
-         (let ((outer (second (member :in (cddr name)))))
-           (typecase outer
-             (null nil)
-             (string (and (>= (length outer) 4) (string-equal "SYS:" outer :end2 4)))
-             (t (%implementation-name-p outer))))
-         (%implementation-name-p (second name))))
+     (let ((outer (and (member (first name) '(flet labels lambda))
+                       (second (member :in (cddr name))))))
+       (typecase outer
+         (null (and (not (eq (first name) 'lambda))
+                    (%implementation-name-p (second name))))
+         (string (and (>= (length outer) 4) (string-equal "SYS:" outer :end2 4)))
+         (t (%implementation-name-p outer)))))
     (t nil)))
 
 #+sbcl
 (defun %map-stack (function)
   "Call FUNCTION on each frame of the stack, innermost first, as SBCL's debugger
 walks it.  A capture's two walks both start here, so the frames they see line
-up."
+up.  The walk is not cut at SB-DEBUG:*BACKTRACE-FRAME-COUNT*: on a deeper stack
+the boundary, and the outermost frame of the window, lie past that count."
   (declare (optimize (debug 3) (speed 0)))
-  (funcall (fdefinition (find-symbol "MAP-BACKTRACE" "SB-DEBUG")) function)
+  (funcall (fdefinition (find-symbol "MAP-BACKTRACE" "SB-DEBUG")) function
+           :count most-positive-fixnum)
   nil)
 
 #+sbcl
