@@ -67,9 +67,11 @@ Set 'locals_preview_frames' > 0 to auto-expand local variable previews in top N 
 providing immediate insight without extra inspect-object calls during debugging: a
 non-primitive local in one of those frames has its entries, elements or slots
 written out under it instead of only its printed form.
-The 'locals_preview_skip_internal' parameter (default: true) skips internal frames
-(CL-MCP, SBCL internals, ASDF, etc.) when counting frames for preview eligibility.
-This ensures user code frames get previews even when buried under infrastructure.
+The backtrace holds the frames of the evaluated code, from the one that signalled
+down to the form itself; repl-eval's own frames are not on it. SBCL's own frames
+are named on one line without their locals, which 'error_context' keeps.
+The 'locals_preview_skip_internal' parameter (default: true) skips SBCL's own
+frames when counting frames for preview eligibility.
 NOTE: Local variable capture requires (declare (optimize (debug 3))) in the function.
 SBCL's default optimization does not preserve locals for inspection.
 
@@ -114,7 +116,7 @@ default to 10)")
    "Max elements per collection in local variable previews (default: 5)")
   (locals-preview-skip-internal :type :boolean :json-name
    "locals_preview_skip_internal" :default t :description
-   "Skip internal frames (CL-MCP, SBCL internals, ASDF, etc.) when counting for preview eligibility (default: true)"))
+   "Skip SBCL's own frames when counting for preview eligibility (default: true)"))
  :body
  (with-proxy-dispatch (id "worker/eval"
                          (make-ht "code" code

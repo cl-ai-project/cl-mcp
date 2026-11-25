@@ -17,7 +17,9 @@
   (:import-from #:cl-mcp/src/utils/bounded-stream
                 #:make-bounded-output-stream
                 #:bounded-output-string)
-  (:import-from #:cl-mcp/src/frame-inspector #:capture-error-context)
+  (:import-from #:cl-mcp/src/frame-inspector
+                #:capture-error-context
+                #:eval-at-user-code-boundary)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/utils/nesting
@@ -227,7 +229,9 @@ evaluation complete, and COMPLETED-P says so."
                                        (funcall on-error e)
                                        (return-from evaluation)))))
                (dolist (form forms)
-                 (setf last-value (eval form)))
+                 ;; The boundary's frame is where a backtrace of an error in
+                 ;; FORM ends: everything below it is this evaluator's.
+                 (setf last-value (eval-at-user-code-boundary form)))
                (setf completed t)))))))
     (values last-value completed)))
 

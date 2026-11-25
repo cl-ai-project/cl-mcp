@@ -76,18 +76,18 @@
   (declare (optimize (debug 3) (speed 0)))
   ;; The hash table's own printer does not print its contents. A failing
   ;; nested printer therefore identifies preview collection, not :VALUE.
-  ;; Rove's whole-package runner otherwise prints imported capture functions
-  ;; unqualified, which the existing frame filter cannot identify as internal.
+  ;; No condition is signalled, so the capture starts below its own frames:
+  ;; at this function's, whose OBJECT is previewed.
   (let ((*package* (find-package '#:cl-user)))
     (let ((context
             (if ordinary-p
                 (capture-error-context
                  (make-condition 'simple-error :format-control "preview source")
-                 :max-frames 1 :filter-internal t :locals-preview-frames 1
+                 :max-frames 1 :locals-preview-frames 1
                  :preview-max-depth 2)
                 (capture-debugger-error-context
                  (make-condition 'simple-error :format-control "preview source") callback
-                 :max-frames 1 :filter-internal t :locals-preview-frames 1
+                 :max-frames 1 :locals-preview-frames 1
                  :preview-max-depth 2))))
       (values context object))))
 
@@ -297,46 +297,6 @@ established when the context is captured, and HANDLER-CASE unwinds first."
       (ok (getf ctx :error))
       (ok (stringp (getf ctx :message))))))
 
-(deftest internal-frame-p-prefix-boundary
-  (testing "%internal-frame-p matches package prefixes with boundaries only"
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "CL-MCP/SRC/REPL:REPL-EVAL"))
-    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
-              "CL-MCP/TESTS/REPL-TEST::HELPER")))
-    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
-              "SB-INTROSPECTIVE::FOO")))
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "SB-INT:FOO"))))
-
-(deftest internal-frame-p-anonymous-and-standard
-  (testing "%internal-frame-p marks anonymous and standard signaling frames as internal"
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "(LAMBDA () ...)"))
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "(FLET X)"))
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "ERROR"))
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "SIGNAL"))
-    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p "MY-APP::PROCESS")))))
-
-(deftest internal-frame-p-clos-method-frames
-  (testing
-   "%internal-frame-p exempts user CLOS method wrappers but keeps internal ones"
-   (ok
-    (not (cl-mcp/src/frame-inspector::%internal-frame-p
-          "(SB-PCL::FAST-METHOD MY-APP::GREET (STRING))")))
-   (ok
-    (cl-mcp/src/frame-inspector::%internal-frame-p
-     "(SB-PCL::FAST-METHOD SB-INT::FAKE (T))"))
-   (ok
-    (not (cl-mcp/src/frame-inspector::%internal-frame-p
-          "(SB-PCL::SLOW-METHOD MY-APP::FOO (T))")))))
-
-(deftest internal-frame-p-setf-forms
-  (testing
-   "%internal-frame-p exempts (SETF user:name) but keeps internal SETFs"
-   (ok
-    (not (cl-mcp/src/frame-inspector::%internal-frame-p
-          "(SETF MY-APP::CUSTOM-SETTER)")))
-   (ok
-    (cl-mcp/src/frame-inspector::%internal-frame-p
-     "(SETF SB-INT::STORE)"))))
-
 (defun frame-probe-shadowed-local (pattern)
   "Signal with two live variables named PATTERN in one frame -- the argument and
 an inner binding of the same name -- as a let-converted LABELS helper leaves
@@ -441,70 +401,6 @@ own, SB-C::X."
     (ok (getf (capture 2) :frames-truncated) "two frames do not reach the outermost")
     (ok (not (getf (capture 10000) :frames-truncated)) "ten thousand do")))
 
-(deftest internal-frame-p-local-functions-follow-their-outer-function
-  (testing "a local or anonymous function inside a user's function is the user's frame"
-    ;; SBCL names it (FLET NAME :IN OUTER), (LABELS NAME :IN OUTER) or
-    ;; (LAMBDA LAMBDA-LIST :IN OUTER).  Every such name used to count as
-    ;; internal, so the frame an error was signalled in was dropped from the
-    ;; backtrace whenever that was a LABELS helper or a lambda.
-    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
-              "(LABELS MY-APP::VISIT :IN MY-APP::TOPOLOGICAL-SORT)")))
-    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
-              "(FLET MY-APP::HELPER :IN MY-APP::RUN)")))
-    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
-              "(LAMBDA (MY-APP::X) :IN MY-APP::RUN)")))
-    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p "(LABELS WALK :IN OUTER)"))
-        "names printed relative to the user's own package")
-    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
-              "(FLET MY-APP::INNER :IN (SB-PCL::FAST-METHOD MY-APP::GREET (STRING)))"))
-        "an OUTER that is itself a user's method")
-    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
-              "(LAMBDA (&KEY (MY-APP::MODE :IN)) :IN MY-APP::RUN)"))
-        "an :IN inside the lambda list is not the one that names OUTER"))
-  (testing "a local function inside infrastructure stays internal"
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p
-         "(FLET SB-C::WITH-IT :IN SB-C::%WITH-COMPILATION-UNIT)"))
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p
-         "(LAMBDA () :IN CL-MCP/SRC/REPL-CORE::%EVAL-FORMS)"))
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "(LAMBDA (C) :IN ERROR)"))
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p
-         "(LAMBDA (&OPTIONAL (X :IN)) :IN SB-IMPL::FOO)"))
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p
-         "(FLET MY-APP::INNER :IN (SB-PCL::FAST-METHOD SB-INT::FAKE (T)))")))
-  (testing "a top-level form's lambda, named by a source string, stays internal"
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "(LAMBDA () :IN \"repl-eval\")"))
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p
-         "(LAMBDA () :IN \"/tmp/a (b) :IN c.lisp\")"))))
-
-(deftest internal-frame-p-reads-common-lisp-qualified-operators
-  ;; Frame names are printed relative to the caller's *PACKAGE*.  One that does
-  ;; not use COMMON-LISP qualifies the operators too, and each shape used to
-  ;; be misread: a user's local function or SETF function as internal, and a
-  ;; standard signalling function as the user's.
-  (testing "a qualified FLET, LABELS or LAMBDA follows its OUTER"
-    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
-              "(COMMON-LISP:LABELS MY-APP::VISIT :IN MY-APP::RUN)")))
-    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
-              "(CL:FLET MY-APP::HELPER :IN MY-APP::RUN)")))
-    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
-              "(COMMON-LISP:LAMBDA (MY-APP::X) :IN MY-APP::RUN)")))
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p
-         "(COMMON-LISP:FLET SB-C::WITH-IT :IN SB-C::%WITH-COMPILATION-UNIT)"))
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p
-         "(COMMON-LISP:LAMBDA () :IN \"repl-eval\")")))
-  (testing "a qualified SETF follows its target"
-    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p
-              "(COMMON-LISP:SETF MY-APP::CUSTOM-SETTER)")))
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "(COMMON-LISP:SETF SB-INT::STORE)")))
-  (testing "a qualified standard signalling function is internal, a user's namesake is not"
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "COMMON-LISP:ERROR"))
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "CL:SIGNAL"))
-    (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p "MY-APP::ERROR"))))
-  (testing "an operator of the same name from another package is not taken for one"
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p
-         "(MY-APP::LABELS MY-APP::VISIT :IN MY-APP::RUN)"))
-    (ok (cl-mcp/src/frame-inspector::%internal-frame-p "(MY-APP::SETF MY-APP::X)"))))
-
 (defun frame-probe-walk (item)
   "Signal from inside a LABELS function, for the local-function frame test.
 VISIT recurses outside tail position and is called twice, so SBCL keeps it a
@@ -515,42 +411,40 @@ function of its own with frames of its own."
                  (cons item (visit (1- depth))))))
     (list (visit 1) (visit 2))))
 
-(defun %filtered-probe-frame-names (package)
-  "Return the frame names capture-error-context keeps with :filter-internal for
-FRAME-PROBE-WALK's error, captured with *PACKAGE* bound to PACKAGE: frame names
-are printed relative to it."
+(defun %probe-frame-names (package)
+  "Return the frame names capture-error-context records for FRAME-PROBE-WALK's
+error, captured with *PACKAGE* bound to PACKAGE: frame names are printed
+relative to it."
   (let ((context nil))
     (block caught
       (handler-bind ((error (lambda (e)
-                              (setf context (capture-error-context
-                                             e :max-frames 30 :filter-internal t))
+                              (setf context (capture-error-context e :max-frames 30))
                               (return-from caught))))
         (let ((*package* package))
           (frame-probe-walk :x))))
     (mapcar (lambda (frame) (getf frame :function))
             (getf context :frames))))
 
-(deftest filtered-backtrace-keeps-the-labels-frame-that-signalled
+(deftest backtrace-starts-at-the-labels-frame-that-signalled
   ;; In a package that does not use COMMON-LISP the names read
-  ;; (COMMON-LISP:LABELS ... :IN ...): the operator is qualified too.
+  ;; (COMMON-LISP:LABELS ... :IN ...): the capture must not depend on that.
   (dolist (package (list (find-package '#:cl-mcp/tests/frame-inspector-test)
                          (or (find-package "CL-MCP-FRAME-PROBE-WITHOUT-CL")
                              (make-package "CL-MCP-FRAME-PROBE-WITHOUT-CL" :use '()))))
-    (testing (format nil "capture-error-context with :filter-internal keeps a user's ~
-LABELS frames, printed relative to ~A" (package-name package))
-      (let* ((names (%filtered-probe-frame-names package))
-             (probe-frames (remove-if-not (lambda (name) (search "FRAME-PROBE-WALK" name))
-                                          names))
+    (testing (format nil "capture-error-context records a user's LABELS frames, ~
+printed relative to ~A" (package-name package))
+      (let* ((names (%probe-frame-names package))
              (visit-frames (remove-if-not
                             (lambda (name)
                               (and (search "LABELS " name)
                                    (search "VISIT :IN " name)))
-                            probe-frames)))
-        (ok probe-frames "the outer function's frame is there")
+                            names)))
+        (ok (find-if (lambda (name) (search "FRAME-PROBE-WALK" name)) names)
+            "the outer function's frame is there")
         (ok (= 2 (length visit-frames))
             "and so are both VISIT frames, the one that signalled included")
-        (ok (search "VISIT :IN " (first probe-frames))
-            "the probe's innermost frame shown is the one that signalled")))))
+        (ok (search "VISIT :IN " (first names))
+            "the first frame is the one that signalled")))))
 
 (defgeneric frame-probe-generic-function-with-a-long-enough-name (x)
   (:documentation "Signals from a :before method, for the frame name tests."))
@@ -565,9 +459,7 @@ LABELS frames, printed relative to ~A" (package-name package))
   (testing "a method frame's name is one line, however the printer is set up"
     ;; The name was printed with the caller's printer settings, so a qualified
     ;; method name wrapped and repl-eval's backtrace header broke over two
-    ;; lines, pushing the source location onto the continuation line.  A
-    ;; break straight after the operator also defeats the
-    ;; "(SB-PCL::FAST-METHOD " prefix %INTERNAL-FRAME-P looks for, and a
+    ;; lines, pushing the source location onto the continuation line, and a
     ;; user's *PRINT-LENGTH* cut the name short.
     (let ((context nil))
       (let ((*print-pretty* t)
@@ -600,8 +492,11 @@ LABELS frames, printed relative to ~A" (package-name package))
         (when method-frame
           (ok (search ":BEFORE (INTEGER))" method-frame)
               "with its qualifier and specializers")
-          (ok (not (cl-mcp/src/frame-inspector::%internal-frame-p method-frame))
-              "and is still recognized as the user's method")))))
+          (ok (not (getf (find method-frame (getf context :frames)
+                               :key (lambda (frame) (getf frame :function))
+                               :test #'equal)
+                         :implementation))
+              "and is not taken for SBCL's own code")))))
   (testing "a lambda's empty lambda list reads as SBCL's debugger writes it"
     ;; Printing with *PRINT-PRETTY* off would show (LAMBDA NIL :IN ...).  The
     ;; frames of this deftest's own body and of Rove's runner are such lambdas.
@@ -664,3 +559,96 @@ LABELS frames, printed relative to ~A" (package-name package))
       (ignore-errors (delete-file path))
       (let ((sym (find-symbol sym-name :cl-user)))
         (when sym (unintern sym :cl-user)))))))
+
+(deftest implementation-name-p-reads-the-name-sbcl-holds
+  ;; The name is SBCL's own object, not its printed text, so no *PACKAGE* or
+  ;; printer setting can change the answer.
+  (flet ((impl-p (name) (cl-mcp/src/frame-inspector::%implementation-name-p name)))
+    (testing "a symbol is SBCL's when its home package is"
+      (ok (impl-p 'sb-kernel::%signal))
+      (ok (impl-p 'sb-int:simple-eval-in-lexenv))
+      (ok (not (impl-p 'car)) "a COMMON-LISP function is the API called, not SBCL's own")
+      (ok (not (impl-p 'frame-probe-walk)))
+      (ok (not (impl-p 'cl-mcp/src/frame-inspector:capture-error-context))
+          "cl-mcp's code is not SBCL's: it is what is debugged when cl-mcp is"))
+    (testing "a compound name names its second element"
+      (ok (not (impl-p '(setf frame-probe-walk))))
+      (ok (impl-p '(setf sb-kernel::%signal)))
+      (ok (not (impl-p '(sb-pcl::fast-method frame-probe-walk (integer)))))
+      (ok (impl-p '(sb-pcl::fast-method sb-kernel::%signal (t))))
+      (ok (not (impl-p '(labels frame-probe-walk :in "repl-eval"))))
+      (ok (impl-p '(flet sb-kernel::%signal :in "SYS:SRC;CODE;WARM-ERROR.LISP"))))
+    (testing "a lambda is its OUTER's, a source file SBCL's on the SYS: host"
+      (ok (not (impl-p '(lambda (x) :in "repl-eval"))))
+      (ok (not (impl-p '(lambda () :in "/home/user/app.lisp"))))
+      (ok (impl-p '(lambda () :in "SYS:SRC;CODE;LIST.LISP")))
+      (ok (not (impl-p '(lambda (x) :in frame-probe-walk))))
+      (ok (impl-p '(lambda () :in sb-impl::%simple-eval)))
+      (ok (not (impl-p '(lambda (x))))))
+    (testing "a bare string is SBCL's name for a foreign or trampoline frame"
+      (ok (impl-p "foreign function: call_into_lisp"))
+      (ok (impl-p "undefined function")))))
+
+(defun %capture-in-handler (thunk &rest options)
+  "Run THUNK and return the capture its first error's handler takes, with OPTIONS."
+  (block caught
+    (handler-bind ((error (lambda (e)
+                            (return-from caught
+                              (apply #'capture-error-context e options)))))
+      (funcall thunk))))
+
+(deftest capture-starts-at-the-frame-that-signalled
+  (testing "the handler's frames and the signalling machinery above it are not captured"
+    (let* ((ctx (%capture-in-handler (lambda () (frame-probe-dolist '(1)))))
+           (first-frame (first (getf ctx :frames))))
+      #+sbcl
+      (progn
+        (ok (search "FRAME-PROBE-DOLIST" (getf first-frame :function))
+            (format nil "the first frame is the one that signalled: ~A"
+                    (getf first-frame :function)))
+        (ok (eql 0 (getf first-frame :index)) "and is numbered 0"))))
+  (testing "a capture after HANDLER-CASE unwound starts below the capture's own frames"
+    (let ((ctx (handler-case (frame-probe-dolist '(1))
+                 (error (e) (capture-error-context e)))))
+      #+sbcl
+      (ok (notany (lambda (frame)
+                    (search "CAPTURE-ERROR-CONTEXT" (getf frame :function)))
+                  (getf ctx :frames))
+          "capture-error-context's own frame is not among them"))))
+
+(deftest capture-ends-at-the-user-code-boundary
+  (testing "the boundary, the evaluator it called and everything below are not captured"
+    (let ((ctx (%capture-in-handler
+                (lambda ()
+                  (cl-mcp/src/frame-inspector::eval-at-user-code-boundary
+                   '(frame-probe-dolist '(1)))))))
+      #+sbcl
+      (progn
+        (ok (equal '("FRAME-PROBE-DOLIST")
+                   (mapcar (lambda (frame)
+                             (let ((name (getf frame :function)))
+                               (subseq name (1+ (or (position #\: name :from-end t) -1)))))
+                           (getf ctx :frames)))
+            (format nil "only the evaluated code's frame is left: ~S"
+                    (mapcar (lambda (frame) (getf frame :function)) (getf ctx :frames))))
+        (ok (not (getf ctx :frames-truncated)))
+        (ok (eql 1 (getf ctx :frames-total))))))
+  (testing "past MAX-FRAMES the outermost frame of the code is still recorded"
+    (labels ((deep (n) (if (zerop n) (error "deep bottom") (1+ (deep (1- n))))))
+      (let* ((ctx (%capture-in-handler
+                   (lambda ()
+                     (cl-mcp/src/frame-inspector::eval-at-user-code-boundary
+                      `(funcall ,(lambda () (deep 30)))))
+                   :max-frames 5))
+             (frames (getf ctx :frames)))
+        #+sbcl
+        (progn
+          (ok (= 5 (length frames)) "MAX-FRAMES frames are recorded")
+          (ok (getf ctx :frames-truncated) "and the capture says the code held more")
+          (ok (< 5 (getf ctx :frames-total)) "counting them")
+          (ok (= (1- (getf ctx :frames-total)) (getf (car (last frames)) :index))
+              "the last one recorded is the code's outermost")
+          ;; The closure calls DEEP in tail position, so DEEP's first call is
+          ;; the outermost frame of the code.
+          (ok (equal "30" (getf (first (getf (car (last frames)) :locals)) :value))
+              (format nil "the first call, N = 30: ~S" (car (last frames)))))))))

@@ -251,10 +251,8 @@ Input schema (JSON):
   of the top N frames (see `error_context` below)
 - `locals_preview_max_depth` (integer, default `1`) / `locals_preview_max_elements` (integer,
   default `5`): bound those expansions
-- `locals_preview_skip_internal` (boolean, default `true`): skip cl-mcp, SBCL, ASDF and other
-  infrastructure frames when counting the N frames. A local function or lambda counts as part
-  of the function it is written in (SBCL names it `(LABELS VISIT :IN OUTER)`), so one inside
-  your own function is your frame, here and in the backtrace
+- `locals_preview_skip_internal` (boolean, default `true`): skip SBCL's own frames (those
+  `error_context` marks `implementation`) when counting the N frames
 
 The printed value and captured output preserve Unicode text, including characters such as 😀.
 The display filter strips ANSI escape sequences, DEL and C0 controls other than tab, newline
@@ -289,17 +287,27 @@ Output fields:
   changed, is unknown. An expression that merely returns `:timeout` is not an error.
 
 - `error_context` (object|null): when `repl-eval` returns a structured in-process error result,
-  contains `condition_type`, `message`, `restarts`, and `frames` with local variable inspection
-  (your frames only, or every frame when none is yours). The content text carries the same thing
-  for up to five of your frames: the first four and the outermost (a recursive `labels` helper
-  would otherwise fill the list and hide the function you called), with a line counting those
-  left out between them. At most 20 frames are captured, the capture's own five among them; when
-  a frame of yours lay deeper the line says so, and the frame after it is the outermost
-  captured, not the function you called. The text is cut at `max_output_length` from its end, so
-  with a small budget that line and the outermost frame go first. Each displayed frame is
-  followed by its locals as `NAME = VALUE`, with `[object-id: ID]` on a non-primitive one,
-  capped at 10 per frame. Two variables of one name in a frame -- an inner binding shadowing an
-  argument, or a `labels` helper's variables merged into its caller -- are named as SBCL's
+  contains `condition_type`, `message`, `restarts`, and `frames` with local variable inspection.
+  `frames` holds the frames of the code you evaluated: from the one that signalled down to the
+  form itself. Which frames those are is decided by where they stand, not by whose code they
+  look like: above them, the frames of the handler that captured the error and of the
+  signalling machinery (`error`, `SB-KERNEL::%SIGNAL`); below them, the evaluator `repl-eval`
+  called and everything under it. Neither is listed, and every frame between is -- a standard
+  function such as `mapcar`, a library's, cl-mcp's own when you call it. A frame of SBCL's own
+  code carries `implementation: true`. When the form itself signalled, as `(error "x")` typed
+  at the top level does, there is no frame between, and the text says `Backtrace: none -- the
+  form evaluated signalled it itself`. At most 20 frames are recorded: when there were more,
+  the first 19 and the outermost -- the call you made -- are, `frames_truncated` is true and
+  `frames_total` says how many there were. Each frame's `index` is its place among them, 0
+  the innermost. The content text lists the same frames grouped: a run of three or more calls
+  of one function as its first and last calls with a line counting those between, consecutive
+  SBCL frames as one line of their names without their locals, and frames not recorded as a
+  line counting them. Up to five such entries are shown, the first four and the outermost,
+  with a line counting the frames of those left out between them. The text is cut at
+  `max_output_length` from its end, so with a small budget that line and the outermost frame
+  go first. Each displayed frame (not SBCL's) is followed by its locals as `NAME = VALUE`,
+  with `[object-id: ID]` on a non-primitive one, capped at 10 per frame.
+  Two variables of one name in a frame -- an inner binding shadowing an argument, or a `labels` helper's variables merged into its caller -- are named as SBCL's
   debugger names them, `PATTERN` and `PATTERN#1`, here and in the JSON `name`; a variable the
   compiler introduced or renamed, such as the key `case` binds, is written with its package,
   `SB-C::X`, and a macro's gensym (`dolist`'s list) as `#:LIST0`. `locals_preview_frames`
