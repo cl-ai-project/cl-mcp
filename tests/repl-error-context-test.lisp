@@ -314,7 +314,9 @@
     (ok (search "3: MAPCAR" text) "and a standard function is shown as itself")
     (ok (eq t (gethash "implementation" (aref json 1)))
         "error_context.frames marks SBCL's frames")
-    (ok (gethash "locals" (aref json 1)) "and keeps their locals")))
+    (ok (find "SB-IMPL::LISTS" (gethash "locals" (aref json 1))
+              :key (lambda (local) (gethash "name" local)) :test #'equal)
+        "and keeps their locals")))
 
 (deftest backtrace-text-counts-a-real-recursion-truthfully
   ;; Through repl-eval's own path: every stack ends in the thread's frames, so
@@ -581,6 +583,17 @@ budget pressure a real response is under."
           (ok (search "Backtrace: none -- the form evaluated signalled it itself" text)
               (format nil "the text says why there is no frame: ~A" text))
           (ok (zerop (length json-frames)) "error_context.frames is empty"))))))
+
+(deftest backtrace-of-a-top-level-macrolet-is-the-forms-alone
+  (testing "the evaluator's MACROLET frames are below the code, like its other frames"
+    (dolist (code '("(macrolet ((m () '(error \"in macrolet\"))) (m))"
+                    "(symbol-macrolet ((s (error \"in symbol-macrolet\"))) s)"))
+      (let ((error-context (nth-value 4 (repl-eval code :package "CL-USER"))))
+        #+sbcl
+        (ok (zerop (getf error-context :frames-total))
+            (format nil "~A leaves no frame: ~S" code
+                    (mapcar (lambda (frame) (getf frame :function))
+                            (getf error-context :frames))))))))
 
 (deftest backtrace-shows-a-cl-mcp-frame-like-any-other
   ;; cl-mcp is developed with its own tools: a cl-mcp function called from

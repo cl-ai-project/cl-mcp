@@ -560,6 +560,7 @@ printed relative to ~A" (package-name package))
       (let ((sym (find-symbol sym-name :cl-user)))
         (when sym (unintern sym :cl-user)))))))
 
+#+sbcl
 (deftest implementation-name-p-reads-the-name-sbcl-holds
   ;; The name is SBCL's own object, not its printed text, so no *PACKAGE* or
   ;; printer setting can change the answer.
@@ -701,6 +702,7 @@ printed relative to ~A" (package-name package))
               :key (lambda (local) (getf local :name)) :test #'equal)
         "and keeps its locals")))
 
+#+sbcl
 (deftest stack-window-is-decided-by-position
   (flet ((window (&rest names)
            (multiple-value-list
