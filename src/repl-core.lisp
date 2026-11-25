@@ -17,7 +17,9 @@
   (:import-from #:cl-mcp/src/utils/bounded-stream
                 #:make-bounded-output-stream
                 #:bounded-output-string)
-  (:import-from #:cl-mcp/src/frame-inspector #:capture-error-context)
+  (:import-from #:cl-mcp/src/frame-inspector
+                #:capture-error-context
+                #:eval-at-user-code-boundary)
   (:import-from #:cl-mcp/src/utils/sanitize
                 #:sanitize-for-json)
   (:import-from #:cl-mcp/src/utils/nesting
@@ -227,7 +229,9 @@ evaluation complete, and COMPLETED-P says so."
                                        (funcall on-error e)
                                        (return-from evaluation)))))
                (dolist (form forms)
-                 (setf last-value (eval form)))
+                 ;; The boundary's frame is where a backtrace of an error in
+                 ;; FORM ends: everything below it is this evaluator's.
+                 (setf last-value (eval-at-user-code-boundary form)))
                (setf completed t)))))))
     (values last-value completed)))
 
@@ -515,7 +519,7 @@ Options:
 - LOCALS-PREVIEW-FRAMES: number of top frames to include local variable previews (default: 0).
 - LOCALS-PREVIEW-MAX-DEPTH: max nesting depth for local previews (default: 1).
 - LOCALS-PREVIEW-MAX-ELEMENTS: max elements per collection in local previews (default: 5).
-- LOCALS-PREVIEW-SKIP-INTERNAL: when T (default), skip internal frames when counting for preview."
+- LOCALS-PREVIEW-SKIP-INTERNAL: when T (default), skip SBCL's own frames when counting for preview."
   (let* ((effective-max-output-length
            (or max-output-length *default-max-output-length*))
          (*request-debugger-config*

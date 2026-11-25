@@ -576,6 +576,14 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
     (setf (gethash :key my-hash) my-list)
     (error "test error without debug 3")))
 
+(defun %test-assert-with-locals ()
+  "Test function whose error SBCL's ASSERT-ERROR signals: an SBCL frame then
+lies above this one, the first frame of the backtrace."
+  (declare (optimize (debug 3)))
+  (let ((my-hash (make-hash-table)))
+    (setf (gethash :key my-hash) (list 1 2 3))
+    (assert (zerop (hash-table-count my-hash)))))
+
 (deftest repl-eval-locals-preview-without-debug3-safe
   (testing "locals preview does not fail when debug 3 is not enabled"
     (multiple-value-bind (printed raw stdout stderr error-context)
@@ -637,20 +645,22 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
 (deftest repl-eval-locals-preview-only-top-frames
   (testing "only top N frames get preview when counting all frames"
     (multiple-value-bind (printed raw stdout stderr error-context)
-        ;; Set to 2 - only frames 0 and 1 should get preview
-        ;; Explicitly disable skip-internal to test raw frame counting
-        (repl-eval "(cl-mcp/tests/repl-test::%test-error-with-locals)"
-                   :locals-preview-frames 2
+        ;; One preview, counted over every frame: SBCL's ASSERT-ERROR, above
+        ;; the test function, takes it.
+        (repl-eval "(cl-mcp/tests/repl-test::%test-assert-with-locals)"
+                   :locals-preview-frames 1
                    :locals-preview-skip-internal nil)
       (declare (ignore printed raw stdout stderr))
       (ok error-context "should have error context")
       (let ((frame (find-if (lambda (f)
-                              (search "TEST-ERROR-WITH-LOCALS"
+                              (search "TEST-ASSERT-WITH-LOCALS"
                                       (getf f :function)))
                             (getf error-context :frames))))
         (ok frame "should find test function frame")
-        (ok (> (getf frame :index) 2)
-            "test function should be at index > 2 (buried under infrastructure)")
+        (ok (getf (first (getf error-context :frames)) :implementation)
+            "an SBCL frame lies above it")
+        (ok (and frame (> (getf frame :index) 0))
+            "so the test function is not the first frame")
         (let ((locals (getf frame :locals)))
           (ok locals "frame should have locals (requires debug 3)")
           (let ((local (first locals)))
@@ -682,38 +692,36 @@ Checks for control chars (0-31 except tab/newline/CR) and DEL (127)."
 
 (deftest repl-eval-locals-preview-skip-internal-comparison
   (testing "skip-internal=true vs false should differ for same preview-frames"
-    ;; Call with skip-internal=false (frames=2 won't reach our function)
+    ;; One preview each.  Counting every frame, SBCL's ASSERT-ERROR above the
+    ;; test function takes it; skipping SBCL's frames, the test function does.
     (multiple-value-bind (printed-1 raw-1 stdout-1 stderr-1 ctx-1)
-        (repl-eval "(cl-mcp/tests/repl-test::%test-error-with-locals)"
-                   :locals-preview-frames 2
+        (repl-eval "(cl-mcp/tests/repl-test::%test-assert-with-locals)"
+                   :locals-preview-frames 1
                    :locals-preview-skip-internal nil)
       (declare (ignore printed-1 raw-1 stdout-1 stderr-1))
-      ;; Call with skip-internal=true (frames=2 SHOULD reach our function)
       (multiple-value-bind (printed-2 raw-2 stdout-2 stderr-2 ctx-2)
-          (repl-eval "(cl-mcp/tests/repl-test::%test-error-with-locals)"
-                     :locals-preview-frames 2
+          (repl-eval "(cl-mcp/tests/repl-test::%test-assert-with-locals)"
+                     :locals-preview-frames 1
                      :locals-preview-skip-internal t)
         (declare (ignore printed-2 raw-2 stdout-2 stderr-2))
         (let ((frame-1 (find-if
                         (lambda (f)
-                          (search "TEST-ERROR-WITH-LOCALS" (getf f :function)))
+                          (search "TEST-ASSERT-WITH-LOCALS" (getf f :function)))
                         (getf ctx-1 :frames)))
               (frame-2 (find-if
                         (lambda (f)
-                          (search "TEST-ERROR-WITH-LOCALS" (getf f :function)))
+                          (search "TEST-ASSERT-WITH-LOCALS" (getf f :function)))
                         (getf ctx-2 :frames))))
           (ok frame-1 "should find test function in ctx-1")
           (ok frame-2 "should find test function in ctx-2")
-          (ok (> (getf frame-1 :index) 2)
-              "test function should be at index > 2")
+          (ok (> (getf frame-1 :index) 0)
+              "an SBCL frame lies above the test function")
           (let ((locals-1 (getf frame-1 :locals))
                 (locals-2 (getf frame-2 :locals)))
             (ok locals-1 "frame-1 should have locals")
             (ok locals-2 "frame-2 should have locals")
-            ;; Without skip-internal, no preview (index > 2)
             (ok (null (getf (first locals-1) :preview))
                 "without skip-internal, user frame should NOT have preview")
-            ;; With skip-internal, should have preview
             (ok (getf (first locals-2) :preview)
                 "with skip-internal, user frame SHOULD have preview")))))))
 

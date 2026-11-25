@@ -44,6 +44,34 @@
                 :key (lambda (restart) (getf restart :name))
                 :test #'search)))))
 
+(defun repl-break-frame ()
+  "Call BREAK from a user frame, the way code stops to be looked at."
+  (declare (optimize (debug 3) (speed 0)))
+  (break "repl break ~A" :here)
+  :resumed)
+
+(deftest backtrace-of-a-break-starts-at-the-caller
+  (testing "BREAK's own frames are signalling machinery, like ERROR's"
+    (let ((*request-debugger-boundary-active* t))
+      (multiple-value-bind (printed raw stdout stderr error-context)
+          (repl-eval "(repl-break-frame)"
+                     :package "CL-MCP/TESTS/REPL-ERROR-CONTEXT-TEST"
+                     :timeout-seconds 2)
+        (declare (ignore printed raw stdout stderr))
+        #+sbcl
+        (let ((names (mapcar (lambda (frame) (or (getf frame :function) ""))
+                             (getf error-context :frames))))
+          (ok (search "repl break HERE" (getf error-context :message))
+              "the break's message is kept")
+          (ok (and names (search "REPL-BREAK-FRAME" (first names)))
+              (format nil "the frame that called BREAK is the first: ~S" names))
+          (ok (= 1 (length names))
+              (format nil "and, called as the form, the only one: ~S" names))
+          (ok (notany (lambda (name) (search "BREAK" name :test #'char-equal))
+                      (remove-if (lambda (name) (search "REPL-BREAK-FRAME" name))
+                                 names))
+              (format nil "neither BREAK nor SB-INT:%BREAK is listed: ~S" names)))))))
+
 (deftest repl-debugger-output-keeps-bounds-and-sanitization
   (let ((*request-debugger-boundary-active* t))
     (dolist (limit '(4 0))
@@ -193,9 +221,9 @@
       (ok (eq raw :timeout))
       (ok (null error-context)))))
 
-(deftest backtrace-falls-back-when-all-frames-internal
+(deftest backtrace-text-shows-a-window-of-sbcl-frames-alone
   (testing
-   "build-eval-response shows backtrace even when every frame is internal"
+   "build-eval-response shows the backtrace when every frame is SBCL's"
    (let* ((ctx
            (list :error t
                  :condition-type "SIMPLE-ERROR"
@@ -213,52 +241,82 @@
                   (gethash "text" (aref content 0)))))
      (ok text)
      (ok (search "Backtrace:" text)
-         "Backtrace header appears despite all frames being internal")
+         "the Backtrace header appears")
      (ok (search "SB-KERNEL::ERROR" text)
-         "fallback includes the first would-be-filtered frame"))))
+         "and names the first frame"))))
 
 (deftest backtrace-text-says-what-it-leaves-out-and-keeps-the-outermost-frame
-  ;; Five user frames were listed and the text ended there, with no word of
-  ;; the rest.  A recursive LABELS fills all five, so the function the user
-  ;; called -- the outermost user frame -- never appeared.
-  (flet ((context (truncated)
+  ;; Five frames were listed and the text ended there, with no word of the
+  ;; rest.  A recursive LABELS fills all five, so the function the user called
+  ;; -- the outermost frame -- never appeared.
+  (testing "a recursion is one entry: its first and last calls, and how many between"
+    (let ((text (%response-text
+                 (list :error t :condition-type "SIMPLE-ERROR" :message "bottom"
+                       :restarts nil :frames-total 10
+                       :frames (append
+                                (loop for index from 0 below 9
+                                      collect (list :index index
+                                                    :function "(LABELS APP::DOWN :IN APP::OUTER)"
+                                                    :locals nil))
+                                (list (list :index 9 :function "APP::OUTER" :locals nil)))))))
+      (ok (search "0: (LABELS APP::DOWN" text) (format nil "the innermost call: ~A" text))
+      (ok (search "1-7: 7 more calls of the same function" text) "the ones between, counted")
+      (ok (search "8: (LABELS APP::DOWN" text) "the outermost call")
+      (ok (search "9: APP::OUTER" text) "and the function the user called")))
+  (flet ((context (truncated total)
            (list :error t :condition-type "SIMPLE-ERROR" :message "bottom"
-                 :restarts nil :frames-truncated truncated
+                 :restarts nil :frames-truncated truncated :frames-total total
                  :frames (append
-                          (loop for index from 1 to 9
+                          (loop for index from 0 below 7
                                 collect (list :index index
-                                              :function "(LABELS APP::DOWN :IN APP::OUTER)"
+                                              :function (format nil "APP::F~D" index)
                                               :locals nil))
-                          (list (list :index 10 :function "APP::OUTER" :locals nil)
-                                (list :index 11 :function "SB-INT:SIMPLE-EVAL-IN-LEXENV"
-                                      :locals nil))))))
-    (let ((text (cl-mcp/tests/repl-error-context-test::%response-text (context nil))))
-      (ok (search "10: APP::OUTER" text)
-          (format nil "the outermost user frame is shown: ~A" text))
-      (ok (search "5 more of your frames left out here" text)
-          "the ones left out are counted")
-      (ok (search "error_context.frames has all 10 of them" text)
-          "with where to find them, counted as that field holds them: the user's")
-      (ok (null (search "  5: " text)) "the middle of the run is what is left out"))
-    (let ((text (cl-mcp/tests/repl-error-context-test::%response-text (context t))))
-      (ok (null (search "has all" text))
-          "a capture its cap cut short does not claim to hold them all")
-      (ok (search "outermost captured" text)
-          (format nil "and says the last frame shown is the outermost captured: ~A" text)))))
+                          (list (list :index (1- total)
+                                      :function "APP::OUTER" :locals nil))))))
+    (testing "past the limit the outermost frame is kept and the rest counted"
+      (let ((text (%response-text (context nil 8))))
+        (ok (search "7: APP::OUTER" text)
+            (format nil "the outermost frame is shown: ~A" text))
+        (ok (search "3 more frames left out here" text) "the ones left out are counted")
+        (ok (search "error_context.frames has all 8 of them" text)
+            "with where to find them")
+        (ok (null (search "APP::F4" text)) "the middle of the run is what is left out")))
+    (testing "a capture its cap cut short says how many the stack held"
+      (let ((text (%response-text (context t 30))))
+        (ok (search "29: APP::OUTER" text)
+            (format nil "the outermost frame is still shown: ~A" text))
+        (ok (search "error_context.frames has 8 of the 30" text)
+            "and the count says what was not recorded")))))
 
-(deftest backtrace-text-falls-back-to-the-same-limit-without-your-frames
-  ;; With no user frame the first frames are shown, as many as the limit, and
-  ;; a count of the rest does not call them yours.
-  (let* ((frames (loop for index from 0 below 8
-                       collect (list :index index :function (format nil "SB-INT::F~D" index)
-                                     :locals nil)))
-         (text (let ((cl-mcp/src/tools/response-builders::*backtrace-frames-shown* 3))
-                 (cl-mcp/tests/repl-error-context-test::%response-text
-                  (list :error t :condition-type "SIMPLE-ERROR" :message "x"
-                        :restarts nil :frames frames)))))
-    (ok (search "SB-INT::F2" text) "the first frames are shown")
-    (ok (null (search "SB-INT::F3" text)) "up to the limit")
-    (ok (null (search "of your frames" text)) "and none is called yours")))
+(deftest backtrace-text-names-sbcl-frames-without-their-locals
+  ;; SBCL's own frames are named, so nothing is hidden, but their locals --
+  ;; SBCL's internals -- stay in error_context.frames.
+  (let* ((context
+           (list :error t :condition-type "SIMPLE-ERROR" :message "x"
+                 :restarts nil :frames-total 4
+                 :frames (list (list :index 0 :function "(LAMBDA (X) :IN \"repl-eval\")"
+                                     :locals (list (list :name "X" :value "41")))
+                               (list :index 1 :function "SB-IMPL::MAP1" :implementation t
+                                     :locals (list (list :name "SB-IMPL::LISTS"
+                                                         :value "((41))")))
+                               (list :index 2 :function "SB-IMPL::OTHER" :implementation t
+                                     :locals nil)
+                               (list :index 3 :function "MAPCAR" :locals nil))))
+         (text (%response-text context))
+         (json (gethash "frames"
+                        (gethash "error_context"
+                                 (cl-mcp/src/tools/response-builders:build-eval-response
+                                  "" nil "" "" context)))))
+    (ok (search "1-2: SB-IMPL::MAP1, SB-IMPL::OTHER (SBCL)" text)
+        (format nil "consecutive SBCL frames share one line: ~A" text))
+    (ok (null (search "SB-IMPL::LISTS" text)) "without their locals")
+    (ok (search "X = 41" text) "the user's frames keep theirs")
+    (ok (search "3: MAPCAR" text) "and a standard function is shown as itself")
+    (ok (eq t (gethash "implementation" (aref json 1)))
+        "error_context.frames marks SBCL's frames")
+    (ok (find "SB-IMPL::LISTS" (gethash "locals" (aref json 1))
+              :key (lambda (local) (gethash "name" local)) :test #'equal)
+        "and keeps their locals")))
 
 (deftest backtrace-text-counts-a-real-recursion-truthfully
   ;; Through repl-eval's own path: every stack ends in the thread's frames, so
@@ -281,11 +339,15 @@
                                       printed value stdout stderr context))
                             0)))))
     (let ((text (text-for 8)))
-      (ok (search "has all" text) (format nil "a walk that reached the user's outermost: ~A" text))
-      (ok (search "REC-PROBE-OUTER (repl-eval)" text) "which is shown"))
+      (ok (search "1-7: 7 more calls of the same function" text)
+          (format nil "the recursion is counted: ~A" text))
+      (ok (search "9: REC-PROBE-OUTER (repl-eval)" text) "and the function called is shown")
+      (ok (search "N = 8" text) "with its locals"))
     (let ((text (text-for 40)))
-      (ok (search "outermost captured" text)
-          (format nil "a walk the cap cut short says so: ~A" text)))))
+      (ok (search "41: REC-PROBE-OUTER (repl-eval)" text)
+          (format nil "past the cap the function called is still shown: ~A" text))
+      (ok (search "frames not recorded here" text) "where frames were not recorded is said")
+      (ok (search "error_context.frames has 20 of the 42" text) "and how many"))))
 
 (defun %response-text (error-context &key max-output-length)
   "Return the content text BUILD-EVAL-RESPONSE renders for ERROR-CONTEXT.
@@ -453,3 +515,200 @@ budget pressure a real response is under."
       (ok (search "MY-APP::CALLER" text)
           "and so is the caller frame, which is what used to be lost")
       (ok (search "N = 3000" text) "with its own locals"))))
+
+(deftest backtrace-of-a-top-level-form-starts-at-the-form
+  (testing "a top-level form's error shows the form's frame first, with its locals preview"
+    (multiple-value-bind (printed raw stdout stderr error-context)
+        (repl-eval "(locally (declare (optimize (debug 3)))
+                      (let ((sample-ht (make-hash-table :test #'equal)))
+                        (setf (gethash \"status\" sample-ht) :testing)
+                        (error \"top-level boom ~A\" sample-ht)))"
+                   :package "CL-USER"
+                   :locals-preview-frames 2)
+      (let* ((resp (cl-mcp/src/tools/response-builders:build-eval-response
+                    printed raw stdout stderr error-context))
+             (text (gethash "text" (aref (gethash "content" resp) 0)))
+             (json-ctx (gethash "error_context" resp)))
+        #+sbcl
+        (progn
+          (ok (search "0: (LAMBDA () :IN \"repl-eval\")" text)
+              (format nil "top-level repl-eval frame is the first shown: ~A" text))
+          (ok (search "SAMPLE-HT" text)
+              (format nil "top-level local variable is shown: ~A" text))
+          (ok (search "\"status\" => :TESTING" text)
+              (format nil "top-level local preview is expanded: ~A" text))
+          (ok (null (search "%COLLECT-WINDOW" text))
+              "capture harness frame is omitted from text")
+          (ok (null (search "CAPTURE-ERROR-CONTEXT" text))
+              "capture-error-context frame is omitted from text")
+          (ok (null (search "NOTE-ERROR" text))
+              "note-error frame is omitted from text")
+          (ok (null (search "%EVAL-FORMS" text))
+              "and so is the evaluator below the form")
+          (ok (= 1 (length (gethash "frames" json-ctx)))
+              "error_context.frames holds the form's frame alone"))))))
+
+(deftest backtrace-of-a-compile-error-shows-the-form-alone
+  (testing "a top-level COMPILED-PROGRAM-ERROR shows the form's frame and nothing of cl-mcp's"
+    (multiple-value-bind (printed raw stdout stderr error-context)
+        (repl-eval "(return-from nil 1)" :package "CL-USER")
+      (let* ((resp (cl-mcp/src/tools/response-builders:build-eval-response
+                    printed raw stdout stderr error-context))
+             (text (gethash "text" (aref (gethash "content" resp) 0)))
+             (json-ctx (gethash "error_context" resp))
+             (json-frames (gethash "frames" json-ctx)))
+        #+sbcl
+        (progn
+          (ok (search "0: (LAMBDA () :IN \"repl-eval\")" text)
+              (format nil "the form's frame is shown: ~A" text))
+          (ok (null (search "%COLLECT-WINDOW" text))
+              "does not dump capture harness frames")
+          (ok (null (search "PREVIEWED" text))
+              "does not dump capture harness locals")
+          (ok (and (vectorp json-frames) (= 1 (length json-frames)))
+              "error_context.frames holds that frame alone")
+          (ok (null (gethash "frames_truncated" json-ctx))
+              "and nothing was cut"))))))
+
+(deftest backtrace-says-so-when-the-form-itself-signalled
+  (testing "an ERROR called by the evaluated form directly leaves no frame of the code"
+    (multiple-value-bind (printed raw stdout stderr error-context)
+        (repl-eval "(error \"plain ~A\" 1)" :package "CL-USER")
+      (let* ((resp (cl-mcp/src/tools/response-builders:build-eval-response
+                    printed raw stdout stderr error-context))
+             (text (gethash "text" (aref (gethash "content" resp) 0)))
+             (json-frames (gethash "frames" (gethash "error_context" resp))))
+        #+sbcl
+        (progn
+          (ok (search "Backtrace: none -- the form evaluated signalled it itself" text)
+              (format nil "the text says why there is no frame: ~A" text))
+          (ok (zerop (length json-frames)) "error_context.frames is empty"))))))
+
+(deftest backtrace-of-a-top-level-macrolet-is-the-forms-alone
+  (testing "the evaluator's MACROLET frames are below the code, like its other frames"
+    (dolist (code '("(macrolet ((m () '(error \"in macrolet\"))) (m))"
+                    "(symbol-macrolet ((s (error \"in symbol-macrolet\"))) s)"))
+      (let ((error-context (nth-value 4 (repl-eval code :package "CL-USER"))))
+        #+sbcl
+        (ok (zerop (getf error-context :frames-total))
+            (format nil "~A leaves no frame: ~S" code
+                    (mapcar (lambda (frame) (getf frame :function))
+                            (getf error-context :frames))))))))
+
+(deftest backtrace-shows-a-cl-mcp-frame-like-any-other
+  ;; cl-mcp is developed with its own tools: a cl-mcp function called from
+  ;; repl-eval is the code being debugged, and a client renders only the text.
+  (testing "a cl-mcp function called in repl-eval is shown with its locals"
+    (let ((text (multiple-value-bind (printed raw stdout stderr context)
+                    (repl-eval "(cl-mcp/src/frame-inspector::%sbcl-package-p 5)"
+                               :package "CL-USER")
+                  (gethash "text"
+                           (aref (gethash "content"
+                                          (cl-mcp/src/tools/response-builders:build-eval-response
+                                           printed raw stdout stderr context))
+                                 0)))))
+      #+sbcl
+      (progn
+        (ok (search "CL-MCP/SRC/FRAME-INSPECTOR::%SBCL-PACKAGE-P" text)
+            (format nil "the cl-mcp function's frame is shown: ~A" text))
+        (ok (search "PACKAGE = 5" text) "with its locals")
+        (ok (null (search "%EVAL-FORMS" text)) "and the evaluator below it is not")))))
+
+(deftest backtrace-keeps-the-frames-under-a-users-own-eval
+  ;; Only the evaluator frames next to the boundary are repl-eval's; a user's
+  ;; function that calls EVAL itself is the user's code, and so is what it ran.
+  (testing "a function that calls EVAL, and the function EVAL ran, are both shown"
+    (let ((text (multiple-value-bind (printed raw stdout stderr context)
+                    (repl-eval "(defun %eval-probe-inner (x)
+  (declare (optimize (debug 3)))
+  (error \"inner eval boom ~A\" x))
+(defun %eval-probe-runner (form)
+  (declare (optimize (debug 3)))
+  (list (eval form)))
+(%eval-probe-runner '(%eval-probe-inner 3))"
+                               :package "CL-USER")
+                  (gethash "text"
+                           (aref (gethash "content"
+                                          (cl-mcp/src/tools/response-builders:build-eval-response
+                                           printed raw stdout stderr context))
+                                 0)))))
+      #+sbcl
+      (progn
+        (ok (search "%EVAL-PROBE-INNER" text)
+            (format nil "the function EVAL ran is shown: ~A" text))
+        (ok (search "%EVAL-PROBE-RUNNER" text) "and so is the user's function that called EVAL")
+        (ok (null (search "%EVAL-FORMS" text)) "repl-eval's own evaluator is not")))))
+
+(deftest backtrace-skip-internal-false-still-lists-your-frames
+  ;; locals_preview_skip_internal only says which frames are counted for a
+  ;; preview.  It once also turned the filtering off, and the text then listed
+  ;; the capture's own five frames and stopped before the user's.
+  (testing "locals_preview_skip_internal=nil changes preview counting, not which frames are shown"
+    (multiple-value-bind (printed raw stdout stderr error-context)
+        (repl-eval "(defun %skip-internal-probe-inner (x)
+  (declare (optimize (debug 3)))
+  (let ((doubled (* x 2)))
+    (error \"inner ~A\" doubled)))
+(defun %skip-internal-probe-outer (n)
+  (declare (optimize (debug 3)))
+  (%skip-internal-probe-inner (1+ n)))
+(%skip-internal-probe-outer 1)"
+                   :package "CL-USER"
+                   :locals-preview-frames 5
+                   :locals-preview-skip-internal nil)
+      (let* ((resp (cl-mcp/src/tools/response-builders:build-eval-response
+                    printed raw stdout stderr error-context))
+             (text (gethash "text" (aref (gethash "content" resp) 0)))
+             (frames (gethash "frames" (gethash "error_context" resp))))
+        #+sbcl
+        (progn
+          (ok (search "%SKIP-INTERNAL-PROBE-INNER" text)
+              (format nil "the frame that signalled is in the text: ~A" text))
+          (ok (search "DOUBLED = 4" text) "with its locals")
+          (ok (search "%SKIP-INTERNAL-PROBE-OUTER" text) "and so is its caller")
+          (ok (null (search "%COLLECT-WINDOW" text)) "the capture's frames are not")
+          (ok (null (search "HANDLER-CLUSTERS" text)) "nor the signalling plumbing's locals")
+          (ok (search "%SKIP-INTERNAL-PROBE-INNER" (gethash "function" (aref frames 0)))
+              "error_context.frames starts at the user's frame too"))))))
+
+(deftest backtrace-keeps-the-outermost-of-a-top-level-labels
+  ;; A LABELS written in repl-eval is the user's code as much as a defun is: a
+  ;; recursion in it fills the first frames, so the outermost is kept and those
+  ;; between are counted, as they are for a named function.
+  (testing "a top-level recursive LABELS keeps its outermost call and says what it left out"
+    (multiple-value-bind (printed raw stdout stderr error-context)
+        (repl-eval "(locally (declare (optimize (debug 3)))
+  (labels ((walk (n) (if (zerop n) (error \"bottom\") (walk (1- n)))))
+    (walk 8)))"
+                   :package "CL-USER")
+      (let ((text (gethash "text"
+                           (aref (gethash "content"
+                                          (cl-mcp/src/tools/response-builders:build-eval-response
+                                           printed raw stdout stderr error-context))
+                                 0))))
+        #+sbcl
+        (progn
+          (ok (search "N = 0" text) (format nil "the innermost call is shown: ~A" text))
+          (ok (search "N = 8" text) "and so is the outermost")
+          (ok (search "1-7: 7 more calls of the same function" text)
+              "with the ones between counted"))))))
+
+(deftest backtrace-keeps-a-top-level-lambda-under-a-standard-function
+  ;; A CL function such as MAPCAR counts as a frame of the user's, and once
+  ;; there was one the lambda written in repl-eval -- the code that signalled,
+  ;; holding the local that explains it -- was dropped as internal.
+  (testing "a lambda written in repl-eval is shown with its locals beside MAPCAR"
+    (multiple-value-bind (printed raw stdout stderr error-context)
+        (repl-eval "(mapcar (lambda (x) (declare (optimize (debug 3))) (error \"m ~A\" x)) '(41))"
+                   :package "CL-USER")
+      (let ((text (gethash "text"
+                           (aref (gethash "content"
+                                          (cl-mcp/src/tools/response-builders:build-eval-response
+                                           printed raw stdout stderr error-context))
+                                 0))))
+        #+sbcl
+        (progn
+          (ok (search "(LAMBDA (X) :IN \"repl-eval\")" text)
+              (format nil "the lambda's frame is shown: ~A" text))
+          (ok (search "X = 41" text) "with its local")
+          (ok (search "MAPCAR" text) "and the standard function stays"))))))

@@ -590,10 +590,9 @@
                                           (princ-to-string secondary)
                                           (%context-state *request-debugger-context*)))
                               (funcall callback secondary))
-                            ;; Two user frames: this lambda, which runs on the
-                            ;; stack above the debugger and is this test's own
-                            ;; code, then the frame whose OBJECT is previewed.
-                            :max-frames 2 :filter-internal t :locals-preview-frames 2
+                            ;; The capture starts at the code that entered the
+                            ;; debugger, the frame whose OBJECT is previewed.
+                            :max-frames 2 :locals-preview-frames 2
                             :preview-max-depth 2)))
            (%assert-deadline-race (lambda () (boundary-preview-user-frame object)) entered)
            (ok (equal '(simple-error "secondary preview unwind failure" :deadline-unwinding)

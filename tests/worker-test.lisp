@@ -669,14 +669,14 @@ Cleans up server and socket on exit. AUTHENTICATED selects post-auth tests."
 (deftest worker-eval-locals-preview-frames
   (testing "locals_preview_frames adds preview to frame locals"
     (with-handler-server (stream :authenticated t)
-      ;; Use locals_preview_skip_internal=false so infrastructure frames
-      ;; (which have non-primitive locals like condition objects) also
-      ;; get previews.  SBCL does not reliably preserve locals for
-      ;; functions defined/called via eval, so relying on user-frame
-      ;; locals is fragile.  This still validates the full preview
-      ;; pipeline end-to-end through JSON.
+      ;; The error is signalled under MAPCAR, so the backtrace holds SBCL's
+      ;; MAP1, whose list locals are non-primitive; with
+      ;; locals_preview_skip_internal=false they get previews.  SBCL does not
+      ;; reliably preserve locals for functions defined via eval, so a
+      ;; standard function's frame is the dependable one.  This validates the
+      ;; preview pipeline end-to-end through JSON.
       (let ((params (make-hash-table :test 'equal)))
-        (setf (gethash "code" params) "(error \"locals-preview-test\")"
+        (setf (gethash "code" params) "(mapcar (lambda (x) (error \"locals-preview-test ~A\" x)) (list 1 2))"
               (gethash "package" params) "CL-USER"
               (gethash "locals_preview_frames" params) 5
               (gethash "locals_preview_skip_internal" params) nil)
@@ -687,7 +687,8 @@ Cleans up server and socket on exit. AUTHENTICATED selects post-auth tests."
           (let ((frames (gethash "frames" ctx)))
             (ok (vectorp frames) "frames is a vector")
             ;; Look for a frame that has locals with a preview key
-            (when (> (length frames) 0)
+            (progn
+              (ok (plusp (length frames)) "the evaluated code left frames")
               (let ((found-preview nil))
                 (dotimes (i (length frames))
                   (let ((locals (gethash "locals" (aref frames i))))
@@ -700,8 +701,6 @@ Cleans up server and socket on exit. AUTHENTICATED selects post-auth tests."
                                 "local preview is a hash-table")
                             (ok (gethash "kind" (gethash "preview" local-var))
                                 "local preview has kind")))))))
-                ;; Infrastructure frames have non-primitive locals (e.g.
-                ;; condition objects) that receive previews.
                 (ok found-preview
                     "at least one local variable has a preview")))))))))
 

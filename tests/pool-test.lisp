@@ -897,11 +897,12 @@ in the cleanup form regardless of success or failure."
     (let ((*use-worker-pool* t)
           (*current-session-id* "e2e-locals-preview-session"))
       (with-pool ()
-        ;; Use locals_preview_skip_internal=false so infrastructure frames
-        ;; (which reliably have non-primitive locals) get previews.
-        ;; This validates the full preview pipeline through JSON round-trip.
+        ;; The error is signalled under MAPCAR, so the backtrace holds SBCL's
+        ;; MAP1, whose list locals are non-primitive; with
+        ;; locals_preview_skip_internal=false they get previews.  This
+        ;; validates the full preview pipeline through JSON round-trip.
         (let ((params (make-hash-table :test 'equal)))
-          (setf (gethash "code" params) "(error \"e2e-locals-test\")"
+          (setf (gethash "code" params) "(mapcar (lambda (x) (error \"e2e-locals-test ~A\" x)) (list 1 2))"
                 (gethash "package" params) "CL-USER"
                 (gethash "locals_preview_frames" params) 5
                 (gethash "locals_preview_skip_internal" params) nil)
@@ -911,7 +912,8 @@ in the cleanup form regardless of success or failure."
               (ok ctx "result has error_context")
               (let ((frames (gethash "frames" ctx)))
                 (ok (vectorp frames) "frames is a vector")
-                (when (> (length frames) 0)
+                (progn
+                  (ok (plusp (length frames)) "the evaluated code left frames")
                   (let ((found-preview nil))
                     (dotimes (i (length frames))
                       (let ((locals (gethash "locals" (aref frames i))))

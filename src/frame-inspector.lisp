@@ -17,7 +17,7 @@
                 #:%offset->line)
   (:export #:capture-error-context
            #:capture-debugger-error-context
-           #:%internal-frame-p))
+           #:eval-at-user-code-boundary))
 
 
 (in-package #:cl-mcp/src/frame-inspector)
@@ -142,30 +142,31 @@ A name is %DEBUG-VAR-NAME's, so two variables of one name stay apart."
 A name is %DEBUG-VAR-NAME's, as in %FRAME-LOCALS."
   (let ((debug-fun (sb-di:frame-debug-fun frame))
         (locals '()))
-    (sb-di:do-debug-fun-vars (var debug-fun)
-      (when (eq (sb-di:debug-var-validity var (sb-di:frame-code-location frame))
-                :valid)
-        (let ((name (%debug-var-name var))
-              (val (sb-di:debug-var-value var frame)))
-          (if (inspectable-p val)
-              (if include-preview
-                  (let ((preview (generate-debugger-preview
-                                  val
-                                  :max-depth (or preview-max-depth 1)
-                                  :max-elements (or preview-max-elements 5))))
-                    (push (list :name name
-                                :value (%debugger-prin1 val print-level print-length)
-                                :object-id (gethash "id" preview)
-                                :preview preview)
-                          locals))
-                  (let ((object-id (register-object val)))
-                    (push (list :name name
-                                :value (%debugger-prin1 val print-level print-length)
-                                :object-id object-id)
-                          locals)))
-              (push (list :name name
-                          :value (%debugger-prin1 val print-level print-length))
-                    locals)))))
+    (when (and debug-fun (not (typep debug-fun 'sb-di::bogus-debug-fun)))
+      (sb-di:do-debug-fun-vars (var debug-fun)
+        (when (eq (sb-di:debug-var-validity var (sb-di:frame-code-location frame))
+                  :valid)
+          (let ((name (%debug-var-name var))
+                (val (sb-di:debug-var-value var frame)))
+            (if (inspectable-p val)
+                (if include-preview
+                    (let ((preview (generate-debugger-preview
+                                    val
+                                    :max-depth (or preview-max-depth 1)
+                                    :max-elements (or preview-max-elements 5))))
+                      (push (list :name name
+                                  :value (%debugger-prin1 val print-level print-length)
+                                  :object-id (gethash "id" preview)
+                                  :preview preview)
+                            locals))
+                    (let ((object-id (register-object val)))
+                      (push (list :name name
+                                  :value (%debugger-prin1 val print-level print-length)
+                                  :object-id object-id)
+                            locals)))
+                (push (list :name name
+                            :value (%debugger-prin1 val print-level print-length))
+                      locals))))))
     (nreverse locals)))
 
 #+sbcl
@@ -219,30 +220,30 @@ point)."
 #+sbcl
 (defun %frame-source-location-for-debugger (frame)
   "Extract FRAME source information without recovering from inspection failures."
-  (let ((code-location (sb-di:frame-code-location frame)))
-    (when code-location
-      (let ((debug-source (sb-di:code-location-debug-source code-location)))
-        (when debug-source
-          (let ((namestring (sb-di:debug-source-namestring debug-source)))
-            (when namestring
-              (let* ((tlf-offset
-                       (sb-di:code-location-toplevel-form-offset code-location))
-                     (start-positions (%debug-source-start-positions debug-source))
-                     (tlf-char (when (and start-positions tlf-offset
-                                          (< tlf-offset (length start-positions)))
-                                 (aref start-positions tlf-offset)))
-                     (line (when (and tlf-char (probe-file namestring))
-                             (%offset->line namestring tlf-char))))
-                (list :file namestring :line line)))))))))
+  (let ((debug-fun (sb-di:frame-debug-fun frame)))
+    (when (and debug-fun (not (typep debug-fun 'sb-di::bogus-debug-fun)))
+      (let ((code-location (sb-di:frame-code-location frame)))
+        (when code-location
+          (let ((debug-source (sb-di:code-location-debug-source code-location)))
+            (when debug-source
+              (let ((namestring (sb-di:debug-source-namestring debug-source)))
+                (when namestring
+                  (let* ((tlf-offset
+                           (sb-di:code-location-toplevel-form-offset code-location))
+                         (start-positions (%debug-source-start-positions debug-source))
+                         (tlf-char (when (and start-positions tlf-offset
+                                              (< tlf-offset (length start-positions)))
+                                     (aref start-positions tlf-offset)))
+                         (line (when (and tlf-char (probe-file namestring))
+                                 (%offset->line namestring tlf-char))))
+                    (list :file namestring :line line)))))))))))
 
 (defun %frame-name-string (name)
   "Return NAME, a debug-fun name, printed on one line.
 The printer is otherwise the caller's -- the user's own, while their error is
 being handled -- and a pretty printer breaks a long method name such as
 (SB-PCL::FAST-METHOD PKG::NAME :BEFORE (T)) over several lines: the backtrace
-header then wraps, and a break straight after the operator also hides the
-\"(SB-PCL::FAST-METHOD \" prefix %INTERNAL-FRAME-P recognizes a user's method
-by.  A user's *PRINT-LENGTH*, *PRINT-CASE*, *PRINT-BASE* or pprint-dispatch
+header then wraps.  A user's *PRINT-LENGTH*, *PRINT-CASE*, *PRINT-BASE* or pprint-dispatch
 entries would likewise cut, recase or re-break the name.
 
 So the name is printed with standard printer settings, keeping only the
@@ -257,388 +258,273 @@ the (LAMBDA NIL :IN ...) printing without the pretty printer gives."
             (*print-right-margin* most-positive-fixnum))
         (prin1-to-string name)))))
 
-#+sbcl
-(defun %frame-function-name (frame)
-  "Extract function name from FRAME as a string."
-  (handler-case
-      (let* ((debug-fun (sb-di:frame-debug-fun frame))
-             (name (sb-di:debug-fun-name debug-fun)))
-        (if name
-            (%frame-name-string name)
-            "<anonymous>"))
-    (error () "<unknown>")))
+(declaim (notinline eval-at-user-code-boundary))
+
+(defun eval-at-user-code-boundary (form)
+  "Evaluate FORM, code a caller was asked to run, with this function's frame
+marking on the stack where that code's evaluation begins.  A backtrace captured
+while FORM runs stops there: this frame, the evaluator frames just above it and
+everything below are the caller's machinery, not FORM's (%STACK-WINDOW).
+DEBUG 3 keeps the call to EVAL out of tail position, so the frame stays."
+  (declare (optimize (debug 3) (speed 0)))
+  (eval form))
+
+(defun %symbols-named (&rest specs)
+  "Return the symbols SPECS name, each a list (PACKAGE-NAME SYMBOL-NAME), leaving
+out those this Lisp does not have."
+  (loop for (package-name symbol-name) in specs
+        for symbol = (and (find-package package-name)
+                          (find-symbol symbol-name package-name))
+        when symbol
+          collect symbol))
+
+(defparameter *signalling-functions*
+  (%symbols-named '("COMMON-LISP" "ERROR") '("COMMON-LISP" "CERROR")
+                  '("COMMON-LISP" "SIGNAL") '("COMMON-LISP" "WARN")
+                  '("COMMON-LISP" "BREAK") '("COMMON-LISP" "INVOKE-DEBUGGER")
+                  '("SB-INT" "%BREAK")
+                  '("SB-KERNEL" "%SIGNAL") '("SB-KERNEL" "%ERROR")
+                  '("SB-KERNEL" "COERCE-TO-CONDITION") '("SB-KERNEL" "%COERCE-TO-CONDITION")
+                  '("SB-KERNEL" "WITH-SIMPLE-CONDITION-RESTARTS")
+                  '("SB-DEBUG" "%INVOKE-DEBUGGER") '("SB-DEBUG" "RUN-HOOK"))
+  "The functions a condition passes through between the call that signals it and
+the handler or debugger hook that captures it.")
+
+(defparameter *evaluator-functions*
+  (%symbols-named '("COMMON-LISP" "EVAL") '("SB-INT" "SIMPLE-EVAL-IN-LEXENV")
+                  '("SB-IMPL" "SIMPLE-EVAL-PROGN-BODY") '("SB-IMPL" "SIMPLE-EVAL-LOCALLY")
+                  '("SB-IMPL" "%SIMPLE-EVAL") '("SB-IMPL" "EVAL-IN-LEXENV")
+                  '("SB-C" "%FUNCALL-IN-FOOMACROLET-LEXENV"))
+  "The functions EVAL-AT-USER-CODE-BOUNDARY's EVAL runs through before the code
+of the form it evaluates.")
+
+(defparameter *capture-functions*
+  '(%map-stack %collect-window capture-error-context capture-debugger-error-context)
+  "This file's functions on the stack above a capture's walk; the walk starts in
+the first of them unless SBCL starts it elsewhere.")
+
+(defun %signalling-name-p (name)
+  "True when NAME, a frame's debug-fun name, is one of *SIGNALLING-FUNCTIONS*."
+  (and (member name *signalling-functions*) t))
+
+(defun %stack-window (names)
+  "Return (values START END) delimiting, within NAMES -- a vector of one walk's
+frame names, innermost first, ending at EVAL-AT-USER-CODE-BOUNDARY's frame when
+the walk met it -- the frames of the code that signalled.
+
+Above START, when the walk begins in this file's own frames
+(*CAPTURE-FUNCTIONS*): those, the handler or hook that called them, and the run
+of *SIGNALLING-FUNCTIONS* that reached it -- or, with no condition signalled
+(a capture after HANDLER-CASE unwound), this file's frames alone.  When the walk
+begins elsewhere, as SBCL begins an internal error's at the frame that erred,
+only a leading run of *SIGNALLING-FUNCTIONS*.
+From END on: the boundary, and the *EVALUATOR-FUNCTIONS* frames just above it.
+
+Every rule is about where a frame stands relative to the capture or the
+boundary, never about whose code a frame looks like."
+  (labels ((capture-name-p (name)
+             ;; One of this file's functions, or a local function or lambda
+             ;; written in one: (FLET WALK :IN %COLLECT-WINDOW).
+             (or (and (member name *capture-functions*) t)
+                 (and (consp name)
+                      (member (first name) '(flet labels lambda))
+                      (let ((outer (second (member :in (cddr name)))))
+                        (and outer (capture-name-p outer)))))))
+    (let* ((count (length names))
+           (start
+             (if (and (plusp count) (capture-name-p (aref names 0)))
+                 (let ((signal (position-if #'%signalling-name-p names)))
+                   (if signal
+                       (or (position-if-not #'%signalling-name-p names :start signal) count)
+                       (or (position-if-not #'capture-name-p names) count)))
+                 (or (position-if-not #'%signalling-name-p names) count)))
+           (end (or (position 'eval-at-user-code-boundary names :start start) count)))
+      (loop while (and (> end start)
+                       (member (aref names (1- end)) *evaluator-functions*))
+            do (decf end))
+      (values start end))))
+
+(defun %sbcl-package-p (package)
+  "True when PACKAGE is one of SBCL's own: its name begins with SB-."
+  (let ((name (package-name package)))
+    (and (> (length name) 3) (string= "SB-" name :end2 3))))
+
+(defun %implementation-name-p (name)
+  "True when NAME, a frame's debug-fun name as SBCL holds it, names SBCL's own
+code rather than code it was given.
+A symbol is SBCL's when its home package is (%SBCL-PACKAGE-P); a COMMON-LISP
+function is the API called, not SBCL's own.  A bare string is SBCL's name for a
+foreign or trampoline frame (\"foreign function: call_into_lisp\").  A local
+function or lambda, (FLET NAME :IN OUTER), (LABELS NAME :IN OUTER) or
+(LAMBDA ARGS :IN OUTER), is OUTER's: a symbol or name by the same rule, a
+string a source file, SBCL's when it is on the SYS: logical host.  This holds
+even when an SBCL macro made the local function: the body WITH-MUTEX or an
+UNWIND-PROTECT cleanup wraps in one is the code of the function it is written
+in.  A local function with no OUTER, and any other list, names its second
+element: (SETF NAME), (SB-PCL::FAST-METHOD NAME ...)."
+  (typecase name
+    (null nil)
+    (symbol (let ((package (symbol-package name)))
+              (and package (%sbcl-package-p package))))
+    (string t)
+    (cons
+     (let ((outer (and (member (first name) '(flet labels lambda))
+                       (second (member :in (cddr name))))))
+       (typecase outer
+         (null (and (not (eq (first name) 'lambda))
+                    (%implementation-name-p (second name))))
+         (string (and (>= (length outer) 4) (string-equal "SYS:" outer :end2 4)))
+         (t (%implementation-name-p outer)))))
+    (t nil)))
 
 #+sbcl
-(defun %frame-function-name-for-debugger (frame)
-  "Extract FRAME's function name without recovering from inspection failures."
-  (let* ((debug-fun (sb-di:frame-debug-fun frame))
-         (name (sb-di:debug-fun-name debug-fun)))
-    (if name
-        (%frame-name-string name)
-        "<anonymous>")))
-
-(defparameter *internal-package-prefixes*
-  '(;; CL-MCP implementation (not tests - those are user code to debug)
-    "CL-MCP/SRC"
-    ;; SBCL internal packages (specific to avoid false positives)
-    "SB-KERNEL" "SB-INT" "SB-IMPL" "SB-DEBUG" "SB-C" "SB-DI" "SB-VM"
-    "SB-EXT" "SB-SYS" "SB-PCL" "SB-MOP" "SB-ALIEN" "SB-THREAD"
-    "SB-INTROSPECT" "SB-PROFILE" "SB-LOOP" "SB-PRETTY" "SB-FORMAT"
-    "SB-DISASSEM" "SB-BIGNUM" "SB-WALKER" "SB-CLTL2" "SB-SEQUENCE"
-    "SB-GRAY" "SB-UNICODE" "SB-COVER" "SB-BSD-SOCKETS" "SB-POSIX"
-    ;; Other infrastructure
-    "UIOP" "ASDF" "BORDEAUX-THREADS" "HUNCHENTOOT" "USOCKET")
-  "Package prefixes that indicate internal/infrastructure frames.
-Uses CL-MCP/SRC (not just CL-MCP) to allow debugging of test code.")
-
-(defparameter *standard-signaling-frames*
-  '("ERROR" "SIGNAL" "CERROR" "WARN" "INVOKE-DEBUGGER" "BREAK" "EVAL")
-  "Unqualified standard CL function names always classified as internal frames
-in backtraces, independent of the *internal-package-prefixes* list.")
-
-(defparameter *method-wrapper-prefixes*
-  '("(SB-PCL::FAST-METHOD " "(SB-PCL::SLOW-METHOD ")
-  "Exact leading substrings (opening paren + package-qualified operator +
-trailing space) that mark an SBCL CLOS method wrapper frame.  Matching against
-the full prefix avoids collisions with arbitrary user symbols that merely
-contain the substring FAST-METHOD.")
-
-(defun %prefix-internal-p (name)
-  "Return T if NAME begins with any entry in *INTERNAL-PACKAGE-PREFIXES*
-terminated by a package delimiter (: or /) or end-of-string."
-  (some (lambda (prefix)
-          (let ((prefix-len (length prefix)))
-            (and (>= (length name) prefix-len)
-                 (string-equal name prefix :end1 prefix-len)
-                 (or (= (length name) prefix-len)
-                     (char= (char name prefix-len) #\:)
-                     (char= (char name prefix-len) #\/)))))
-        *internal-package-prefixes*))
-
-(defun %parse-wrapped-symbol (s start)
-  "Read a symbol token from S starting at or after START, skipping leading
-spaces.  When the token is a nested (SETF NAME) form, returns just NAME.
-Returns NIL when no symbol can be extracted."
-  (let ((head (position-if-not (lambda (c) (char= c #\Space))
-                               s :start start)))
-    (when head
-      (if (char= (char s head) #\()
-          (let ((setf-pos (search "SETF " s :start2 head)))
-            (when setf-pos
-              (let* ((sym-start (position-if-not (lambda (c) (char= c #\Space))
-                                                 s :start (+ setf-pos 5)))
-                     (sym-end (when sym-start
-                                (or (position #\) s :start sym-start)
-                                    (length s)))))
-                (when (and sym-start sym-end (< sym-start sym-end))
-                  (subseq s sym-start sym-end)))))
-          (subseq s head
-                  (or (position-if (lambda (c)
-                                     (or (char= c #\Space)
-                                         (char= c #\()
-                                         (char= c #\))))
-                                   s :start head)
-                      (length s)))))))
-
-(defun %method-wrapper-name (function-name)
-  "Return the user-visible method name from a (SB-PCL::FAST-METHOD NAME ...)
-or (SB-PCL::SLOW-METHOD NAME ...) wrapper, or NIL when FUNCTION-NAME is not a
-method wrapper.  Uses a full opening-paren-qualified prefix match so symbols
-that merely contain FAST-METHOD as a substring are not misclassified."
-  (dolist (prefix *method-wrapper-prefixes*)
-    (let ((prefix-len (length prefix)))
-      (when (and (>= (length function-name) prefix-len)
-                 (string-equal function-name prefix :end1 prefix-len))
-        (return-from %method-wrapper-name
-          (%parse-wrapped-symbol function-name prefix-len))))))
-
-(defun %common-lisp-name (token)
-  "Return TOKEN, a symbol as printed, without its package prefix when that prefix
-names COMMON-LISP; TOKEN itself when it has no prefix; NIL when another package
-qualifies it.
-Frame names are printed relative to the caller's *PACKAGE* (%FRAME-NAME-STRING),
-so one that does not use COMMON-LISP writes (COMMON-LISP:LABELS ...),
-(COMMON-LISP:SETF ...) and COMMON-LISP:ERROR.  A nickname, or a local nickname
-of the package doing the reading, is accepted as FIND-PACKAGE resolves it."
-  (let ((colon (position #\: token)))
-    (cond ((null colon) token)
-          ((zerop colon) nil)
-          ((let ((prefix (subseq token 0 colon)))
-             (or (member prefix '("COMMON-LISP" "CL") :test #'string-equal)
-                 (eq (find-package prefix) (find-package "COMMON-LISP"))))
-           (string-left-trim ":" (subseq token colon)))
-          (t nil))))
-
-(defun %frame-operator (function-name)
-  "Return (values OPERATOR END) for FUNCTION-NAME, a frame name printed as a
-list: OPERATOR is the name of its first element when that is a COMMON-LISP
-symbol, written without a package prefix (see %COMMON-LISP-NAME), and END the
-index of the space after it.  NIL when FUNCTION-NAME is not such a list."
-  (let ((end (position #\Space function-name)))
-    (when (and end
-               (> end 1)
-               (char= (char function-name 0) #\())
-      (let ((operator (%common-lisp-name (subseq function-name 1 end))))
-        (when operator
-          (values operator end))))))
-
-(defun %setf-frame-target (function-name)
-  "Return the target symbol name from a (SETF NAME) frame as a string, or NIL
-when FUNCTION-NAME is not a SETF frame.  The SETF may be printed qualified,
-(COMMON-LISP:SETF NAME)."
-  (multiple-value-bind (operator end) (%frame-operator function-name)
-    (when (and operator (string-equal operator "SETF"))
-      (string-trim '(#\) #\Space) (subseq function-name end)))))
-
-(defparameter *local-function-operators* '("FLET" "LABELS" "LAMBDA")
-  "Operators of the names SBCL gives a local or anonymous function:
-(FLET NAME :IN OUTER), (LABELS NAME :IN OUTER) and (LAMBDA LAMBDA-LIST :IN OUTER),
-where OUTER is the global function the definition sits in.")
-
-(defun %skip-delimited (s start delimiter)
-  "Return the index just past the DELIMITER that closes the token opened at
-START in S, honouring backslash escapes, or the length of S when none does."
-  (loop with i = (1+ start)
-        while (< i (length s))
-        do (let ((c (char s i)))
-             (cond ((char= c #\\) (incf i 2))
-                   ((char= c delimiter) (return (1+ i)))
-                   (t (incf i))))
-        finally (return (length s))))
-
-(defun %local-function-outer (function-name)
-  "Return OUTER's text from a (FLET|LABELS|LAMBDA ... :IN OUTER) frame name, or NIL
-when FUNCTION-NAME is not one or names no OUTER.
-Only an :IN at the name's own level counts: one inside a lambda list, as in
-(LAMBDA (&KEY (MODE :IN)) ...), belongs to that list.  A string or |...| token
-is skipped whole, so a parenthesis or :IN inside a source file name is not
-taken for one.  The operator may be printed qualified, (COMMON-LISP:LABELS ...)."
-  (let ((length (length function-name))
-        (operator (%frame-operator function-name)))
-    (when (and operator
-               (char= (char function-name (1- length)) #\))
-               (member operator *local-function-operators* :test #'string-equal))
-      (loop with depth = 0
-            with i = 0
-            while (< i length)
-            do (let ((c (char function-name i)))
-                 (cond
-                   ((or (char= c #\") (char= c #\|))
-                    (setf i (%skip-delimited function-name i c)))
-                   ((char= c #\()
-                    (incf depth)
-                    (incf i))
-                   ((char= c #\))
-                    (decf depth)
-                    (incf i))
-                   ((and (= depth 1)
-                         (char= c #\:)
-                         (<= (+ i 4) length)
-                         (char= (char function-name (1- i)) #\Space)
-                         (string-equal function-name ":IN " :start1 i :end1 (+ i 4)))
-                    (let ((outer (string-trim " " (subseq function-name (+ i 4)
-                                                          (1- length)))))
-                      (return (and (plusp (length outer)) outer))))
-                   (t (incf i))))))))
-
-(defun %internal-frame-p (function-name)
-  "Return T if FUNCTION-NAME appears to be an internal/infrastructure frame.
-Dispatches on structural shape first, then applies the package-prefix filter
-to the relevant inner name:
-
-- (SB-PCL::FAST-METHOD NAME (...) ...) -> internal iff NAME has an internal prefix
-- (SB-PCL::SLOW-METHOD NAME (...) ...) -> internal iff NAME has an internal prefix
-- (SETF NAME)                          -> internal iff NAME has an internal prefix
-- (FLET|LABELS|LAMBDA ... :IN OUTER)   -> internal iff OUTER is, classified by
-                                          these same rules; an OUTER that is a
-                                          string (a top-level form's source,
-                                          such as \"repl-eval\") is internal
-- Any other (...) wrapper              -> always internal
-- A \"...\" name, SBCL's for a foreign frame -> always internal
-- Bare symbol name matching an internal package prefix -> internal
-- Name in *STANDARD-SIGNALING-FRAMES*, unqualified or
-  COMMON-LISP-qualified                                -> internal
-
-Names are printed relative to the caller's *PACKAGE*, so in a package that does
-not use COMMON-LISP the operators come qualified, (COMMON-LISP:LABELS ...):
-SETF, FLET, LABELS and LAMBDA are recognized either way (%FRAME-OPERATOR), and
-only as COMMON-LISP's own -- a user's MY-APP::LABELS is not one.
-
-A local function or lambda is code of the function it sits in: a LABELS helper
-of the user's function is where the user's error is signalled, and its locals
-are the ones that explain it, so it is shown whenever that function is.
-
-Empty strings are treated as non-internal (caller's responsibility to filter)."
-  (when (plusp (length function-name))
-    (let ((method-name (%method-wrapper-name function-name))
-          (setf-target (%setf-frame-target function-name))
-          (outer (%local-function-outer function-name)))
-      (cond
-        (method-name (%prefix-internal-p method-name))
-        (setf-target (%prefix-internal-p setf-target))
-        (outer (or (char= (char outer 0) #\")
-                   (%internal-frame-p outer)))
-        ((char= (char function-name 0) #\() t)
-        ;; SBCL's name for a foreign frame, at the bottom of every thread:
-        ;; "foreign function: call_into_lisp", "funcall1".
-        ((char= (char function-name 0) #\") t)
-        ((%prefix-internal-p function-name) t)
-        ((member (%common-lisp-name function-name) *standard-signaling-frames*
-                 :test #'string-equal)
-         t)))))
-
-#+sbcl
-(defun %collect-frames (max-frames print-level print-length
-                        &key locals-preview-frames preview-max-depth
-                             preview-max-elements locals-preview-skip-internal
-                             filter-internal)
-  "Walk stack and collect frame information using SBCL backtrace API.
-LOCALS-PREVIEW-FRAMES controls how many top frames get local variable previews.
-When LOCALS-PREVIEW-SKIP-INTERNAL is true, only USER frames are counted and
-receive previews; internal frames are skipped entirely for preview purposes.
-When FILTER-INTERNAL is true, internal frames are excluded from the result
-entirely, keeping backtraces focused on user code.
-PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS control preview generation.
-The second value is true when a frame of the user's (not %INTERNAL-FRAME-P) lies
-past the MAX-FRAMES collected, so the last of the user's collected is not their
-outermost.  Internal frames past the cap -- every thread ends in its own -- do
-not count."
-  (let ((frames '())
-        (truncated nil)
-        (index 0)
-        (user-frame-index 0)
-        (preview-frames (or locals-preview-frames 0))
-        (skip-internal (and locals-preview-skip-internal t)))
-    (handler-case
-        (let ((map-fn (ignore-errors
-                        (fdefinition
-                         (find-symbol "MAP-BACKTRACE" "SB-DEBUG")))))
-          (when map-fn
-            (funcall map-fn
-                     (lambda (frame)
-                       (if (>= index max-frames)
-                           ;; Cut short only if a frame of the user's lies past
-                           ;; the cap: every stack ends in the thread's own.
-                           (unless truncated
-                             (setf truncated
-                                   (not (%internal-frame-p (%frame-function-name frame)))))
-                         (let* ((function-name (%frame-function-name frame))
-                                (source-loc (%frame-source-location frame))
-                                (is-internal (%internal-frame-p function-name)))
-                           (unless (and filter-internal is-internal)
-                             (let ((include-preview
-                                     (if skip-internal
-                                         (and (not is-internal)
-                                              (< user-frame-index preview-frames))
-                                         (< index preview-frames))))
-                               (push (list :index index
-                                           :function function-name
-                                           :source-file (getf source-loc :file)
-                                           :source-line (getf source-loc :line)
-                                           :locals
-                                           (%frame-locals frame print-level
-                                                          print-length
-                                                          :include-preview
-                                                          include-preview
-                                                          :preview-max-depth
-                                                          preview-max-depth
-                                                          :preview-max-elements
-                                                          preview-max-elements))
-                                     frames))
-                             (unless is-internal
-                               (incf user-frame-index))
-                             (incf index))))))))
-      (error () nil))
-    (values (nreverse frames) truncated)))
-
-#+sbcl
-(defun %collect-frames-for-debugger (max-frames print-level print-length
-                                     &key locals-preview-frames preview-max-depth
-                                          preview-max-elements
-                                          locals-preview-skip-internal
-                                          filter-internal)
-  "Walk the SBCL stack while letting every diagnostic condition escape.
-Returns what %COLLECT-FRAMES does: the frames, and whether MAX-FRAMES cut the
-walk short."
-  (let ((frames '())
-        (truncated nil)
-        (index 0)
-        (user-frame-index 0)
-        (preview-frames (or locals-preview-frames 0))
-        (skip-internal (and locals-preview-skip-internal t))
-        (map-fn (fdefinition (find-symbol "MAP-BACKTRACE" "SB-DEBUG"))))
-    (funcall map-fn
-             (lambda (frame)
-               (if (>= index max-frames)
-                   (unless truncated
-                     (setf truncated
-                           (not (%internal-frame-p
-                                 (%frame-function-name-for-debugger frame)))))
-                 (let* ((function-name (%frame-function-name-for-debugger frame))
-                        (source-loc (%frame-source-location-for-debugger frame))
-                        (is-internal (%internal-frame-p function-name)))
-                   (unless (and filter-internal is-internal)
-                     (let ((include-preview
-                             (if skip-internal
-                                 (and (not is-internal)
-                                      (< user-frame-index preview-frames))
-                                 (< index preview-frames))))
-                       (push (list :index index
-                                   :function function-name
-                                   :source-file (getf source-loc :file)
-                                   :source-line (getf source-loc :line)
-                                   :locals
-                                   (%frame-locals-for-debugger
-                                    frame print-level print-length
-                                    :include-preview include-preview
-                                    :preview-max-depth preview-max-depth
-                                    :preview-max-elements preview-max-elements))
-                             frames))
-                     (unless is-internal
-                       (incf user-frame-index))
-                     (incf index))))))
-    (values (nreverse frames) truncated)))
-
-#-sbcl
-(defun %collect-frames (max-frames print-level print-length
-                        &key locals-preview-frames preview-max-depth
-                             preview-max-elements locals-preview-skip-internal
-                             filter-internal)
-  "Fallback for non-SBCL: return empty frame list."
-  (declare (ignore max-frames print-level print-length
-                   locals-preview-frames preview-max-depth preview-max-elements
-                   locals-preview-skip-internal filter-internal))
+(defun %map-stack (function)
+  "Call FUNCTION on each frame of the stack, innermost first, as SBCL's debugger
+walks it.  A capture's two walks both start here, so the frames they see line
+up.  The walk is not cut at SB-DEBUG:*BACKTRACE-FRAME-COUNT*: on a deeper stack
+the boundary, and the outermost frame of the window, lie past that count."
+  (declare (optimize (debug 3) (speed 0)))
+  (funcall (fdefinition (find-symbol "MAP-BACKTRACE" "SB-DEBUG")) function
+           :count most-positive-fixnum)
   nil)
 
+#+sbcl
+(defun %frame-name-object (frame)
+  "Return FRAME's debug-fun name as SBCL holds it: a symbol, a list such as
+(LABELS WALK :IN RUN), or a string."
+  (sb-di:debug-fun-name (sb-di:frame-debug-fun frame)))
+
+#+sbcl
+(defun %frame-entry (frame index name implementation print-level print-length
+                     &key include-preview preview-max-depth preview-max-elements
+                          debugger)
+  "Return the plist recording FRAME, the INDEXth of a capture's window, whose
+debug-fun name is NAME.  DEBUGGER selects the helpers that let every condition
+escape; otherwise a name that cannot be printed is recorded as <unknown>."
+  (let ((source (if debugger
+                    (%frame-source-location-for-debugger frame)
+                    (%frame-source-location frame))))
+    (list :index index
+          :function (cond ((null name) "<anonymous>")
+                          (debugger (%frame-name-string name))
+                          (t (handler-case (%frame-name-string name)
+                               (error () "<unknown>"))))
+          :implementation implementation
+          :source-file (getf source :file)
+          :source-line (getf source :line)
+          :locals (if debugger
+                      (%frame-locals-for-debugger
+                       frame print-level print-length
+                       :include-preview include-preview
+                       :preview-max-depth preview-max-depth
+                       :preview-max-elements preview-max-elements)
+                      (%frame-locals
+                       frame print-level print-length
+                       :include-preview include-preview
+                       :preview-max-depth preview-max-depth
+                       :preview-max-elements preview-max-elements)))))
+
+#+sbcl
+(defun %collect-window (max-frames print-level print-length
+                        &key locals-preview-frames preview-max-depth
+                             preview-max-elements locals-preview-skip-internal
+                             debugger)
+  "Walk the stack and return (values FRAMES TRUNCATED TOTAL) for the TOTAL frames
+of %STACK-WINDOW.  FRAMES holds them all when they fit in MAX-FRAMES; otherwise
+the first MAX-FRAMES less one and the outermost, so the call that started the
+code is always there, and TRUNCATED is true.  Each frame's :INDEX is its place
+in the window, 0 the innermost, and :IMPLEMENTATION is true for SBCL's own code
+(%IMPLEMENTATION-NAME-P).
+
+The first LOCALS-PREVIEW-FRAMES frames get a structural preview of their
+locals, not counting SBCL's own when LOCALS-PREVIEW-SKIP-INTERNAL is true.
+PREVIEW-MAX-DEPTH and PREVIEW-MAX-ELEMENTS bound those previews.
+
+DEBUGGER selects the inspection helpers that let every condition escape, for
+the request debugger hook; otherwise a frame that cannot be inspected is
+recorded as far as it can be, and a failed walk returns what it collected."
+  (let ((names (make-array 64 :adjustable t :fill-pointer 0))
+        (frames '())
+        (total 0)
+        (preview-frames (or locals-preview-frames 0))
+        (previewed 0))
+    (flet ((walk ()
+             (block names
+               (%map-stack (lambda (frame)
+                             (let ((name (if debugger
+                                             (%frame-name-object frame)
+                                             (ignore-errors (%frame-name-object frame)))))
+                               (vector-push-extend name names)
+                               (when (eq name 'eval-at-user-code-boundary)
+                                 (return-from names))))))
+             (multiple-value-bind (start end) (%stack-window names)
+               (setf total (- end start))
+               (let ((cut (and (> total max-frames) (>= max-frames 2)))
+                     (position -1))
+                 (block frames
+                   (%map-stack
+                    (lambda (frame)
+                      (incf position)
+                      (when (>= position end)
+                        (return-from frames))
+                      (let ((index (- position start)))
+                        (when (and (>= index 0)
+                                   (if cut
+                                       (or (< index (1- max-frames)) (= index (1- total)))
+                                       (< index max-frames)))
+                          (let* ((name (aref names position))
+                                 (implementation (%implementation-name-p name))
+                                 (include-preview
+                                   (and (< previewed preview-frames)
+                                        (not (and locals-preview-skip-internal
+                                                  implementation)))))
+                            (when include-preview
+                              (incf previewed))
+                            (push (%frame-entry frame index name implementation
+                                                print-level print-length
+                                                :include-preview include-preview
+                                                :preview-max-depth preview-max-depth
+                                                :preview-max-elements preview-max-elements
+                                                :debugger debugger)
+                                  frames)))))))))))
+      (if debugger
+          (walk)
+          (handler-case (walk)
+            (error () nil))))
+    (let ((frames (nreverse frames)))
+      (values frames (> total (length frames)) total))))
+
 #-sbcl
-(defun %collect-frames-for-debugger (max-frames print-level print-length
-                                     &key locals-preview-frames preview-max-depth
-                                          preview-max-elements
-                                          locals-preview-skip-internal
-                                          filter-internal)
+(defun %collect-window (max-frames print-level print-length
+                        &key locals-preview-frames preview-max-depth
+                             preview-max-elements locals-preview-skip-internal
+                             debugger)
   "Return no frames on implementations without the SBCL backtrace API."
   (declare (ignore max-frames print-level print-length
                    locals-preview-frames preview-max-depth preview-max-elements
-                   locals-preview-skip-internal filter-internal))
-  nil)
+                   locals-preview-skip-internal debugger))
+  (values nil nil 0))
 
 (defun capture-error-context
     (condition
      &key (max-frames 20) (print-level 3) (print-length 10)
      (locals-preview-frames 0) (preview-max-depth 1)
-     (preview-max-elements 5) (locals-preview-skip-internal t)
-     (filter-internal nil))
+     (preview-max-elements 5) (locals-preview-skip-internal t))
   "Capture structured error context including frames and locals.
 
+The frames are those of the code that signalled (%STACK-WINDOW): from the frame
+that signalled CONDITION down to the code EVAL-AT-USER-CODE-BOUNDARY was given,
+or to the bottom of the stack when no boundary is on it.  The capture's own
+frames, the handler's and the signalling machinery's above them, and the
+evaluator and caller below the boundary, are not.
+
+MAX-FRAMES: frames recorded (default: 20).  When the window holds more, the
+  first MAX-FRAMES less one and the outermost are.
 LOCALS-PREVIEW-FRAMES: Number of top frames to include local variable previews (default: 0).
   Set to a positive integer to automatically expand local variables in the top N frames.
   This helps agents immediately see the state of variables without extra inspect-object calls.
-LOCALS-PREVIEW-SKIP-INTERNAL: When true (default), skip internal frames when counting for preview.
-  Internal frames include CL-MCP, SBCL internals (SB-KERNEL, etc.), ASDF, UIOP, anonymous functions.
-  This ensures user code frames get previews even when buried under infrastructure frames.
-FILTER-INTERNAL: When true (default), exclude internal frames from the result entirely.
-  This keeps backtraces focused on user code by omitting CL-MCP, SBCL, and other
-  infrastructure frames.
+LOCALS-PREVIEW-SKIP-INTERNAL: When true (default), SBCL's own frames
+  (:IMPLEMENTATION) are not counted for preview, and get none.
 PREVIEW-MAX-DEPTH: Max nesting depth for local previews (default: 1).
 PREVIEW-MAX-ELEMENTS: Max elements per collection in local previews (default: 5).
 
@@ -647,24 +533,27 @@ Returns a plist with:
   :condition-type - string name of condition type
   :message - formatted error message
   :restarts - list of (:name STRING :description STRING)
-  :frames - list of frame plists (SBCL only, NIL on other implementations)
+  :frames - list of frame plists (SBCL only, NIL on other implementations): :index
+            (the place in the window, 0 innermost), :function, :implementation,
+            :source-file, :source-line, :locals.
             When LOCALS-PREVIEW-FRAMES > 0, locals in top frames include :preview field.
-  :frames-truncated - true when a user frame lies past the MAX-FRAMES collected,
-            so the last user frame of :FRAMES is not the outermost."
-  (multiple-value-bind (frames truncated)
-      (%collect-frames max-frames print-level print-length
+  :frames-truncated - true when the window held more frames than :FRAMES
+  :frames-total - how many it held."
+  (multiple-value-bind (frames truncated total)
+      (%collect-window max-frames print-level print-length
                        :locals-preview-frames locals-preview-frames
                        :preview-max-depth preview-max-depth
                        :preview-max-elements preview-max-elements
-                       :locals-preview-skip-internal
-                       locals-preview-skip-internal
-                       :filter-internal filter-internal)
-    (list :error t :condition-type (prin1-to-string (type-of condition)) :message
+                       :locals-preview-skip-internal locals-preview-skip-internal)
+    (list :error t
+          :condition-type (prin1-to-string (type-of condition))
+          :message
           (handler-case (princ-to-string condition)
-                        (error nil "<error formatting condition>"))
+            (error nil "<error formatting condition>"))
           :restarts (%collect-restarts)
           :frames frames
-          :frames-truncated truncated)))
+          :frames-truncated truncated
+          :frames-total total)))
 
 (defun %debugger-condition-type-name (condition)
   "Return CONDITION's type text while the diagnostic handler-bind is active."
@@ -677,26 +566,26 @@ Returns a plist with:
     (condition on-diagnostic-condition
      &key (max-frames 20) (print-level 3) (print-length 10)
           (locals-preview-frames 0) (preview-max-depth 1)
-          (preview-max-elements 5) (locals-preview-skip-internal t)
-          (filter-internal nil))
+          (preview-max-elements 5) (locals-preview-skip-internal t))
   "Capture CONDITION while every secondary condition transfers through
-ON-DIAGNOSTIC-CONDITION.
+ON-DIAGNOSTIC-CONDITION.  Returns what CAPTURE-ERROR-CONTEXT does, for the same
+window of frames.
 
 This is for the request debugger hook only. ON-DIAGNOSTIC-CONDITION is
 expected to escape; it is deliberately not an ordinary recovery callback."
   (handler-bind
       ((condition on-diagnostic-condition))
-    (multiple-value-bind (frames truncated)
-        (%collect-frames-for-debugger
-         max-frames print-level print-length
-         :locals-preview-frames locals-preview-frames
-         :preview-max-depth preview-max-depth
-         :preview-max-elements preview-max-elements
-         :locals-preview-skip-internal locals-preview-skip-internal
-         :filter-internal filter-internal)
+    (multiple-value-bind (frames truncated total)
+        (%collect-window max-frames print-level print-length
+                         :locals-preview-frames locals-preview-frames
+                         :preview-max-depth preview-max-depth
+                         :preview-max-elements preview-max-elements
+                         :locals-preview-skip-internal locals-preview-skip-internal
+                         :debugger t)
       (list :error t
             :condition-type (%debugger-condition-type-name condition)
             :message (princ-to-string condition)
             :restarts (%collect-restarts-for-debugger)
             :frames frames
-            :frames-truncated truncated))))
+            :frames-truncated truncated
+            :frames-total total))))

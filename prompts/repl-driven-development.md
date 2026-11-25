@@ -172,7 +172,9 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
 1. **Reproduce** via `repl-eval`. On error, the backtrace in the response text lists,
    under each frame, its locals as `NAME = VALUE`:
    - `condition_type`, `message`, `restarts` head the block
-   - `frames`: stack frames with function names, source locations, local variables
+   - `frames`: the frames of the evaluated code, from the one that signalled down to the
+     form itself, with function names, source locations, local variables; a recursion is
+     shown as its first and last calls, and SBCL's own frames as one line of names
    - Locals include `[object-id: ID]` for non-primitives (drill down via `inspect-object`)
    - Local capture requires `(declare (optimize (debug 3)))` in the function; without it
      the frame is listed with no locals under it
@@ -186,8 +188,8 @@ Use `repl-eval` for testing expressions, inspecting state, and verifying edits. 
    written out under the local instead of only its printed form, which is often enough to skip
    the `inspect-object` round-trip. A child that `locals_preview_max_depth` reached is
    expanded under its own row too, so raising the depth shows more here and not only in
-   the JSON. `locals_preview_skip_internal` (default true) skips CL-MCP/SBCL/ASDF
-   infrastructure frames when counting which frames qualify.
+   the JSON. `locals_preview_skip_internal` (default true) skips SBCL's own frames when
+   counting which frames qualify.
 
 3. **Analyze**: `code-find-references` for usage analysis, `lisp-check-parens` for syntax issues, `code-describe` to verify signatures.
 
