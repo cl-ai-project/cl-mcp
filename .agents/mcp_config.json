@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "cl-mcp": {
+      "command": "ros",
+      "args": [
+        "run",
+        "-s",
+        "cl-mcp",
+        "-e",
+        "(cl-mcp:run :transport :stdio)"
+      ],
+      "env": {
+        "MCP_ENABLE_TOOL_GROUPS": "cl-spec"
+      }
+    }
+  }
+}
