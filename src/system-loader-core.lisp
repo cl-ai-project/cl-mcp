@@ -365,9 +365,9 @@ registering it."
                                   (setf unwound-stderr stderr
                                         unwound-records records))
                      :in-project in-project
-                      :warn-on-dependency
-                      (when (equal dependency-warnings "warn")
-                        (%dependency-compile-predicate system-name)))))
+                     :warn-on-dependency
+                     (when (equal dependency-warnings "warn")
+                       (%dependency-compile-predicate system-name)))))
              (handler-case (%do-load)
                (asdf/find-component:missing-component (c)
                  (let* ((missing (princ-to-string
