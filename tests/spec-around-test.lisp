@@ -53,5 +53,11 @@
                        (ok (equal "completed" (field lifecycle "around")))
                        (ok (equal "passed" (field result "status")))
                        (ok (eq t (field check "verified")))
-                       (ok (eq t (field batch "verified")))))))
+                       (ok (eq t (field batch "verified"))))))
+        (let* ((result (input-check "cl-mcp/tests/spec-around-test::around-programmatic"
+                                    "recipe" 3))
+               (fixture (field result "core_result" "data" "fixture")))
+          (ok (equal "passed" (field result "status")))
+          (ok (equal "completed" (field result "lifecycle" "around")))
+          (ok (and fixture (equalp #() (gethash "around" fixture))))))
       (skip "This cl-spec predates around isolation.")))

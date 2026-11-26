@@ -723,11 +723,9 @@ returns a version-two :FIXTURE-CHECK. Other readers keep their own schema rules.
           (case (getf fixture :isolation)
             (:fresh)
             (:around
-             (let ((wrapper (getf fixture :around)))
-               (unless (and (consp wrapper) (proper-list-p wrapper)
-                            (consp (first wrapper)) (null (cdr (first wrapper)))
-                            (symbolp (first (first wrapper))) (first (first wrapper)))
-                 (bad "an around fixture requires its wrapper and thunk parameter"))))
+             ;; Programmatic wrappers may have no recorded source forms.
+             (unless (proper-list-p (getf fixture :around :missing))
+               (bad "an around fixture requires a list of wrapper source forms")))
             (otherwise
              (return-from validate-versioned-record
                (values :unsupported-isolation (getf fixture :isolation)))))))
