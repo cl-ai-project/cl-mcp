@@ -157,10 +157,13 @@ test counts as a failure, not a pass."
      "compact-names-only-need-enumeration"
      "fixture-presence-and-unsupported-schemas-survive-focused-describe"
      "invalid-views-name-the-option-or-available-cases")
+    ("cl-mcp/tests/spec-around-test"
+     "around-fixtures-report-case-and-lifecycle-through-spec-tools")
     ("cl-mcp/tests/spec-input-test"
      "concrete-input-identifies-the-exact-selected-case"
      "caller-arguments-check-and-mutate-the-supplied-registry"
      "fixture-recipe-reports-owned-lifecycle-and-snapshot-availability"
+     "concrete-input-names-an-unsupported-fixture-isolation"
      "concrete-input-distinguishes-empty-arguments-scalars-and-null-recipe"
      "invalid-concrete-input-selection-precedes-checking"
      "invalid-concrete-tokens-never-start-a-call"

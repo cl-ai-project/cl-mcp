@@ -77,6 +77,7 @@
   (:import-from #:cl-mcp/tests/spec-integration-test)
   (:import-from #:cl-mcp/tests/spec-discovery-views-test)
   (:import-from #:cl-mcp/tests/spec-input-test)
+  (:import-from #:cl-mcp/tests/spec-around-test)
   (:import-from #:cl-mcp/tests/spec-batch-test)
   (:import-from #:cl-mcp/tests/lisp-macroexpand-test)
   (:import-from #:cl-mcp/tests/source-snapshot-test))

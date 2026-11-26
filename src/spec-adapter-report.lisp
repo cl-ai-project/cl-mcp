@@ -2128,6 +2128,12 @@ complete." (princ-to-string (second raw))))))
                           :projection (list :complete t :issues nil)
                           :data nil)
                     :unavailable nil))
+      (when (eq :unsupported-isolation core-record-status)
+        (return-from %result-plist
+          (list :property (symbol-data name) :kind kind :status :unsupported
+                :reason :unsupported-isolation
+                :trials trials :counterexample-status :unavailable :shrink-status :unavailable
+                :message (format nil "Unsupported fixture isolation ~S." core-record-reason))))
       (when (eq :malformed core-record-status)
         (return-from %result-plist
           (list :property (symbol-data name) :kind kind :status :internal-error

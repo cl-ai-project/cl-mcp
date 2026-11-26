@@ -117,6 +117,17 @@
       (ok (search "cleanup" (input-text result)))
       (ok (search "unavailable" (input-text result))))))
 
+(deftest concrete-input-names-an-unsupported-fixture-isolation
+  (let* ((record '(:schema-version 2 :record-kind :fixture-check :entity-kind :function-spec
+                   :input-kind :fixture-recipe :definition-digest "abc"
+                   :definition-digest-complete t :definition-digest-covers :declaration
+                   :capabilities nil :fixture (:isolation :sandbox :version 1 :recipe-name recipe
+                                               :setup ((list recipe)) :cleanup (nil))))
+         (result (cl-mcp/src/tools/spec-input::%record-response record "example" t 200)))
+    (ok (equal "unsupported" (field result "status")))
+    (ok (equal "UNSUPPORTED_ISOLATION" (field result "code")))
+    (ok (search "SANDBOX" (field result "message")))))
+
 (deftest concrete-input-distinguishes-empty-arguments-scalars-and-null-recipe
   (with-self-specs
     (ok (equal "passed"

@@ -163,6 +163,20 @@ jobs:
             CL_MCP_SPECS_SUITE="cl-mcp/tests/$suite" timeout 900 ros run --load scripts/check-specs.lisp
           done
 
+      - name: Around fixture integration
+        env:
+          AROUND_SPEC_REVISION: a539b29f28b9f0875413034fc6bdd611a572ce8a
+          XDG_CACHE_HOME: ${{ runner.temp }}/cl-mcp-around-spec-cache
+          CL_MCP_SPECS_MODE: integration
+          CL_MCP_SPECS_SUITE: cl-mcp/tests/spec-around-test
+          CL_SOURCE_REGISTRY: '(:source-registry (:directory "${{ github.workspace }}/") :inherit-configuration)'
+        run: |
+          dir="$HOME/.roswell/local-projects/masatoi/cl-spec"
+          git -C "$dir" fetch --quiet --depth 1 "$CL_SPEC_REPOSITORY" "$AROUND_SPEC_REVISION"
+          git -C "$dir" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$dir" rev-parse HEAD)" = "$AROUND_SPEC_REVISION"
+          timeout 900 ros run --load scripts/check-specs.lisp
+
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4
