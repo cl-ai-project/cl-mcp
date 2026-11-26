@@ -20,6 +20,7 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:discover-asd-in-project)
   (:import-from #:cl-mcp/src/utils/fasls
+                #:registered-source-owners
                 #:delete-project-fasls
                 #:delete-same-second-fasls)
   (:import-from #:cl-mcp/src/utils/compilation-unit
@@ -108,6 +109,23 @@ before it reported records, kept for the clients that read it."
   (format nil "~{~A~%~}"
           (mapcar (lambda (table) (gethash "message" table)) tables)))
 
+(defun %dependency-compile-predicate (system-name)
+  "Return a predicate for the ASDF compile action currently executing on this thread.
+Compare the component and actual compiler input so a nested COMPILE-FILE of an
+unrelated file does not inherit the outer action's warning policy."
+  (let ((owners nil))
+    (lambda ()
+      (when (and *compile-file-truename* asdf/session:*asdf-session*)
+        (let ((action (first (asdf/session:visiting-action-list asdf/session:*asdf-session*))))
+          (and (typep (car action) 'asdf:compile-op)
+               (typep (cdr action) 'asdf:cl-source-file)
+               (let ((source (asdf:component-pathname (cdr action))))
+                 (and (uiop:pathname-equal (truename source) *compile-file-truename*)
+                      (eq :dependency
+                          (gethash (namestring source)
+                                   (or owners
+                                       (setf owners (registered-source-owners system-name)))))))))))))
+
 (defun %call-with-suppressed-output (thunk &key on-unwind in-project warn-on-dependency)
   "Call THUNK with compilation and load output suppressed.
 Returns (values thunk-result warning-count warning-details compiler-stderr
@@ -136,13 +154,15 @@ later load agree -- where ASDF by itself, and run-tests, refuse the file."
   (let ((records '())
         (stderr (make-string-output-stream)))
     (flet ((handle-warning (w)
-             (let ((redefinition-p (%redefinition-warning-p w)))
+             (let* ((redefinition-p (%redefinition-warning-p w))
+                    (dependency-p (and warn-on-dependency
+                                       (ignore-errors (funcall warn-on-dependency)))))
                (unless redefinition-p
-                 (push (%make-warning-record w) records))
+                 (let ((record (%make-warning-record w)))
+                    (when dependency-p (setf (getf record :permitted-dependency) t))
+                    (push record records)))
                (when (and (or redefinition-p (typep w 'style-warning)
-                               (and warn-on-dependency *compile-file-truename*
-                                    (null (funcall in-project
-                                                   (list :file *compile-file-truename*)))))
+                               dependency-p)
                           (find-restart 'muffle-warning))
                  (invoke-restart 'muffle-warning))))
            (finished-records ()
@@ -345,7 +365,9 @@ registering it."
                                   (setf unwound-stderr stderr
                                         unwound-records records))
                      :in-project in-project
-                      :warn-on-dependency (equal dependency-warnings "warn"))))
+                      :warn-on-dependency
+                      (when (equal dependency-warnings "warn")
+                        (%dependency-compile-predicate system-name)))))
              (handler-case (%do-load)
                (asdf/find-component:missing-component (c)
                  (let* ((missing (princ-to-string
