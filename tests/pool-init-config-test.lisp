@@ -6,6 +6,8 @@
 (defpackage #:cl-mcp/tests/pool-init-config-test
   (:use #:cl)
   (:import-from #:rove #:deftest #:testing #:ok)
+  (:import-from #:cl-mcp/tests/test-helpers
+                #:call-with-late-warning-project #:spawn-available-p #:with-pool)
   (:import-from #:cl-mcp/src/pool
                 #:*worker-init-config*)
   (:import-from #:cl-mcp/src/worker-client
@@ -153,6 +155,33 @@ restore.  A NIL value unsets the variable."
                       (when recovered
                         (ok (/= (first second) (gethash "id" recovered)))))))
              (cl-mcp/src/pool:shutdown-pool)))))))
+
+(deftest per-worker-init-allows-a-late-dependency-warning
+  (if (not (and (%socket-available-p) (spawn-available-p)))
+      (rove:skip "worker process or socket unavailable")
+      (call-with-late-warning-project
+       (lambda (root)
+         (%with-env
+          '(("MCP_WORKER_INIT_MODE" . "per-worker")
+            ("MCP_WORKER_INIT_SYSTEM" . "clmcp-late-app")
+            ("MCP_WORKER_INIT_DEPENDENCY_WARNINGS" . "warn")
+            ("MCP_WORKER_INIT_ENTRY" . nil)
+            ("MCP_WORKER_INIT_EVAL" . nil))
+          (lambda ()
+            (let ((session "init-late-dependency"))
+              (cl-mcp/src/project-root:set-project-root root :session-id session)
+              (unwind-protect
+                   (with-pool ()
+                     (multiple-value-bind (worker failure)
+                         (handler-case (%await-ready-worker session)
+                           (cl-mcp/src/pool:pool-worker-init-failed (c)
+                             (values nil (princ-to-string c))))
+                       (ok worker failure)
+                       (when worker
+                         (let ((status (worker-rpc worker "worker/init-status" nil)))
+                           (ok (equal "running" (gethash "init_state" status)))
+                           (ok (null (gethash "last_init_error" status)))))))
+                (cl-mcp/src/project-root:forget-session-project-root session)))))))))
 
 (deftest per-worker-failure-is-local
   (if (not (%socket-available-p))

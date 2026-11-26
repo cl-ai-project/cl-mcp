@@ -120,11 +120,14 @@ unrelated file does not inherit the outer action's warning policy."
           (and (typep (car action) 'asdf:compile-op)
                (typep (cdr action) 'asdf:cl-source-file)
                (let ((source (asdf:component-pathname (cdr action))))
-                 (and (uiop:pathname-equal (truename source) *compile-file-truename*)
-                      (eq :dependency
-                          (gethash (namestring source)
-                                   (or owners
-                                       (setf owners (registered-source-owners system-name)))))))))))))
+                 (when (uiop:pathname-equal (truename source) *compile-file-truename*)
+                   (let ((path (namestring source)))
+                     (eq :dependency
+                         (or (and owners (gethash path owners))
+                             ;; Loads can register more systems after compilation starts,
+                             ;; as with :DEFSYSTEM-DEPENDS-ON.
+                             (gethash path
+                                      (setf owners (registered-source-owners system-name))))))))))))))
 
 (defun %call-with-suppressed-output (thunk &key on-unwind in-project warn-on-dependency)
   "Call THUNK with compilation and load output suppressed.

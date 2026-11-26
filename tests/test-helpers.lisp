@@ -11,7 +11,8 @@
                 #:initialize-pool
                 #:shutdown-pool)
   (:export #:spawn-available-p
-           #:with-pool))
+           #:with-pool
+           #:call-with-late-warning-project))
 
 (in-package #:cl-mcp/tests/test-helpers)
 
@@ -51,3 +52,35 @@ race with tests that manually crash workers.  Pass a short interval
      (unwind-protect
          (progn (initialize-pool) ,@body)
        (shutdown-pool))))
+
+(defun call-with-late-warning-project (thunk)
+  "Call THUNK with the directory of a cold ASDF project with two compile warnings."
+  (let ((root (merge-pathnames (format nil "clmcp-late-warning-~36R/"
+                                       (random most-positive-fixnum (make-random-state t)))
+                               (uiop:temporary-directory))))
+    (unwind-protect
+         (progn
+           (dolist (file
+                    '(("clmcp-late-app.asd" .
+                       "(defsystem \"clmcp-late-app\"
+                          :defsystem-depends-on (\"clmcp-late-bootstrap\")
+                          :depends-on (\"clmcp-late-dep\") :components ((:file \"app\")))")
+                      ("app.lisp" . "(in-package :cl-user)")
+                      ("clmcp-late-bootstrap.asd" .
+                       "(defsystem \"clmcp-late-bootstrap\" :components ((:file \"bootstrap\")))")
+                      ("bootstrap.lisp" .
+                       "(eval-when (:compile-toplevel)
+                          (assert (not (asdf:registered-system \"clmcp-late-dep\")))
+                          (warn \"bootstrap compile warning\"))")
+                      ("clmcp-late-dep.asd" .
+                       "(defsystem \"clmcp-late-dep\" :pathname \".qlot/\"
+                          :components ((:file \"dep\")))")
+                      (".qlot/dep.lisp" .
+                       "(eval-when (:compile-toplevel) (warn \"late dependency compile warning\"))")))
+             (destructuring-bind (name . text) file
+               (let ((path (merge-pathnames name root)))
+                 (ensure-directories-exist path)
+                 (with-open-file (out path :direction :output :if-exists :error)
+                   (write-string text out)))))
+           (funcall thunk root))
+      (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
