@@ -10,7 +10,8 @@
                 #:collect-target-files)
   (:import-from #:cl-mcp/src/utils/project-files
                 #:project-ignored-predicate)
-  (:export #:fasl-source-directory
+  (:export #:delete-project-fasls
+           #:fasl-source-directory
            #:delete-same-second-fasls
            #:registered-source-fasl-pairs
            #:registered-system-files
@@ -110,6 +111,8 @@ dependency -- IGNORED-P would leave out everything, so it is not applied."
     (when source-dir
       (dolist (source (ignore-errors (collect-target-files source-dir)))
         (when (and (equal "lisp" (pathname-type source))
+                   (not (member ".qlot" (pathname-directory (enough-namestring source source-dir))
+                                :test #'equal))
                    (not (and filter-p (funcall ignored-p source))))
           (let ((fasl (ignore-errors
                        (asdf:apply-output-translations (compile-file-pathname source)))))
@@ -126,6 +129,16 @@ this does nothing."
   (let ((register (uiop:find-symbol* '#:register-file-stamp '#:asdf/session nil)))
     (when (and register (fboundp register))
       (ignore-errors (funcall register file nil)))))
+
+(defun delete-project-fasls (system-name)
+  "Delete project source outputs and return their count and the owning system name."
+  (multiple-value-bind (directory owner) (fasl-source-directory system-name)
+    (values (if directory
+                (loop for (nil . fasl) in (%source-fasl-pairs system-name)
+                      when (ignore-errors (delete-file fasl) t)
+                        count t and do (%forget-file-stamp fasl))
+                0)
+            owner)))
 
 (defun delete-same-second-fasls (system-name)
   "Delete the fasl of each source file of SYSTEM-NAME's project (%SOURCE-FASL-PAIRS)

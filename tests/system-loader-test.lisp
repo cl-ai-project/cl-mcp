@@ -1520,6 +1520,28 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
       (ok (zerop (gethash "warnings" ht))
           "reloading an already-loaded system must not surface noise"))))
 
+(deftest load-system-clear-fasls-preserves-warm-dependency
+  (%call-with-probe-files
+   '(("owned-app.asd" . "(defsystem \"owned-app\" :depends-on (\"warm-dep\") :components ((:file \"app\")))")
+     ("app.lisp" . "(in-package :cl-user)")
+     (".qlot/warm-dep.asd" . "(defsystem \"warm-dep\" :components ((:file \"dep\")))")
+     (".qlot/dep.lisp" . "(in-package :cl-user)"))
+   (lambda (path)
+     (unwind-protect
+          (progn
+            (asdf:load-asd (funcall path ".qlot/warm-dep.asd"))
+            (asdf:load-asd (funcall path "owned-app.asd"))
+            (asdf:load-system "owned-app")
+            (let* ((fasl (asdf:apply-output-translations
+                          (compile-file-pathname (funcall path ".qlot/dep.lisp"))))
+                   (stamp (file-write-date fasl))
+                   (result (load-system "owned-app" :clear-fasls t)))
+              (ok (equal "loaded" (gethash "status" result)))
+              (ok (eql 1 (gethash "fasls_deleted" result)))
+              (ok (and (probe-file fasl) (= stamp (file-write-date fasl))))))
+       (asdf:clear-system "owned-app")
+       (asdf:clear-system "warm-dep")))))
+
 (deftest load-system-clear-fasls-recompiles-package-inferred
   (testing "clear_fasls recompiles dependency subsystems regardless of timestamps"
     ;; ASDF's :FORCE T only forces the NAMED system, not its
