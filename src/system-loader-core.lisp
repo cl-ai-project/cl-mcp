@@ -108,7 +108,7 @@ before it reported records, kept for the clients that read it."
   (format nil "~{~A~%~}"
           (mapcar (lambda (table) (gethash "message" table)) tables)))
 
-(defun %call-with-suppressed-output (thunk &key on-unwind in-project)
+(defun %call-with-suppressed-output (thunk &key on-unwind in-project warn-on-dependency)
   "Call THUNK with compilation and load output suppressed.
 Returns (values thunk-result warning-count warning-details compiler-stderr
 warning-records).  IN-PROJECT is passed on to %WARNING-RECORD-TABLES.
@@ -129,7 +129,7 @@ signalled twice or two warnings, and class and text cannot tell which.
 What is muffled is another matter, settled by what muffling does to the build.
 A STYLE-WARNING cannot fail a compile, so it is muffled once it is recorded:
 left alone it would be printed, and ASDF would add a warning of its own about
-the file.  A full WARNING is never muffled.  COMPILE-FILE offers a warning to
+the file.  A full WARNING is left alone unless WARN-ON-DEPENDENCY selects its compile.  COMPILE-FILE offers a warning to
 outer handlers before it counts it, and one muffled there is not counted: the
 file compiles \"cleanly\", ASDF loads it, and the FASL left behind makes every
 later load agree -- where ASDF by itself, and run-tests, refuse the file."
@@ -139,7 +139,10 @@ later load agree -- where ASDF by itself, and run-tests, refuse the file."
              (let ((redefinition-p (%redefinition-warning-p w)))
                (unless redefinition-p
                  (push (%make-warning-record w) records))
-               (when (and (or redefinition-p (typep w 'style-warning))
+               (when (and (or redefinition-p (typep w 'style-warning)
+                               (and warn-on-dependency *compile-file-truename*
+                                    (null (funcall in-project
+                                                   (list :file *compile-file-truename*)))))
                           (find-restart 'muffle-warning))
                  (invoke-restart 'muffle-warning))))
            (finished-records ()
@@ -245,19 +248,20 @@ later load agree -- where ASDF by itself, and run-tests, refuse the file."
 
 (declaim (ftype (function (string &key (:force boolean)
                                        (:clear-fasls boolean)
+                                       (:dependency-warnings (or null string))
                                        (:timeout-seconds (or null (real (0)))))
                           (values hash-table &rest t))
                 load-system))
 
 (defun load-system
-       (system-name &key (force t) (clear-fasls nil) (timeout-seconds 120))
+       (system-name &key (force t) (clear-fasls nil) dependency-warnings (timeout-seconds 120))
   "Load ASDF system SYSTEM-NAME with structured result.
 
 When FORCE is true (default), clears loaded state before loading so
 changed files are picked up -- a file written in the same second as its fasl
 too, whose fasl is deleted first (DELETE-SAME-SECOND-FASLS), since ASDF's
 one-second timestamps would keep it. When CLEAR-FASLS is true, deletes the
-system's cached fasls (its output-translation directory) before
+project's cached source FASLs before
 loading, guaranteeing recompilation from source — including
 package-inferred dependency subsystems that :FORCE T alone would not
 rebuild. TIMEOUT-SECONDS must be a positive number
@@ -270,9 +274,14 @@ FORCE is and wherever the old definition came from.  A full WARNING signalled
 while a file compiles fails the load, as it does under ASDF itself: the result
 is an \"error\" that carries the records made up to then.
 
+With DEPENDENCY-WARNINGS set to \"warn\", record and muffle full warnings
+during dependency compilation. Compiler and load errors still fail the operation.
+
 If ASDF signals MISSING-COMPONENT for the requested system, searches
 *project-root* for a matching .asd file and retries once after
 registering it."
+  (unless (member dependency-warnings '(nil "strict" "warn") :test #'equal)
+    (error "dependency_warnings must be strict or warn"))
   (check-type system-name string)
   (check-type timeout-seconds (or null (real (0))))
   (let* ((system-name (string-downcase system-name))
@@ -335,7 +344,8 @@ registering it."
                      :on-unwind (lambda (stderr records)
                                   (setf unwound-stderr stderr
                                         unwound-records records))
-                     :in-project in-project)))
+                     :in-project in-project
+                      :warn-on-dependency (equal dependency-warnings "warn"))))
              (handler-case (%do-load)
                (asdf/find-component:missing-component (c)
                  (let* ((missing (princ-to-string

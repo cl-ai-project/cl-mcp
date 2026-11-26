@@ -252,7 +252,7 @@ Handles both LF and CRLF line endings."
     ;; from leaking into every worker's environment.
     "MCP_WORKER_INIT_SYSTEM" "MCP_WORKER_INIT_ENTRY" "MCP_WORKER_INIT_EVAL"
     "MCP_WORKER_INIT_PACKAGE" "MCP_WORKER_INIT_MAX_FAILURES"
-    "MCP_WORKER_INIT_MODE")
+    "MCP_WORKER_INIT_MODE" "MCP_WORKER_INIT_DEPENDENCY_WARNINGS")
   "Environment variables that must NOT be inherited from the parent.
 MCP_WORKER_SECRET/ID/PARENT_PID are set explicitly per-worker.
 MCP_LOG_FILE is excluded so workers don't write to the parent's log file.

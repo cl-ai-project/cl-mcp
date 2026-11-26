@@ -53,7 +53,8 @@ again only when it is stale, and a definition made in repl-eval stays until it
 is: load-system on that file's own system (my-app/src/states), clear_fasls=true
 or a fresh worker (pool-kill-worker) drops it.
 
-Warning handling: a file that compiles with a full WARNING (a duplicate
+With dependency_warnings=warn, dependency compiler warnings are recorded and loading continues.
+By default, a file that compiles with a full WARNING (a duplicate
 definition, a type conflict, package variance, a wrong argument count to a
 function defun'd earlier in the same file) fails the load, exactly as it does
 under asdf:load-system and run-tests; the error gives that warning and its
@@ -107,6 +108,8 @@ Examples:
    (clear-fasls :type :boolean :json-name "clear_fasls"
     :description "Delete ASDF FASLs of the project's registered components and those reached by this
 load, including package-inferred subsystems. Vendored dependency FASLs are retained (default: false)")
+   (dependency-warnings :type :string :json-name "dependency_warnings"
+    :description "Use warn to permit full compiler warnings in dependencies. Default: strict.")
    (timeout-seconds :type :number :json-name "timeout_seconds"
     :description "Timeout for the operation in seconds; positive (default: 120)"))
   :body
@@ -119,9 +122,11 @@ load, including package-inferred subsystems. Vendored dependency FASLs are retai
                              (make-ht "system" system
                                       "force" force
                                       "clear_fasls" clear-fasls
+                                      "dependency_warnings" dependency-warnings
                                       "timeout_seconds" timeout-seconds))
       (let ((ht (load-system system
                              :force force
                              :clear-fasls clear-fasls
+                             :dependency-warnings dependency-warnings
                              :timeout-seconds (or timeout-seconds 120))))
         (result id (build-load-system-response system ht))))))

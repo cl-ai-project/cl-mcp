@@ -205,7 +205,8 @@ a :failed init and leaves the worker fully usable."
     (handler-case
         (with-asdf-load-lock
           (when system
-            (let* ((result (load-system system :force nil :timeout-seconds nil))
+            (let* ((result (load-system system :force nil :timeout-seconds nil
+                                        :dependency-warnings (gethash "dependency_warnings" params)))
                    (status (and (hash-table-p result) (gethash "status" result))))
               ;; load-system returns a status hash (does NOT signal) on compile
               ;; error / missing system; surface a non-"loaded" status as a

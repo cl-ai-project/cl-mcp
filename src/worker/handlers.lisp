@@ -203,6 +203,7 @@ it gives up and kills the worker."
                  (load-system system
                               :force force
                               :clear-fasls clear-fasls
+                              :dependency-warnings (gethash "dependency_warnings" params)
                               :timeout-seconds budget))))
       (build-load-system-response system ht))))
 
