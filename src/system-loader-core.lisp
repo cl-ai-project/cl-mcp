@@ -20,7 +20,7 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:discover-asd-in-project)
   (:import-from #:cl-mcp/src/utils/fasls
-                #:fasl-source-directory
+                #:delete-project-fasls
                 #:delete-same-second-fasls)
   (:import-from #:cl-mcp/src/utils/compilation-unit
                 #:call-with-own-compilation-unit)
@@ -243,30 +243,6 @@ later load agree -- where ASDF by itself, and run-tests, refuse the file."
           (unless completed-p
             (unwound)))))))
 
-(defun %delete-system-fasls (system-name)
-  "Delete the cached fasls under SYSTEM-NAME's output-translation
-directory (FASL-SOURCE-DIRECTORY).  ASDF's :FORCE T only forces the named
-system, not its dependencies — for package-inferred systems the actual code
-lives in dependency subsystems, so forcing the top system alone recompiles
-nothing, and a source edit landing in the same second as the previous
-compile is masked by second-granularity FILE-WRITE-DATE.  Deleting the
-fasls makes recompilation unconditional.
-
-Returns two values: the number of files deleted (0 when no system or cache
-directory is found), and the name of the system whose directory was
-cleared, or NIL."
-  (multiple-value-bind (source-dir cleared) (fasl-source-directory system-name)
-    (if (null source-dir)
-        (values 0 nil)
-        (let ((deleted 0))
-          (dolist (fasl (directory
-                         (merge-pathnames
-                          "**/*.fasl"
-                          (asdf:apply-output-translations source-dir))))
-            (when (ignore-errors (delete-file fasl) t)
-              (incf deleted)))
-          (values deleted cleared)))))
-
 (declaim (ftype (function (string &key (:force boolean)
                                        (:clear-fasls boolean)
                                        (:timeout-seconds (or null (real (0)))))
@@ -324,7 +300,7 @@ registering it."
                           unwound-records nil)
                     (when clear-fasls
                       (multiple-value-bind (count from)
-                          (%delete-system-fasls system-name)
+                          (delete-project-fasls system-name)
                         ;; Summed: a retry after auto-discovery clears again.
                         (setf fasls-deleted (+ (or fasls-deleted 0) count)
                               fasls-cleared-from (or from fasls-cleared-from))))
