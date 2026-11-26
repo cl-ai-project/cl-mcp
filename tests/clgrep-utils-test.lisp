@@ -342,8 +342,8 @@ and delete it."
   (%call-with-gitignore-tree
    "" '("checkout/keep.lisp" "checkout/drop.lisp")
    (lambda (root)
-     (let* ((old (merge-pathnames "checkout/" root))
-            (dir (merge-pathnames (uiop:parse-unix-namestring "project[old]/") root)))
+     (let ((old (merge-pathnames "checkout/" root))
+           (dir (merge-pathnames (uiop:parse-unix-namestring "project[old]/") root)))
        (rename-file old dir)
        (with-open-file (stream (merge-pathnames ".gitignore" dir) :direction :output)
          (write-line "drop.lisp" stream))
