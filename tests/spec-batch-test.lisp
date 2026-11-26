@@ -157,6 +157,38 @@
          (ok (equal "unknown" (gethash "worker_reuse" report)))
          (ok (eq yason:false (gethash "verified" report))))))))
 
+(deftest an-expired-wrapper-deadline-never-runs-inline
+  (let ((calls 0))
+    (multiple-value-bind (value status leaked)
+        (cl-mcp/src/spec-execution:call-with-check-deadline
+         (lambda () (incf calls)) 0 :wrapper #'funcall :name "expired-wrapper-test")
+      (ok (eq :timeout status))
+      (ok (eql 0 value))
+      (ok (null leaked)))
+    (ok (zerop calls))))
+
+(defun call-with-slow-teardown (check)
+  "Finish the check and hold the wrapper open past the deadline."
+  (multiple-value-prog1 (funcall check)
+    (sleep 5)))
+
+(deftest a-wrapper-teardown-timeout-keeps-compared-digest-evidence
+  (call-with-registry
+   (lambda ()
+     (register-property 'teardown-check (lambda () t))
+     (let* ((name (qualified 'teardown-check))
+            (baseline (spec-check-response (make-ht "property" name "seed" "42")))
+            (digest (first (values-of baseline "definition_digest")))
+            (report (spec-check-response
+                     (make-ht "property" name "around_function" (qualified 'call-with-slow-teardown)
+                              "expect_definition_digest" digest "seed" "42" "timeout_seconds" 1))))
+       (ok (stringp digest))
+       (ok (equal '("passed") (values-of report "status")))
+       (ok (equal '("match") (values-of report "definition_match")))
+       (ok (equal "faithful" (gethash "reproduction_faithful" report)))
+       (ok (equal "incomplete" (gethash "status" report)))
+       (ok (eq yason:false (gethash "verified" report)))))))
+
 (deftest combined-run-selects-the-contract-and-direct-properties
   (call-with-registry
    (lambda ()

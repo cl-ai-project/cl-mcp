@@ -100,6 +100,10 @@ The wrapper covers the request, including discovery, running and rendering.
 Nested checks run in its dynamic extent under the same outer deadline."
   (cond
     (wrapper
+     ;; A wrapping request always has a deadline. A caller may have spent
+     ;; the final part of its budget between selecting and starting a batch.
+     (unless (and (realp seconds) (plusp seconds))
+       (return-from call-with-check-deadline (values seconds :timeout nil)))
      (let* ((specials (%cl-spec-runtime-specials))
             (settings (mapcar #'symbol-value specials))
             (registry *object-registry*))

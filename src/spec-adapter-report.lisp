@@ -2667,10 +2667,9 @@ lets the shortfall it guards against pass silently as verified."
           :reproduce-scope +reproduce-scope-note+
           :reproduction-faithful
           (cond ((null expected-digest) :not-checked)
-                ((or interrupted
-                     (find-if (lambda (result)
-                                (member (getf result :definition-match) '(:unknown :not-checked)))
-                              results))
+                ((find-if (lambda (result)
+                            (member (getf result :definition-match) '(:unknown :not-checked)))
+                          results)
                  :unknown)
                 ((every (lambda (result) (eq :true (getf result :definition-match))) results)
                  :true)
