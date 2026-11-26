@@ -197,7 +197,10 @@ Handles both LF and CRLF line endings."
 ;;; ---------------------------------------------------------------------------
 
 (defstruct worker
-  "Represents a child worker process and its communication channel."
+  "Represents a child worker process and its communication channel.
+The pool lock protects INIT-STATE and INIT-ERROR. INIT-STATE is NIL until the
+per-worker hook starts, then :INITIALIZING until it reaches :RUNNING or :FAILED.
+INIT-ERROR holds the failure message in :FAILED state and is NIL otherwise."
   (id nil)
   (state :dead :type keyword)
   (process-info nil)
