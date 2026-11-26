@@ -408,9 +408,14 @@ even there a number against a null is a difference."
                (id (json-at entry "value" "object_id")))
           (ok (stringp id) "a list earns an object id")
           (testing "the session that ran the check can inspect it"
-            (multiple-value-bind (inspected text) (%tool owner "inspect-object" "id" id)
+            (let* ((inspected (%tool owner "inspect-object" "id" id))
+                   (elements (map 'list (lambda (element) (json-at element "value"))
+                                  (json-at inspected "elements"))))
               (ok (not (json-true-p (json-at inspected "isError"))))
-              (ok (claims-p text (json-at entry "value" "printed")))))
+              (ok (equal id (json-at inspected "id")))
+              (ok (= 17 (length elements)))
+              (ok (equal (json-at entry "value" "printed")
+                         (format nil "(~{~D~^ ~})" elements)))))
           (testing "another session cannot: the object lives in the other worker"
             ;; Its id names the owner's image, so the other worker refuses it
             ;; as stale rather than looking the number up in its own registry.

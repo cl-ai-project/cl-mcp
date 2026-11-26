@@ -1861,6 +1861,8 @@ Output fields:
   case, normally `bound` or `standby`), `session` (string or null; longer ids are cut to 8
   characters plus `...`), `pid`, `tcp_port`, and `leaked_threads` (threads a deadline could
   not stop, as of that worker's last answer; the text shows it when non-zero)
+- With per-worker initialization, each assigned worker reports `init_state` (`initializing`,
+  `running`, or `failed`) and `last_init_error` (an error message on failure).
 - `init_owner_session`, `init_owner_worker`, `init_disabled`, `init_failures`: the state of the
   worker init hook (see the README); the text prints an `Init hook:` line when any is set
 
@@ -1900,7 +1902,10 @@ Output fields:
   sets `cancelled_spawn`
 - `reset` (boolean|null): whether a replacement was spawned (only present when `killed` is true)
 - `cancelled_spawn` (boolean|null): true if a pending spawn was cancelled instead of killing a live worker
-- `isError` (boolean|null): true if kill succeeded but replacement spawn failed
+- `isError` (boolean|null): true when the replacement could not start or its initialization failed
+- `worker_id` and `init_state`: when the replacement is bound and its per-worker hook has failed,
+  `reset` is true and these fields identify the worker and its `failed` state. Correct the setup
+  and use `pool-kill-worker` to replace it.
 
 In both modes, you must call `load-system` again to restore previously loaded systems.
 

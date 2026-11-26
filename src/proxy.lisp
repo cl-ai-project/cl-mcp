@@ -483,16 +483,21 @@ sent, because it was written against state the session no longer has."
   (let ((worker
           (handler-case (funcall %cached-get-or-assign% session-id)
             (error (e)
-              (log-event :warn "proxy.pool-error"
-                         "session" session-id
-                         "method" method
-                         "error" (princ-to-string e))
-              (return-from %run-proxied-request
-                (%proxy-error-result
-                 (format nil "Pool error: ~A"
-                         (sanitize-error-message (princ-to-string e)))
-                 :not-executed
-                 :events (claim-session-resets session-id)))))))
+              (let* ((events (claim-session-resets session-id))
+                     ;; A pending or failed hook can leave a replacement bound.
+                     (bound (and events (funcall %cached-find-session-worker% session-id))))
+                (when (cancellation-requested-p record)
+                  (return-from %run-proxied-request
+                    (%cancelled-before-run-result events bound)))
+                (log-event :warn "proxy.pool-error"
+                           "session" session-id
+                           "method" method
+                           "error" (princ-to-string e))
+                (return-from %run-proxied-request
+                  (%proxy-error-result
+                   (format nil "Pool error: ~A"
+                           (sanitize-error-message (princ-to-string e)))
+                   :not-executed :events events :worker-in-place bound)))))))
     ;; A cancellation that arrived while the worker was being found or
     ;; started: the worker stays the session's, the request does not run.
     ;; That worker was acquired, so the notice may say the session has one.

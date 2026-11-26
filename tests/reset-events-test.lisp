@@ -301,6 +301,19 @@ return it: a reset the session is owed and has not been told."
              (ok (eq :bound (worker-state worker))))))
     (discard-session-resets "owner")))
 
+(deftest cancellation-while-worker-is-initializing
+  (let ((cl-mcp/src/proxy::*current-session-id* "pending")
+        (cl-mcp/src/proxy::%cached-get-or-assign%
+          (progn
+            (cl-mcp/src/proxy::%ensure-cached-bindings)
+            (lambda (session)
+              (cancel-request 451 session)
+              (error 'cl-mcp/src/pool:pool-worker-initializing :id 98)))))
+    (declare (ignorable cl-mcp/src/proxy::%cached-get-or-assign%))
+    (let ((result (cl-mcp/src/proxy:proxy-to-worker 451 "worker/eval" (make-hash-table))))
+      (ok (equal "not-executed" (execution-status result)))
+      (ok (search "Request cancelled" (result-text result))))))
+
 (deftest a-pool-error-tells-a-reset-without-promising-a-worker
   (%owe-owner-a-crash -32)
   (unwind-protect
@@ -318,6 +331,29 @@ return it: a reset the session is owed and has not been told."
          (ok (equal '((-32 . :crashed)) (told-in text)))
          (ok (not (search "now using" text)) "no worker was found, so none is claimed")
          (ok (not (search "new worker" text)))
+         (ok (equal "not-executed" (execution-status result))))
+    (discard-session-resets "owner")))
+
+(deftest pending-replacement-is-reported-with-owed-reset
+  (%owe-owner-a-crash -452)
+  (unwind-protect
+       (let* ((cl-mcp/src/proxy::*current-session-id* "owner")
+              (cl-mcp/src/proxy::%cached-get-or-assign%
+                (progn (cl-mcp/src/proxy::%ensure-cached-bindings)
+                       (lambda (session)
+                         (declare (ignore session))
+                         (error 'cl-mcp/src/pool:pool-worker-initializing :id 453))))
+              (cl-mcp/src/proxy::%cached-find-session-worker%
+                (lambda (session)
+                  (when (equal session "owner")
+                    (cl-mcp/src/worker-client:make-worker :id 453 :state :bound))))
+              (result (cl-mcp/src/proxy:proxy-to-worker 9 "worker/eval" (make-hash-table)))
+              (text (result-text result)))
+         (declare (ignorable cl-mcp/src/proxy::%cached-get-or-assign%
+                             cl-mcp/src/proxy::%cached-find-session-worker%))
+         (ok (search "453 is initializing" text))
+         (ok (equal '((-452 . :crashed)) (told-in text)))
+         (ok (search "now using another worker" text))
          (ok (equal "not-executed" (execution-status result))))
     (discard-session-resets "owner")))
 

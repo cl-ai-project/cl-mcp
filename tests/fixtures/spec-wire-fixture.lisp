@@ -52,8 +52,8 @@
   (= (wire-clamp value 10 90) value))
 
 (defproperty wire-lists-are-empty
-    ((items (list-of wire-int)))
-  "False on purpose, over a list, so the counterexample is a compound value
-that earns an object id."
+    ((items (list-of wire-int :min-length 17 :max-length 17)))
+  "False on purpose. The list earns an object id and exceeds the inspector's
+ten-element summary, so the ownership test compares its individual elements."
   (:kind :invariant)
   (null items))

@@ -37,6 +37,7 @@
            #:worker-pid
            #:worker-state
            #:worker-session-id
+           #:worker-init-state #:worker-init-error
            #:worker-id
            #:worker-leaked-threads
            #:worker-stream-lock
@@ -196,7 +197,10 @@ Handles both LF and CRLF line endings."
 ;;; ---------------------------------------------------------------------------
 
 (defstruct worker
-  "Represents a child worker process and its communication channel."
+  "Represents a child worker process and its communication channel.
+The pool lock protects INIT-STATE and INIT-ERROR. INIT-STATE is NIL until the
+per-worker hook starts, then :INITIALIZING until it reaches :RUNNING or :FAILED.
+INIT-ERROR holds the failure message in :FAILED state and is NIL otherwise."
   (id nil)
   (state :dead :type keyword)
   (process-info nil)
@@ -209,6 +213,9 @@ Handles both LF and CRLF line endings."
   (swank-port nil)
   (pid nil)
   (session-id nil)
+  ;; Parent-side per-worker readiness, protected by the pool lock.
+  (init-state nil)
+  (init-error nil)
   (request-counter 0 :type integer)
   (stderr-thread nil)
   ;; Count of threads the worker last reported a deadline could not stop.

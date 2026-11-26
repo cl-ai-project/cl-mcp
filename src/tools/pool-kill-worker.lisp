@@ -17,7 +17,8 @@
                 #:log-event)
   (:import-from #:cl-mcp/src/pool
                 #:kill-session-worker
-                #:get-or-assign-worker)
+                #:get-or-assign-worker #:pool-worker-initializing
+                #:pool-worker-init-failed #:init-failed-worker-id)
   (:export #:pool-kill-worker))
 
 (in-package #:cl-mcp/src/tools/pool-kill-worker)
@@ -43,7 +44,7 @@ that requires a worker (repl-eval, load-system, etc.) will automatically
 spawn a fresh one.  The next call will have a small latency penalty.
 
 With reset=true: the worker is killed AND a new one is immediately spawned
-and bound to your session.  The next tool call is ready without delay.
+and bound to your session.  Per-worker initialization continues in the background.
 Note that reset=true makes this call slower (includes spawn time).
 
 In both cases, you must call load-system again to restore previously
@@ -53,7 +54,9 @@ Response fields: killed, reset. If a spawn was still in progress, it is
 cancelled instead (cancelled_spawn: true, killed: false) and nothing is spawned,
 even with reset=true. With no worker bound, or the pool disabled, killed is
 false. If reset=true and the replacement fails to start, the result is an error
-with killed: true and reset: false; a later call that needs a worker retries."
+with killed: true and reset: false; a later call that needs a worker retries.
+If a replacement is bound but its per-worker hook has failed, reset is true and
+the error includes worker_id and init_state."
   :args ((reset :type :boolean :default nil
                 :description "When true, immediately spawn a replacement worker
 after killing the current one.  When false (default), defer spawning until
@@ -98,17 +101,29 @@ the next tool call that needs a worker."))
             (cond
               (reset
                (handler-case
-                   (progn
-                     (get-or-assign-worker session-id)
+                   (let ((message
+                           (handler-case
+                               (progn (get-or-assign-worker session-id)
+                                      "Worker killed and replaced.")
+                             (pool-worker-initializing (c)
+                               (format nil "Worker killed and replaced. ~A" c)))))
                      (result id
                              (make-ht
                               "content"
                               (text-content
                                (%with-resets
-                                "Worker killed and replaced."
-                                events :worker-in-place t))
+                                message events :worker-in-place t))
                               "killed" t
                               "reset" t)))
+                 (pool-worker-init-failed (condition)
+                   (result id
+                           (make-ht
+                            "content" (text-content
+                                       (%with-resets (princ-to-string condition) events
+                                                     :worker-in-place t))
+                            "killed" t "reset" t "isError" t
+                            "worker_id" (init-failed-worker-id condition)
+                            "init_state" "failed")))
                  (error (e)
                    (log-event :warn "pool.kill-worker.reset-failed"
                               "session" session-id

@@ -156,6 +156,56 @@
               (ok (not (eql old-pid (worker-pid new-worker)))
                   "new worker should have a different PID"))))))))
 
+(deftest pool-kill-worker-reset-returns-during-init
+  (unless (spawn-available-p)
+    (skip "Cannot spawn workers"))
+  (let ((*use-worker-pool* t))
+    (with-pool ()
+      (get-or-assign-worker "pending-reset")
+      (let ((cl-mcp/src/pool:*worker-init-config*
+              '(:mode "per-worker" :system "asdf" :eval "(sleep 60)")))
+        (let ((result (%result-of (%call-kill-worker :session-id "pending-reset" :reset t))))
+          (ok (gethash "reset" result))
+          (ok (gethash "killed" result))
+          (ok (search "initializing" (gethash "text" (elt (gethash "content" result) 0))))
+          (ok (find-session-worker "pending-reset")))))))
+
+(deftest pool-kill-worker-reset-reports-failed-bound-worker
+  (unless (spawn-available-p)
+    (skip "Cannot spawn workers"))
+  (let ((*use-worker-pool* t)
+        (session "failed-reset"))
+    (with-pool ()
+      (get-or-assign-worker session)
+      (let ((cl-mcp/src/pool:*worker-init-config*
+              '(:mode "per-worker" :system "asdf" :eval "(error \"fixture init failed\")"))
+            (acquire (symbol-function 'get-or-assign-worker)))
+        (unwind-protect
+             (progn
+               ;; Force the interleaving where a concurrent caller has already
+               ;; assigned the new worker and its hook failed before reset acquires it.
+               (setf (symbol-function 'get-or-assign-worker)
+                     (lambda (sid)
+                       (loop repeat 600
+                             do (handler-case (return (funcall acquire sid))
+                                  (cl-mcp/src/pool:pool-worker-initializing ()
+                                    (sleep 0.05)))
+                             finally (error "Hook did not finish."))))
+               (let* ((result (%result-of (%call-kill-worker :session-id session :reset t)))
+                      (message (gethash "text" (elt (gethash "content" result) 0)))
+                      (bound (find-session-worker session)))
+                 (ok bound)
+                 (ok (gethash "killed" result))
+                 (ok (gethash "reset" result))
+                 (ok (gethash "isError" result))
+                 (ok (equal "failed" (gethash "init_state" result)))
+                 (ok (eql (cl-mcp/src/worker-client:worker-id bound)
+                          (gethash "worker_id" result)))
+                 (ok (search "fixture init failed" message))
+                 (ok (search "pool-kill-worker" message))
+                 (ok (not (search "starting a replacement failed" message)))))
+          (setf (symbol-function 'get-or-assign-worker) acquire))))))
+
 (deftest pool-kill-worker-double-kill
   (testing "second kill returns no-worker"
     (unless (spawn-available-p)
