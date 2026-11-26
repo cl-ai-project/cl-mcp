@@ -10,9 +10,11 @@
                 #:collect-target-files)
   (:import-from #:cl-mcp/src/utils/project-files
                 #:project-ignored-predicate)
-  (:export #:fasl-source-directory
+  (:export #:delete-project-fasls
+           #:fasl-source-directory
            #:delete-same-second-fasls
            #:registered-source-fasl-pairs
+           #:registered-source-owners
            #:registered-system-files
            #:registered-fasl-sources))
 
@@ -49,6 +51,19 @@ them.  Only systems already registered: one never loaded has no fasl to doubt."
         ((typep component 'asdf:parent-component)
          (loop for child in (asdf:component-children component)
                append (%source-file-components child)))))
+
+(defun registered-source-owners (system-name)
+  "Map registered CL sources to :PROJECT or :DEPENDENCY for SYSTEM-NAME.
+The requested primary and its subsystems take precedence for shared sources."
+  (let ((owners (make-hash-table :test #'equal))
+        (primary (asdf:primary-system-name system-name)))
+    (dolist (name (asdf:registered-systems) owners)
+      (let ((system (asdf:registered-system name))
+            (project-p (equal primary (asdf:primary-system-name name))))
+        (dolist (file (%source-file-components system))
+          (let ((path (namestring (asdf:component-pathname file))))
+            (when (or project-p (null (gethash path owners)))
+              (setf (gethash path owners) (if project-p :project :dependency)))))))))
 
 (defun %compiled-fasl (component)
   "Return the fasl ASDF compiles COMPONENT, a source file, into, or NIL."
@@ -106,10 +121,14 @@ When the directory itself is left out -- the system being loaded is such a
 dependency -- IGNORED-P would leave out everything, so it is not applied."
   (let* ((pairs (registered-source-fasl-pairs system-name))
          (source-dir (fasl-source-directory system-name))
+         (owners (and source-dir (registered-source-owners system-name)))
          (filter-p (and source-dir (not (funcall ignored-p source-dir)))))
     (when source-dir
       (dolist (source (ignore-errors (collect-target-files source-dir)))
         (when (and (equal "lisp" (pathname-type source))
+                   (not (eq :dependency (gethash (namestring source) owners)))
+                   (not (member ".qlot" (pathname-directory (enough-namestring source source-dir))
+                                :test #'equal))
                    (not (and filter-p (funcall ignored-p source))))
           (let ((fasl (ignore-errors
                        (asdf:apply-output-translations (compile-file-pathname source)))))
@@ -126,6 +145,20 @@ this does nothing."
   (let ((register (uiop:find-symbol* '#:register-file-stamp '#:asdf/session nil)))
     (when (and register (fboundp register))
       (ignore-errors (funcall register file nil)))))
+
+(defun delete-project-fasls (system-name)
+  "Delete the ASDF outputs of project components and return the count and owning system.
+Resolve the load's component graph before collecting outputs. This registers
+package-inferred subsystems in a fresh image without inferring ownership from
+where source files happen to live."
+  (multiple-value-bind (directory owner) (fasl-source-directory system-name)
+    (let ((system (and directory (asdf:find-system system-name nil))))
+      (when system
+        (asdf:required-components system))
+      (values (loop for (nil . fasl) in (registered-source-fasl-pairs system-name)
+                    when (ignore-errors (delete-file fasl) t)
+                      count t and do (%forget-file-stamp fasl))
+              owner))))
 
 (defun delete-same-second-fasls (system-name)
   "Delete the fasl of each source file of SYSTEM-NAME's project (%SOURCE-FASL-PAIRS)

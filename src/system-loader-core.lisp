@@ -20,7 +20,8 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:discover-asd-in-project)
   (:import-from #:cl-mcp/src/utils/fasls
-                #:fasl-source-directory
+                #:registered-source-owners
+                #:delete-project-fasls
                 #:delete-same-second-fasls)
   (:import-from #:cl-mcp/src/utils/compilation-unit
                 #:call-with-own-compilation-unit)
@@ -108,7 +109,24 @@ before it reported records, kept for the clients that read it."
   (format nil "~{~A~%~}"
           (mapcar (lambda (table) (gethash "message" table)) tables)))
 
-(defun %call-with-suppressed-output (thunk &key on-unwind in-project)
+(defun %dependency-compile-predicate (system-name)
+  "Return a predicate for the ASDF compile action currently executing on this thread.
+Compare the component and actual compiler input so a nested COMPILE-FILE of an
+unrelated file does not inherit the outer action's warning policy."
+  (let ((owners nil))
+    (lambda ()
+      (when (and *compile-file-truename* asdf/session:*asdf-session*)
+        (let ((action (first (asdf/session:visiting-action-list asdf/session:*asdf-session*))))
+          (and (typep (car action) 'asdf:compile-op)
+               (typep (cdr action) 'asdf:cl-source-file)
+               (let ((source (asdf:component-pathname (cdr action))))
+                 (and (uiop:pathname-equal (truename source) *compile-file-truename*)
+                      (eq :dependency
+                          (gethash (namestring source)
+                                   (or owners
+                                       (setf owners (registered-source-owners system-name)))))))))))))
+
+(defun %call-with-suppressed-output (thunk &key on-unwind in-project warn-on-dependency)
   "Call THUNK with compilation and load output suppressed.
 Returns (values thunk-result warning-count warning-details compiler-stderr
 warning-records).  IN-PROJECT is passed on to %WARNING-RECORD-TABLES.
@@ -129,17 +147,22 @@ signalled twice or two warnings, and class and text cannot tell which.
 What is muffled is another matter, settled by what muffling does to the build.
 A STYLE-WARNING cannot fail a compile, so it is muffled once it is recorded:
 left alone it would be printed, and ASDF would add a warning of its own about
-the file.  A full WARNING is never muffled.  COMPILE-FILE offers a warning to
+the file.  A full WARNING is left alone unless WARN-ON-DEPENDENCY selects its compile.  COMPILE-FILE offers a warning to
 outer handlers before it counts it, and one muffled there is not counted: the
 file compiles \"cleanly\", ASDF loads it, and the FASL left behind makes every
 later load agree -- where ASDF by itself, and run-tests, refuse the file."
   (let ((records '())
         (stderr (make-string-output-stream)))
     (flet ((handle-warning (w)
-             (let ((redefinition-p (%redefinition-warning-p w)))
+             (let ((redefinition-p (%redefinition-warning-p w))
+                   (dependency-p (and warn-on-dependency
+                                      (ignore-errors (funcall warn-on-dependency)))))
                (unless redefinition-p
-                 (push (%make-warning-record w) records))
-               (when (and (or redefinition-p (typep w 'style-warning))
+                 (let ((record (%make-warning-record w)))
+                   (when dependency-p (setf (getf record :permitted-dependency) t))
+                   (push record records)))
+               (when (and (or redefinition-p (typep w 'style-warning)
+                              dependency-p)
                           (find-restart 'muffle-warning))
                  (invoke-restart 'muffle-warning))))
            (finished-records ()
@@ -243,45 +266,22 @@ later load agree -- where ASDF by itself, and run-tests, refuse the file."
           (unless completed-p
             (unwound)))))))
 
-(defun %delete-system-fasls (system-name)
-  "Delete the cached fasls under SYSTEM-NAME's output-translation
-directory (FASL-SOURCE-DIRECTORY).  ASDF's :FORCE T only forces the named
-system, not its dependencies — for package-inferred systems the actual code
-lives in dependency subsystems, so forcing the top system alone recompiles
-nothing, and a source edit landing in the same second as the previous
-compile is masked by second-granularity FILE-WRITE-DATE.  Deleting the
-fasls makes recompilation unconditional.
-
-Returns two values: the number of files deleted (0 when no system or cache
-directory is found), and the name of the system whose directory was
-cleared, or NIL."
-  (multiple-value-bind (source-dir cleared) (fasl-source-directory system-name)
-    (if (null source-dir)
-        (values 0 nil)
-        (let ((deleted 0))
-          (dolist (fasl (directory
-                         (merge-pathnames
-                          "**/*.fasl"
-                          (asdf:apply-output-translations source-dir))))
-            (when (ignore-errors (delete-file fasl) t)
-              (incf deleted)))
-          (values deleted cleared)))))
-
 (declaim (ftype (function (string &key (:force boolean)
                                        (:clear-fasls boolean)
+                                       (:dependency-warnings (or null string))
                                        (:timeout-seconds (or null (real (0)))))
                           (values hash-table &rest t))
                 load-system))
 
 (defun load-system
-       (system-name &key (force t) (clear-fasls nil) (timeout-seconds 120))
+       (system-name &key (force t) (clear-fasls nil) dependency-warnings (timeout-seconds 120))
   "Load ASDF system SYSTEM-NAME with structured result.
 
 When FORCE is true (default), clears loaded state before loading so
 changed files are picked up -- a file written in the same second as its fasl
 too, whose fasl is deleted first (DELETE-SAME-SECOND-FASLS), since ASDF's
 one-second timestamps would keep it. When CLEAR-FASLS is true, deletes the
-system's cached fasls (its output-translation directory) before
+project's cached source FASLs before
 loading, guaranteeing recompilation from source — including
 package-inferred dependency subsystems that :FORCE T alone would not
 rebuild. TIMEOUT-SECONDS must be a positive number
@@ -294,9 +294,14 @@ FORCE is and wherever the old definition came from.  A full WARNING signalled
 while a file compiles fails the load, as it does under ASDF itself: the result
 is an \"error\" that carries the records made up to then.
 
+With DEPENDENCY-WARNINGS set to \"warn\", record and muffle full warnings
+during dependency compilation. Compiler and load errors still fail the operation.
+
 If ASDF signals MISSING-COMPONENT for the requested system, searches
 *project-root* for a matching .asd file and retries once after
 registering it."
+  (unless (member dependency-warnings '(nil "strict" "warn") :test #'equal)
+    (error "dependency_warnings must be strict or warn"))
   (check-type system-name string)
   (check-type timeout-seconds (or null (real (0))))
   (let* ((system-name (string-downcase system-name))
@@ -324,7 +329,7 @@ registering it."
                           unwound-records nil)
                     (when clear-fasls
                       (multiple-value-bind (count from)
-                          (%delete-system-fasls system-name)
+                          (delete-project-fasls system-name)
                         ;; Summed: a retry after auto-discovery clears again.
                         (setf fasls-deleted (+ (or fasls-deleted 0) count)
                               fasls-cleared-from (or from fasls-cleared-from))))
@@ -359,7 +364,10 @@ registering it."
                      :on-unwind (lambda (stderr records)
                                   (setf unwound-stderr stderr
                                         unwound-records records))
-                     :in-project in-project)))
+                     :in-project in-project
+                      :warn-on-dependency
+                      (when (equal dependency-warnings "warn")
+                        (%dependency-compile-predicate system-name)))))
              (handler-case (%do-load)
                (asdf/find-component:missing-component (c)
                  (let* ((missing (princ-to-string

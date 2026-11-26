@@ -200,6 +200,7 @@ is the master gate, mirroring MCP_WORKER_SWANK."
   (let ((system (%env-string "MCP_WORKER_INIT_SYSTEM")))
     (when system
       (list :system system
+            :dependency-warnings (%env-string "MCP_WORKER_INIT_DEPENDENCY_WARNINGS")
             :entry (%env-string "MCP_WORKER_INIT_ENTRY")
             :eval (%env-string "MCP_WORKER_INIT_EVAL")
             :package (or (%env-string "MCP_WORKER_INIT_PACKAGE") "CL-USER")
@@ -574,6 +575,7 @@ init cannot brick a session's repl-eval/load-system."
   "Build the worker/init-start params hash-table from CONFIG plist."
   (let ((ht (make-hash-table :test 'equal)))
     (setf (gethash "system" ht) (getf config :system)
+          (gethash "dependency_warnings" ht) (getf config :dependency-warnings)
           (gethash "entry" ht) (getf config :entry)
           (gethash "eval" ht) (getf config :eval)
           (gethash "package" ht) (getf config :package))

@@ -312,6 +312,7 @@ Disable the worker pool with `MCP_NO_WORKER_POOL=1` or the `:worker-pool` keywor
 | `MCP_WORKER_INIT_PACKAGE` | Package used to read/eval `MCP_WORKER_INIT_EVAL` | `CL-USER` |
 | `MCP_WORKER_INIT_MAX_FAILURES` | Soft singleton init failures before init auto-retry latches off | `1` |
 | `MCP_WORKER_INIT_MODE` | `singleton` elects one runtime owner. `per-worker` prepares every assigned worker before its first application call | `singleton` |
+| `MCP_WORKER_INIT_DEPENDENCY_WARNINGS` | Set to `warn` to allow dependency compiler warnings during init | `strict` |
 
 ### Tuning warmup for cold-start handshakes
 

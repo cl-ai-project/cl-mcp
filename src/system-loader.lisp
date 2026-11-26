@@ -43,7 +43,7 @@ it judges stale by their timestamps (one-second resolution).  A file of the
 project's tree written in the same second as its FASL would look current, so
 that FASL is deleted first, and the file is recompiled when this load reaches
 it (same_second_fasls_deleted counts them).  clear_fasls=true is the
-guaranteed rebuild, of every file.  force=true clears the named system and
+guaranteed rebuild of project sources reached by the load, including package-inferred subsystems.  force=true clears the named system and
 re-reads its .asd, so every system defined there that this load reaches (the
 named one and its dependencies) is loaded again: a stale file is recompiled, a
 current FASL loaded as it is, and either replaces a definition made in
@@ -53,7 +53,8 @@ again only when it is stale, and a definition made in repl-eval stays until it
 is: load-system on that file's own system (my-app/src/states), clear_fasls=true
 or a fresh worker (pool-kill-worker) drops it.
 
-Warning handling: a file that compiles with a full WARNING (a duplicate
+With dependency_warnings=warn, dependency compiler warnings are recorded and loading continues.
+By default, a file that compiles with a full WARNING (a duplicate
 definition, a type conflict, package variance, a wrong argument count to a
 function defun'd earlier in the same file) fails the load, exactly as it does
 under asdf:load-system and run-tests; the error gives that warning and its
@@ -105,9 +106,10 @@ Examples:
    (force :type :boolean :default t
     :description "Clear loaded state before loading to pick up changes (default: true)")
    (clear-fasls :type :boolean :json-name "clear_fasls"
-    :description "Delete the cached FASLs under this system's source tree (its primary system's, for
-a package-inferred subsystem) before loading, forcing that tree to recompile; dependencies in other
-projects are not touched (default: false)")
+    :description "Delete ASDF FASLs of the project's registered components and those reached by this
+load, including package-inferred subsystems. Vendored dependency FASLs are retained (default: false)")
+   (dependency-warnings :type :string :json-name "dependency_warnings"
+    :description "Use warn to permit full compiler warnings in dependencies. Default: strict.")
    (timeout-seconds :type :number :json-name "timeout_seconds"
     :description "Timeout for the operation in seconds; positive (default: 120)"))
   :body
@@ -120,9 +122,11 @@ projects are not touched (default: false)")
                              (make-ht "system" system
                                       "force" force
                                       "clear_fasls" clear-fasls
+                                      "dependency_warnings" dependency-warnings
                                       "timeout_seconds" timeout-seconds))
       (let ((ht (load-system system
                              :force force
                              :clear-fasls clear-fasls
+                             :dependency-warnings dependency-warnings
                              :timeout-seconds (or timeout-seconds 120))))
         (result id (build-load-system-response system ht))))))
