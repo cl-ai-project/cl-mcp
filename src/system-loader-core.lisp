@@ -155,14 +155,14 @@ later load agree -- where ASDF by itself, and run-tests, refuse the file."
         (stderr (make-string-output-stream)))
     (flet ((handle-warning (w)
              (let ((redefinition-p (%redefinition-warning-p w))
-                    (dependency-p (and warn-on-dependency
-                                       (ignore-errors (funcall warn-on-dependency)))))
+                   (dependency-p (and warn-on-dependency
+                                      (ignore-errors (funcall warn-on-dependency)))))
                (unless redefinition-p
                  (let ((record (%make-warning-record w)))
-                    (when dependency-p (setf (getf record :permitted-dependency) t))
-                    (push record records)))
+                   (when dependency-p (setf (getf record :permitted-dependency) t))
+                   (push record records)))
                (when (and (or redefinition-p (typep w 'style-warning)
-                               dependency-p)
+                              dependency-p)
                           (find-restart 'muffle-warning))
                  (invoke-restart 'muffle-warning))))
            (finished-records ()
