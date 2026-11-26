@@ -75,6 +75,30 @@ restore.  A NIL value unsets the variable."
               (warning () nil))
             "no warning when INIT unset (even with pool disabled)")))))
 
+(deftest per-worker-pending-returns-without-running-application
+  (let* ((session "init-pending")
+         (worker (make-worker :id 451 :session-id session :state :bound
+                              :init-state :initializing))
+         (cl-mcp/src/pool::*pool-running* t)
+         (cl-mcp/src/pool::*affinity-map* (make-hash-table :test 'equal))
+         (*worker-init-config* '(:mode "per-worker")))
+    (setf (gethash session cl-mcp/src/pool::*affinity-map*) worker)
+    (let ((message
+            (handler-case
+                (sb-ext:with-timeout 1
+                  (cl-mcp/src/pool:get-or-assign-worker session)
+                  "application admitted")
+              (sb-ext:timeout () "stuck waiting for init")
+              (error (c) (princ-to-string c)))))
+      (ok (search "initializing" message))
+      (ok (search "451" message)))))
+
+(defun %await-ready-worker (session)
+  (loop repeat 600
+        do (handler-case (return (cl-mcp/src/pool:get-or-assign-worker session))
+             (cl-mcp/src/pool:pool-worker-initializing () (sleep 0.05)))
+        finally (error "Worker for ~A did not finish initialization." session)))
+
 (deftest per-worker-readiness
   (if (not (%socket-available-p))
       (rove:skip "socket unavailable")
@@ -90,7 +114,7 @@ restore.  A NIL value unsets the variable."
            (cl-mcp/src/pool:initialize-pool)
            (unwind-protect
                 (flet ((acquire (session)
-                         (let* ((w (cl-mcp/src/pool:get-or-assign-worker session))
+                         (let* ((w (%await-ready-worker session))
                                 (params (make-hash-table :test 'equal)))
                            (setf (gethash "code" params)
                                  "(and (boundp '*init-count*) *init-count*)")
@@ -160,7 +184,7 @@ restore.  A NIL value unsets the variable."
                            (first (bt:make-thread
                                    (lambda ()
                                      (handler-case
-                                         (progn (cl-mcp/src/pool:get-or-assign-worker bad) nil)
+                                         (progn (%await-ready-worker bad) nil)
                                        (error (c) (princ-to-string c)))))))
                       (ok standby)
                       (when standby (ok (null (gethash "init_state" standby))))
@@ -172,7 +196,7 @@ restore.  A NIL value unsets the variable."
                         (ok initializing)
                         (when (and initializing standby)
                           (ok (equal (gethash "id" standby) (gethash "id" initializing)))))
-                      (ok (cl-mcp/src/pool:get-or-assign-worker good))
+                      (ok (%await-ready-worker good))
                       (ok (equal "running" (gethash "init_state" (status good))))
                       (delete-file gate)
                       (let ((message (bt:join-thread first))

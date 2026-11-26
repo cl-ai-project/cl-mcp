@@ -483,6 +483,9 @@ sent, because it was written against state the session no longer has."
   (let ((worker
           (handler-case (funcall %cached-get-or-assign% session-id)
             (error (e)
+              (when (cancellation-requested-p record)
+                (return-from %run-proxied-request
+                  (%cancelled-before-run-result (claim-session-resets session-id))))
               (log-event :warn "proxy.pool-error"
                          "session" session-id
                          "method" method

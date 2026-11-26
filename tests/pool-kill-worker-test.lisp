@@ -156,6 +156,20 @@
               (ok (not (eql old-pid (worker-pid new-worker)))
                   "new worker should have a different PID"))))))))
 
+(deftest pool-kill-worker-reset-returns-during-init
+  (unless (spawn-available-p)
+    (skip "Cannot spawn workers"))
+  (let ((*use-worker-pool* t))
+    (with-pool ()
+      (get-or-assign-worker "pending-reset")
+      (let* ((cl-mcp/src/pool:*worker-init-config*
+               '(:mode "per-worker" :system "asdf" :eval "(sleep 60)"))
+             (result (%result-of (%call-kill-worker :session-id "pending-reset" :reset t))))
+        (ok (gethash "reset" result))
+        (ok (gethash "killed" result))
+        (ok (search "initializing" (gethash "text" (elt (gethash "content" result) 0))))
+        (ok (find-session-worker "pending-reset"))))))
+
 (deftest pool-kill-worker-double-kill
   (testing "second kill returns no-worker"
     (unless (spawn-available-p)

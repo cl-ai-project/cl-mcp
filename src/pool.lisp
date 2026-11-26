@@ -81,6 +81,7 @@
            #:pool-shutting-down
            #:pool-capacity-exceeded
            #:pool-spawn-cancelled
+           #:pool-worker-initializing
            #:*recovery-threads*
            #:find-session-worker
            #:pool-status-info))
@@ -109,6 +110,13 @@
   (:report (lambda (c s)
              (format s "Session ~A was released during worker spawn."
                      (pool-spawn-cancelled-session-id c)))))
+
+(define-condition pool-worker-initializing (error)
+  ((id :initarg :id :reader initializing-worker-id))
+  (:documentation "An assigned worker is running its initialization hook.")
+  (:report (lambda (condition stream)
+             (format stream "Worker ~A is initializing. Check pool-status and retry when running."
+                     (initializing-worker-id condition)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Configuration
@@ -771,9 +779,6 @@ implementations, falls back to condition-notify (wakes at least one)."
   #+sbcl (sb-thread:condition-broadcast condvar)
   #-sbcl (bt:condition-notify condvar))
 
-(defvar *worker-init-changed* (make-condition-variable :name "worker-init-changed")
-  "Notified under the pool lock when an assigned worker finishes initialization.")
-
 (defun %per-worker-init-p ()
   (equal (getf *worker-init-config* :mode) "per-worker"))
 
@@ -810,11 +815,10 @@ implementations, falls back to condition-notify (wakes at least one)."
              (setf failure (princ-to-string condition))))
       (with-lock-held (*pool-lock*)
         (setf (worker-init-error worker) failure
-              (worker-init-state worker) (if failure :failed :running))
-        (%condition-broadcast *worker-init-changed*)))))
+              (worker-init-state worker) (if failure :failed :running))))))
 
-(defun %ensure-assigned-worker-init (worker session-id &key wait)
-  "Start the assigned worker's hook once. With WAIT, admit only initialized workers."
+(defun %ensure-assigned-worker-init (worker session-id &key require-ready)
+  "Start the assigned worker's hook once. With REQUIRE-READY, report pending or failed setup."
   (with-lock-held (*pool-lock*)
     (unless (and *pool-running* (eq :bound (worker-state worker))
                  (eq worker (gethash session-id *affinity-map*)))
@@ -825,9 +829,9 @@ implementations, falls back to condition-notify (wakes at least one)."
          (lambda () (%initialize-assigned-worker worker session-id config root))
          :name (format nil "pool-worker-init-~A" (worker-id worker)))
         (setf (worker-init-state worker) :initializing)))
-    (when wait
-      (loop while (eq (worker-init-state worker) :initializing)
-            do (condition-wait *worker-init-changed* *pool-lock*))
+    (when require-ready
+      (when (eq (worker-init-state worker) :initializing)
+        (error 'pool-worker-initializing :id (worker-id worker)))
       (when (eq (worker-init-state worker) :failed)
         (error "Worker ~A initialization failed: ~A" (worker-id worker)
                (worker-init-error worker))))))
@@ -1904,7 +1908,7 @@ cannot be created."
                  (worker-id worker) session-id)))
       ;; Fire the init hook only when THIS call newly bound a worker.
       (cond ((%per-worker-init-p)
-             (%ensure-assigned-worker-init worker session-id :wait t))
+             (%ensure-assigned-worker-init worker session-id :require-ready t))
             ((and (or assigned-from-standby need-spawn) *worker-init-config*)
              (ignore-errors (%ensure-runtime-init worker session-id))))
       worker)))

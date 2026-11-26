@@ -366,8 +366,8 @@ and `MCP_WORKER_INIT_ENTRY=recurya/dev:start-dev-runtime!`.
 For projects that need a test runner or other setup in each worker, set
 `MCP_WORKER_INIT_MODE=per-worker`. The pool initializes each newly assigned
 worker under its session's project root, including dedicated REPLs and
-replacements. Standbys wait for assignment. Concurrent application calls
-wait for the same initialization. A soft failure blocks that worker and
+replacements. Standbys wait for assignment. Application calls during initialization return the worker ID and a retry
+message. Retry when `pool-status` shows `running`. A soft failure blocks that worker and
 leaves other sessions available. Inspect the worker's `init_state` and
 `last_init_error` in `pool-status`; use `pool-kill-worker` to replace it
 after correcting the setup.
