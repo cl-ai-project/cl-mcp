@@ -338,6 +338,26 @@ and delete it."
        (dolist (explicit '(".worktrees/copy/" ".worktrees/copy/main.lisp"))
          (ok (= 1 (length (collect-target-files (merge-pathnames explicit root))))))))))
 
+(deftest collect-target-files-reads-native-ignore-paths
+  (%call-with-gitignore-tree
+   "" '("checkout/keep.lisp" "checkout/drop.lisp")
+   (lambda (root)
+     (let* ((old (merge-pathnames "checkout/" root))
+            (dir (merge-pathnames (uiop:parse-unix-namestring "project[old]/") root)))
+       (rename-file old dir)
+       (with-open-file (stream (merge-pathnames ".gitignore" dir) :direction :output)
+         (write-line "drop.lisp" stream))
+       (ok (equal (list (merge-pathnames "keep.lisp" dir)) (collect-target-files dir)))))))
+
+(deftest collect-target-files-skips-symlinked-working-tree-rules
+  (%call-with-gitignore-tree
+   "hidden.lisp" '("src/hidden.lisp" "src/keep.lisp")
+   (lambda (root)
+     (rename-file (merge-pathnames ".gitignore" root) (merge-pathnames "rules" root))
+     (uiop:run-program (list "ln" "-s" "../rules"
+                             (uiop:native-namestring (merge-pathnames "src/.gitignore" root))))
+     (ok (= 2 (length (collect-target-files root)))))))
+
 (defun %check-against-git (gitignore kept left-out)
   "Write a tree of KEPT and LEFT-OUT files under GITIGNORE and check that both
 the walk and the project-file predicate keep exactly KEPT, as git check-ignore

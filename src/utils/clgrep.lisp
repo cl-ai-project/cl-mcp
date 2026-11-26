@@ -461,9 +461,11 @@ the directories above PATH, for a walk that has made it on the way down."
         for scanner = (ignore-errors (create-scanner (if (consp pattern) (cdr pattern) pattern)))
         when scanner collect (if (consp pattern) (cons :negate scanner) scanner)))
 
-(defun %local-ignore-patterns (file root)
-  ;; A rule file may be a symlink or a FIFO. Only open a regular file in the walk.
-  (when (and (eq :file (ignore-errors (sb-impl::native-file-kind (namestring file) t)))
+(defun %local-ignore-patterns (file root &key follow-links)
+  ;; Git skips symlinked working-tree .gitignore files. Repository-local excludes
+  ;; may be linked, but must still resolve to a regular file inside this walk.
+  (when (and (eq :file (ignore-errors
+                         (sb-impl::native-file-kind (sb-ext:native-namestring file) follow-links)))
              (uiop:subpathp (truename file) root))
     (parse-gitignore file)))
 
@@ -513,7 +515,7 @@ Apply each directory's ignore rules relative to it. Prune excluded directories."
                        (walk child scopes)))))))
       (walk root (list (cons root (%compile-ignore-patterns
                                    (%local-ignore-patterns
-                                    (merge-pathnames ".git/info/exclude" root) root))))))
+                                    (merge-pathnames ".git/info/exclude" root) root :follow-links t))))))
     (nreverse result)))
 
 (defparameter *known-form-types*
