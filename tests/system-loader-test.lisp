@@ -1539,10 +1539,14 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
                             (compile-file-pathname (funcall path dep-src))))
                      (stamp (file-write-date fasl))
                      (result
-                       (let ((asdf:*central-registry*
-                               (cons (funcall path vendor) asdf:*central-registry*)))
+                       (let ((cl-mcp/src/system-loader-core:*system-load-lock-wrapper*
+                               (lambda (load)
+                                 ;; The registry binding belongs on the load thread.
+                                 (let ((asdf:*central-registry*
+                                         (cons (funcall path vendor) asdf:*central-registry*)))
+                                   (funcall load)))))
                          (when fresh-registry (asdf:clear-system "warm-dep"))
-                         (load-system "owned-app" :clear-fasls t :timeout-seconds nil))))
+                         (load-system "owned-app" :clear-fasls t))))
                 (ok (equal "loaded" (gethash "status" result)))
                 (ok (eql 1 (gethash "fasls_deleted" result)))
                 (ok (and (probe-file fasl) (= stamp (file-write-date fasl))))))
