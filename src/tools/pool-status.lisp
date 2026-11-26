@@ -28,7 +28,8 @@ characters plus \"...\"), tcp_port (integer), pid (integer), state (the
 worker's state in lower case: normally \"bound\" or \"standby\"; a crashed
 worker not yet reaped shows its own state and is counted in bound_count),
 leaked_threads (integer): threads a deadline could not stop, as of that
-worker's last answer.  A non-zero count means a run exceeded its timeout and
+worker's last answer. Per-worker initialization adds init_state (initializing,
+running or failed) and last_init_error. A non-zero leaked_threads count means a run exceeded its timeout and
 could not be interrupted; the worker retires rather than serve its next
 request while one is still running, and the session's state is reset."
   :args ()
@@ -66,5 +67,8 @@ request while one is still running, and the session's state is reset."
                                   (gethash "pid" w)
                                   (gethash "tcp_port" w)
                                   (gethash "session" w)
-                                  (or (gethash "leaked_threads" w) 0))))))))
+                                  (or (gethash "leaked_threads" w) 0))
+                          (when (gethash "init_state" w)
+                            (format s " init=~A~@[ (~A)~]" (gethash "init_state" w)
+                                    (gethash "last_init_error" w)))))))))
     (result id info)))

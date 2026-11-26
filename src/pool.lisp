@@ -29,6 +29,7 @@
                 #:spawn-worker #:worker-rpc #:kill-worker
                 #:signal-worker-terminate
                 #:worker-state #:worker-session-id
+                #:worker-init-state #:worker-init-error
                 #:record-worker-termination
                 #:worker-leaked-threads
                 #:worker-tcp-port
@@ -770,6 +771,67 @@ implementations, falls back to condition-notify (wakes at least one)."
   #+sbcl (sb-thread:condition-broadcast condvar)
   #-sbcl (bt:condition-notify condvar))
 
+(defvar *worker-init-changed* (make-condition-variable :name "worker-init-changed")
+  "Notified under the pool lock when an assigned worker finishes initialization.")
+
+(defun %per-worker-init-p ()
+  (equal (getf *worker-init-config* :mode) "per-worker"))
+
+(defun %initialize-assigned-worker (worker session-id config fallback-root)
+  "Synchronize WORKER's session root and run its configured hook once."
+  (let ((failure "Initialization interrupted"))
+    (unwind-protect
+         (handler-case
+             (progn
+               (let ((*project-root* fallback-root))
+                 (with-session-project-root (:session-id session-id)
+                   (when *project-root*
+                     (let ((params (make-hash-table :test 'equal)))
+                       (setf (gethash "path" params) (uiop:native-namestring *project-root*))
+                       (worker-rpc worker "worker/set-project-root" params :timeout 5
+                                   :before-send
+                                   (lambda ()
+                                     (let ((latest (session-project-root session-id)))
+                                       (when latest
+                                         (setf (gethash "path" params)
+                                               (uiop:native-namestring latest))))
+                                     :send))))))
+               (worker-rpc worker "worker/init-start" (%init-params config) :timeout 5)
+               (loop with delay = 0.05
+                     for status = (worker-rpc worker "worker/init-status" nil :timeout 5)
+                     for state = (gethash "init_state" status)
+                     until (equal state "running")
+                     do (when (equal state "failed")
+                          (error "~A" (gethash "last_init_error" status)))
+                        (sleep delay)
+                        (setf delay (min 1.0 (* 1.5 delay))))
+               (setf failure nil))
+           (error (condition)
+             (setf failure (princ-to-string condition))))
+      (with-lock-held (*pool-lock*)
+        (setf (worker-init-error worker) failure
+              (worker-init-state worker) (if failure :failed :running))
+        (%condition-broadcast *worker-init-changed*)))))
+
+(defun %ensure-assigned-worker-init (worker session-id &key wait)
+  "Start the assigned worker's hook once. With WAIT, admit only initialized workers."
+  (with-lock-held (*pool-lock*)
+    (unless (and *pool-running* (eq :bound (worker-state worker))
+                 (eq worker (gethash session-id *affinity-map*)))
+      (error "Worker ~A is no longer assigned to session ~A" (worker-id worker) session-id))
+    (unless (worker-init-state worker)
+      (let ((config *worker-init-config*) (root *project-root*))
+        (bt:make-thread
+         (lambda () (%initialize-assigned-worker worker session-id config root))
+         :name (format nil "pool-worker-init-~A" (worker-id worker)))
+        (setf (worker-init-state worker) :initializing)))
+    (when wait
+      (loop while (eq (worker-init-state worker) :initializing)
+            do (condition-wait *worker-init-changed* *pool-lock*))
+      (when (eq (worker-init-state worker) :failed)
+        (error "Worker ~A initialization failed: ~A" (worker-id worker)
+               (worker-init-error worker))))))
+
 (defstruct worker-placeholder
   "Placeholder inserted into the affinity map while a worker is being
 spawned.  Other threads requesting the same session wait on the
@@ -1200,7 +1262,9 @@ the shutdown ends the worker."
                         "new_worker_id" (worker-id new-worker)
                         "session" session-id)
              (when *worker-init-config*
-               (ignore-errors (%ensure-runtime-init new-worker session-id))))
+               (if (%per-worker-init-p)
+                   (%ensure-assigned-worker-init new-worker session-id)
+                   (ignore-errors (%ensure-runtime-init new-worker session-id)))))
          (error (e)
            ;; The session was released, the pool shut down, or the spawn
            ;; failed: %SPAWN-AND-BIND ended its worker and took the
@@ -1651,7 +1715,8 @@ cannot be created."
       (cond
         ;; Path 1: Existing bound worker — return immediately
         ((and entry (typep entry 'worker) (eq :bound (worker-state entry)))
-         (return-from get-or-assign-worker entry))
+         (unless (%per-worker-init-p)
+           (return-from get-or-assign-worker entry)))
         ;; Path 1b: Existing dead/crashed worker — remove and reassign.
         ;; Save reference for kill outside the lock (%kill-worker can
         ;; block for up to 2 seconds on SIGTERM→SIGKILL).
@@ -1791,6 +1856,7 @@ cannot be created."
                      assigned-from-standby)
                     (need-spawn
                      (%spawn-and-bind session-id entry spawn-generation))
+                    ((typep entry 'worker) entry)
                     (t (%wait-for-placeholder entry)))))
       ;; Sync the parent's *project-root* to a newly assigned worker.
       ;; At initialize time the worker doesn't exist yet, so the root
@@ -1804,7 +1870,8 @@ cannot be created."
       ;; unusable.  We MUST detect this and not return a corrupted worker.
       ;; A dedicated worker started under its recorded root. Sending the
       ;; caller's binding now could overwrite a concurrent root change.
-      (when (and (not dedicated-p) (or assigned-from-standby need-spawn) *project-root*)
+      (when (and (not (%per-worker-init-p)) (not dedicated-p)
+                 (or assigned-from-standby need-spawn) *project-root*)
         (ignore-errors
           (send-root-to-session-worker session-id *project-root*))
         ;; Check if send-root corrupted the worker.  If so, clean up
@@ -1836,8 +1903,10 @@ cannot be created."
           (error "Worker ~A crashed during project root setup for session ~A"
                  (worker-id worker) session-id)))
       ;; Fire the init hook only when THIS call newly bound a worker.
-      (when (and (or assigned-from-standby need-spawn) *worker-init-config*)
-        (ignore-errors (%ensure-runtime-init worker session-id)))
+      (cond ((%per-worker-init-p)
+             (%ensure-assigned-worker-init worker session-id :wait t))
+            ((and (or assigned-from-standby need-spawn) *worker-init-config*)
+             (ignore-errors (%ensure-runtime-init worker session-id))))
       worker)))
 
 ;;; ---------------------------------------------------------------------------
@@ -2067,6 +2136,9 @@ unrestricted REPL access bypassing MCP security policies."
                 ;; condition arose and the worker has not been asked for
                 ;; anything since.
                 (gethash "leaked_threads" ht) (worker-leaked-threads w))
+          (when (worker-init-state w)
+            (setf (gethash "init_state" ht) (string-downcase (worker-init-state w))
+                  (gethash "last_init_error" ht) (worker-init-error w)))
           (vector-push-extend ht result))))
     result))
 

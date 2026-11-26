@@ -306,12 +306,12 @@ Disable the worker pool with `MCP_NO_WORKER_POOL=1` or the `:worker-pool` keywor
 | `CL_MCP_WORKER_POOL_WARMUP` | Number of standby workers to maintain (non-negative integer) | `1` |
 | `CL_MCP_MAX_POOL_SIZE` | Maximum total workers, bound + standby (positive integer) | `16` |
 | `CL_MCP_DEDICATED_REPL_IDLE_SECONDS` | Seconds of inactivity before a dedicated worker is retired (`0` disables idle retirement) | `900` |
-| `MCP_WORKER_INIT_SYSTEM` | ASDF system to load in the elected owner worker at bind (master gate for the init hook) | (unset = off) |
+| `MCP_WORKER_INIT_SYSTEM` | ASDF system to load on worker assignment (master gate for the init hook) | (unset = off) |
 | `MCP_WORKER_INIT_ENTRY` | `PKG:SYMBOL` nullary thunk run after the load (preferred activation) | (none) |
 | `MCP_WORKER_INIT_EVAL` | Lisp form run via repl-eval as an escape hatch | (none) |
 | `MCP_WORKER_INIT_PACKAGE` | Package used to read/eval `MCP_WORKER_INIT_EVAL` | `CL-USER` |
-| `MCP_WORKER_INIT_MAX_FAILURES` | Soft init failures before init auto-retry latches off | `1` |
-| `MCP_WORKER_INIT_MODE` | `singleton` (one owner binds a fixed port). v1 supports `singleton` only | `singleton` |
+| `MCP_WORKER_INIT_MAX_FAILURES` | Soft singleton init failures before init auto-retry latches off | `1` |
+| `MCP_WORKER_INIT_MODE` | `singleton` elects one runtime owner. `per-worker` prepares every assigned worker before its first application call | `singleton` |
 
 ### Tuning warmup for cold-start handshakes
 
@@ -334,7 +334,7 @@ workers use their common user cache directory for the lock.
 ### Running an app inside a worker (init hook)
 
 Set `MCP_WORKER_INIT_SYSTEM` (and optionally `MCP_WORKER_INIT_ENTRY`) to have
-the pool run a startup routine inside the single worker elected as the
+the pool run a startup routine. By default it runs inside the single worker elected as the
 "runtime owner" when a session binds it. This lets an app (e.g. a web server)
 run in the same process that serves `repl-eval`/`load-system`, so hot-reload
 lands in the app's process, while the parent keeps the persistent `/mcp`
@@ -347,7 +347,7 @@ endpoint. `pool-kill-worker` restarts the runtime without dropping `/mcp`.
   refuses it, and the init fails. `ql:quickload` muffles such warnings, so an
   app that has only ever been quickloaded can meet this the first time its
   files are compiled here; `load-system` on it names the warning and its place.
-- Init failures never trip the crash circuit breaker; a failed init leaves a
+- In singleton mode, init failures never trip the crash circuit breaker; a failed init leaves a
   plain, usable REPL worker. Check `pool-status` (`init_owner_session`,
   `init_disabled`, `init_failures`) to see runtime state.
 - Requires the pool enabled (do not set `MCP_NO_WORKER_POOL=1`); cl-mcp warns
@@ -363,7 +363,16 @@ Example (recurya): add a nullary `recurya/dev:start-dev-runtime!` thunk that
 starts the DB and web server, then set `MCP_WORKER_INIT_SYSTEM=recurya/dev`
 and `MCP_WORKER_INIT_ENTRY=recurya/dev:start-dev-runtime!`.
 
-Known v1 limitations:
+For projects that need a test runner or other setup in each worker, set
+`MCP_WORKER_INIT_MODE=per-worker`. The pool initializes each newly assigned
+worker under its session's project root, including dedicated REPLs and
+replacements. Standbys wait for assignment. Concurrent application calls
+wait for the same initialization. A soft failure blocks that worker and
+leaves other sessions available. Inspect the worker's `init_state` and
+`last_init_error` in `pool-status`; use `pool-kill-worker` to replace it
+after correcting the setup.
+
+Singleton limitations:
 
 - **Single dev runtime / single session.** `singleton` mode is designed for one
   developer session driving one fixed-port app. Ownership is bound to the owner

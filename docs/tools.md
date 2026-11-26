@@ -1861,6 +1861,8 @@ Output fields:
   case, normally `bound` or `standby`), `session` (string or null; longer ids are cut to 8
   characters plus `...`), `pid`, `tcp_port`, and `leaked_threads` (threads a deadline could
   not stop, as of that worker's last answer; the text shows it when non-zero)
+- With per-worker initialization, each assigned worker reports `init_state` (`initializing`,
+  `running`, or `failed`) and `last_init_error` (an error message on failure).
 - `init_owner_session`, `init_owner_worker`, `init_disabled`, `init_failures`: the state of the
   worker init hook (see the README); the text prints an `Init hook:` line when any is set
 

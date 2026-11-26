@@ -75,6 +75,117 @@ restore.  A NIL value unsets the variable."
               (warning () nil))
             "no warning when INIT unset (even with pool disabled)")))))
 
+(deftest per-worker-readiness
+  (if (not (%socket-available-p))
+      (rove:skip "socket unavailable")
+      (%with-env
+       '(("MCP_WORKER_INIT_MODE" . "per-worker")
+         ("MCP_WORKER_INIT_SYSTEM" . "asdf")
+         ("MCP_WORKER_INIT_ENTRY" . nil)
+         ("MCP_WORKER_INIT_EVAL" .
+          "(progn (sleep 0.4) (defvar *init-count* 0) (incf *init-count*))"))
+       (lambda ()
+         (let ((cl-mcp/src/pool:*worker-pool-warmup* 0)
+               (cl-mcp/src/pool:*max-pool-size* 3))
+           (cl-mcp/src/pool:initialize-pool)
+           (unwind-protect
+                (flet ((acquire (session)
+                         (let* ((w (cl-mcp/src/pool:get-or-assign-worker session))
+                                (params (make-hash-table :test 'equal)))
+                           (setf (gethash "code" params)
+                                 "(and (boundp '*init-count*) *init-count*)")
+                           (list (worker-id w)
+                                 (gethash "text"
+                                          (elt (gethash "content"
+                                                        (worker-rpc w "worker/eval" params))
+                                               0))))))
+                  (let* ((first (bt:make-thread (lambda () (acquire "worker-a"))))
+                         (raced (acquire "worker-a"))
+                         (joined (bt:join-thread first))
+                         (second (acquire "worker-b")))
+                    (ok (equal joined raced))
+                    (ok (equal "1" (second raced)))
+                    (ok (equal "1" (second second)))
+                    (cl-mcp/src/pool:kill-session-worker "worker-a")
+                    (let ((replacement (acquire "worker-a")))
+                      (ok (/= (first raced) (first replacement)))
+                      (ok (equal "1" (second replacement))))
+                    ;; Recovery initializes its replacement before the next request.
+                    (cl-mcp/src/pool::%handle-worker-crash
+                     (cl-mcp/src/pool:find-session-worker "worker-b"))
+                    (let ((recovered
+                            (loop repeat 600
+                                  for rows = (cl-mcp/src/pool:pool-worker-info)
+                                  for row = (find "worker-b" rows :test #'equal
+                                                  :key (lambda (r) (gethash "session" r)))
+                                  when (and row (equal "running" (gethash "init_state" row)))
+                                    return row
+                                  do (sleep 0.05))))
+                      (ok recovered)
+                      (when recovered
+                        (ok (/= (first second) (gethash "id" recovered)))))))
+             (cl-mcp/src/pool:shutdown-pool)))))))
+
+(deftest per-worker-failure-is-local
+  (if (not (%socket-available-p))
+      (rove:skip "socket unavailable")
+      (uiop:with-temporary-file (:pathname gate :stream stream)
+        (finish-output stream)
+        (let* ((bad "init-bad")
+               (good "init-ok")
+               (bad-root (asdf:system-relative-pathname "cl-mcp" "tests/"))
+               (good-root (asdf:system-relative-pathname "cl-mcp" "docs/"))
+               (hook (format nil "(when (equal (truename cl-mcp/src/project-root:*project-root*)
+                                               (truename ~S))
+                                   (loop repeat 600 while (probe-file ~S) do (sleep 0.05))
+                                   (error \"bad session fixture\"))"
+                             bad-root gate))
+               (cl-mcp/src/pool:*worker-pool-warmup* 1)
+               (cl-mcp/src/pool:*max-pool-size* 4))
+          (%with-env
+           (list (cons "MCP_WORKER_INIT_MODE" "per-worker")
+                 (cons "MCP_WORKER_INIT_SYSTEM" "asdf")
+                 (cons "MCP_WORKER_INIT_ENTRY" nil)
+                 (cons "MCP_WORKER_INIT_EVAL" hook))
+           (lambda ()
+             (cl-mcp/src/project-root:set-project-root bad-root :session-id bad)
+             (cl-mcp/src/project-root:set-project-root good-root :session-id good)
+             (cl-mcp/src/pool:initialize-pool)
+             (unwind-protect
+                  (flet ((status (session)
+                           (find session (cl-mcp/src/pool:pool-worker-info)
+                                 :key (lambda (row) (gethash "session" row)) :test #'equal)))
+                    (let* ((standby (loop repeat 600 for row = (status nil)
+                                          when row return row do (sleep 0.05)))
+                           (first (bt:make-thread
+                                   (lambda ()
+                                     (handler-case
+                                         (progn (cl-mcp/src/pool:get-or-assign-worker bad) nil)
+                                       (error (c) (princ-to-string c)))))))
+                      (ok standby)
+                      (when standby (ok (null (gethash "init_state" standby))))
+                      (let ((initializing (loop repeat 600 for row = (status bad)
+                                                when (and row (equal "initializing"
+                                                                     (gethash "init_state" row)))
+                                                  return row
+                                                do (sleep 0.05))))
+                        (ok initializing)
+                        (when (and initializing standby)
+                          (ok (equal (gethash "id" standby) (gethash "id" initializing)))))
+                      (ok (cl-mcp/src/pool:get-or-assign-worker good))
+                      (ok (equal "running" (gethash "init_state" (status good))))
+                      (delete-file gate)
+                      (let ((message (bt:join-thread first))
+                            (failed (status bad)))
+                        (ok (and message (search "bad session fixture" message)))
+                        (ok (equal "failed" (gethash "init_state" failed)))
+                        (ok (search "bad session fixture" (gethash "last_init_error" failed)))
+                        (ok (cl-mcp/src/pool:get-or-assign-worker good)))))
+               (when (probe-file gate) (delete-file gate))
+               (cl-mcp/src/pool:shutdown-pool)
+               (cl-mcp/src/project-root:forget-session-project-root bad)
+               (cl-mcp/src/project-root:forget-session-project-root good))))))))
+
 (defun %socket-available-p ()
   "Return T if we can bind a TCP socket on localhost."
   (handler-case

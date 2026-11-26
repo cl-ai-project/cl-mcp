@@ -37,6 +37,7 @@
            #:worker-pid
            #:worker-state
            #:worker-session-id
+           #:worker-init-state #:worker-init-error
            #:worker-id
            #:worker-leaked-threads
            #:worker-stream-lock
@@ -209,6 +210,9 @@ Handles both LF and CRLF line endings."
   (swank-port nil)
   (pid nil)
   (session-id nil)
+  ;; Parent-side per-worker readiness, protected by the pool lock.
+  (init-state nil)
+  (init-error nil)
   (request-counter 0 :type integer)
   (stderr-thread nil)
   ;; Count of threads the worker last reported a deadline could not stop.
