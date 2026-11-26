@@ -50,6 +50,6 @@ With no ROOT every file is the project's."
           (let ((path (%absolute-path pathname)))
             (and path
                  (path-inside-p path root-dir)
-                  (not (member ".qlot" (pathname-directory (enough-namestring path root-dir))
-                               :test #'equal))
+                 (not (member ".qlot" (pathname-directory (enough-namestring path root-dir))
+                              :test #'equal))
                  (not (funcall ignored-p path))))))))
