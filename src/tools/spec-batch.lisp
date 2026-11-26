@@ -15,7 +15,9 @@
   (:import-from #:cl-mcp/src/tools/helpers
                 #:make-ht #:json-bool #:text-content #:extract-arg #:extract-array-arg
                 #:arg-validation-error #:validation-message)
-  (:import-from #:cl-mcp/src/utils/deadline #:call-with-deadline-thread #:leaked-threads)
+  (:import-from #:cl-mcp/src/utils/deadline #:leaked-threads)
+  (:import-from #:cl-mcp/src/spec-execution
+                #:resolve-check-wrapper #:call-with-check-deadline #:check-wrapper-message)
   (:import-from #:cl-mcp/src/utils/request-debugger-boundary
                 #:request-debugger-escape-error-p #:request-debugger-escape-error-display-text)
   (:export #:spec-batch-response))
@@ -89,7 +91,7 @@
   ;; The inner check's timeout alone bounds none of these.
   (let ((remaining (%remaining deadline)))
     (if (plusp remaining)
-        (call-with-deadline-thread
+        (call-with-check-deadline
          (lambda () (progv specials values (funcall thunk))) remaining :name "mcp-spec-batch")
         (values nil :not-run nil))))
 
@@ -104,7 +106,7 @@
            "verified" (json-bool nil) "verification_gaps" (vector status)
            "message" message "seed" nil "definition_digest" nil "replay" nil))
 
-(defun %replay (row kind name profile)
+(defun %replay (row kind name profile wrapper-name)
   "Return spec-check arguments for the actual seed and budget reported in ROW."
   (when (gethash "seed" row)
     (let* ((contract (eq kind :contract))
@@ -115,6 +117,7 @@
              (setf (gethash "trials" args) budget))
             ((and (not contract) profile) (setf (gethash "profile" args) profile)))
       (when digest (setf (gethash "expect_definition_digest" args) digest))
+      (when wrapper-name (setf (gethash "around_function" args) wrapper-name))
       args)))
 
 (defun %check-item (api target options deadline)
@@ -141,36 +144,39 @@
           (gethash "verification_gaps" item) (or (gethash "verification_gaps" response)
                                                 (gethash "verification_gaps" item))
           (gethash "selection" item) (gethash "selection" response)
-          (gethash "replay" item) (%replay item kind name (gethash "profile" response)))
+          (gethash "replay" item) (%replay item kind name (gethash "profile" response)
+                                        (getf options :around-function)))
     (values item (gethash "worker_reuse" response "safe"))))
 
-(defun %run-targets (api targets options deadline specials values)
-  (let ((reuse "safe") (results '()))
-    (dolist (target targets)
-      (multiple-value-bind (value status leaked)
-          (if (equal reuse "safe")
-              (%before-deadline deadline (lambda () (%check-item api target options deadline))
-                                specials values)
-              (values nil :not-run nil))
-        (push (case status
-                (:ok (setf reuse (second value)) (first value))
-                (:not-run (%unexecuted-item target "not-run" "The item did not start."))
-                (:timeout
-                 (setf reuse "unknown")
-                 (%unexecuted-item target "timeout" "The deadline expired during this item."))
-                (:error (%unexecuted-item target "internal-error" (%condition-message value))))
-              results)
-        ;; An outer timeout can unwind the check while its inner deadline is
-        ;; cleaning up. That deadline records its surviving thread centrally.
-        (when (or leaked (and (eq status :timeout) (leaked-threads)))
-          (setf reuse "unsafe"))))
-    (values (nreverse results) reuse)))
+(defun %run-targets (api targets options deadline specials settings progress)
+  (let ((reuse "safe")
+        (results '()))
+    (loop for pending on targets
+          for target = (first pending)
+          do (when progress (funcall progress results pending t))
+             (multiple-value-bind (value status leaked)
+                 (if (equal reuse "safe")
+                     (%before-deadline deadline (lambda () (%check-item api target options deadline))
+                                       specials settings)
+                     (values nil :not-run nil))
+               (push (case status
+                       (:ok (setf reuse (second value)) (first value))
+                       (:not-run (%unexecuted-item target "not-run" "The item did not start."))
+                       (:timeout
+                        (setf reuse "unknown")
+                        (%unexecuted-item target "timeout" "The deadline expired during this item."))
+                       (:error (%unexecuted-item target "internal-error" (%condition-message value))))
+                     results)
+               (when (or leaked (and (eq status :timeout) (leaked-threads)))
+                 (setf reuse "unsafe")))
+             (when progress (funcall progress results (rest pending) nil)))
+    (values (reverse results) reuse)))
 
 (defun %batch-response (results &key status message (reuse "safe") (selection-complete t))
   (let ((counts (make-ht))
         (contracts (count "contract" results :test #'equal
                           :key (lambda (row) (gethash "kind" row))))
-        (verified (and selection-complete results
+        (verified (and (null status) selection-complete results
                        (every (lambda (row) (eq t (gethash "verified" row))) results))))
     (dolist (row results) (incf (gethash (gethash "status" row) counts 0)))
     (let ((status (or status
@@ -204,11 +210,12 @@
             (let ((replay (gethash "replay" row)))
               (when replay
                 (format out "~&  Replay: spec-check ~A=~A seed=~A~@[ trials=~A~]~
-~@[ profile=~A~]~@[ expect_definition_digest=~A~]"
+~@[ profile=~A~]~@[ expect_definition_digest=~A~]~@[ around_function=~A~]"
                         (if (gethash "function" replay) "function" "property")
                         (gethash "name" row) (gethash "seed" replay)
                         (gethash "trials" replay) (gethash "profile" replay)
-                        (gethash "expect_definition_digest" replay)))))
+                        (gethash "expect_definition_digest" replay)
+                         (gethash "around_function" replay)))))
           (unless (equal "safe" reuse) (format out "~&worker_reuse: ~A" reuse))))))))
 
 (defun %discovery-failure (targets combined status value leaked)
@@ -224,49 +231,90 @@
                                    (t "incomplete"))
                      :selection-complete (not combined) :reuse reuse :message message)))
 
+(defun %check-batch (options deadline targets progress)
+  (let ((symbol (getf options :symbol))
+        (package (getf options :package)))
+    (multiple-value-bind (resolved status leaked)
+        (%before-deadline deadline #'resolve-cl-spec-api)
+      (unless (eq :ok status)
+        (return-from %check-batch
+          (%discovery-failure targets symbol status resolved leaked)))
+      (destructuring-bind (api api-status) resolved
+        (unless (eq api-status :ok)
+          (let* ((report (unavailable-report api-status nil))
+                 (status (string-downcase (getf report :status))))
+            (return-from %check-batch
+              (%batch-response (mapcar (lambda (target) (%unexecuted-item target status)) targets)
+                               :status status :message (getf report :message)
+                               :selection-complete (not symbol)))))
+        (let* ((specials (remove nil (list (api-special api :registry)
+                                           (api-special api :generator-backend))))
+               (settings (mapcar #'symbol-value specials)))
+          (when symbol
+            (multiple-value-bind (selection status leaked)
+                (%before-deadline deadline (lambda () (%combined-targets api symbol package))
+                                  specials settings)
+              (unless (eq status :ok)
+                (return-from %check-batch
+                  (%discovery-failure nil symbol status selection leaked)))
+              (destructuring-bind (items &optional error-status message) selection
+                (when error-status
+                  (return-from %check-batch
+                    (%batch-response nil :status error-status :selection-complete nil
+                                     :message message)))
+                (setf targets items))))
+          (when progress (funcall progress nil targets nil))
+          (multiple-value-bind (results reuse)
+              (%run-targets api targets options deadline specials settings progress)
+            (%batch-response results :reuse reuse)))))))
+
+(defun %wrapped-batch (wrapper options deadline targets)
+  (let ((snapshot (list nil targets nil (not (getf options :symbol)))))
+    (multiple-value-bind (value status leaked)
+        (call-with-check-deadline
+         (lambda ()
+           (%check-batch options deadline targets
+                         (lambda (results pending active)
+                           (setf snapshot (list results pending active t)))))
+         (%remaining deadline) :wrapper wrapper :name "mcp-spec-batch-around")
+      (if (eq status :ok)
+          (first value)
+          (destructuring-bind (results pending active selected) snapshot
+            (let* ((timeoutp (eq status :timeout))
+                   (rows (append (reverse results)
+                                 (when active
+                                   (list (%unexecuted-item
+                                          (pop pending) (if timeoutp "timeout" "internal-error"))))
+                                 (mapcar (lambda (target) (%unexecuted-item target "not-run"))
+                                         pending))))
+              (%batch-response rows
+                               :status (cond ((not timeoutp) "internal-error")
+                                             (selected "incomplete")
+                                             (t "timeout"))
+                               :selection-complete selected
+                               :reuse (if leaked "unsafe" "unknown")
+                               :message (if timeoutp
+                                            "The deadline expired during around_function or its checks."
+                                            (check-wrapper-message value)))))))))
+
 (defun spec-batch-response (params)
-  "Return the MCP response for a symbol's contract and direct properties or an explicit set."
+  "Return the MCP response for a selection of checks, with optional wrapper setup."
   (let ((start (get-internal-real-time)))
     (multiple-value-bind (options error) (%options params)
       (when error
         (return-from spec-batch-response
           (%batch-response nil :status "invalid-arguments" :selection-complete nil :message error)))
-      (let* ((deadline (+ start (* (getf options :timeout) internal-time-units-per-second)))
-             (symbol (getf options :symbol))
-             (package (getf options :package))
-             (targets (append (%targets :contract (getf options :functions) package)
-                              (%targets :property (getf options :properties) package))))
-        (multiple-value-bind (resolved status leaked)
-            (%before-deadline deadline #'resolve-cl-spec-api)
-          (unless (eq :ok status)
-            (return-from spec-batch-response
-              (%discovery-failure targets symbol status resolved leaked)))
-          (destructuring-bind (api api-status) resolved
-            (unless (eq api-status :ok)
-              (let* ((report (unavailable-report api-status nil))
-                     (status (string-downcase (getf report :status))))
-                (return-from spec-batch-response
-                  (%batch-response (mapcar (lambda (target) (%unexecuted-item target status))
-                                           targets)
-                                   :status status :message (getf report :message)
-                                   :selection-complete (not symbol)))))
-            ;; Capture the caller's cl-spec bindings before crossing the thread boundary.
-            (let* ((specials (remove nil (list (api-special api :registry)
-                                               (api-special api :generator-backend))))
-                   (values (mapcar #'symbol-value specials)))
-              (when symbol
-                (multiple-value-bind (selection status leaked)
-                    (%before-deadline deadline (lambda () (%combined-targets api symbol package))
-                                      specials values)
-                  (unless (eq status :ok)
-                    (return-from spec-batch-response
-                      (%discovery-failure nil symbol status selection leaked)))
-                  (destructuring-bind (items &optional error-status message) selection
-                    (when error-status
-                      (return-from spec-batch-response
-                        (%batch-response nil :status error-status :selection-complete nil
-                                         :message message)))
-                    (setf targets items))))
-              (multiple-value-bind (results reuse)
-                  (%run-targets api targets options deadline specials values)
-                (%batch-response results :reuse reuse)))))))))
+      (multiple-value-bind (wrapper wrapper-error)
+          (resolve-check-wrapper (gethash "around_function" params))
+        (when wrapper-error
+          (return-from spec-batch-response
+            (%batch-response nil :status "invalid-arguments" :selection-complete nil
+                             :message wrapper-error)))
+        (setf (getf options :around-function) (gethash "around_function" params))
+        (let* ((deadline (+ start (* (getf options :timeout) internal-time-units-per-second)))
+               (package (getf options :package))
+               (targets (append (%targets :contract (getf options :functions) package)
+                                (%targets :property (getf options :properties) package))))
+          (if (and wrapper (plusp (%remaining deadline)))
+              (%wrapped-batch wrapper options deadline targets)
+              (%check-batch options deadline targets nil)))))))

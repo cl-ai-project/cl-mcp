@@ -13,7 +13,8 @@
   (:import-from #:cl-mcp/src/tools/spec-entry #:%positive-integer-arg)
   (:import-from #:cl-mcp/src/tools/helpers #:make-ht #:text-content #:json-bool)
   (:import-from #:cl-mcp/src/utils/sanitize #:sanitize-for-json)
-  (:import-from #:cl-mcp/src/utils/deadline #:call-with-deadline-thread)
+  (:import-from #:cl-mcp/src/spec-execution
+                #:resolve-check-wrapper #:call-with-check-deadline #:check-wrapper-message)
   (:import-from #:cl-mcp/src/utils/request-debugger-boundary
                 #:request-debugger-escape-error-p #:request-debugger-escape-error-display-text)
   (:import-from #:cl-mcp/src/object-registry #:*object-registry* #:lookup-object)
@@ -170,7 +171,7 @@ previous registry generation. Obtain a current handle in this session."))
                   (%condition-report condition max-chars)
                   :input-kind input-kind))))
 
-(defun %run-input (api function package input fixture-p seconds max-chars)
+(defun %run-input (api function package input fixture-p seconds max-chars wrapper)
   (let* ((input-kind (if fixture-p "recipe" "arguments"))
          (runner (if fixture-p :check-fixture :check-call))
          (reader (if fixture-p :fixture-check-data :call-check-data))
@@ -182,7 +183,7 @@ previous registry generation. Obtain a current handle in this session."))
         (%message :unsupported (format nil "The loaded cl-spec must provide ~A and ~A."
                                        runner reader) :input-kind input-kind)))
     (multiple-value-bind (value status leaked)
-        (call-with-deadline-thread
+        (call-with-check-deadline
          (lambda ()
            (progv specials bindings
              (let ((*object-registry* objects))
@@ -196,16 +197,17 @@ previous registry generation. Obtain a current handle in this session."))
                                        function fixture-p max-chars))
                  (serious-condition (condition)
                    (%input-error api condition input-kind max-chars))))))
-         seconds :name "mcp-spec-input")
+         seconds :name "mcp-spec-input" :wrapper wrapper)
       (ecase status
         (:ok (first value))
         (:error
          ;; The deadline has ended. Only a debugger snapshot has safe, saved text.
          (%message :internal-error
-                   (if (request-debugger-escape-error-p value)
-                       (%condition-report (request-debugger-escape-error-display-text value)
-                                          max-chars)
-                       "The concrete check ended before it could report its error.")
+                   (cond (wrapper (check-wrapper-message value))
+                          ((request-debugger-escape-error-p value)
+                           (%condition-report (request-debugger-escape-error-display-text value)
+                                              max-chars))
+                          (t "The concrete check ended before it could report its error."))
                    :input-kind input-kind))
         (:timeout
          (let ((response (%message :timeout
@@ -237,11 +239,15 @@ Replace this worker before further checks.~]" seconds leaked) :input-kind input-
             (%invalid "Supply exactly one of arguments or recipe."))
           (when (and args-p (not (and (vectorp arguments) (not (stringp arguments)))))
             (%invalid "arguments must be a JSON array."))
-          (multiple-value-bind (api status) (resolve-cl-spec-api)
-            (if (eq status :ok)
-                (%run-input api function package (if fixture-p (gethash "recipe" params) arguments)
-                            fixture-p seconds max-chars)
-                (let ((report (unavailable-report status (environment-data api status))))
-                  (%message (getf report :status) (getf report :message))))))
+          (multiple-value-bind (wrapper message)
+               (resolve-check-wrapper (gethash "around_function" params))
+             (when message (%invalid message))
+             (multiple-value-bind (api status) (resolve-cl-spec-api)
+               (if (eq status :ok)
+                   (%run-input api function package
+                               (if fixture-p (gethash "recipe" params) arguments)
+                               fixture-p seconds max-chars wrapper)
+                   (let ((report (unavailable-report status (environment-data api status))))
+                     (%message (getf report :status) (getf report :message)))))))
       (input-problem (condition)
         (%message (input-problem-status condition) (princ-to-string condition))))))

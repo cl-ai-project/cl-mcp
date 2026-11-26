@@ -547,11 +547,13 @@ check-function takes no profile, so it is refused with function=, the mirror
 of how trials is refused with property=. Size a contract run with trials=.
 The name must already exist as a keyword in this image, or it is refused; use one
 that appears in the property's :trials table (see spec-describe).")
-   (seed :type :string
+   (seed :type :string :type-error-hint "Use {\"seed\":\"42\"}."
     :description
     "Decimal digits AS A STRING. A JSON number would already have lost digits.
 A seed reproduces one run, so it is refused when symbol= selects more than one
 property; replay each with property= and its own seed.")
+   (around-function :type :string
+    :description "Loaded Lisp function (pkg:name) that calls the check thunk once synchronously.")
    (detail :type :string :enum ("full" "summary")
     :description "Full evidence (default) or a summary of trials, case counts and selection gaps.")
    (expect-definition-digest :type :string
@@ -572,6 +574,7 @@ budget of 0 or less runs nothing, and every result comes back not-run")
                          "package" package
                          "profile" profile
                          "seed" seed
+                         "around_function" around-function
                          "detail" detail
                          "expect_definition_digest" expect-definition-digest
                          "timeout_seconds" timeout-seconds
@@ -591,6 +594,8 @@ Read selected_case, outcome, failure_phase and the fixture lifecycle for this on
          (package :type :string :description "Package for unqualified symbols")
          (arguments :type :array :item-type :any :description "Positional Lisp argument list")
          (recipe :type :any :description "One input recipe for the contract's fixture")
+         (around-function :type :string
+          :description "Loaded Lisp function that calls the check thunk once synchronously.")
          (timeout-seconds :type :integer :description "Whole-call deadline in seconds")
          (max-value-chars :type :integer :description "Maximum printed characters for a value"))
   :body
@@ -610,7 +615,10 @@ Completed items survive a timeout and remaining items are marked not-run."
          (package :type :string :description "Package for unqualified names")
          (trials :type :integer :description "Trial budget per function contract")
          (profile :type :string :description "Trial profile for properties")
-         (seed :type :string :description "Optional decimal seed applied to each item")
+         (seed :type :string :type-error-hint "Use {\"seed\":\"42\"}."
+          :description "Optional decimal seed string applied to each item")
+         (around-function :type :string
+          :description "Loaded Lisp function that calls the whole batch thunk once synchronously.")
          (timeout-seconds :type :number :description "Shared deadline in seconds")
          (max-value-chars :type :integer :description "Maximum printed characters for a value"))
   :body

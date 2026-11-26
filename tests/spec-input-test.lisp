@@ -66,6 +66,27 @@
                  (ok (search selector (input-text result)))))
       (skip "The optional cl-spec function contracts are unavailable.")))
 
+(defvar *entered-concrete-wrapper* nil
+  "Whether the concrete check ran its wrapper.")
+
+(defun enter-concrete-wrapper (check)
+  "Record one concrete invocation while returning a different value."
+  (setf *entered-concrete-wrapper* t)
+  (funcall check)
+  nil)
+
+(deftest concrete-input-calls-the-wrapper-and-keeps-the-check-result
+  (if (%contracts-available-p)
+      (with-fixture-registry
+        (setf *entered-concrete-wrapper* nil)
+        (let ((result (input-check (%fixture-name "CASE-SENSITIVE-IDENTITY")
+                                   "arguments" #(0)
+                                   "around_function"
+                                   "cl-mcp/tests/spec-input-test::enter-concrete-wrapper")))
+          (ok (equal "passed" (field result "status")))
+          (ok *entered-concrete-wrapper*)))
+      (skip "The optional cl-spec function contracts are unavailable.")))
+
 (deftest caller-arguments-check-and-mutate-the-supplied-registry
   (with-self-specs
     (let* ((args (uiop:symbol-call :cl-spec/self-spec-fixtures

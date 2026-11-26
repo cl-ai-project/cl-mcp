@@ -1475,7 +1475,9 @@ function body)~]~@[  (~A)~]"
                   (getf (getf first-result :property) :qualified)
                   (getf first-result :seed)
                   (%keyword-string (getf first-result :profile))
-                  (getf first-result :definition-digest))))
+                  (getf first-result :definition-digest)))
+      (when (getf report :around-function)
+        (format stream " around_function=~A" (getf report :around-function))))
     ;; Gated on there being a seed to reproduce from.  A run where nothing
     ;; executed has nothing to say about reproduction, and printing the
     ;; caveat there is noise the caller has to read past every time.

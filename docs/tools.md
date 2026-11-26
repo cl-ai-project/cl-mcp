@@ -2169,7 +2169,8 @@ construction is supported; it does not guarantee successful draws or reductions.
   <symbol>)`, or one function spec against its function.
   - `property` **or** `symbol` **or** `function` (exactly one), `package`,
     `profile` (default `normal`), `trials` (positive integer, max 1,000,000),
-    `seed` (decimal digits **as a string**), `expect_definition_digest`,
+    `seed` (decimal digits **as a string**, for example `{"seed":"42"}`),
+    `expect_definition_digest`,
     `timeout_seconds` (number, default 60 — the budget for the whole call),
     `max_value_chars` (positive integer, default 2000)
   - `function` runs the contract. A `symbol` selection does **not** include it
@@ -2374,6 +2375,16 @@ construction is supported; it does not guarantee successful draws or reductions.
   covers the batch. Completed results stay available and selected items that did
   not start have status `not-run`. `selection_complete` indicates whether discovery
   finished before the deadline.
+
+Pass `around_function` to any of these three check tools to run the request
+inside a project-provided environment. Its value is a package-qualified name
+such as `"my-app/tests:call-with-test-env"`. Load the function into the
+session's worker first. It receives a zero-argument thunk and calls it once,
+synchronously, in the desired dynamic extent. A batch uses a single wrapper
+invocation. Setup, checks, shrinking and teardown share the request deadline.
+The replay instructions include the wrapper name when supplied. A
+fixture's `:isolation :around` can still establish a separate transaction for
+each trial within that request.
 
 All tools use the session's worker. Load the system defining the declarations first.
 Generated runs also require a generator backend such as `cl-spec/check-it`.
