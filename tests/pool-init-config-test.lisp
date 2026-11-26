@@ -114,8 +114,8 @@ restore.  A NIL value unsets the variable."
            (cl-mcp/src/pool:initialize-pool)
            (unwind-protect
                 (flet ((acquire (session)
-                         (let* ((w (%await-ready-worker session))
-                                (params (make-hash-table :test 'equal)))
+                         (let ((w (%await-ready-worker session))
+                               (params (make-hash-table :test 'equal)))
                            (setf (gethash "code" params)
                                  "(and (boundp '*init-count*) *init-count*)")
                            (list (worker-id w)
@@ -179,13 +179,13 @@ restore.  A NIL value unsets the variable."
                   (flet ((status (session)
                            (find session (cl-mcp/src/pool:pool-worker-info)
                                  :key (lambda (row) (gethash "session" row)) :test #'equal)))
-                    (let* ((standby (loop repeat 600 for row = (status nil)
-                                          when row return row do (sleep 0.05)))
-                           (first (bt:make-thread
-                                   (lambda ()
-                                     (handler-case
-                                         (progn (%await-ready-worker bad) nil)
-                                       (error (c) (princ-to-string c)))))))
+                    (let ((standby (loop repeat 600 for row = (status nil)
+                                         when row return row do (sleep 0.05)))
+                          (first (bt:make-thread
+                                  (lambda ()
+                                    (handler-case
+                                        (progn (%await-ready-worker bad) nil)
+                                      (error (c) (princ-to-string c)))))))
                       (ok standby)
                       (when standby (ok (null (gethash "init_state" standby))))
                       (let ((initializing (loop repeat 600 for row = (status bad)

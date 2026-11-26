@@ -162,13 +162,13 @@
   (let ((*use-worker-pool* t))
     (with-pool ()
       (get-or-assign-worker "pending-reset")
-      (let* ((cl-mcp/src/pool:*worker-init-config*
-               '(:mode "per-worker" :system "asdf" :eval "(sleep 60)"))
-             (result (%result-of (%call-kill-worker :session-id "pending-reset" :reset t))))
-        (ok (gethash "reset" result))
-        (ok (gethash "killed" result))
-        (ok (search "initializing" (gethash "text" (elt (gethash "content" result) 0))))
-        (ok (find-session-worker "pending-reset"))))))
+      (let ((cl-mcp/src/pool:*worker-init-config*
+              '(:mode "per-worker" :system "asdf" :eval "(sleep 60)")))
+        (let ((result (%result-of (%call-kill-worker :session-id "pending-reset" :reset t))))
+          (ok (gethash "reset" result))
+          (ok (gethash "killed" result))
+          (ok (search "initializing" (gethash "text" (elt (gethash "content" result) 0))))
+          (ok (find-session-worker "pending-reset")))))))
 
 (deftest pool-kill-worker-reset-reports-failed-bound-worker
   (unless (spawn-available-p)

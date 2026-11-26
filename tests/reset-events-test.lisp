@@ -302,17 +302,17 @@ return it: a reset the session is owed and has not been told."
     (discard-session-resets "owner")))
 
 (deftest cancellation-while-worker-is-initializing
-  (let* ((cl-mcp/src/proxy::*current-session-id* "pending")
-         (cl-mcp/src/proxy::%cached-get-or-assign%
-           (progn
-             (cl-mcp/src/proxy::%ensure-cached-bindings)
-             (lambda (session)
-               (cancel-request 451 session)
-               (error 'cl-mcp/src/pool:pool-worker-initializing :id 98))))
-         (result (cl-mcp/src/proxy:proxy-to-worker 451 "worker/eval" (make-hash-table))))
+  (let ((cl-mcp/src/proxy::*current-session-id* "pending")
+        (cl-mcp/src/proxy::%cached-get-or-assign%
+          (progn
+            (cl-mcp/src/proxy::%ensure-cached-bindings)
+            (lambda (session)
+              (cancel-request 451 session)
+              (error 'cl-mcp/src/pool:pool-worker-initializing :id 98)))))
     (declare (ignorable cl-mcp/src/proxy::%cached-get-or-assign%))
-    (ok (equal "not-executed" (execution-status result)))
-    (ok (search "Request cancelled" (result-text result)))))
+    (let ((result (cl-mcp/src/proxy:proxy-to-worker 451 "worker/eval" (make-hash-table))))
+      (ok (equal "not-executed" (execution-status result)))
+      (ok (search "Request cancelled" (result-text result))))))
 
 (deftest a-pool-error-tells-a-reset-without-promising-a-worker
   (%owe-owner-a-crash -32)
