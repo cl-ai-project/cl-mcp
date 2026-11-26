@@ -15,12 +15,15 @@
                 #:list-report
                 #:symbol-report
                 #:describe-report
-                #:check-report)
+                #:check-report #:*default-check-timeout-seconds*)
   (:import-from #:cl-mcp/src/tools/spec-response-builders
                 #:build-spec-list-response
                 #:build-spec-symbol-response
                 #:build-spec-describe-response
                 #:build-spec-check-response)
+  (:import-from #:cl-mcp/src/spec-execution
+                #:resolve-check-wrapper #:call-with-check-deadline #:check-wrapper-message)
+  (:import-from #:cl-mcp/src/tools/helpers #:json-bool)
   (:import-from #:cl-mcp/src/utils/deadline
                 #:call-with-deadline-thread)
   (:import-from #:cl-mcp/src/utils/request-debugger-boundary
@@ -48,7 +51,7 @@ image, and nothing about a seed calls for reader macros."
   (cond
     ((null text) (values nil nil))
     ((not (stringp text))
-     (values nil "seed must be a string of decimal digits"))
+     (values nil "seed must be a string of decimal digits. Use {\"seed\":\"42\"}."))
     ((zerop (length text))
      (values nil "seed must not be empty"))
     ((notevery #'digit-char-p text)
@@ -220,46 +223,69 @@ cl-mcp: ~A"
                                :case (gethash "case" params)
                                :max-chars max-chars))))))))
 
-(defun spec-check-response (params)
-  "Return the spec-check response hash-table for PARAMS.
+(defun %wrapped-check-response (wrapper seconds thunk recover)
+  "Run THUNK in WRAPPER's environment and report a wrapper-level error or timeout."
+  (multiple-value-bind (value status leaked)
+      (call-with-check-deadline thunk seconds :wrapper wrapper :name "mcp-spec-check-around")
+    (when (eq status :timeout)
+      (let ((partial (funcall recover leaked)))
+        (when partial (return-from %wrapped-check-response partial))))
+    (if (eq status :ok)
+        (first value)
+        (let* ((timeoutp (eq status :timeout))
+               (reuse (if leaked "unsafe" "unknown"))
+               (message (if timeoutp
+                            (format nil "around_function or its checks exceeded ~A seconds. ~
+worker_reuse: ~A." seconds reuse)
+                            (check-wrapper-message value)))
+               (result (build-spec-check-response
+                        (list :status (if timeoutp :timeout :internal-error)
+                              :verified nil :message message
+                              :environment (%environment-stub)))))
+          (setf (gethash "worker_reuse" result) reuse
+                (gethash "thread_leaked" result) (json-bool leaked))
+          result))))
 
-An unusable seed is answered here rather than passed on: a run started with a
-seed the caller did not mean is a run whose result means nothing.  TRIALS is
-checked in the same place and for the same reason: the tool schema's :INTEGER
-admits 0 and negative numbers, and cl-spec runs (loop for trial from 1 to -5)
-without complaint -- zero trials, reported as \"-5 executed of -5 budget\"."
-  ;; The raw value, not %STRING-ARG's: that filter turned a JSON number or an
-  ;; empty string into NIL, and NIL means "no seed given" -- so the run went
-  ;; ahead with a fresh random seed and reported it as though it were the
-  ;; caller's.  A seed that cannot be honoured has to be refused, which is
-  ;; the whole reason it travels as text.
-  (multiple-value-bind (seed seed-error)
-      (parse-seed-string (and params (gethash "seed" params)))
+(defun spec-check-response (params)
+  "Return the spec-check response for PARAMS, including an optional project wrapper."
+  (multiple-value-bind (seed seed-error) (parse-seed-string (gethash "seed" params))
     (multiple-value-bind (max-value-chars chars-error)
         (%positive-integer-arg params "max_value_chars" 2000)
-      ;; A default of NIL, so an absent trials stays absent: the budget then
-      ;; comes from the property's own table or the backend, which is what
-      ;; CHECK-REPORT expects to see.
       (multiple-value-bind (trials trials-error)
           (%bounded-integer-arg params "trials" *maximum-trials*)
-        (let* ((detail (or (gethash "detail" params) "full"))
-               (message (or seed-error chars-error trials-error
-                            (unless (member detail '("full" "summary") :test #'equal)
-                              "detail must be full or summary"))))
-          (if message
-              (%argument-error-response message #'build-spec-check-response)
-              (multiple-value-bind (api status) (resolve-cl-spec-api)
-                (build-spec-check-response
-                 (list* :detail detail
-                        (check-report api status
-                                      :property (%string-arg params "property")
-                                      :symbol (%string-arg params "symbol")
-                                      :function (%string-arg params "function")
-                                      :trials trials
-                                      :package (%string-arg params "package")
-                                      :profile (%string-arg params "profile")
-                                      :seed seed
-                                      :expect-definition-digest
-                                      (%string-arg params "expect_definition_digest")
-                                      :timeout-seconds (gethash "timeout_seconds" params)
-                                      :max-value-chars max-value-chars))))))))))
+        (multiple-value-bind (wrapper wrapper-error)
+            (resolve-check-wrapper (gethash "around_function" params))
+          (let* ((detail (or (gethash "detail" params) "full"))
+                 (seconds (or (gethash "timeout_seconds" params) *default-check-timeout-seconds*))
+                 (message (or seed-error chars-error trials-error wrapper-error
+                              (unless (member detail '("full" "summary") :test #'equal)
+                                "detail must be full or summary")
+                              (unless (realp seconds) "timeout_seconds must be a real number"))))
+            (when message
+              (return-from spec-check-response
+                (%argument-error-response message #'build-spec-check-response)))
+            (let ((wrapped (and wrapper (plusp seconds)))
+                  (checkpoint nil))
+              (labels ((render (report)
+                         (build-spec-check-response
+                          (list* :detail detail :around-function (gethash "around_function" params)
+                                 report)))
+                       (answer ()
+                         (multiple-value-bind (api status) (resolve-cl-spec-api)
+                           (render
+                            (check-report
+                             api status :property (%string-arg params "property")
+                             :symbol (%string-arg params "symbol")
+                             :function (%string-arg params "function")
+                             :trials trials :package (%string-arg params "package")
+                             :profile (%string-arg params "profile") :seed seed
+                             :expect-definition-digest (%string-arg params "expect_definition_digest")
+                             :timeout-seconds seconds :max-value-chars max-value-chars
+                             :checkpoint (when wrapped
+                                           (lambda (recover) (setf checkpoint recover))))))))
+                (if wrapped
+                    (%wrapped-check-response
+                     wrapper seconds #'answer
+                     (lambda (leaked)
+                       (when checkpoint (render (funcall checkpoint leaked)))))
+                    (answer))))))))))

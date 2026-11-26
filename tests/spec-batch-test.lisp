@@ -68,6 +68,127 @@
       (ok (equal "invalid-arguments" (gethash "status" response)))
       (ok (eq yason:false (gethash "verified" response))))))
 
+(defvar *test-environment* nil
+  "The connection-like binding that wrapped checks must see.")
+
+(defun call-with-test-environment (check)
+  "Bind a fresh environment for the entire check."
+  (let ((*test-environment* (list (current-thread))))
+    (funcall check)))
+
+(defun call-check-twice (check)
+  "Violate the wrapper protocol after one call."
+  (funcall check)
+  (ignore-errors (funcall check)))
+
+(deftest spec-check-and-batch-run-in-one-test-environment
+  (call-with-registry
+   (lambda ()
+     (let ((environments '()))
+       (dolist (name '(first-wrapped-check second-wrapped-check))
+         (register-property name
+                            (lambda ()
+                              (push *test-environment* environments)
+                              (and *test-environment*
+                                   (eq (current-thread) (first *test-environment*))))))
+       (let* ((name (qualified 'call-with-test-environment))
+              (single (spec-check-response
+                       (make-ht "property" (qualified 'first-wrapped-check)
+                                "around_function" name "seed" "42")))
+              (report (batch "properties" (vector (qualified 'first-wrapped-check)
+                                                   (qualified 'second-wrapped-check))
+                             "around_function" name "seed" "42"))
+              (replay (gethash "replay" (elt (gethash "results" report) 0))))
+         (ok (equal "passed" (gethash "status" (elt (gethash "results" single) 0))))
+         (ok (equal '("passed" "passed") (values-of report "status")))
+         (ok (and (= 3 (length environments)) (first environments)
+                  (eq (first environments) (second environments))
+                  (not (eq (second environments) (third environments)))))
+         (ok (equal name (gethash "around_function" replay)))
+         (ok (search (format nil "around_function=~A" name)
+                     (gethash "text" (elt (gethash "content" single) 0))))
+         (ok (null *test-environment*)))))))
+
+(deftest an-around-function-may-run-the-check-only-once
+  (call-with-registry
+   (lambda ()
+     (let ((count 0))
+       (register-property 'counted-check (lambda () (incf count) t))
+       (let ((report (batch "properties" (vector (qualified 'counted-check))
+                            "around_function" (qualified 'call-check-twice))))
+         (ok (= 1 count))
+         (ok (equal "internal-error" (gethash "status" report)))
+         (ok (search "around_function" (gethash "message" report)))
+         (ok (eq yason:false (gethash "verified" report))))))))
+
+(defvar *finished-wrapper-cleanup* nil
+  "Whether the deadline unwound through the wrapper.")
+
+(defun call-with-test-cleanup (check)
+  "Record wrapper cleanup even when a check times out."
+  (unwind-protect (funcall check)
+    (setf *finished-wrapper-cleanup* t)))
+
+(deftest wrapper-timeouts-retain-check-progress
+  (call-with-registry
+   (lambda ()
+     (let ((visits '())
+           (wrapper (qualified 'call-with-test-cleanup)))
+       (register-property 'wrapped-fast (lambda () (push :first visits) t))
+       (register-property 'wrapped-slow (lambda () (push :slow visits) (sleep 5) t))
+       (register-property 'wrapped-later (lambda () (push :later visits) t))
+       (setf *finished-wrapper-cleanup* nil)
+       (let ((report (batch "properties" (map 'vector #'qualified
+                                              '(wrapped-fast wrapped-slow wrapped-later))
+                            "around_function" wrapper "timeout_seconds" 1)))
+         (ok (equal '(:slow :first) visits))
+         (ok *finished-wrapper-cleanup*)
+         (ok (equal '("passed" "timeout" "not-run") (values-of report "status")))
+         (ok (equal "incomplete" (gethash "status" report)))
+         (ok (equal "unknown" (gethash "worker_reuse" report)))
+         (ok (eq yason:false (gethash "verified" report))))
+       (setf *finished-wrapper-cleanup* nil)
+       (let ((report (spec-check-response
+                      (make-ht "property" (qualified 'wrapped-slow)
+                               "around_function" wrapper "timeout_seconds" 1))))
+         (ok *finished-wrapper-cleanup*)
+         (ok (equal "incomplete" (gethash "status" report)))
+         (ok (equal '("timeout") (values-of report "status")))
+         (ok (equal "unknown" (gethash "worker_reuse" report)))
+         (ok (eq yason:false (gethash "verified" report))))))))
+
+(deftest an-expired-wrapper-deadline-never-runs-inline
+  (let ((calls 0))
+    (multiple-value-bind (value status leaked)
+        (cl-mcp/src/spec-execution:call-with-check-deadline
+         (lambda () (incf calls)) 0 :wrapper #'funcall :name "expired-wrapper-test")
+      (ok (eq :timeout status))
+      (ok (eql 0 value))
+      (ok (null leaked)))
+    (ok (zerop calls))))
+
+(defun call-with-slow-teardown (check)
+  "Finish the check and hold the wrapper open past the deadline."
+  (multiple-value-prog1 (funcall check)
+    (sleep 5)))
+
+(deftest a-wrapper-teardown-timeout-keeps-compared-digest-evidence
+  (call-with-registry
+   (lambda ()
+     (register-property 'teardown-check (lambda () t))
+     (let* ((name (qualified 'teardown-check))
+            (baseline (spec-check-response (make-ht "property" name "seed" "42")))
+            (digest (first (values-of baseline "definition_digest")))
+            (report (spec-check-response
+                     (make-ht "property" name "around_function" (qualified 'call-with-slow-teardown)
+                              "expect_definition_digest" digest "seed" "42" "timeout_seconds" 1))))
+       (ok (stringp digest))
+       (ok (equal '("passed") (values-of report "status")))
+       (ok (equal '("match") (values-of report "definition_match")))
+       (ok (equal "faithful" (gethash "reproduction_faithful" report)))
+       (ok (equal "incomplete" (gethash "status" report)))
+       (ok (eq yason:false (gethash "verified" report)))))))
+
 (deftest combined-run-selects-the-contract-and-direct-properties
   (call-with-registry
    (lambda ()

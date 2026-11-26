@@ -113,10 +113,8 @@ which is what most callers have, still catch it."))
   (:documentation "Signaled when tool argument validation fails.
 Use VALIDATION-MESSAGE to get the user-facing error message."))
 
-(defun %check-type-match (value type arg-name &optional item-number)
-  "Check if VALUE matches TYPE. Signal ARG-VALIDATION-ERROR if not.
-TYPE can be :string, :integer, :number, :boolean, :array, :object, or :any (all JSON values).
-ITEM-NUMBER, when given, identifies an item in the array argument (starting at 1)."
+(defun %check-type-match (value type arg-name &optional item-number type-error-hint)
+  "Check whether VALUE matches TYPE, including TYPE-ERROR-HINT in a failure message."
   (when type
     (let ((valid (ecase type
                    (:any t)
@@ -130,7 +128,7 @@ ITEM-NUMBER, when given, identifies an item in the array argument (starting at 1
       (unless valid
         (error 'arg-validation-error
                :arg-name arg-name
-               :message (format nil "~A~@[ item ~D~] must be ~A"
+               :message (format nil "~A~@[ item ~D~] must be ~A~@[. ~A~]"
                                 arg-name item-number
                                 (ecase type
                                   (:string "a string")
@@ -138,10 +136,15 @@ ITEM-NUMBER, when given, identifies an item in the array argument (starting at 1
                                   (:number "a number")
                                   (:boolean "boolean")
                                   (:array "an array")
-                                  (:object "an object"))))))))
+                                  (:object "an object"))
+                                type-error-hint))))))
 
-(declaim (ftype (function ((or hash-table null) string &key (:type (or keyword null)) (:required boolean)) t) extract-arg))
-(defun extract-arg (args name &key type required)
+(declaim (ftype (function ((or hash-table null) string
+                           &key (:type (or keyword null)) (:required boolean)
+                                (:type-error-hint (or null string)))
+                          t)
+                extract-arg))
+(defun extract-arg (args name &key type required type-error-hint)
   "Extract argument NAME from ARGS hash-table with optional validation.
 
 Arguments:
@@ -150,6 +153,7 @@ Arguments:
   TYPE     - Expected type (:string :integer :number :boolean :array :object)
              If NIL, no type checking is performed.
   REQUIRED - If T, signal error when argument is missing
+   TYPE-ERROR-HINT - Optional extra text for a type mismatch
 
 Returns the argument value, or NIL if optional and not provided.
 Signals ARG-VALIDATION-ERROR on validation failure.
@@ -166,7 +170,7 @@ Example:
               :message (format nil "~A is required" name)))
       ;; Present - check type
       (value
-       (%check-type-match value type name)
+       (%check-type-match value type name nil type-error-hint)
        value)
       ;; Optional and missing
       (t nil))))

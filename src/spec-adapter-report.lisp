@@ -40,8 +40,8 @@
                 #:bounded-output-string)
   (:import-from #:cl-mcp/src/code-core
                 #:code-describe-symbol)
-  (:import-from #:cl-mcp/src/utils/deadline
-                #:call-with-deadline-thread)
+  (:import-from #:cl-mcp/src/spec-execution
+                #:call-with-check-deadline)
   (:import-from #:cl-mcp/src/utils/request-debugger-boundary
                 #:request-debugger-escape-error-p
                 #:request-debugger-escape-error-context
@@ -2321,7 +2321,7 @@ budget computed from one backend and the trials run under another."
              (names (mapcar #'car bindings))
              (settings (mapcar #'cdr bindings)))
         (multiple-value-bind (value status leaked)
-            (call-with-deadline-thread
+            (call-with-check-deadline
              (lambda ()
                (progv names settings
                  (%result-plist api
@@ -2620,16 +2620,75 @@ lets the shortfall it guards against pass silently as verified."
               results)
        t))
 
+(defun %interrupted-check-results (finished pending active kind budget leaked)
+  (append (reverse finished)
+          (loop for name in pending
+                for status = (if active :timeout :not-run) then :not-run
+                for timed-out = (eq status :timeout)
+                collect (list :property (symbol-data name) :kind kind :status status
+                              :reason (unless timed-out :budget-exhausted)
+                              :timeout-seconds (when timed-out budget)
+                              :thread-leaked (and timed-out leaked)
+                              :definition-match :not-checked
+                              :counterexample-status (if timed-out :unavailable :not-run)
+                              :shrink-status (if timed-out :unavailable :not-run)
+                              :message (cond ((not timed-out) +budget-exhausted-message+)
+                                             (leaked +timeout-leaked-message+)
+                                             (t +timeout-stopped-message+))))))
+
+(defun %check-run-report (results selection kind profile budget start expected-digest environment
+                          thread-leaked interrupted)
+  (let ((timed-out (or interrupted (find :timeout results :key (lambda (row)
+                                                                  (getf row :status)))))
+        (gaps (%verification-gaps results selection)))
+    (list :status (if (and (not interrupted)
+                           (every (lambda (result)
+                                    (and (%terminal-status-p (getf result :status))
+                                         (not (%generation-incomplete-p result))))
+                                  results))
+                      :completed
+                      :incomplete)
+          :verified (and (not interrupted) (%verified-p results))
+          :verification-gaps (if interrupted (adjoin :timeout gaps) gaps)
+          :selection selection
+          :results results
+          :counts (%counts results)
+          :profile (unless (eq kind :contract) profile)
+          :timeout-seconds budget
+          :thread-leaked thread-leaked
+          :worker-reuse (cond (thread-leaked :unsafe)
+                              (timed-out :unknown)
+                              (t :safe))
+          :worker-reuse-message (cond (thread-leaked +worker-reuse-unsafe-message+)
+                                      (timed-out +worker-reuse-unknown-message+))
+          :elapsed (%elapsed-since start)
+          :options nil
+          :options-note +options-note+
+          :reproduce-scope +reproduce-scope-note+
+          :reproduction-faithful
+          (cond ((null expected-digest) :not-checked)
+                ((find-if (lambda (result)
+                            (member (getf result :definition-match) '(:unknown :not-checked)))
+                          results)
+                 :unknown)
+                ((every (lambda (result) (eq :true (getf result :definition-match))) results)
+                 :true)
+                (t :false))
+          :environment environment)))
+
 (defun check-report (api api-status &key property symbol function package profile
                                          seed trials expect-definition-digest
                                          timeout-seconds
-                                         (max-value-chars 2000))
+                                         (max-value-chars 2000) checkpoint)
   "Return the plist behind the spec-check tool.
 
 Runs the property named by PROPERTY, every property registered :ABOUT the
 symbol named by SYMBOL, or the function spec named by FUNCTION.
 TIMEOUT-SECONDS is the budget for the whole call, spent across the selection
 in order.
+
+CHECKPOINT, when supplied, records a function that can recover completed rows
+if the enclosing request deadline interrupts this check.
 
 :VERIFIED is true only when at least one property was selected and every one
 of them passed.  A selection of zero, a timeout, a generator failure and a
@@ -2717,96 +2776,39 @@ anything holds."
                 (start (get-internal-real-time))
                 (results '())
                 (thread-leaked nil)
-                ;; Captured once, on this thread, and handed to both the
-                ;; budget derivation and the run.  Reading the special in
-                ;; each place would let the two disagree.
                 (backend (handler-case
                              (funcall (api-fn api :generator-backend))
                            (error () nil))))
-            (dolist (name names)
-              ;; SELECTED-DATA is set only by an explicit selection, which
-              ;; names exactly one definition -- this one.  An :ABOUT
-              ;; selection leaves it NIL and each name is read here.
-              (let* ((facts (if (eq kind :contract)
-                                (%contract-facts api name registry selected-data)
-                                (%property-facts api name registry selected-data)))
-                     (budget-plist (%trials-budget api facts profile-keyword
-                                                   backend trials))
-                     (digest (append (%digest-facts api name registry facts)
-                                     ;; On every branch, not only the one that
-                                     ;; ran: a timeout publishes the digest too
-                                     ;; and would print it bare.
-                                     (list :covers (if (eq kind :contract)
-                                                       :contract
-                                                       :property))))
-                     (remaining (- budget (%elapsed-since start)))
-                     (result (%run-one api name registry kind profile-keyword seed
-                                       budget-plist digest
-                                       expect-definition-digest remaining
-                                       max-value-chars backend facts)))
-                (when (getf result :thread-leaked) (setf thread-leaked t))
-                (push result results)))
-            (setf results (nreverse results))
-            (list :status (if (every (lambda (result)
-                                       (and (%terminal-status-p (getf result :status))
-                                            (not (%generation-incomplete-p result))))
-                                     results)
-                              :completed
-                              :incomplete)
-                  :verified (%verified-p results)
-                  :verification-gaps (%verification-gaps results selection)
-                  :selection selection
-                  :results results
-                  :counts (%counts results)
-                  ;; Absent on a contract run for the same reason it is
-                  ;; refused as an argument there: nothing selected it and
-                  ;; nothing used it.
-                  :profile (unless (eq kind :contract) profile-keyword)
-                  :timeout-seconds budget
-                  :thread-leaked thread-leaked
-                  ;; Reported for any timeout, not only a leaked one.  A
-                  ;; thread that stopped is not evidence that what it was
-                  ;; doing was undone.
-                  :worker-reuse (cond (thread-leaked :unsafe)
-                                      ((find :timeout results
-                                             :key (lambda (result)
-                                                    (getf result :status)))
-                                       :unknown)
-                                      (t :safe))
-                  :worker-reuse-message
-                  (cond (thread-leaked +worker-reuse-unsafe-message+)
-                        ((find :timeout results
-                               :key (lambda (result) (getf result :status)))
-                         +worker-reuse-unknown-message+)
-                        (t nil))
-                  :elapsed (%elapsed-since start)
-                  :options nil
-                  :options-note +options-note+
-                  :reproduce-scope +reproduce-scope-note+
-                  ;; Kept apart from :VERIFIED on purpose.  A run whose
-                  ;; definitions moved can still pass; what it cannot claim
-                  ;; is to have reproduced the earlier run.
-                  :reproduction-faithful
-                  (cond ((null expect-definition-digest) :not-checked)
-                        ;; :NOT-CHECKED beside a digest that WAS asked for is
-                        ;; a run that never reached the comparison -- a
-                        ;; timeout, an exhausted budget, a run that signalled.
-                        ;; It belongs with the unreadable digest and not with
-                        ;; the fall-through: taken for a disagreement, a
-                        ;; contract whose target is not even defined reported
-                        ;; that the caller's definitions had moved, about a
-                        ;; digest nothing had looked at.
-                        ((find-if (lambda (result)
-                                    (member (getf result :definition-match)
-                                            '(:unknown :not-checked)))
-                                  results)
-                         :unknown)
-                        ((every (lambda (result)
-                                  (eq :true (getf result :definition-match)))
-                                results)
-                         :true)
-                        ;; :FALSE rather than NIL: absence of a verdict and a
-                        ;; verdict of "not faithful" are different answers,
-                        ;; and NIL was carrying both.
-                        (t :false))
-                  :environment environment)))))))
+            ;; A checkpoint shares only the immutable prefix of completed rows.
+            ;; The worker can still be alive when a deadline fails to stop it.
+            (labels ((finish (rows leaked interrupted)
+                       (%check-run-report rows selection kind profile-keyword budget start
+                                          expect-definition-digest environment leaked interrupted))
+                     (save (pending active)
+                       (when checkpoint
+                         (let ((finished results))
+                           (funcall checkpoint
+                                    (lambda (leaked)
+                                      (finish (%interrupted-check-results
+                                               finished pending active kind budget leaked)
+                                              leaked t)))))))
+              (loop for pending on names
+                    for name = (first pending)
+                    do (save pending t)
+                       (let* ((facts (if (eq kind :contract)
+                                         (%contract-facts api name registry selected-data)
+                                         (%property-facts api name registry selected-data)))
+                              (budget-plist (%trials-budget api facts profile-keyword
+                                                            backend trials))
+                              (digest (append (%digest-facts api name registry facts)
+                                              (list :covers
+                                                    (if (eq kind :contract) :contract :property))))
+                              (remaining (- budget (%elapsed-since start)))
+                              (result (%run-one api name registry kind profile-keyword seed
+                                                budget-plist digest
+                                                expect-definition-digest remaining
+                                                max-value-chars backend facts)))
+                         (when (getf result :thread-leaked) (setf thread-leaked t))
+                         (push result results))
+                       (save (rest pending) nil))
+              (finish (reverse results) thread-leaked nil))))))))

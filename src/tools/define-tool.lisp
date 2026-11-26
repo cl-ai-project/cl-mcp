@@ -52,7 +52,8 @@
            :item-type :string
            :description nil))
     (list
-     (destructuring-bind (name &key json-name type required default enum description item-type)
+     (destructuring-bind (name &key json-name type required default enum description
+                                    item-type type-error-hint)
          spec
        (list :name name
              :json-name (or json-name (%symbol-to-json-name name))
@@ -61,7 +62,8 @@
              :default default
              :enum enum
              :item-type (or item-type :string)
-             :description description)))))
+             :description description
+             :type-error-hint type-error-hint)))))
 
 (defun %type-to-json-type (type)
   "Convert Lisp type keyword to JSON Schema type string."
@@ -81,14 +83,16 @@
         (type (getf parsed-spec :type))
         (required (getf parsed-spec :required))
         (default (getf parsed-spec :default))
-        (item-type (getf parsed-spec :item-type)))
+        (item-type (getf parsed-spec :item-type))
+        (hint (getf parsed-spec :type-error-hint)))
     (case type
       (:boolean
        `(,name (extract-boolean-arg ,args-var ,json-name :default ,default)))
       (:array
        `(,name (extract-array-arg ,args-var ,json-name ,item-type :required ,required)))
       (otherwise
-       `(,name (extract-arg ,args-var ,json-name :type ,type :required ,required))))))
+       `(,name (extract-arg ,args-var ,json-name :type ,type :required ,required
+                            ,@(when hint (list :type-error-hint hint))))))))
 
 (defun %generate-schema-property (parsed-spec)
   "Generate the schema setter for an argument. :ANY accepts every JSON type."
@@ -121,7 +125,8 @@ DESCRIPTION is the tool description string, or a form evaluated when listing too
 
 ARGS is a list of argument specifications. Each spec can be:
   - A symbol: creates an optional string argument
-  - A list: (name &key json-name type required default enum item-type description)
+  - A list: (name &key json-name type required default enum item-type description
+                       type-error-hint)
     - name: Symbol used in BODY
     - json-name: JSON key (default: snake_case of name)
     - type: :string :integer :number :boolean :array :object :any
@@ -130,6 +135,7 @@ ARGS is a list of argument specifications. Each spec can be:
     - enum: List of allowed string values (e.g., '(\"a\" \"b\" \"c\"))
     - item-type: for an :array, the JSON type of its items (default :string)
     - description: Schema description
+     - type-error-hint: Extra diagnostic text for a scalar type mismatch
 
 GROUP, when given, is a keyword naming an optional tool group.  The tool is
 registered either way but stays out of tools/list and refuses calls until the

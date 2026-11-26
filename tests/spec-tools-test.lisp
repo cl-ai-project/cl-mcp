@@ -204,6 +204,23 @@ are what a test about the message has to look at."
       (ok (string= "invalid-arguments" (gethash "status" response)))
       (ok (search "digits" (string-downcase (gethash "message" response)))))))
 
+(deftest numeric-spec-seeds-show-a-copyable-argument
+  (dolist (call '(("spec-check" . "{\"property\":\"cl:car\",\"seed\":42}")
+                  ("spec-check-batch" . "{\"properties\":[\"cl:car\"],\"seed\":42}")))
+    (ok (search "{\"seed\":\"42\"}" (%text (%call (car call) (cdr call))))))
+  (multiple-value-bind (seed message) (parse-seed-string 42)
+    (ok (null seed))
+    (ok (search "{\"seed\":\"42\"}" message))))
+
+(deftest check-tools-reject-an-unresolved-wrapper
+  (dolist (call '(("spec-check" . "\"property\":\"cl:car\"")
+                  ("spec-check-input" . "\"function\":\"cl:car\",\"arguments\":[null]")
+                  ("spec-check-batch" . "\"properties\":[\"cl:car\"]")))
+    (let ((response (%call (car call)
+                           (format nil "{~A,\"around_function\":\"cl:when\"}" (cdr call)))))
+      (ok (search "around_function" (%text response)))
+      (ok (search "invalid-arguments" (%text response) :test #'char-equal)))))
+
 (deftest spec-check-refuses-an-empty-seed
   (testing "an empty seed is refused, not treated as absent"
     (let ((response (%call "spec-check"
