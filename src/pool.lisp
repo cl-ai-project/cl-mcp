@@ -81,7 +81,7 @@
            #:pool-shutting-down
            #:pool-capacity-exceeded
            #:pool-spawn-cancelled
-           #:pool-worker-initializing
+           #:pool-worker-initializing #:pool-worker-init-failed #:init-failed-worker-id
            #:*recovery-threads*
            #:find-session-worker
            #:pool-status-info))
@@ -115,8 +115,17 @@
   ((id :initarg :id :reader initializing-worker-id))
   (:documentation "An assigned worker is running its initialization hook.")
   (:report (lambda (condition stream)
-             (format stream "Worker ~A is initializing. Check pool-status and retry when running."
+             (format stream "Assigned worker ~A is initializing. Check pool-status and retry when running."
                      (initializing-worker-id condition)))))
+
+(define-condition pool-worker-init-failed (error)
+  ((id :initarg :id :reader init-failed-worker-id)
+   (reason :initarg :reason :reader init-failure-reason))
+  (:documentation "The bound worker failed its per-worker hook and needs replacement.")
+  (:report (lambda (condition stream)
+             (format stream "Initialization failed for worker ~A: ~A. ~
+                             Correct the setup and use pool-kill-worker to replace it."
+                     (init-failed-worker-id condition) (init-failure-reason condition)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Configuration
@@ -833,8 +842,8 @@ implementations, falls back to condition-notify (wakes at least one)."
       (when (eq (worker-init-state worker) :initializing)
         (error 'pool-worker-initializing :id (worker-id worker)))
       (when (eq (worker-init-state worker) :failed)
-        (error "Worker ~A initialization failed: ~A" (worker-id worker)
-               (worker-init-error worker))))))
+        (error 'pool-worker-init-failed :id (worker-id worker)
+               :reason (worker-init-error worker))))))
 
 (defstruct worker-placeholder
   "Placeholder inserted into the affinity map while a worker is being

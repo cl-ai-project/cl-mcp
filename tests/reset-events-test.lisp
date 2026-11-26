@@ -334,6 +334,29 @@ return it: a reset the session is owed and has not been told."
          (ok (equal "not-executed" (execution-status result))))
     (discard-session-resets "owner")))
 
+(deftest pending-replacement-is-reported-with-owed-reset
+  (%owe-owner-a-crash -452)
+  (unwind-protect
+       (let* ((cl-mcp/src/proxy::*current-session-id* "owner")
+              (cl-mcp/src/proxy::%cached-get-or-assign%
+                (progn (cl-mcp/src/proxy::%ensure-cached-bindings)
+                       (lambda (session)
+                         (declare (ignore session))
+                         (error 'cl-mcp/src/pool:pool-worker-initializing :id 453))))
+              (cl-mcp/src/proxy::%cached-find-session-worker%
+                (lambda (session)
+                  (when (equal session "owner")
+                    (cl-mcp/src/worker-client:make-worker :id 453 :state :bound))))
+              (result (cl-mcp/src/proxy:proxy-to-worker 9 "worker/eval" (make-hash-table)))
+              (text (result-text result)))
+         (declare (ignorable cl-mcp/src/proxy::%cached-get-or-assign%
+                             cl-mcp/src/proxy::%cached-find-session-worker%))
+         (ok (search "453 is initializing" text))
+         (ok (equal '((-452 . :crashed)) (told-in text)))
+         (ok (search "now using another worker" text))
+         (ok (equal "not-executed" (execution-status result))))
+    (discard-session-resets "owner")))
+
 ;;; ------------------------------------------------------------------------
 ;;; The checks catch wrong implementations
 

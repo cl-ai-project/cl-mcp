@@ -1902,7 +1902,10 @@ Output fields:
   sets `cancelled_spawn`
 - `reset` (boolean|null): whether a replacement was spawned (only present when `killed` is true)
 - `cancelled_spawn` (boolean|null): true if a pending spawn was cancelled instead of killing a live worker
-- `isError` (boolean|null): true if kill succeeded but replacement spawn failed
+- `isError` (boolean|null): true when the replacement could not start or its initialization failed
+- `worker_id` and `init_state`: when the replacement is bound and its per-worker hook has failed,
+  `reset` is true and these fields identify the worker and its `failed` state. Correct the setup
+  and use `pool-kill-worker` to replace it.
 
 In both modes, you must call `load-system` again to restore previously loaded systems.
 
