@@ -147,14 +147,18 @@ this does nothing."
       (ignore-errors (funcall register file nil)))))
 
 (defun delete-project-fasls (system-name)
-  "Delete project source outputs and return their count and the owning system name."
+  "Delete the ASDF outputs of project components and return the count and owning system.
+Resolve the load's component graph before collecting outputs. This registers
+package-inferred subsystems in a fresh image without inferring ownership from
+where source files happen to live."
   (multiple-value-bind (directory owner) (fasl-source-directory system-name)
-    (values (if directory
-                (loop for (nil . fasl) in (%source-fasl-pairs system-name)
-                      when (ignore-errors (delete-file fasl) t)
-                        count t and do (%forget-file-stamp fasl))
-                0)
-            owner)))
+    (let ((system (and directory (asdf:find-system system-name nil))))
+      (when system
+        (asdf:required-components system))
+      (values (loop for (nil . fasl) in (registered-source-fasl-pairs system-name)
+                    when (ignore-errors (delete-file fasl) t)
+                      count t and do (%forget-file-stamp fasl))
+              owner))))
 
 (defun delete-same-second-fasls (system-name)
   "Delete the fasl of each source file of SYSTEM-NAME's project (%SOURCE-FASL-PAIRS)

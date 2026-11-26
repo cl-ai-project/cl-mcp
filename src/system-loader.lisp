@@ -43,7 +43,7 @@ it judges stale by their timestamps (one-second resolution).  A file of the
 project's tree written in the same second as its FASL would look current, so
 that FASL is deleted first, and the file is recompiled when this load reaches
 it (same_second_fasls_deleted counts them).  clear_fasls=true is the
-guaranteed rebuild of project sources, including package-inferred subsystems.  force=true clears the named system and
+guaranteed rebuild of project sources reached by the load, including package-inferred subsystems.  force=true clears the named system and
 re-reads its .asd, so every system defined there that this load reaches (the
 named one and its dependencies) is loaded again: a stale file is recompiled, a
 current FASL loaded as it is, and either replaces a definition made in
@@ -105,8 +105,8 @@ Examples:
    (force :type :boolean :default t
     :description "Clear loaded state before loading to pick up changes (default: true)")
    (clear-fasls :type :boolean :json-name "clear_fasls"
-    :description "Delete this project's source FASLs before loading, including its primary system's
-sources for a package-inferred subsystem. Vendored dependency FASLs are retained (default: false)")
+    :description "Delete ASDF FASLs of the project's registered components and those reached by this
+load, including package-inferred subsystems. Vendored dependency FASLs are retained (default: false)")
    (timeout-seconds :type :number :json-name "timeout_seconds"
     :description "Timeout for the operation in seconds; positive (default: 120)"))
   :body

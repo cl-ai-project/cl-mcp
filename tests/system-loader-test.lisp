@@ -1520,7 +1520,7 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
       (ok (zerop (gethash "warnings" ht))
           "reloading an already-loaded system must not surface noise"))))
 
-(defun %check-preserved-warm-dependency (vendor)
+(defun %check-preserved-warm-dependency (vendor &key fresh-registry)
   (let ((dep-asd (concatenate 'string vendor "warm-dep.asd"))
         (dep-src (concatenate 'string vendor "dep.lisp")))
     (%call-with-probe-files
@@ -1538,7 +1538,11 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
               (let* ((fasl (asdf:apply-output-translations
                             (compile-file-pathname (funcall path dep-src))))
                      (stamp (file-write-date fasl))
-                     (result (load-system "owned-app" :clear-fasls t)))
+                     (result
+                       (let ((asdf:*central-registry*
+                               (cons (funcall path vendor) asdf:*central-registry*)))
+                         (when fresh-registry (asdf:clear-system "warm-dep"))
+                         (load-system "owned-app" :clear-fasls t :timeout-seconds nil))))
                 (ok (equal "loaded" (gethash "status" result)))
                 (ok (eql 1 (gethash "fasls_deleted" result)))
                 (ok (and (probe-file fasl) (= stamp (file-write-date fasl))))))
@@ -1550,6 +1554,9 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
 
 (deftest load-system-clear-fasls-preserves-tracked-vendor
   (%check-preserved-warm-dependency "vendor/warm-dep/"))
+
+(deftest load-system-clear-fasls-preserves-unregistered-tracked-vendor
+  (%check-preserved-warm-dependency "vendor/warm-dep/" :fresh-registry t))
 
 (deftest load-system-clear-fasls-recompiles-package-inferred
   (testing "clear_fasls recompiles dependency subsystems regardless of timestamps"
@@ -1757,6 +1764,8 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
                (ok (= 7 (twice 3)) "precondition: the wrong definition is loaded")
                (write-impl "(* 2 x)")
                (date-fasls-ahead)
+               (asdf:clear-system (format nil "~A/src/impl" name))
+               (asdf:clear-system subsystem)
                (let ((ht (load-system subsystem :clear-fasls t)))
                  (ok (string= "loaded" (gethash "status" ht)))
                  (ok (plusp (gethash "fasls_deleted" ht 0))
