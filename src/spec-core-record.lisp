@@ -670,7 +670,8 @@ When supplied, DECLARED-NAMES comes from the contract read before the run."
 
 STATUS is :OK, :UNSUPPORTED-SCHEMA when the record declares a version this
 adapter does not know, or :MALFORMED.  REASON is the declared version for
-:UNSUPPORTED-SCHEMA and a sentence for :MALFORMED.
+:UNSUPPORTED-SCHEMA and a sentence for :MALFORMED. A well-formed fixture
+with an unknown isolation returns :UNSUPPORTED-ISOLATION and the isolation keyword.
 
 A malformed answer from a versioned API is reported rather than quietly
 replaced by an older reader: falling back would hide a signature mismatch
@@ -712,13 +713,22 @@ returns a version-two :FIXTURE-CHECK. Other readers keep their own schema rules.
       (when (eql 2 version)
         (let ((fixture (getf record :fixture)))
           (unless (and (%proper-plist-p fixture)
-                       (eq :fresh (getf fixture :isolation))
+                       (keywordp (getf fixture :isolation))
                        (typep (getf fixture :version) '(integer 1 *))
                        (getf fixture :recipe-name)
                        (symbolp (getf fixture :recipe-name))
                        (proper-list-p (getf fixture :setup :missing))
                        (proper-list-p (getf fixture :cleanup :missing)))
-            (bad "a version 2 fixture result requires its fresh fixture declaration"))))
+            (bad "a version 2 fixture result requires a complete fixture declaration"))
+          (case (getf fixture :isolation)
+            (:fresh)
+            (:around
+             ;; Programmatic wrappers may have no recorded source forms.
+             (unless (proper-list-p (getf fixture :around :missing))
+               (bad "an around fixture requires a list of wrapper source forms")))
+            (otherwise
+             (return-from validate-versioned-record
+               (values :unsupported-isolation (getf fixture :isolation)))))))
       (when (and expected-record-kind
                  (not (eq expected-record-kind (getf record :record-kind))))
         (bad (format nil "expected a ~A record and got ~A"
@@ -1003,10 +1013,10 @@ returns a version-two :FIXTURE-CHECK. Other readers keep their own schema rules.
 
 (defparameter +fixture-declaration-descriptor+
   '(:object (:isolation . :leaf) (:version . :leaf) (:recipe-name . :leaf)
-            (:setup . (:array :leaf)) (:cleanup . (:array :leaf))))
+            (:around . (:array :leaf)) (:setup . (:array :leaf)) (:cleanup . (:array :leaf))))
 
 (defparameter +fixture-lifecycle-descriptor+
-  '(:object (:setup . :leaf) (:evaluation . :leaf) (:cleanup . :leaf)
+  '(:object (:isolation . :leaf) (:around . :leaf) (:setup . :leaf) (:evaluation . :leaf) (:cleanup . :leaf)
             (:state . :leaf) (:completion . :leaf) (:target-called . :boolean)
             (:errors . (:array (:object (:phase . :leaf) (:reason . :leaf)
                                        (:condition-type . :leaf) (:condition-report . :leaf))))))
@@ -1066,7 +1076,7 @@ error has its own observation, including when shrinking an earlier counterexampl
                                                    (max-chars 2000))
   "Return (values REPORT STATUS REASON) for one versioned cl-spec RECORD.
 
-STATUS is :OK, :UNSUPPORTED-SCHEMA or :MALFORMED.  A malformed record yields no
+STATUS is :OK, :UNSUPPORTED-SCHEMA, :UNSUPPORTED-ISOLATION or :MALFORMED.  A malformed record yields no
 REPORT: the caller reports it as an adapter-visible fault rather than falling
 back to a legacy reader, which would hide it.
 
@@ -1087,7 +1097,7 @@ beside a 10-character compatibility alias is one call with two answers."
                                  :expected-entity-kind expected-entity-kind
                                  :shape-name shape-name)
     (case status
-      (:malformed (values nil :malformed reason))
+      ((:malformed :unsupported-isolation) (values nil status reason))
       (:unsupported-schema
        (values (list :availability :collected
                      :schema-supported nil

@@ -263,6 +263,19 @@ fixture never exercised.")
       ;; A seed is text on both sides; a JSON consumer would round the number.
       (ok (equal "4611686018427387903" (getf report :seed))))))
 
+(deftest unsupported-fixture-isolation-cannot-verify-a-passing-result
+  (let* ((record (list* :schema-version 2 :input-kind :fixture-recipe
+                        :fixture '(:isolation :sandbox :version 1 :recipe-name recipe
+                                   :setup ((list recipe)) :cleanup (nil))
+                        *passing-result*))
+         (report (cl-mcp/src/spec-adapter-report::%result-plist
+                  (%stub-api :result-data (constantly record)) nil (%sym "ADD")
+                  :contract '(:budget 2) nil nil 2000 nil)))
+    (ok (eq :unsupported (getf report :status)))
+    (ok (eq :unsupported-isolation (getf report :reason)))
+    (ok (search "SANDBOX" (getf report :message)))
+    (ok (not (cl-mcp/src/spec-adapter-report::%verified-p (list report))))))
+
 (deftest contract-rejected-agrees-with-the-record-even-against-a-disagreeing-reader
   ;; The drift this branch exists to close: CONTRACT.REJECTED and
   ;; CORE_RESULT.DATA.REJECTED must be the same fact, read once, not two

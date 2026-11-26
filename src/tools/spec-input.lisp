@@ -127,6 +127,10 @@ previous registry generation. Obtain a current handle in this session."))
         (project-core-record record (if fixture-p :fixture-check-data :call-check-data)
                              :expected-record-kind (if fixture-p :fixture-check :result)
                              :expected-entity-kind :function-spec :max-chars max-chars)
+      (when (eq status :unsupported-isolation)
+        (return-from %record-response
+          (%message :unsupported (format nil "Unsupported fixture isolation ~S." reason)
+                    :input-kind input-kind :code "UNSUPPORTED_ISOLATION")))
       (unless (eq status :ok)
         (return-from %record-response
           (%message (if (eq status :malformed) :internal-error status)
