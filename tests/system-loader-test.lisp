@@ -1609,6 +1609,36 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
          (mapc #'asdf:clear-system
                '("clmcp-late-app" "clmcp-late-bootstrap" "clmcp-late-dep")))))))
 
+(deftest load-system-keeps-a-shared-project-sources-warning-strict
+  (%call-with-probe-files
+   '(("shared-warning-app.asd" .
+      "(defsystem \"shared-warning-app\" :defsystem-depends-on (\"shared-warning-bootstrap\")
+         :depends-on (\"shared-warning-bootstrap/shared\") :components ((:file \"shared\")))")
+     ("shared-warning-bootstrap.asd" .
+      "(defsystem \"shared-warning-bootstrap\" :components ((:file \"bootstrap\")))
+       (defsystem \"shared-warning-bootstrap/shared\" :components ((:file \"shared\")))")
+     ("bootstrap.lisp" . "(eval-when (:compile-toplevel) (warn \"bootstrap compile warning\"))")
+     ("shared.lisp" . "(eval-when (:compile-toplevel) (warn \"shared source compile warning\"))"))
+   (lambda (path)
+     (let* ((root (funcall path "./"))
+            (asdf:*central-registry* (cons root asdf:*central-registry*))
+            (asdf/output-translations:*output-translations*
+              (list (cons (list (uiop:wilden root) t) (asdf:ensure-output-translations)))))
+       (unwind-protect
+            (let* ((result (load-system "shared-warning-app" :force nil :timeout-seconds nil
+                                                            :dependency-warnings "warn"))
+                   (records (gethash "warning_records" result))
+                   (bootstrap (%warning-with "bootstrap compile warning" records))
+                   (shared (%warning-with "shared source compile warning" records)))
+              (ok (equal "error" (gethash "status" result)))
+              (ok (%outside-p bootstrap))
+              (ok (%own-p shared))
+              (when shared
+                (ok (eq t (gethash "fails_compile" shared)))))
+         (mapc #'asdf:clear-system
+               '("shared-warning-app" "shared-warning-bootstrap/shared"
+                 "shared-warning-bootstrap")))))))
+
 (deftest load-system-clear-fasls-preserves-warm-dependency
   (%check-preserved-warm-dependency ".qlot/"))
 

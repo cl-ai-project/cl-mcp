@@ -20,7 +20,7 @@
   (:import-from #:cl-mcp/src/utils/paths
                 #:discover-asd-in-project)
   (:import-from #:cl-mcp/src/utils/fasls
-                #:registered-source-owners
+                #:registered-project-source-p
                 #:delete-project-fasls
                 #:delete-same-second-fasls)
   (:import-from #:cl-mcp/src/utils/compilation-unit
@@ -111,23 +111,21 @@ before it reported records, kept for the clients that read it."
 
 (defun %dependency-compile-predicate (system-name)
   "Return a predicate for the ASDF compile action currently executing on this thread.
-Compare the component and actual compiler input so a nested COMPILE-FILE of an
-unrelated file does not inherit the outer action's warning policy."
-  (let ((owners nil))
-    (lambda ()
-      (when (and *compile-file-truename* asdf/session:*asdf-session*)
-        (let ((action (first (asdf/session:visiting-action-list asdf/session:*asdf-session*))))
-          (and (typep (car action) 'asdf:compile-op)
-               (typep (cdr action) 'asdf:cl-source-file)
-               (let ((source (asdf:component-pathname (cdr action))))
-                 (when (uiop:pathname-equal (truename source) *compile-file-truename*)
-                   (let ((path (namestring source)))
-                     (eq :dependency
-                         (or (and owners (gethash path owners))
-                             ;; Loads can register more systems after compilation starts,
-                             ;; as with :DEFSYSTEM-DEPENDS-ON.
-                             (gethash path
-                                      (setf owners (registered-source-owners system-name))))))))))))))
+Compare the component and actual compiler input to keep unrelated nested
+COMPILE-FILE calls strict.  Consult current registrations because
+:DEFSYSTEM-DEPENDS-ON can compile files before their owners are all known."
+  (lambda ()
+    (let* ((session asdf/session:*asdf-session*)
+           (action (and *compile-file-truename* session
+                        (first (asdf/session:visiting-action-list session))))
+           (component (cdr action)))
+      (when (and (typep (car action) 'asdf:compile-op)
+                 (typep component 'asdf:cl-source-file))
+        (let ((source (asdf:component-pathname component))
+              (system (asdf:component-system component)))
+          (and (uiop:pathname-equal (truename source) *compile-file-truename*)
+               (eq system (asdf:registered-system (asdf:component-name system)))
+               (not (registered-project-source-p source system-name))))))))
 
 (defun %call-with-suppressed-output (thunk &key on-unwind in-project warn-on-dependency)
   "Call THUNK with compilation and load output suppressed.

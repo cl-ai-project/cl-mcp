@@ -82,5 +82,8 @@ race with tests that manually crash workers.  Pass a short interval
                  (ensure-directories-exist path)
                  (with-open-file (out path :direction :output :if-exists :error)
                    (write-string text out)))))
-           (funcall thunk root))
+           (let ((asdf/output-translations:*output-translations*
+                   (list (cons (list (uiop:wilden root) t)
+                               (asdf:ensure-output-translations)))))
+             (funcall thunk root)))
       (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore))))
