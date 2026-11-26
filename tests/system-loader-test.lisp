@@ -1553,6 +1553,43 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
          (asdf:clear-system "owned-app")
          (asdf:clear-system "warm-dep"))))))
 
+
+(deftest dependency-warnings-policy
+  (flet ((run (dep app options &key missing-output (root t) (vendor ".qlot/"))
+           (%call-with-probe-files
+            `(("policy-app.asd" . "(defsystem \"policy-app\" :depends-on (\"policy-dep\") :components ((:file \"app\")))")
+              ("app.lisp" . ,app)
+              (,(concatenate 'string vendor "policy-dep.asd") .
+               ,(if missing-output
+                    "(defsystem \"policy-dep\" :components
+                       ((:file \"dep\" :perform (compile-op :after (op file)
+                         (delete-file (first (output-files op file)))))))"
+                    "(defsystem \"policy-dep\" :components ((:file \"dep\")))"))
+              (,(concatenate 'string vendor "dep.lisp") . ,dep))
+            (lambda (path)
+              (unwind-protect
+                   (let ((cl-mcp/src/project-root:*project-root* (and root (funcall path "./"))))
+                     (asdf:load-asd (funcall path (concatenate 'string vendor "policy-dep.asd")))
+                     (asdf:load-asd (funcall path "policy-app.asd"))
+                     (apply #'load-system "policy-app" options))
+                (asdf:clear-system "policy-app")
+                (asdf:clear-system "policy-dep"))))))
+    (let ((warn "(eval-when (:compile-toplevel) (warn \"cold compile warning\"))")
+          (clean "(in-package :cl-user)")
+          (policy '(:dependency-warnings "warn")))
+      (ok (equal "error" (gethash "status" (run warn clean nil))))
+      (ok (equal "loaded" (gethash "status" (run warn clean policy :root nil))))
+      (ok (equal "loaded" (gethash "status" (run warn clean policy :vendor "vendor/policy-dep/"))))
+      (let ((result (run warn clean policy)))
+        (ok (equal "loaded" (gethash "status" result)))
+        (let ((warning (%warning-with "cold compile warning" (gethash "warning_records" result))))
+          (ok (%outside-p warning))
+          (ok (null (gethash "fails_compile" warning)))))
+      (ok (equal "error" (gethash "status" (run clean warn policy))))
+      (ok (equal "error" (gethash "status" (run warn clean policy :missing-output t))))
+      (ok (equal "error" (gethash "status" (run "(defun invalid (1) 3)" clean policy))))
+      (ok (equal "error" (gethash "status" (run "(error \"load fails\")" clean policy)))))))
+
 (deftest load-system-clear-fasls-preserves-warm-dependency
   (%check-preserved-warm-dependency ".qlot/"))
 

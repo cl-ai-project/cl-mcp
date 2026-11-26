@@ -311,6 +311,7 @@ Disable the worker pool with `MCP_NO_WORKER_POOL=1` or the `:worker-pool` keywor
 | `MCP_WORKER_INIT_EVAL` | Lisp form run via repl-eval as an escape hatch | (none) |
 | `MCP_WORKER_INIT_PACKAGE` | Package used to read/eval `MCP_WORKER_INIT_EVAL` | `CL-USER` |
 | `MCP_WORKER_INIT_MAX_FAILURES` | Soft init failures before init auto-retry latches off | `1` |
+| `MCP_WORKER_INIT_DEPENDENCY_WARNINGS` | Set to `warn` to allow dependency compiler warnings during init | `strict` |
 | `MCP_WORKER_INIT_MODE` | `singleton` (one owner binds a fixed port). v1 supports `singleton` only | `singleton` |
 
 ### Tuning warmup for cold-start handshakes

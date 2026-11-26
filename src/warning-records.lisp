@@ -282,11 +282,13 @@ for from the ones that only came before."
                               "class" (sanitize-for-json (getf record :class))
                               "message" (sanitize-for-json (getf record :message))
                               "kind" (1+ kind))))
-         (when (and (getf record :compiling) (equal severity "warning"))
+         (when (and (getf record :compiling) (equal severity "warning")
+                    (not (getf record :permitted-dependency)))
            (setf (gethash "fails_compile" table) t))
          (when in-project
            ;; A judgement that fails tells nothing, so it hides nothing either.
-           (let ((own (handler-case (funcall in-project record)
+           (let ((own (handler-case (unless (getf record :permitted-dependency)
+                                      (funcall in-project record))
                         (error () :unknown))))
              (unless (eq own :unknown)
                (setf (gethash "in_project" table) (json-bool own)))))
