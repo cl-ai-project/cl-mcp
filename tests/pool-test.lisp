@@ -147,6 +147,22 @@ in the cleanup form regardless of success or failure."
                    (search "3" text))
               "eval result text contains '3'"))))))
 
+(deftest distinct-worker-random-states
+  (unless (spawn-available-p)
+    (skip "worker spawning unavailable"))
+  (flet ((sample ()
+           (with-spawned-worker (worker)
+             (let ((params (make-hash-table :test 'equal)))
+               (setf (gethash "code" params)
+                     "(let ((*random-state* (make-random-state nil)))
+                        (loop repeat 6 collect (random most-positive-fixnum)))")
+               (let* ((result (worker-rpc worker "worker/eval" params))
+                      (content (gethash "content" result))
+                      (value (read-from-string (gethash "text" (elt content 0)))))
+                 (ok (and (listp value) (= 6 (length value)) (every #'integerp value)))
+                 value)))))
+    (ok (not (equal (sample) (sample))) "fresh workers have independent defaults")))
+
 (deftest worker-kill-sets-state-dead
   (testing "kill-worker terminates process and sets state to :dead"
     (unless (spawn-available-p)

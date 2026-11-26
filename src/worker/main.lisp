@@ -207,6 +207,8 @@ Roswell REPL."
   ;; broadening this handler.
   (handler-case
       (progn
+        ;; A saved image can give every child the same initial random stream.
+        (setf *random-state* (make-random-state t))
         (%install-signal-handlers)
         (let ((wid (uiop/os:getenv "MCP_WORKER_ID")))
           (when (and wid (plusp (length wid)))
