@@ -410,15 +410,18 @@ Load an ASDF system with structured output and reload support. Preferred over
 Input:
 - `system` (string, required): ASDF system name (e.g., `"cl-mcp"`, `"my-project/tests"`)
 - `force` (boolean, default `true`): clear loaded state before loading to pick up file changes
-- `clear_fasls` (boolean, default `false`): force full recompilation from source by
-  deleting the cached FASLs under the system's source directory. A package-inferred
-  subsystem (`my-app/src/contracts`) has no directory of its own, so its primary system's
-  (`my-app`) is cleared, which holds every FASL in the tree. The files are recompiled in
-  this worker's image, so what it already defines still takes part (a macro the files
-  now define after its use, say); to build from the saved source alone, get a fresh
-  worker with `pool-kill-worker`, whose cache for the project root starts empty. Under a
-  worker, the FASLs of files under the project root are the worker's own (see
-  `pool-kill-worker`), so clearing them touches no other session
+- `clear_fasls` (boolean, default `false`) deletes cached FASLs for the project's
+  registered components and project sources reached by this load. A package-inferred
+  subsystem such as `my-app/src/contracts` uses its primary system, `my-app`, to select
+  those outputs. Vendored dependencies such as those under `.qlot/` keep their FASLs.
+  The files are recompiled in the current worker, where definitions from earlier loads
+  can still affect compilation. Use `pool-kill-worker` to build from saved source in a
+  fresh worker with an empty project cache. The project FASLs use the current worker's
+  cache when the worker pool is enabled.
+- `dependency_warnings` (string, default `"strict"`) accepts `"warn"` to continue
+  after full warnings during dependency compilation. The warnings appear in
+  `warning_records`. Full warnings during project compilation, compiler errors and
+  missing compiler outputs still fail the load.
 - `timeout_seconds` (number, default `120`): timeout for the load operation; must be positive
 
 Output fields:
@@ -453,10 +456,10 @@ Output fields:
   `alexandria:define-constant`; a compile that failed on an error, the file to fix; any other
   error, a fresh worker only if the error is about what this worker holds
 - `system` (string): echoed system name
-- `status` (string): `"loaded"`, `"timeout"`, or `"error"`. A full `WARNING` signalled while
-  a file compiles (a duplicate definition, a type conflict, package variance, a wrong argument
-  count to a function `defun`'d earlier in the same file) makes it `"error"`, as it makes
-  `asdf:load-system` and `run-tests` fail: ASDF refuses the file and keeps no FASL of it.
+- `status` (string) is `"loaded"`, `"timeout"`, or `"error"`. With the default warning policy,
+  a full `WARNING` signalled while a file compiles (a duplicate definition, a type conflict,
+  package variance, a wrong argument count to a function `defun`'d earlier in the same file)
+  gives `"error"` and ASDF rejects the compiler output.
   (`ql:quickload` muffles such a warning, so a system that has only ever been quickloaded can
   fail here until the warning is fixed.) A `STYLE-WARNING` (unused variable, undefined
   function) never does, and neither does a full warning signalled outside a compilation
@@ -490,16 +493,15 @@ Output fields:
   - `kind` (integer): shared by the warnings of one kind, counted from 1 in order of first
     appearance. A kind is a class and, for the classes SBCL uses for many messages
     (`SIMPLE-WARNING`, `SIMPLE-STYLE-WARNING`), a message template
-  - `fails_compile` (boolean, present when true): a full warning signalled while a file was
-    being compiled. `compile-file` reports that compile as failed, which is what ASDF refuses a
-    file for, so these are the warnings a refused compile is blamed on. Absent from a style
-    warning and from a full warning signalled at any other time: while a file loads, or when
-    the compiler reports an undefined variable as the compilation unit ends (which has a
-    `file` and `line` all the same)
-  - `in_project` (boolean): whether the warning came from the project's own files. The file
-    is the warning's place, or else the file loading when it was signalled (a dependency's
-    `.asd` or FASL, for one); a FASL stands for the source a registered system compiles
-    into it, wherever the FASL is cached. A source is the project's when it is a source or
+  - `fails_compile` (boolean, present when true) marks a full warning that causes
+    `compile-file` to report failure. Permitted dependency warnings under `"warn"` omit
+    this field, as do style warnings and full warnings signalled outside compilation.
+  - `in_project` (boolean) indicates whether the warning came from the project's own files.
+    Permitted dependency warnings have `in_project` set to `false`, even for a dependency
+    tracked under the project root. For other warnings, the file is the warning's place
+    or the file loading when it was signalled, such as a dependency's `.asd` or FASL.
+    A FASL stands for the source a registered system compiles into it, wherever the FASL
+    is cached. A source is the project's when it is a source or
     `.asd` of the loaded system's project -- wherever that lies, so loading a library kept
     in `.qlot/local-projects/` lists its own warnings -- or when it is under the project
     root and the root's `.gitignore` does not leave it out: the rule the source scan of
@@ -525,8 +527,8 @@ Output fields:
 - `compiler_output` (string, on error): the compiler's output; the text shows its first 2 KB
 - `fasls_deleted` (integer, with `clear_fasls`): how many cached FASLs were deleted. `0` means
   nothing was forced to recompile, and the text says so
-- `fasls_cleared_from` (string, with `clear_fasls`): the system whose directory was cleared —
-  the primary system when a subsystem was named
+- `fasls_cleared_from` (string, with `clear_fasls`) names the system used to select project
+  outputs, which is the primary system when a package-inferred subsystem was named.
 - `same_second_fasls_deleted` (integer, present when any, `force` without `clear_fasls`): FASLs
   of the project's tree deleted because their source was written in the same second as them —
   ASDF's one-second timestamps would have reused them, running the code from before the edit.
