@@ -854,6 +854,25 @@ is stopped and waited for."
       (when (plusp (length failures))
         (ok (equal "(= 3 FOUR)" (gethash "form" (aref failures 0))))))))
 
+(deftest run-tests-preserves-rove-methods
+  (let* ((generic #'rove/core/result::test-name)
+         (classes (list (find-class 'rove/core/result::failed-assertion)))
+         (original (find-method generic nil classes nil))
+         (system "cl-mcp/tests/test-runner-test-direct-assertion"))
+    ;; An older runner may already have installed its compatibility method.
+    (unwind-protect
+         (progn
+           (when original (remove-method generic original))
+           (dolist (args (list nil (list :test (concatenate 'string system
+                                                            "::direct-assertion-failure"))))
+             (let ((before (sb-mop:generic-function-methods generic)))
+               (ok (plusp (gethash "failed" (apply #'run-tests system args))))
+               (ok (null (set-exclusive-or before (sb-mop:generic-function-methods generic)))
+                   "reporting a bare assertion preserves Rove's methods"))))
+      (let ((current (find-method generic nil classes nil)))
+        (when current (remove-method generic current)))
+      (when original (add-method generic original)))))
+
 (deftest ensure-system-loaded-reloads-system
   (testing "%%ensure-system-loaded clears and reloads so ASDF re-checks timestamps"
     (let ((system-name "cl-mcp/tests/clhs-test"))
