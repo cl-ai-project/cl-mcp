@@ -154,7 +154,7 @@ later load agree -- where ASDF by itself, and run-tests, refuse the file."
   (let ((records '())
         (stderr (make-string-output-stream)))
     (flet ((handle-warning (w)
-             (let* ((redefinition-p (%redefinition-warning-p w))
+             (let ((redefinition-p (%redefinition-warning-p w))
                     (dependency-p (and warn-on-dependency
                                        (ignore-errors (funcall warn-on-dependency)))))
                (unless redefinition-p
