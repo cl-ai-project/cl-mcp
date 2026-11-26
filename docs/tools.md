@@ -493,16 +493,15 @@ Output fields:
   - `kind` (integer): shared by the warnings of one kind, counted from 1 in order of first
     appearance. A kind is a class and, for the classes SBCL uses for many messages
     (`SIMPLE-WARNING`, `SIMPLE-STYLE-WARNING`), a message template
-  - `fails_compile` (boolean, present when true): a full warning signalled while a file was
-    being compiled. `compile-file` reports that compile as failed, which is what ASDF refuses a
-    file for, so these are the warnings a refused compile is blamed on. Absent from a style
-    warning and from a full warning signalled at any other time: while a file loads, or when
-    the compiler reports an undefined variable as the compilation unit ends (which has a
-    `file` and `line` all the same)
-  - `in_project` (boolean): whether the warning came from the project's own files. The file
-    is the warning's place, or else the file loading when it was signalled (a dependency's
-    `.asd` or FASL, for one); a FASL stands for the source a registered system compiles
-    into it, wherever the FASL is cached. A source is the project's when it is a source or
+  - `fails_compile` (boolean, present when true) marks a full warning that causes
+    `compile-file` to report failure. Permitted dependency warnings under `"warn"` omit
+    this field, as do style warnings and full warnings signalled outside compilation.
+  - `in_project` (boolean) indicates whether the warning came from the project's own files.
+    Permitted dependency warnings have `in_project` set to `false`, even for a dependency
+    tracked under the project root. For other warnings, the file is the warning's place
+    or the file loading when it was signalled, such as a dependency's `.asd` or FASL.
+    A FASL stands for the source a registered system compiles into it, wherever the FASL
+    is cached. A source is the project's when it is a source or
     `.asd` of the loaded system's project -- wherever that lies, so loading a library kept
     in `.qlot/local-projects/` lists its own warnings -- or when it is under the project
     root and the root's `.gitignore` does not leave it out: the rule the source scan of
