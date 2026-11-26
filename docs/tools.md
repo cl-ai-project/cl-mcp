@@ -410,15 +410,18 @@ Load an ASDF system with structured output and reload support. Preferred over
 Input:
 - `system` (string, required): ASDF system name (e.g., `"cl-mcp"`, `"my-project/tests"`)
 - `force` (boolean, default `true`): clear loaded state before loading to pick up file changes
-- `clear_fasls` (boolean, default `false`): force full recompilation from source by
-  deleting the cached FASLs under the system's source directory. A package-inferred
-  subsystem (`my-app/src/contracts`) has no directory of its own, so its primary system's
-  (`my-app`) is cleared, which holds every FASL in the tree. The files are recompiled in
-  this worker's image, so what it already defines still takes part (a macro the files
-  now define after its use, say); to build from the saved source alone, get a fresh
-  worker with `pool-kill-worker`, whose cache for the project root starts empty. Under a
-  worker, the FASLs of files under the project root are the worker's own (see
-  `pool-kill-worker`), so clearing them touches no other session
+- `clear_fasls` (boolean, default `false`) deletes cached FASLs for the project's
+  registered components and project sources reached by this load. A package-inferred
+  subsystem such as `my-app/src/contracts` uses its primary system, `my-app`, to select
+  those outputs. Vendored dependencies such as those under `.qlot/` keep their FASLs.
+  The files are recompiled in the current worker, where definitions from earlier loads
+  can still affect compilation. Use `pool-kill-worker` to build from saved source in a
+  fresh worker with an empty project cache. The project FASLs use the current worker's
+  cache when the worker pool is enabled.
+- `dependency_warnings` (string, default `"strict"`) accepts `"warn"` to continue
+  after full warnings during dependency compilation. The warnings appear in
+  `warning_records`. Full warnings during project compilation, compiler errors and
+  missing compiler outputs still fail the load.
 - `timeout_seconds` (number, default `120`): timeout for the load operation; must be positive
 
 Output fields:
@@ -453,10 +456,10 @@ Output fields:
   `alexandria:define-constant`; a compile that failed on an error, the file to fix; any other
   error, a fresh worker only if the error is about what this worker holds
 - `system` (string): echoed system name
-- `status` (string): `"loaded"`, `"timeout"`, or `"error"`. A full `WARNING` signalled while
-  a file compiles (a duplicate definition, a type conflict, package variance, a wrong argument
-  count to a function `defun`'d earlier in the same file) makes it `"error"`, as it makes
-  `asdf:load-system` and `run-tests` fail: ASDF refuses the file and keeps no FASL of it.
+- `status` (string) is `"loaded"`, `"timeout"`, or `"error"`. With the default warning policy,
+  a full `WARNING` signalled while a file compiles (a duplicate definition, a type conflict,
+  package variance, a wrong argument count to a function `defun`'d earlier in the same file)
+  gives `"error"` and ASDF rejects the compiler output.
   (`ql:quickload` muffles such a warning, so a system that has only ever been quickloaded can
   fail here until the warning is fixed.) A `STYLE-WARNING` (unused variable, undefined
   function) never does, and neither does a full warning signalled outside a compilation
@@ -525,8 +528,8 @@ Output fields:
 - `compiler_output` (string, on error): the compiler's output; the text shows its first 2 KB
 - `fasls_deleted` (integer, with `clear_fasls`): how many cached FASLs were deleted. `0` means
   nothing was forced to recompile, and the text says so
-- `fasls_cleared_from` (string, with `clear_fasls`): the system whose directory was cleared —
-  the primary system when a subsystem was named
+- `fasls_cleared_from` (string, with `clear_fasls`) names the system used to select project
+  outputs, which is the primary system when a package-inferred subsystem was named.
 - `same_second_fasls_deleted` (integer, present when any, `force` without `clear_fasls`): FASLs
   of the project's tree deleted because their source was written in the same second as them —
   ASDF's one-second timestamps would have reused them, running the code from before the edit.
