@@ -42,6 +42,9 @@
       (let ((*enabled-tool-groups* (list "TEST-INSTRUCTIONS-GROUP")))
         (ok (equal '("Replaced.") (enabled-tool-group-instructions)))))))
 
+(defun %base-text ()
+  (format nil +base-instructions+ (cl-mcp/src/project-root:project-root-guidance)))
+
 (deftest group-instructions-follow-registration-order
   ;; F1: multiple groups compose in registration order, not enablement order,
   ;; and re-registering a group replaces its text where it already stands.
@@ -50,7 +53,7 @@
     (register-tool-group-instructions :group-b "B")
     (register-tool-group-instructions :group-a "A2")
     (let ((*enabled-tool-groups* (list "GROUP-B" "GROUP-A")))
-      (ok (equal (format nil "~A~%~%~A~%~%~A" +base-instructions+ "A2" "B")
+      (ok (equal (format nil "~A~%~%~A~%~%~A" (%base-text) "A2" "B")
                  (server-instructions))))))
 
 (deftest register-tool-group-instructions-refuses-empty-names
@@ -75,13 +78,13 @@
 
 (deftest base-instructions-only-without-groups
   (let ((*enabled-tool-groups* '()))
-    (ok (string= +base-instructions+ (server-instructions)))
+    (ok (string= (%base-text) (server-instructions)))
     (ok (not (search "spec-check" (server-instructions))))))
 
 (deftest cl-spec-instructions-follow-the-group
   (let ((*enabled-tool-groups* (list "CL-SPEC")))
     (let ((text (server-instructions)))
-      (ok (eql 0 (search +base-instructions+ text)) "the base text comes first")
+      (ok (eql 0 (search (%base-text) text)) "the base text comes first")
       (ok (search "function=" text))
       (ok (search "Replay:" text)))))
 
@@ -138,6 +141,14 @@
           (format nil "~S: ~D characters"
                   groups (length (server-instructions)))))))
 
+(deftest long-project-root-fits-instructions
+  (let ((cl-mcp/src/project-root:*project-root*
+          (uiop:ensure-directory-pathname
+           (concatenate 'string "/project/" (make-string 200 :initial-element #\a))))
+        (*enabled-tool-groups* '("CL-SPEC")))
+    (ok (<= (length (server-instructions)) +instructions-budget+))
+    (ok (search "fs-get-project-info" (server-instructions)))))
+
 (deftest core-rules-lead-the-base-text
   ;; ChatGPT asks for the essentials in the first 512 characters; Claude Code
   ;; cuts from the end.  Either way the opening has to stand alone.
@@ -190,6 +201,27 @@
         (let ((result (%initialize-result version)))
           (ok (equal (server-instructions) (gethash "instructions" result))
               (format nil "~A with groups ~S" version groups)))))))
+
+(deftest root-guidance-follows-the-request
+  (let ((cl-mcp/src/project-root:*project-root* #P"/app/")
+        (cl-mcp/src/project-root::*session-project-roots* (make-hash-table :test #'equal)))
+    (labels ((check (expected)
+               (let* ((init (%initialize-result (first +supported-protocol-versions+)))
+                      (reply (parse (process-json-line
+                                     "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}")))
+                      (tools (gethash "tools" (gethash "result" reply)))
+                      (tool (find "fs-set-project-root" tools :test #'equal
+                                  :key (lambda (item) (gethash "name" item)))))
+                 (dolist (text (list (gethash "instructions" init) (gethash "description" tool)))
+                   (ok (search expected text))
+                   (ok (search "server-visible" text))
+                   (ok (search "relative paths" text))))))
+      (check "/app/")
+      (let ((cl-mcp/src/state:*current-session-id* "guidance-test"))
+        (cl-mcp/src/project-root:set-project-root #P"/alternate/" :session-id "guidance-test")
+        (check "/alternate/"))
+      (let ((cl-mcp/src/project-root:*project-root* nil))
+        (check "No project root")))))
 
 (deftest initialize-explains-when-to-close-a-subagent-repl
   (let* ((result (%initialize-result (first +supported-protocol-versions+)))

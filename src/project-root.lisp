@@ -7,7 +7,8 @@
   (:use #:cl)
   (:import-from #:bordeaux-threads #:make-lock)
   (:import-from #:cl-mcp/src/state #:*current-session-id*)
-  (:export #:*project-root*
+  (:export #:project-root-guidance
+           #:*project-root*
            #:*project-root-lock*
            #:session-project-root
            #:remember-session-project-root
@@ -30,6 +31,12 @@
       (uiop:parse-unix-namestring env-root :ensure-directory t)))
   "Absolute pathname of the project root.
 Set via MCP_PROJECT_ROOT environment variable or fs-set-project-root tool.")
+
+(defun project-root-guidance ()
+  "Describe how this request resolves relative paths."
+  (if *project-root*
+      (format nil "Resolve relative paths under ~A." (uiop:native-namestring *project-root*))
+      "No project root. Set one before using relative paths."))
 
 (defvar *project-root-lock* (bt:make-lock "project-root-lock")
   "Lock protecting multi-step mutations of *project-root* and related globals.")

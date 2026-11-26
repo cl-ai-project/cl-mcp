@@ -10,6 +10,7 @@
 
 (defpackage #:cl-mcp/src/tools/registry
   (:use #:cl)
+  (:import-from #:alexandria #:copy-hash-table)
   (:import-from #:uiop
                 #:getenv)
   (:export #:register-tool
@@ -179,7 +180,12 @@ mistake to correct, the second a setting to change."
     (maphash (lambda (name entry)
                (declare (ignore name))
                (when (tool-group-enabled-p (tool-entry-group entry))
-                 (push (tool-entry-descriptor entry) descriptors)))
+                 (let* ((descriptor (tool-entry-descriptor entry))
+                        (description (gethash "description" descriptor)))
+                   (when (functionp description)
+                     (setf descriptor (copy-hash-table descriptor)
+                           (gethash "description" descriptor) (funcall description)))
+                   (push descriptor descriptors))))
              *tool-registry*)
     (coerce (nreverse descriptors) 'vector)))
 

@@ -117,7 +117,7 @@
 
 NAME is the tool name string (e.g., \"fs-list-directory\").
 
-DESCRIPTION is the tool description string for the schema.
+DESCRIPTION is the tool description string, or a form evaluated when listing tools.
 
 ARGS is a list of argument specifications. Each spec can be:
   - A symbol: creates an optional string argument
@@ -169,7 +169,7 @@ Example:
          (let ((properties (make-hash-table :test #'equal)))
            ,@(mapcar #'%generate-schema-property parsed-specs)
            (make-ht "name" ,name
-                    "description" ,description
+                    "description" ,(if (stringp description) description `(lambda () ,description))
                     "inputSchema"
                     (make-ht "type" "object"
                              "properties" properties

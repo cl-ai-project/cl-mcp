@@ -14,6 +14,7 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/tools/registry
                 #:enabled-tool-group-instructions)
+  (:import-from #:cl-mcp/src/project-root #:project-root-guidance)
   (:export #:+instructions-budget+
            #:+base-instructions+
            #:server-instructions))
@@ -28,7 +29,7 @@ Claude Code truncates server instructions past 2,048 characters.")
   "cl-mcp is a Common Lisp development server: a live SBCL REPL, ASDF loading and
 structure-aware editing of Lisp source.
 
-1. Call fs-set-project-root with the project's absolute path before any file tool.
+1. ~A To change roots, pass a server-visible path to fs-set-project-root.
 2. Read and change .lisp/.asd only with cl-mcp tools, no shell command, script or
 built-in Read/Edit: lisp-edit-form/lisp-patch-form for forms, fs-write-file only for
 a new or unparseable file (see lisp-check-parens).
@@ -44,7 +45,8 @@ clos-describe, lisp-macroexpand and inspect-object run in this session's own wor
 image. If the worker is lost, reload systems and discard its object ids.
 With the pool on, agent_id selects a subagent's REPL.
 Use repl-close only for permanent retirement. Let idle timeout handle resumable agents."
-  "Instructions every client gets, whatever groups are on.  The three numbered
+  "Format control for the base instructions. Its argument describes the project root.
+The three numbered
 rules come first because a client may read only the opening.")
 
 (defun server-instructions ()
@@ -53,4 +55,11 @@ enabled tool group, separated by a blank line.
 
 Computed per call from *ENABLED-TOOL-GROUPS*, the same setting tools/list
 reads, so the two cannot describe different tool sets."
-  (format nil "~A~{~%~%~A~}" +base-instructions+ (enabled-tool-group-instructions)))
+  (let* ((groups (enabled-tool-group-instructions))
+         (text (format nil "~A~{~%~%~A~}" (format nil +base-instructions+ (project-root-guidance))
+                       groups)))
+    (if (<= (length text) +instructions-budget+)
+        text
+        (format nil "~A~{~%~%~A~}"
+                (format nil +base-instructions+ "See fs-get-project-info for the current root.")
+                groups))))
