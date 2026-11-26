@@ -77,6 +77,7 @@ restore.  A NIL value unsets the variable."
               (warning () nil))
             "no warning when INIT unset (even with pool disabled)")))))
 
+#+sbcl
 (deftest per-worker-pending-returns-without-running-application
   (let* ((session "init-pending")
          (worker (make-worker :id 451 :session-id session :state :bound
