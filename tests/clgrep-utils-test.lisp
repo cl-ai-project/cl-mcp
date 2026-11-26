@@ -318,6 +318,46 @@ and delete it."
          (ok (not (funcall project-p (merge-pathnames left-out root)))
              (format nil "~A is not the project's" left-out)))))))
 
+(deftest collect-target-files-inherits-local-ignore-rules
+  (%call-with-gitignore-tree
+   (format nil "*.bak.lisp~%!keep.lisp~%")
+   '(".worktrees/copy/main.lisp" ".worktrees/ok.bak.lisp" "copy/main.lisp"
+     "local.lisp" "keep.lisp")
+   (lambda (root)
+     (labels ((rules (file text)
+                (let ((path (merge-pathnames file root)))
+                  (ensure-directories-exist path)
+                  (with-open-file (out path :direction :output :if-exists :supersede)
+                    (write-string text out)))))
+       (uiop:run-program (list "git" "init" "-q" (namestring root)))
+       (rules ".git/info/exclude" (format nil "/local.lisp~%/keep.lisp~%"))
+       (rules ".worktrees/.gitignore" (format nil "/copy/~%!ok.bak.lisp~%"))
+       (let ((files (mapcar (lambda (p) (enough-namestring p root)) (collect-target-files root))))
+         (ok (equal '(".worktrees/ok.bak.lisp" "copy/main.lisp" "keep.lisp")
+                    (sort files #'string<))))
+       (dolist (explicit '(".worktrees/copy/" ".worktrees/copy/main.lisp"))
+         (ok (= 1 (length (collect-target-files (merge-pathnames explicit root))))))))))
+
+(deftest collect-target-files-reads-native-ignore-paths
+  (%call-with-gitignore-tree
+   "" '("checkout/keep.lisp" "checkout/drop.lisp")
+   (lambda (root)
+     (let ((old (merge-pathnames "checkout/" root))
+           (dir (merge-pathnames (uiop:parse-unix-namestring "project[old]/") root)))
+       (rename-file old dir)
+       (with-open-file (stream (merge-pathnames ".gitignore" dir) :direction :output)
+         (write-line "drop.lisp" stream))
+       (ok (equal (list (merge-pathnames "keep.lisp" dir)) (collect-target-files dir)))))))
+
+(deftest collect-target-files-skips-symlinked-working-tree-rules
+  (%call-with-gitignore-tree
+   "hidden.lisp" '("src/hidden.lisp" "src/keep.lisp")
+   (lambda (root)
+     (rename-file (merge-pathnames ".gitignore" root) (merge-pathnames "rules" root))
+     (uiop:run-program (list "ln" "-s" "../rules"
+                             (uiop:native-namestring (merge-pathnames "src/.gitignore" root))))
+     (ok (= 2 (length (collect-target-files root)))))))
+
 (defun %check-against-git (gitignore kept left-out)
   "Write a tree of KEPT and LEFT-OUT files under GITIGNORE and check that both
 the walk and the project-file predicate keep exactly KEPT, as git check-ignore

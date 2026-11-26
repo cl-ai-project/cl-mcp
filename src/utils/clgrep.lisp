@@ -426,11 +426,12 @@ nothing, as in git, and is dropped.  Returns NIL if the file doesn't exist."
   "True when the last of PATTERNS that matches RELATIVE-PATH leaves it out: a
 pattern is a regex or scanner that does, or (:NEGATE . regex-or-scanner) that
 takes the path back in.  NIL when none matches."
-  (let ((ignored nil))
-    (dolist (pattern patterns ignored)
+  (let ((ignored nil)
+        (matched nil))
+    (dolist (pattern patterns (values ignored matched))
       (let ((negated (and (consp pattern) (eq (car pattern) :negate))))
         (when (cl-ppcre:scan (if negated (cdr pattern) pattern) relative-path)
-          (setf ignored (not negated)))))))
+          (setf ignored (not negated) matched t))))))
 
 (defun path-ignored-p (path root-dir ignore-patterns &key (parents t))
   "True when PATH, made relative to ROOT-DIR, is left out by IGNORE-PATTERNS,
@@ -455,21 +456,23 @@ the directories above PATH, for a walk that has made it on the way down."
                                                   ignore-patterns)))
         (%last-match-ignores-p relative ignore-patterns))))
 
+(defun %compile-ignore-patterns (patterns)
+  (loop for pattern in patterns
+        for scanner = (ignore-errors (create-scanner (if (consp pattern) (cdr pattern) pattern)))
+        when scanner collect (if (consp pattern) (cons :negate scanner) scanner)))
+
+(defun %local-ignore-patterns (file root &key follow-links)
+  ;; Git skips symlinked working-tree .gitignore files. Repository-local excludes
+  ;; may be linked, but must still resolve to a regular file inside this walk.
+  (when (and (eq :file (ignore-errors
+                         (sb-impl::native-file-kind (sb-ext:native-namestring file) follow-links)))
+             (uiop:subpathp (truename file) root))
+    (parse-gitignore file)))
+
 (defun root-ignore-patterns (root-dir)
-  "Return the patterns that leave a path under ROOT-DIR out of the project: its
-.gitignore's, in order, then .git/, last so no ! line takes it back in.  Matched
-with PATH-IGNORED-P.  A line whose pattern is no regular expression -- a reversed
-range such as [z-a] -- is dropped, alone, and leaves nothing out (git keeps such
-a line and reads the range's start alone).
-Compiled here, once: given as strings, CL-PPCRE:SCAN compiles each again for
-every entry of the walk, which took seconds over a large project's tree."
-  (flet ((compiled (regex)
-           (ignore-errors (create-scanner regex))))
-    (loop for pattern in (append (parse-gitignore (merge-pathnames ".gitignore" root-dir))
-                                 (list (glob-to-regex ".git/")))
-          for scanner = (compiled (if (consp pattern) (cdr pattern) pattern))
-          when scanner
-            collect (if (consp pattern) (cons (car pattern) scanner) scanner))))
+  "Return the project's root ignore patterns, compiled once for the walk."
+  (%compile-ignore-patterns (append (parse-gitignore (merge-pathnames ".gitignore" root-dir))
+                                   (list (glob-to-regex ".git/")))))
 
 (defun target-file-p (pathname)
   "Check if PATHNAME has a target extension (.lisp, .asd, or .ros)."
@@ -487,44 +490,33 @@ search reads with interrupts disabled, so no deadline could stop it there."
                   (sb-impl::native-file-kind (sb-ext:native-namestring pathname) t)))))
 
 (defun collect-target-files (root-directory &key (recursive t))
-  "Collect .lisp, .asd, and .ros files from ROOT-DIRECTORY -- regular files
-   only (%SEARCHABLE-FILE-P).
-   If ROOT-DIRECTORY is a single file, return it in a list (if it's a target file).
-   If RECURSIVE is true (default), search subdirectories recursively.
-   Respects .gitignore patterns and excludes .git directories.  A directory left
-   out is not entered, so each entry's own directories were checked on the way
-   down (PATH-IGNORED-P :PARENTS NIL)."
-  (let ((root-path (truename root-directory)))
-    ;; Handle single file case
-    (when (uiop:file-pathname-p root-path)
-      (return-from collect-target-files
-        (if (%searchable-file-p root-path)
-            (list root-path)
-            nil)))
-    ;; Directory case
-    (let* ((root-dir (uiop:ensure-directory-pathname root-path))
-           (all-patterns (root-ignore-patterns root-dir))
-           (result nil))
-      (flet ((ignored-p (entry)
-               (path-ignored-p entry root-dir all-patterns :parents nil)))
-        (if recursive
-            (labels ((collect-from-dir (dir)
-                       "Recursively collect files from DIR."
-                       (dolist (entry (uiop:directory*
-                                       (merge-pathnames uiop:*wild-file* dir)))
-                         (unless (ignored-p entry)
-                           (when (%searchable-file-p entry)
-                             (push entry result))))
-                       (dolist (subdir (uiop:subdirectories dir))
-                         (unless (ignored-p subdir)
-                           (collect-from-dir subdir)))))
-              (collect-from-dir root-dir))
-            (dolist (entry (uiop:directory*
-                            (merge-pathnames uiop:*wild-file* root-dir)))
-              (unless (ignored-p entry)
-                (when (%searchable-file-p entry)
-                  (push entry result))))))
-      (nreverse result))))
+  "Collect regular Lisp source files under ROOT-DIRECTORY, or the named file.
+Apply each directory's ignore rules relative to it. Prune excluded directories."
+  (let ((root (truename root-directory))
+        (result nil))
+    (when (uiop:file-pathname-p root)
+      (return-from collect-target-files (when (%searchable-file-p root) (list root))))
+    (labels ((ignored-p (entry scopes)
+               (loop for (dir . patterns) in scopes
+                     do (multiple-value-bind (ignored matched)
+                            (path-ignored-p entry dir patterns :parents nil)
+                          (when matched (return ignored)))))
+             (walk (dir inherited)
+               (let* ((patterns (%compile-ignore-patterns
+                                 (%local-ignore-patterns (merge-pathnames ".gitignore" dir) root)))
+                      (scopes (if patterns (acons dir patterns inherited) inherited)))
+                 (dolist (entry (uiop:directory* (merge-pathnames uiop:*wild-file* dir)))
+                   (when (and (%searchable-file-p entry) (not (ignored-p entry scopes)))
+                     (push entry result)))
+                 (when recursive
+                   (dolist (child (uiop:subdirectories dir))
+                     (unless (or (equal ".git" (car (last (pathname-directory child))))
+                                 (ignored-p child scopes))
+                       (walk child scopes)))))))
+      (walk root (list (cons root (%compile-ignore-patterns
+                                   (%local-ignore-patterns
+                                    (merge-pathnames ".git/info/exclude" root) root :follow-links t))))))
+    (nreverse result)))
 
 (defparameter *known-form-types*
   '("defun" "defmethod" "defgeneric" "defmacro" "define-compiler-macro"

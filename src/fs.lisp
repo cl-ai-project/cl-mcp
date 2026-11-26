@@ -6,7 +6,7 @@
   (:import-from #:cl-mcp/src/project-root
                 #:*project-root*
                 #:set-project-root
-                #:session-project-root)
+                #:session-project-root #:project-root-guidance)
   (:import-from #:bordeaux-threads
                 #:with-lock-held
                 #:make-lock
@@ -978,14 +978,9 @@ Fails when no project root is set."
                      "workers" (gethash "workers" info)))))
 
 (define-tool "fs-set-project-root"
-  :description "Set this session's project root directory to the specified path.
-Use this to synchronize the server with the client's project location. File,
-edit and search tools resolve this session's relative paths against it, and
-this session's worker is moved to it; other sessions on the same server keep
-their own roots. The root lasts as long as the session: after a reconnect,
-call this again.
-RESTRICTION: You MUST only provide your current working directory (e.g., obtained via pwd).
-Do not use arbitrary paths."
+  :description (format nil "~A Set this session's project root to a server-visible checkout path.
+The file tools and this session's worker use it until the session ends."
+                       (project-root-guidance))
   :args ((path :type :string :required t
                :description "Absolute path to the project root directory (a relative one
 resolves against the current root, or the server's working directory when none is set,
