@@ -4,6 +4,8 @@
   (:use #:cl)
   (:import-from #:rove
                 #:deftest #:testing #:ok)
+  (:import-from #:cl-mcp/tests/test-helpers
+                #:call-with-late-warning-project)
   (:import-from #:cl-mcp/src/system-loader
                 #:load-system)
   (:import-from #:cl-mcp/src/system-loader-core
@@ -1589,6 +1591,53 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
       (ok (equal "error" (gethash "status" (run warn clean policy :missing-output t))))
       (ok (equal "error" (gethash "status" (run "(defun invalid (1) 3)" clean policy))))
       (ok (equal "error" (gethash "status" (run "(error \"load fails\")" clean policy)))))))
+
+(deftest load-system-allows-a-late-dependency-warning
+  (call-with-late-warning-project
+   (lambda (root)
+     (let ((asdf:*central-registry* (cons root asdf:*central-registry*)))
+       (unwind-protect
+            (let* ((result (load-system "clmcp-late-app" :force nil :timeout-seconds nil
+                                                       :dependency-warnings "warn"))
+                   (records (gethash "warning_records" result)))
+              (ok (equal "loaded" (gethash "status" result)) (gethash "message" result))
+              (dolist (message '("bootstrap compile warning" "late dependency compile warning"))
+                (let ((record (%warning-with message records)))
+                  (ok (%outside-p record))
+                  (when record
+                    (ok (not (nth-value 1 (gethash "fails_compile" record))))))))
+         (mapc #'asdf:clear-system
+               '("clmcp-late-app" "clmcp-late-bootstrap" "clmcp-late-dep")))))))
+
+(deftest load-system-keeps-a-shared-project-sources-warning-strict
+  (%call-with-probe-files
+   '(("shared-warning-app.asd" .
+      "(defsystem \"shared-warning-app\" :defsystem-depends-on (\"shared-warning-bootstrap\")
+         :depends-on (\"shared-warning-bootstrap/shared\") :components ((:file \"shared\")))")
+     ("shared-warning-bootstrap.asd" .
+      "(defsystem \"shared-warning-bootstrap\" :components ((:file \"bootstrap\")))
+       (defsystem \"shared-warning-bootstrap/shared\" :components ((:file \"shared\")))")
+     ("bootstrap.lisp" . "(eval-when (:compile-toplevel) (warn \"bootstrap compile warning\"))")
+     ("shared.lisp" . "(eval-when (:compile-toplevel) (warn \"shared source compile warning\"))"))
+   (lambda (path)
+     (let* ((root (funcall path "./"))
+            (asdf:*central-registry* (cons root asdf:*central-registry*))
+            (asdf/output-translations:*output-translations*
+              (list (cons (list (uiop:wilden root) t) (asdf:ensure-output-translations)))))
+       (unwind-protect
+            (let* ((result (load-system "shared-warning-app" :force nil :timeout-seconds nil
+                                                            :dependency-warnings "warn"))
+                   (records (gethash "warning_records" result))
+                   (bootstrap (%warning-with "bootstrap compile warning" records))
+                   (shared (%warning-with "shared source compile warning" records)))
+              (ok (equal "error" (gethash "status" result)))
+              (ok (%outside-p bootstrap))
+              (ok (%own-p shared))
+              (when shared
+                (ok (eq t (gethash "fails_compile" shared)))))
+         (mapc #'asdf:clear-system
+               '("shared-warning-app" "shared-warning-bootstrap/shared"
+                 "shared-warning-bootstrap")))))))
 
 (deftest load-system-clear-fasls-preserves-warm-dependency
   (%check-preserved-warm-dependency ".qlot/"))

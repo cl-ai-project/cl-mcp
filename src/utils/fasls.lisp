@@ -15,6 +15,7 @@
            #:delete-same-second-fasls
            #:registered-source-fasl-pairs
            #:registered-source-owners
+           #:registered-project-source-p
            #:registered-system-files
            #:registered-fasl-sources))
 
@@ -51,6 +52,13 @@ them.  Only systems already registered: one never loaded has no fasl to doubt."
         ((typep component 'asdf:parent-component)
          (loop for child in (asdf:component-children component)
                append (%source-file-components child)))))
+
+(defun registered-project-source-p (source system-name)
+  "Return true when SOURCE is a component of SYSTEM-NAME's registered project."
+  (some (lambda (system)
+          (find source (%source-file-components system)
+                :key #'asdf:component-pathname :test #'uiop:pathname-equal))
+        (%project-systems system-name)))
 
 (defun registered-source-owners (system-name)
   "Map registered CL sources to :PROJECT or :DEPENDENCY for SYSTEM-NAME.
