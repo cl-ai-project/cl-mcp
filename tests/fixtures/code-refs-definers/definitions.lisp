@@ -34,7 +34,7 @@
   "Return ARGUMENT for the caller in the other fixture package."
   argument)
 
-;; The function and variable namespaces can share a symbol.
+;;; The function and variable namespaces can share a symbol.
 (define-variable target)
 (define-variable *only-variable*)
 (define-structure only-structure)
