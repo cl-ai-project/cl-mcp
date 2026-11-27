@@ -1688,6 +1688,30 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
     (testing "same-second cleanup also preserves the shared output"
       (check nil))))
 
+(deftest load-system-reloading-a-vendored-system-preserves-unregistered-sibling
+  (%call-with-probe-files
+   '(("qlot-selected.asd" .
+      "(defsystem \"qlot-selected\" :pathname \".qlot/selected/\"
+         :components ((:file \"selected\")))")
+     (".qlot/selected/selected.lisp" . "(in-package :cl-user)")
+     (".qlot/sibling/sibling.lisp" . "(in-package :cl-user)"))
+   (lambda (path)
+     (let* ((root (truename (funcall path "./")))
+            (asdf:*central-registry* (cons root asdf:*central-registry*))
+            (asdf/output-translations:*output-translations*
+              (list (cons (list (uiop:wilden root) t) (asdf:ensure-output-translations))))
+            (sibling (funcall path ".qlot/sibling/sibling.lisp")))
+       (unwind-protect
+            (let* ((fasl (compile-file sibling))
+                   (stamp (file-write-date fasl))
+                   (unix (- stamp (encode-universal-time 0 0 0 1 1 1970 0))))
+              (uiop:symbol-call :sb-posix :utimes (namestring sibling) unix unix)
+              (asdf:load-system "qlot-selected")
+              (let ((result (load-system "qlot-selected" :timeout-seconds nil)))
+                (ok (equal "loaded" (gethash "status" result)) (gethash "message" result))
+                (ok (probe-file fasl) "the sibling's shared FASL remains")))
+         (asdf:clear-system "qlot-selected"))))))
+
 (deftest load-system-clear-fasls-reuses-a-warm-qlot-component
   (%call-with-probe-files
    '(("qlot-component.asd" .

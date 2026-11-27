@@ -157,7 +157,10 @@ dependency -- IGNORED-P would leave out everything, so it is not applied."
       (dolist (source (ignore-errors (collect-target-files source-dir)))
         (when (and (equal "lisp" (pathname-type source))
                    (not (eq :dependency (gethash (namestring source) owners)))
-                   (not (vendored-project-path-p source vendored-root))
+                   ;; The .asd directory can also contain unregistered
+                   ;; siblings of a standalone vendored system.
+                   (not (or (vendored-project-path-p source source-dir)
+                            (vendored-project-path-p source vendored-root)))
                    (not (and filter-p (funcall ignored-p source))))
           (let ((fasl (ignore-errors
                        (asdf:apply-output-translations (compile-file-pathname source)))))
