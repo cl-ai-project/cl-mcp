@@ -347,28 +347,34 @@ registering it."
                                 (+ (or same-second-deleted 0) stale))
                           (log-event :info "load-system-same-second-fasls"
                                      "system" system-name "deleted" stale))))
-                    (when (and force
-                               (member system-name
-                                       (asdf:already-loaded-systems)
-                                       :test #'string-equal))
-                      (let ((asd-src
-                              (ignore-errors
-                               (asdf:system-source-file
-                                (asdf:find-system system-name nil)))))
-                        (asdf:clear-system system-name)
-                        (when asd-src
-                          (ignore-errors
-                           (asdf:load-asd asd-src)))))
-                    (%call-with-suppressed-output
-                     (lambda ()
-                       (asdf:load-system system-name :force clear-fasls))
-                     :on-unwind (lambda (stderr records)
-                                  (setf unwound-stderr stderr
-                                        unwound-records records))
-                     :in-project in-project
-                     :warn-on-dependency
-                     (when (equal dependency-warnings "warn")
-                       (%dependency-compile-predicate system-name)))))
+                    ;; A surrounding ASDF operation can retain the old
+                    ;; definition and plan after this reload mutates them.
+                    (asdf/session:with-asdf-session
+                        (:override (or force clear-fasls) :override-cache t)
+                      (when (and force
+                                 (member system-name
+                                         (asdf:already-loaded-systems)
+                                         :test #'string-equal))
+                        (let ((asd-src
+                                (ignore-errors
+                                 (asdf:system-source-file
+                                  (asdf:find-system system-name nil)))))
+                          (asdf:clear-system system-name)
+                          (when asd-src
+                            (ignore-errors
+                             (asdf:load-asd asd-src)))))
+                      ;; ASDF rebuilds missing project outputs. A forced load
+                      ;; would also recompile warm .qlot components.
+                      (%call-with-suppressed-output
+                       (lambda ()
+                         (asdf:load-system system-name))
+                       :on-unwind (lambda (stderr records)
+                                    (setf unwound-stderr stderr
+                                          unwound-records records))
+                       :in-project in-project
+                       :warn-on-dependency
+                       (when (equal dependency-warnings "warn")
+                         (%dependency-compile-predicate system-name))))))
              (handler-case (%do-load)
                (asdf/find-component:missing-component (c)
                  (let* ((missing (princ-to-string

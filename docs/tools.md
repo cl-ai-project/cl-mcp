@@ -1881,16 +1881,22 @@ Kill the worker process bound to the current session. All Lisp state (loaded
 systems, REPL definitions, packages) in the worker is lost. Use this when a
 worker is stuck, has corrupted state, or you want a clean environment.
 
-Each worker compiles the files under its project root into a FASL cache of its
-own (`~/.cache/cl-mcp/worker-fasls/<pid>-<token>/`, or under `$XDG_CACHE_HOME`),
-so the replacement builds the project from its saved source: a FASL the old
-worker compiled while its image held definitions the files no longer have -- a
-macro since moved to a later file, a symbol exported only through `repl-eval` --
-is not loaded by the new one (#317). Libraries outside the root keep ASDF's
-shared cache; a root that encloses them (`$HOME`) moves them too, and each fresh
-worker then compiles them again. A worker holds a lock on its cache for as long
-as it runs, and the next worker to start after it has ended removes the cache.
-The inline server (`MCP_NO_WORKER_POOL=1`) keeps the shared cache.
+Each worker compiles project sources into its own FASL cache
+(`~/.cache/cl-mcp/worker-fasls/<pid>-<token>/`, or under `$XDG_CACHE_HOME`).
+The replacement builds from saved source, so it starts without FASLs that the
+old worker compiled with definitions it held only in its image (#317).
+
+Libraries outside the root and vendored sources in a `.qlot/` directory below
+it use ASDF's configured output translations. A fresh worker can reuse the
+FASLs a qlot shell build compiled for those dependencies. Both `clear_fasls`
+and the same-second reload check preserve `.qlot/` dependency outputs for
+the project being loaded. Other library directories enclosed by the root,
+for example with `$HOME` as the root, can still be compiled into each worker's
+cache.
+
+A worker holds a lock on its cache for as long as it runs. The next worker to
+start after it has ended removes the cache. The inline server
+(`MCP_NO_WORKER_POOL=1`) uses ASDF's configured output translations.
 
 Input:
 - `reset` (boolean, default `false`): when `true`, immediately spawn a replacement

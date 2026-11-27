@@ -9,7 +9,8 @@
   (:import-from #:cl-mcp/src/utils/clgrep
                 #:collect-target-files)
   (:import-from #:cl-mcp/src/utils/project-files
-                #:project-ignored-predicate)
+                #:project-ignored-predicate
+                #:vendored-project-path-p)
   (:export #:delete-project-fasls
            #:fasl-source-directory
            #:delete-same-second-fasls
@@ -116,9 +117,29 @@ cannot be asked in reverse."
               (when (and source fasl)
                 (setf (gethash (namestring fasl) table) source)))))))))
 
+(defun %project-vendored-root (system-name)
+  "Return the directory under which .qlot marks vendoring for the ASDF primary."
+  (let ((primary (or (asdf:registered-system (asdf:primary-system-name system-name))
+                     (asdf:registered-system system-name))))
+    (when primary
+      (let ((components (asdf:component-pathname primary))
+            (definition (asdf:system-source-directory primary)))
+        ;; A primary can put its own components in src/ while .qlot/ sits
+        ;; beside the .asd. A standalone system with components in .qlot/
+        ;; can still be cleared explicitly.
+        (if (and definition components (uiop:subpathp components definition)
+                 (not (vendored-project-path-p components definition)))
+            definition
+            components)))))
+
+(defun %project-source-fasl-pairs (system-name root)
+  "Return registered SOURCE and FASL pairs eligible for project cleanup."
+  (remove-if (lambda (pair) (vendored-project-path-p (car pair) root))
+             (registered-source-fasl-pairs system-name)))
+
 (defun %source-fasl-pairs (system-name &key (ignored-p (project-ignored-predicate)))
   "Return (SOURCE . FASL) for each source file of SYSTEM-NAME's project, from two
-places, since neither alone sees every file: REGISTERED-SOURCE-FASL-PAIRS, and
+places, since neither alone sees every file: %PROJECT-SOURCE-FASL-PAIRS, and
 every .lisp file under the project's source directory (FASL-SOURCE-DIRECTORY),
 which reaches a package-inferred subsystem this worker has not registered or has
 just cleared.  The walk leaves out what the directory's .gitignore does
@@ -127,16 +148,19 @@ just cleared.  The walk leaves out what the directory's .gitignore does
 the project's, and walking it cost seconds on every load of a large project.
 When the directory itself is left out -- the system being loaded is such a
 dependency -- IGNORED-P would leave out everything, so it is not applied."
-  (let* ((pairs (registered-source-fasl-pairs system-name))
-         (source-dir (fasl-source-directory system-name))
+  (let* ((source-dir (fasl-source-directory system-name))
+         (vendored-root (or (%project-vendored-root system-name) source-dir))
+         (pairs (%project-source-fasl-pairs system-name vendored-root))
          (owners (and source-dir (registered-source-owners system-name)))
          (filter-p (and source-dir (not (funcall ignored-p source-dir)))))
     (when source-dir
       (dolist (source (ignore-errors (collect-target-files source-dir)))
         (when (and (equal "lisp" (pathname-type source))
                    (not (eq :dependency (gethash (namestring source) owners)))
-                   (not (member ".qlot" (pathname-directory (enough-namestring source source-dir))
-                                :test #'equal))
+                   ;; The .asd directory can also contain unregistered
+                   ;; siblings of a standalone vendored system.
+                   (not (or (vendored-project-path-p source source-dir)
+                            (vendored-project-path-p source vendored-root)))
                    (not (and filter-p (funcall ignored-p source))))
           (let ((fasl (ignore-errors
                        (asdf:apply-output-translations (compile-file-pathname source)))))
@@ -157,16 +181,17 @@ this does nothing."
 (defun delete-project-fasls (system-name)
   "Delete the ASDF outputs of project components and return the count and owning system.
 Resolve the load's component graph before collecting outputs. This registers
-package-inferred subsystems in a fresh image without inferring ownership from
-where source files happen to live."
+package-inferred subsystems in a fresh image. Keep the outputs of sources in
+.qlot directories under the primary project's root."
   (multiple-value-bind (directory owner) (fasl-source-directory system-name)
     (let ((system (and directory (asdf:find-system system-name nil))))
       (when system
         (asdf:required-components system))
-      (values (loop for (nil . fasl) in (registered-source-fasl-pairs system-name)
-                    when (ignore-errors (delete-file fasl) t)
-                      count t and do (%forget-file-stamp fasl))
-              owner))))
+      (let ((root (%project-vendored-root system-name)))
+        (values (loop for (nil . fasl) in (%project-source-fasl-pairs system-name root)
+                      when (ignore-errors (delete-file fasl) t)
+                        count t and do (%forget-file-stamp fasl))
+                owner)))))
 
 (defun delete-same-second-fasls (system-name)
   "Delete the fasl of each source file of SYSTEM-NAME's project (%SOURCE-FASL-PAIRS)
