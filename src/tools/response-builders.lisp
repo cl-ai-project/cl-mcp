@@ -789,17 +789,17 @@ with a WARNING:"
                     (%write-style-warnings s style))
                   (let ((co (gethash "compiler_output" ht)))
                     (when (and (stringp co) (plusp (length co)))
-                      (let* ((limit 2048)
-                             (truncated-p (> (length co) limit))
-                             (body (if truncated-p
-                                       (concatenate
-                                        'string (subseq co 0 limit)
-                                        (format nil
-                                                "~%... [~D more characters truncated]"
-                                                (- (length co) limit)))
-                                       co)))
-                        (format s "~%~%Compiler output:~%~A"
-                                (string-right-trim '(#\Newline) body)))))
+                      (let ((limit 2048)
+                            (size (length co)))
+                        (format s "~%~%Compiler output:~%")
+                        (when (> size limit)
+                          ;; The compiler echoes the form before reporting the error.
+                          (let ((half (floor limit 2)))
+                            (write-string co s :end half)
+                            (format s "~%... [~D characters omitted from the middle] ...~%"
+                                    (- size limit))
+                            (setf co (subseq co (- size half)))))
+                        (write-string (string-right-trim '(#\Newline) co) s))))
                   ;; Withheld when this load never started -- a concurrent
                   ;; load still holding the ASDF lock, say.  There the advice
                   ;; is actively harmful: following it aborts work that was

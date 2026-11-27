@@ -524,7 +524,9 @@ Output fields:
 - `auto_discovered_asd` (string, when it happened): the system was not known to ASDF, and this
   `.asd` under the project root was found and registered for it; the text says
   `Auto-registered …`
-- `compiler_output` (string, on error): the compiler's output; the text shows its first 2 KB
+- `compiler_output` (string, on error): the full compiler output. When it exceeds 2048
+  characters, the text keeps the first and last 1024 and marks how many characters were
+  omitted from the middle, so the file and the diagnostic near the end remain visible.
 - `fasls_deleted` (integer, with `clear_fasls`): how many cached FASLs were deleted. `0` means
   nothing was forced to recompile, and the text says so
 - `fasls_cleared_from` (string, with `clear_fasls`) names the system used to select project
