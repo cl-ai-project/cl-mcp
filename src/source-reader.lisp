@@ -173,22 +173,27 @@ and STANDARD-SYNTAX-READTABLE-P compare against.")
 
 (defun %sharpsign-dot (stream sub-char argument)
   "The #. of SOURCE-READTABLE: read the form, return it unevaluated."
-  (declare (ignore sub-char argument))
+  (declare (ignore sub-char))
+  (when (and argument (not *read-suppress*))
+    (error "Reader error: #. does not take a numeric argument."))
   (let ((form (read stream t nil t)))
     (unless *read-suppress*
       (make-read-time-evaluation form))))
 
 (defun %sharpsign-s (stream sub-char argument)
   "The #S of SOURCE-READTABLE: read the list, build no structure."
-  (declare (ignore sub-char argument))
+  (declare (ignore sub-char))
+  (when (and argument (not *read-suppress*))
+    (error "Reader error: #S does not take a numeric argument."))
   (let ((contents (read stream t nil t)))
-    (cond
-      (*read-suppress* nil)
-      ((and (consp contents) (ignore-errors (list-length contents)))
-       (make-structure-literal (first contents) (rest contents)))
-      (t (error "Reader error: #S must be followed by a list naming a structure, ~
-                 not ~S."
-                contents)))))
+    (unless *read-suppress*
+      (let ((length (handler-case (list-length contents)
+                      (type-error () nil))))
+        (unless (and length (oddp length) (symbolp (first contents))
+                     (loop for (name) on (rest contents) by #'cddr
+                           always (typep name '(or symbol string character))))
+          (error "Reader error: #S requires a structure name and slot name/value pairs.")))
+      (make-structure-literal (first contents) (rest contents)))))
 
 (defun source-readtable (readtable)
   "Return a copy of READTABLE whose #. and #S read as the source client reads
