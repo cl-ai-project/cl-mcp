@@ -27,7 +27,6 @@
   (:import-from #:cl-mcp/tests/repl-error-context-test)
   (:import-from #:cl-mcp/tests/repl-inspect-integration-test)
   (:import-from #:cl-mcp/tests/cst-test)
-  (:import-from #:cl-mcp/tests/source-readtable-test)
   (:import-from #:cl-mcp/tests/lisp-read-file-test)
   (:import-from #:cl-mcp/tests/lisp-edit-form-test)
   (:import-from #:cl-mcp/tests/lisp-patch-form-test)
