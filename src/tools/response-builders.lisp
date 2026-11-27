@@ -796,7 +796,7 @@ with a WARNING:"
                           ;; The compiler echoes the form before reporting the error.
                           (let ((half (floor limit 2)))
                             (write-string co s :end half)
-                            (format s "~%... [~D characters omitted from the middle] ...~%"
+                            (format s "~%... [~D character~:P omitted from the middle] ...~%"
                                     (- size limit))
                             (setf co (subseq co (- size half)))))
                         (write-string (string-right-trim '(#\Newline) co) s))))
