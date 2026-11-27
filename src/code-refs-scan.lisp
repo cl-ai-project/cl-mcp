@@ -470,7 +470,8 @@ lists one JSON-ready hash-table per top-level form holding a site, with path,
 abs_path, index, start_line, end_line, form_type, form_name, test_name,
 test_framework, in_package, context and sites.  INDEX counts the file's
 top-level expressions from 0, the number SBCL's DEFINITION-SOURCE-FORM-PATH
-starts with.  Each site has line, column, kind, token, context and
+starts with.  START_OFFSET and END_OFFSET bound the form in TEXT's character
+positions, with END_OFFSET exclusive.  Each site has line, column, kind, token, context and
 shadowed_by.  Collection stops after MAX-SITES sites.  Signals the parser's
 error when TEXT does not parse.
 
@@ -521,6 +522,8 @@ later forms were not scanned"
                                      "index" index
                                      "start_line" (cst-node-start-line node)
                                      "end_line" (cst-node-end-line node)
+                                     "start_offset" (cst-node-start node)
+                                     "end_offset" (cst-node-end node)
                                      "form_type" form-type
                                      "form_name" form-name
                                      "test_name" test-name

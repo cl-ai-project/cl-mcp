@@ -1480,7 +1480,7 @@ Output (the content text carries everything that matters for a decision):
 Limits: matching is positional, not a code walker. A `flet`/`labels`/`macrolet` binding the same
 name is flagged in `shadowed_by`; other lexical bindings are not. A custom definer's bare
 name is reported only when the worker can place its loaded definitions outside that form.
-A definition in the same file needs a reliable source line for this check. Sites after an
+A definition in the same file needs a reliable source position for this check. Sites after an
 `in-readtable` switch are not found.
 Only files `fs-read-file` may read are scanned (under the project root or a registered ASDF
 system's source directory, symlinks resolved): a file the root reaches through a symlink leading

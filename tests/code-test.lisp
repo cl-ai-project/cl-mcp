@@ -698,6 +698,7 @@ fixture directory."
          (uses (merge-pathnames "uses.lisp" *project-root*)))
     (%load-xref-fixture definitions)
     (%load-xref-fixture uses)
+    (%load-xref-fixture (merge-pathnames "same-line.lisp" *project-root*))
     (flet ((report (name)
              (code-find-references-report name :scan (scan-project name))))
       (testing "an attachment in another package is listed alongside the ordinary caller"
@@ -716,8 +717,12 @@ fixture directory."
                    (equal '("definer-name")
                           (map 'list (lambda (site) (gethash "kind" site))
                                (gethash "call_sites" attachment)))))))
-      (testing "an attachment in the same file is distinct from the macro that defines the function"
+      (testing "an attachment in the same file is distinct from the definitions of its name"
         (let ((refs (gethash "refs" (report "cl-mcp-definer-refs-fixture::macro-target"))))
+          (ok (equal '("define-checked")
+                     (map 'list (lambda (ref) (gethash "form_type" ref)) refs)))))
+      (testing "a definition and an attachment can share a line"
+        (let ((refs (gethash "refs" (report "cl-mcp-definer-refs-fixture::compact-target"))))
           (ok (equal '("define-checked")
                      (map 'list (lambda (ref) (gethash "form_type" ref)) refs)))))
       (testing "a custom variable or structure definition is not a reference"
