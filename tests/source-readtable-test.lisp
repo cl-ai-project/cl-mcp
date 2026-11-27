@@ -13,7 +13,10 @@
 
 (defvar *source-reader-flag* nil)
 
-(defstruct source-reader-probe value)
+(defstruct source-reader-probe
+  "Fixture for detecting constructor calls during source reads."
+  ;; Payload supplied by the structure literal in the constructor test.
+  value)
 
 (deftest source-reader-does-not-call-structure-constructors
   (let ((original (symbol-function 'make-source-reader-probe))
