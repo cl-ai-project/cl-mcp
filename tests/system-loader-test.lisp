@@ -1683,10 +1683,11 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
                                     (eql stamp (file-write-date dep-fasl)))))))
                   (mapc #'asdf:clear-system
                         '("qlot-family/cli" "qlot-family/vendor" "qlot-family"))))))))
-    (testing "clear_fasls applies the directory rule to all members of the ASDF primary"
-      (check t))
-    (testing "same-second cleanup also preserves the shared output"
-      (check nil))))
+    (asdf/session:with-asdf-session (:override t :override-cache t)
+      (testing "clear_fasls applies the directory rule to all members of the ASDF primary"
+        (check t))
+      (testing "same-second cleanup also preserves the shared output"
+        (check nil)))))
 
 (deftest load-system-reloading-a-vendored-system-preserves-unregistered-sibling
   (%call-with-probe-files
@@ -1727,7 +1728,7 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
             (asdf/output-translations:*output-translations*
               (list (cons (list (uiop:wilden root) t) (asdf:ensure-output-translations)))))
        (unwind-protect
-            (progn
+            (asdf/session:with-asdf-session (:override t :override-cache t)
               (asdf:load-system "qlot-component")
               (with-open-file (marker (funcall path ".qlot/vendor/warmed.marker") :direction :output)
                 (write-line "warmed" marker))
