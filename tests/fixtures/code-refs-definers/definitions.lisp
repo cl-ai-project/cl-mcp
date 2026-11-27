@@ -1,12 +1,13 @@
 ;;;; Definitions for the code-find-references definer-name tests.
 
-(defpackage #:cl-mcp-definer-refs-fixture
+(defpackage #:cl-mcp/tests/fixtures/code-refs-definers/definitions
   (:use #:cl)
   (:export #:define-checked #:target))
 
-(in-package #:cl-mcp-definer-refs-fixture)
+(in-package #:cl-mcp/tests/fixtures/code-refs-definers/definitions)
 
 (defmacro define-checked (name)
+  "Mark NAME as having a contract in this fixture."
   `(setf (get ',name 'checked) t))
 
 (defmacro define-variable (name)
@@ -30,6 +31,7 @@
      value))
 
 (defun target (argument)
+  "Return ARGUMENT for the caller in the other fixture package."
   argument)
 
 ;; The function and variable namespaces can share a symbol.

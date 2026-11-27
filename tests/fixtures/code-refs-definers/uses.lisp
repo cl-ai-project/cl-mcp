@@ -1,12 +1,13 @@
 ;;;; Uses in another file and package.
 
-(defpackage #:cl-mcp-definer-refs-uses
+(defpackage #:cl-mcp/tests/fixtures/code-refs-definers/uses
   (:use #:cl)
-  (:import-from #:cl-mcp-definer-refs-fixture #:define-checked))
+  (:import-from #:cl-mcp/tests/fixtures/code-refs-definers/definitions
+                #:define-checked))
 
-(in-package #:cl-mcp-definer-refs-uses)
+(in-package #:cl-mcp/tests/fixtures/code-refs-definers/uses)
 
-(define-checked cl-mcp-definer-refs-fixture:target)
+(define-checked cl-mcp/tests/fixtures/code-refs-definers/definitions:target)
 
 (defun caller (argument)
-  (cl-mcp-definer-refs-fixture:target argument))
+  (cl-mcp/tests/fixtures/code-refs-definers/definitions:target argument))

@@ -695,14 +695,17 @@ fixture directory."
   (let* ((*project-root*
            (asdf:system-relative-pathname :cl-mcp "tests/fixtures/code-refs-definers/"))
          (definitions (merge-pathnames "definitions.lisp" *project-root*))
-         (uses (merge-pathnames "uses.lisp" *project-root*)))
+         (uses (merge-pathnames "uses.lisp" *project-root*))
+         (definitions-package "cl-mcp/tests/fixtures/code-refs-definers/definitions")
+         (same-line-package "cl-mcp/tests/fixtures/code-refs-definers/same-line"))
     (%load-xref-fixture definitions)
     (%load-xref-fixture uses)
     (%load-xref-fixture (merge-pathnames "same-line.lisp" *project-root*))
-    (flet ((report (name)
-             (code-find-references-report name :scan (scan-project name))))
+    (flet ((report (name &optional (package definitions-package))
+             (let ((designator (format nil "~A::~A" package name)))
+               (code-find-references-report designator :scan (scan-project designator)))))
       (testing "an attachment in another package is listed alongside the ordinary caller"
-        (let* ((refs (gethash "refs" (report "cl-mcp-definer-refs-fixture:target")))
+        (let* ((refs (gethash "refs" (report "target")))
                (attachment (find "define-checked" refs
                                  :key (lambda (ref) (gethash "form_type" ref))
                                  :test #'equal)))
@@ -710,7 +713,7 @@ fixture directory."
                      (map 'list (lambda (ref) (gethash "type" ref)) refs)))
           (ok (and attachment (equal "uses.lisp" (gethash "path" attachment))))
           (ok (and attachment
-                   (eql (%fixture-line "(define-checked cl-mcp-definer-refs-fixture:target" uses)
+                   (eql (%fixture-line "(define-checked " uses)
                         (gethash "line" attachment))))
           (ok (and attachment (equal "source" (gethash "origin" attachment))))
           (ok (and attachment
@@ -718,16 +721,15 @@ fixture directory."
                           (map 'list (lambda (site) (gethash "kind" site))
                                (gethash "call_sites" attachment)))))))
       (testing "an attachment in the same file is distinct from the definitions of its name"
-        (let ((refs (gethash "refs" (report "cl-mcp-definer-refs-fixture::macro-target"))))
+        (let ((refs (gethash "refs" (report "macro-target"))))
           (ok (equal '("define-checked")
                      (map 'list (lambda (ref) (gethash "form_type" ref)) refs)))))
       (testing "a definition and an attachment can share a line"
-        (let ((refs (gethash "refs" (report "cl-mcp-definer-refs-fixture::compact-target"))))
+        (let ((refs (gethash "refs" (report "compact-target" same-line-package))))
           (ok (equal '("define-checked")
                      (map 'list (lambda (ref) (gethash "form_type" ref)) refs)))))
       (testing "a custom variable or structure definition is not a reference"
-        (dolist (name '("cl-mcp-definer-refs-fixture::*only-variable*"
-                        "cl-mcp-definer-refs-fixture::only-structure"))
+        (dolist (name '("*only-variable*" "only-structure"))
           (let ((result (report name)))
             (ok (equal "found" (gethash "symbol_status" result)))
             (ok (zerop (gethash "count" result)))))))))
