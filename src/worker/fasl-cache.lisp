@@ -7,6 +7,8 @@
   (:use #:cl)
   (:import-from #:cl-mcp/src/log
                 #:log-event)
+  (:import-from #:cl-mcp/src/utils/project-files
+                #:vendored-project-path-p)
   (:documentation "Each worker's own FASL cache for the files of its project root.
 
 Every worker, and every shell build, used to share one ASDF output cache.  A
@@ -16,8 +18,8 @@ than its source, so the next worker loaded it as current and never compiled
 that file again: a fresh worker passed tests a clean build fails (issue #317).
 Compiling the project root's files into a directory of the worker's own makes
 a fresh worker build the project from source, and keeps any worker's
-compilation away from the others and from the shared cache.  Files outside the
-root -- the libraries it depends on -- keep the shared cache.")
+compilation away from the others and from the shared cache.  Libraries outside
+the root and dependencies in .qlot/ within it keep the configured ASDF cache.")
   (:export #:*worker-fasl-cache*
            #:worker-fasl-cache-base
            #:sweep-dead-worker-caches
@@ -47,7 +49,7 @@ tells a cache in use from one left behind -- across PID namespaces too, where
 two live workers can share a PID.")
 
 (defvar *isolated-roots* '()
-  "The (SOURCE DESTINATION) output translations ISOLATE-PROJECT-FASLS added,
+  "The (SOURCE TRANSLATOR) output translations ISOLATE-PROJECT-FASLS added,
 newest first, for ENSURE-PROJECT-FASLS-ISOLATED to put back when ASDF's
 configuration is cleared or initialized again.")
 
@@ -236,28 +238,34 @@ go: ROOT's own path below CACHE, so two roots never share a FASL."
   (merge-pathnames (make-pathname :directory (cons :relative (rest (pathname-directory root))))
                    cache))
 
-(defun isolate-project-fasls (root)
-  "Compile the files under ROOT into this worker's own cache from now on: put an
-output translation from ROOT's tree to its place in *WORKER-FASL-CACHE* in
-front of the shared cache's.  ASDF orders translations by how deep their source
-directory is, so the root's entry wins over the catch-all ones and its files
-alone move; a dependency outside ROOT keeps its shared FASLs.  Called whenever
-the worker's project root is set.  Every root set stays translated, so a system
-loaded under an earlier root is never compiled into the shared cache either,
-and ENSURE-PROJECT-FASLS-ISOLATED puts the entries back if ASDF's configuration
-is cleared.  A root that encloses the libraries themselves ($HOME, say) moves
-them too: they are then compiled again by each fresh worker.
+(defun %project-output-translator (root cache-directory)
+  (let ((destination (uiop:wilden cache-directory)))
+    (lambda (path source)
+      (if (vendored-project-path-p path root)
+          ;; Run ASDF's configured mappings without the worker's root overlays.
+          (let ((asdf/output-translations:*output-translations*
+                  (list (remove-if (lambda (entry)
+                                     (member entry *isolated-roots* :test #'equal))
+                                   (asdf/output-translations:output-translations)))))
+            (asdf:apply-output-translations path))
+          (translate-pathname path source destination)))))
 
-Does nothing and returns NIL outside a worker (*WORKER-FASL-CACHE* NIL), when
-ROOT is NIL, or when it is not an existing directory; otherwise returns ROOT's
-cache directory."
+(defun isolate-project-fasls (root)
+  "Install the translation from ROOT to this worker's cache.
+ASDF orders translations by source directory depth, so the root's entry wins
+over catch-all entries.  Files outside ROOT and files in .qlot directories
+below ROOT use ASDF's configured translations.  Every root set stays translated.
+ENSURE-PROJECT-FASLS-ISOLATED restores the entries after ASDF reconfigures.
+
+Return ROOT's cache directory, or NIL outside a worker (*WORKER-FASL-CACHE* NIL)
+or without an existing ROOT directory."
   (let ((root (and *worker-fasl-cache* root
-                   (ignore-errors (truename (uiop:ensure-directory-pathname root))))))
+                    (ignore-errors (truename (uiop:ensure-directory-pathname root))))))
     (when root
-      (let* ((destination (%root-cache-directory root *worker-fasl-cache*))
-             (entry (list (uiop:wilden root) (uiop:wilden destination))))
-        (unless (member entry *isolated-roots* :test #'equal)
-          (push entry *isolated-roots*)
+      (let ((destination (%root-cache-directory root *worker-fasl-cache*))
+            (source (uiop:wilden root)))
+        (unless (assoc source *isolated-roots* :test #'equal)
+          (push (list source (%project-output-translator root destination)) *isolated-roots*)
           (log-event :info "worker.fasl-cache.isolated"
                      "root" (uiop:native-namestring root)
                      "cache" (uiop:native-namestring destination)))

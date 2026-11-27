@@ -88,7 +88,9 @@ time.sleep(120)"
                   (outside (asdf:system-relative-pathname :cl-mcp "src/fs.fasl"))
                   (outside-before (asdf:apply-output-translations outside))
                   (own (prepare-worker-fasl-cache base))
-                  (inside (merge-pathnames "src/a.fasl" (truename root))))
+                  (inside (merge-pathnames "src/a.fasl" (truename root)))
+                  (vendored (merge-pathnames "subproject/.qlot/dists/dep.fasl" (truename root)))
+                  (vendored-before (asdf:apply-output-translations vendored)))
              (unwind-protect
                   (progn
                     (testing "the worker's own cache is BASE/<pid>-<token>/, claimed by its lock"
@@ -107,17 +109,22 @@ time.sleep(120)"
                       (testing "a file outside the root keeps the shared cache"
                         (ok (equal outside-before (asdf:apply-output-translations outside))
                             "unchanged"))
+                      (testing "a .qlot directory within the root keeps the shared cache"
+                        (ok (equal vendored-before (asdf:apply-output-translations vendored))))
                       (testing "setting the same root again adds nothing"
                         (isolate-project-fasls root)
                         (ok (= count (length (asdf/output-translations:output-translations)))
                             "one entry per root"))
                       (testing "a cleared configuration gets the entry back"
                         (asdf:clear-output-translations)
-                        (ok (= 1 (ensure-project-fasls-isolated)) "one entry put back")
-                        (ok (uiop:subpathp (asdf:apply-output-translations inside) own)
-                            "the root's files go to the worker's cache again")
-                        (ok (zerop (ensure-project-fasls-isolated))
-                            "and nothing more while it holds"))))
+                        (let ((vendored-after-clear (asdf:apply-output-translations vendored)))
+                          (ok (= 1 (ensure-project-fasls-isolated)) "one entry put back")
+                          (ok (uiop:subpathp (asdf:apply-output-translations inside) own)
+                              "the root's files go to the worker's cache again")
+                          (ok (equal vendored-after-clear (asdf:apply-output-translations vendored))
+                              ".qlot still uses the shared translation")
+                          (ok (zerop (ensure-project-fasls-isolated))
+                              "and nothing more while it holds")))))
                (when *worker-cache-lock-fd*
                  (sb-posix:close *worker-cache-lock-fd*)))))
       (uiop:delete-directory-tree base :validate t :if-does-not-exist :ignore)
@@ -539,4 +546,73 @@ machine, so this deletes every ended worker's, as a starting worker would."
           (when first-worker (kill-worker first-worker))
           (when second-worker (kill-worker second-worker))
           (ignore-errors (delete-file shared-a-fasl))
+          (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore)))))
+
+(deftest a-fresh-worker-reuses-qlot-fasls
+  (if (not (spawn-available-p))
+      (skip "Cannot spawn workers")
+      (let* ((root (%scratch-directory "qlot-fasl-project"))
+             (shared (merge-pathnames "shared-fasls/" root))
+             (dep-dir ".qlot/dists/fixture/")
+             (dep-fasl (merge-pathnames (concatenate 'string dep-dir "dep.fasl") shared))
+             (marker (merge-pathnames "dependency-warmed" root))
+             (mapping (list (namestring root) (namestring shared)))
+             (worker nil))
+        (unwind-protect
+             (progn
+               (%write-text
+                (merge-pathnames "clmcp-qlot-app.asd" root)
+                "(defsystem \"clmcp-qlot-app\" :depends-on (\"clmcp-qlot-lib\")
+                   :components ((:file \"app\")))")
+               (%write-text (merge-pathnames "app.lisp" root) "(in-package :cl-user)")
+               (%write-text
+                (merge-pathnames "clmcp-qlot-lib.asd" root)
+                (format nil "(defsystem \"clmcp-qlot-lib\" :pathname ~S
+                               :components ((:file \"dep\")))" dep-dir))
+               (%write-text
+                (merge-pathnames (concatenate 'string dep-dir "dep.lisp") root)
+                (format nil "(eval-when (:compile-toplevel)
+                               (when (probe-file ~S) (warn \"dependency compiled again\")))"
+                        marker))
+               (with-saved-translations
+                 (let ((asdf:*central-registry* (cons root asdf:*central-registry*)))
+                   (setf (asdf/output-translations:output-translations)
+                         (list* (list (uiop:wilden shared) t)
+                                (list (uiop:wilden root) (uiop:wilden shared))
+                                (asdf:ensure-output-translations)))
+                   (asdf:load-system "clmcp-qlot-lib")))
+               (ok (probe-file dep-fasl) "The dependency was compiled into the shared cache.")
+               (%write-text marker "")
+               (setf worker (spawn-worker))
+               (%set-worker-root worker root)
+               (%eval-in worker
+                         (format nil "(progn (asdf:initialize-output-translations
+                                               '(:output-translations ~S :inherit-configuration))
+                                            :configured)" mapping))
+               (let* ((params (cl-mcp/src/tools/helpers:make-ht
+                               "system" "clmcp-qlot-app" "force" yason:false))
+                      (result (worker-rpc worker "worker/load-system" params)))
+                 (ok (equal "loaded" (gethash "status" result))
+                     (gethash "message" result))
+                 (when (equal "loaded" (gethash "status" result))
+                   (ok (string-equal
+                        ":caches-match"
+                        (%eval-in worker
+                                  (format nil "(flet ((fasl (system file)
+                                                (first (asdf:output-files 'asdf:compile-op
+                                                         (asdf:find-component system file)))))
+                                    (let ((app (fasl \"clmcp-qlot-app\" \"app\"))
+                                          (dep (fasl \"clmcp-qlot-lib\" \"dep\")))
+                                      (when (and (probe-file app)
+                                                 (uiop:subpathp app
+                                                  cl-mcp/src/worker/fasl-cache:*worker-fasl-cache*)
+                                                 (equal dep ~S) (probe-file dep))
+                                        :caches-match)))" dep-fasl))))
+                   (setf (gethash "clear_fasls" params) t)
+                   (let ((reload (worker-rpc worker "worker/load-system" params)))
+                     (ok (equal "loaded" (gethash "status" reload)) (gethash "message" reload))
+                     (ok (eql 1 (gethash "fasls_deleted" reload)))
+                     (ok (probe-file dep-fasl))))))
+          (when worker (kill-worker worker))
+          (asdf:clear-system "clmcp-qlot-lib")
           (uiop:delete-directory-tree root :validate t :if-does-not-exist :ignore)))))

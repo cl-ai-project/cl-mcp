@@ -9,7 +9,8 @@
   (:import-from #:cl-mcp/src/utils/clgrep
                 #:collect-target-files)
   (:import-from #:cl-mcp/src/utils/project-files
-                #:project-ignored-predicate)
+                #:project-ignored-predicate
+                #:vendored-project-path-p)
   (:export #:delete-project-fasls
            #:fasl-source-directory
            #:delete-same-second-fasls
@@ -135,8 +136,7 @@ dependency -- IGNORED-P would leave out everything, so it is not applied."
       (dolist (source (ignore-errors (collect-target-files source-dir)))
         (when (and (equal "lisp" (pathname-type source))
                    (not (eq :dependency (gethash (namestring source) owners)))
-                   (not (member ".qlot" (pathname-directory (enough-namestring source source-dir))
-                                :test #'equal))
+                   (not (vendored-project-path-p source source-dir))
                    (not (and filter-p (funcall ignored-p source))))
           (let ((fasl (ignore-errors
                        (asdf:apply-output-translations (compile-file-pathname source)))))
@@ -157,14 +157,16 @@ this does nothing."
 (defun delete-project-fasls (system-name)
   "Delete the ASDF outputs of project components and return the count and owning system.
 Resolve the load's component graph before collecting outputs. This registers
-package-inferred subsystems in a fresh image without inferring ownership from
-where source files happen to live."
+package-inferred subsystems in a fresh image. Keep the outputs under .qlot
+directories inside the owning system's component directory."
   (multiple-value-bind (directory owner) (fasl-source-directory system-name)
-    (let ((system (and directory (asdf:find-system system-name nil))))
+    (let* ((system (and directory (asdf:find-system system-name nil)))
+           (root (and system (asdf:component-pathname system))))
       (when system
         (asdf:required-components system))
-      (values (loop for (nil . fasl) in (registered-source-fasl-pairs system-name)
-                    when (ignore-errors (delete-file fasl) t)
+      (values (loop for (source . fasl) in (registered-source-fasl-pairs system-name)
+                    when (and (not (vendored-project-path-p source root))
+                              (ignore-errors (delete-file fasl) t))
                       count t and do (%forget-file-stamp fasl))
               owner))))
 

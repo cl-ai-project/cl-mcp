@@ -10,7 +10,8 @@
                 #:root-ignore-patterns
                 #:path-ignored-p)
   (:export #:project-file-predicate
-           #:project-ignored-predicate))
+           #:project-ignored-predicate
+           #:vendored-project-path-p))
 
 (in-package #:cl-mcp/src/utils/project-files)
 
@@ -18,6 +19,14 @@
   "Return DESIGNATOR, a pathname or namestring, as an absolute pathname, or NIL."
   (let ((path (and designator (ignore-errors (pathname designator)))))
     (and path (uiop:absolute-pathname-p path) path)))
+
+(defun vendored-project-path-p (path root)
+  "Return true when PATH is in a .qlot directory below ROOT.
+ROOT is an absolute directory pathname, or NIL when there is no root."
+  (let ((relative (and root (uiop:subpathp path root))))
+    (and relative
+         (member ".qlot" (pathname-directory relative) :test #'equal)
+         t)))
 
 (defun project-ignored-predicate (&optional (root *project-root*))
   "Return a function of a pathname that is true when the file is under ROOT but
@@ -50,6 +59,5 @@ With no ROOT every file is the project's."
           (let ((path (%absolute-path pathname)))
             (and path
                  (path-inside-p path root-dir)
-                 (not (member ".qlot" (pathname-directory (enough-namestring path root-dir))
-                              :test #'equal))
+                 (not (vendored-project-path-p path root-dir))
                  (not (funcall ignored-p path))))))))
