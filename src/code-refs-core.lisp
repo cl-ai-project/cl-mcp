@@ -262,10 +262,11 @@ A merged form holding no site of a kind listed for one of its xref types gets
 *NOTE-UNMATCHED-XREF* (see %REFERENCE-NOTE); a type missing from this table is
 shown by no site.")
 
-(defparameter *site-kinds-xref-seldom-records* '("quoted" "template" "method")
+(defparameter *site-kinds-xref-seldom-records* '("quoted" "template" "method" "definer-name")
   "Scan site kinds xref usually does not record: quoted data, backquote templates
-and DEFMETHOD names.  (WHO-CALLS does record a function passed by name, as in
-(mapcar 'name xs) or :key 'name, but a compiled form like that is then found by
+and names in DEFMETHOD or custom DEF... forms.  (WHO-CALLS does record a
+function passed by name, as in (mapcar 'name xs) or :key 'name, but that form
+is then found by
 xref too, and so is not source-only.)  A form the scan alone found gets
 *NOTE-NOT-IN-XREF* only when it holds a site of some other kind; for these the
 absence is expected, and the note's explanation (a top-level form, or code not
@@ -290,7 +291,7 @@ listed, each with its own kind, but none of them is that call, set, ... itself."
 the likely reason no site shows it.  A type missing here is named as it is
 spelled, with no reason.")
 
-(defun resolve-scan-forms (forms target &key macro-p)
+(defun resolve-scan-forms (forms target &key macro-p definer-reference-p)
   "Keep the scan sites in FORMS that name TARGET in this image.
 
 FORMS are the parent's form objects (CL-MCP/SRC/CODE-REFS-SCAN:SCAN-TEXT).
@@ -301,6 +302,9 @@ RESOLVED lists, in input order, one plist per form that kept a site:
    :test-name :test-framework :context :in-package :sites)
 with :SITES plists (:line :column :kind :context :shadowed-by).  When MACRO-P a
 \"call\" site becomes \"macro\", the type WHO-MACROEXPANDS entries carry.
+
+A \"definer-name\" candidate is kept only when DEFINER-REFERENCE-P, called
+with the enclosing scan form, confirms that TARGET is defined elsewhere.
 
 UNRESOLVED lists plists (:path :package :count :tests), one per file and
 missing package, counting the sites that could not be judged."
@@ -313,13 +317,15 @@ missing package, counting the sites that could not be judged."
               (resolve-site-token (gethash "token" site) (gethash "in_package" form) target)
             (case verdict
               (:match
-               (push (list :line (gethash "line" site)
-                           :column (gethash "column" site)
-                           :kind (let ((kind (gethash "kind" site)))
-                                   (if (and macro-p (equal kind "call")) "macro" kind))
-                           :context (gethash "context" site)
-                           :shadowed-by (gethash "shadowed_by" site))
-                     kept))
+               (let ((kind (gethash "kind" site)))
+                 (when (or (not (equal kind "definer-name"))
+                           (and definer-reference-p (funcall definer-reference-p form)))
+                   (push (list :line (gethash "line" site)
+                               :column (gethash "column" site)
+                               :kind (if (and macro-p (equal kind "call")) "macro" kind)
+                               :context (gethash "context" site)
+                               :shadowed-by (gethash "shadowed_by" site))
+                         kept))))
               (:unresolved
                (let ((entry (find-if (lambda (entry)
                                        (and (equal (getf entry :path) (gethash "path" form))

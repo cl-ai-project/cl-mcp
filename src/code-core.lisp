@@ -311,7 +311,8 @@ OFFSET across:
     form that cannot be read is not skipped: the walk stops at it.
 and stop at the first character that begins anything else, normally the `('
 that begins the definition form.  The walk is bounded only by the file's
-length.  Returns NIL when the file cannot be read."
+length.  The second value is the resulting character position.  Returns NIL
+when the file cannot be read."
   (when (and pathname offset)
     (handler-case
         (let* ((physical (translate-logical-pathname pathname))
@@ -387,7 +388,7 @@ length.  Returns NIL when the file cannot be read."
                            (when after
                              (setf i after))))))
                     (t (return)))))
-              (1+ (count #\Newline content :end (min i len))))))
+              (values (1+ (count #\Newline content :end (min i len))) i))))
       (error (e)
         (log-event :warn "code.find.line-error"
                    "path" (princ-to-string pathname)
@@ -588,8 +589,8 @@ left may record only the forms read before a DEFPACKAGE took effect."
                 (funcall (%sbcl-function "SB-C" "DEBUG-SOURCE-START-POSITIONS") source)))
           (position-in (%cached-read-form-starts pathname))))))
 
-(defun definition-source-line (source)
-  "Return the 1-based line an SB-INTROSPECT definition SOURCE starts on, or NIL.
+(defun %definition-source-position (source)
+  "Return the line and character position where SB-INTROSPECT SOURCE starts.
 
 A character offset, recorded for functions, is used when present.  Classes,
 conditions, structures and methods carry only a form path, whose first element
@@ -609,11 +610,33 @@ Both are octet positions that %OFFSET->LINE converts."
                                 (%form-start-offset pathname (first form-path)))))))
         (and position (%offset->line pathname position))))))
 
+(defun definition-source-line (source)
+  "Return the 1-based line an SB-INTROSPECT definition SOURCE starts on, or NIL."
+  (nth-value 0 (%definition-source-position source)))
+
 (defun %debug-source-created (pathname)
   "Return the source write date recorded in PATHNAME's newest debug source, or NIL."
   (let ((source (%debug-source-for pathname)))
     (and source
          (funcall (%sbcl-function "SB-C" "DEBUG-SOURCE-CREATED") source))))
+
+(defun %definition-source-location (source)
+  "Return the definition's file, line, freshness and character position."
+  (let* ((pkg (%ensure-sb-introspect))
+         (path-fn (and pkg (find-symbol "DEFINITION-SOURCE-PATHNAME" pkg)))
+         (write-date-fn (and pkg (find-symbol "DEFINITION-SOURCE-FILE-WRITE-DATE" pkg)))
+         (pathname (and source path-fn (ignore-errors (funcall path-fn source)))))
+    (if (null pathname)
+        (values nil nil nil nil nil)
+        (let ((truename (%truename-string pathname))
+              (recorded (or (and write-date-fn (ignore-errors (funcall write-date-fn source)))
+                            (ignore-errors (%debug-source-created pathname)))))
+          (multiple-value-bind (line position) (%definition-source-position source)
+            (values (and truename (uiop:absolute-pathname-p truename) truename)
+                    (normalize-path-for-display pathname)
+                    line
+                    (and (%source-stale-p pathname recorded) t)
+                    position))))))
 
 (defun definition-source-location (source)
   "Return (values ABS-PATH PATH LINE STALE) for an SB-INTROSPECT definition SOURCE.
@@ -625,19 +648,13 @@ and LINE comes from DEFINITION-SOURCE-LINE; either may be NIL.  STALE is true
 when the file was written after the date recorded for SOURCE -- its own
 FILE-WRITE-DATE, or, for definitions that keep none, the date in the file's
 debug source.  Without either date STALE is false."
-  (let* ((pkg (%ensure-sb-introspect))
-         (path-fn (and pkg (find-symbol "DEFINITION-SOURCE-PATHNAME" pkg)))
-         (write-date-fn (and pkg (find-symbol "DEFINITION-SOURCE-FILE-WRITE-DATE" pkg)))
-         (pathname (and source path-fn (ignore-errors (funcall path-fn source)))))
-    (if (null pathname)
-        (values nil nil nil nil)
-        (let ((truename (%truename-string pathname))
-              (recorded (or (and write-date-fn (ignore-errors (funcall write-date-fn source)))
-                            (ignore-errors (%debug-source-created pathname)))))
-          (values (and truename (uiop:absolute-pathname-p truename) truename)
-                  (normalize-path-for-display pathname)
-                  (definition-source-line source)
-                  (and (%source-stale-p pathname recorded) t))))))
+  (multiple-value-bind (absolute path line stale) (%definition-source-location source)
+    (values absolute path line stale)))
+
+(defparameter *named-definition-kinds*
+  '(:function :generic-function :method :macro :class :condition :structure :type
+    :variable :constant :method-combination :package)
+  "SB-INTROSPECT definition kinds searched when locating a symbol's definition.")
 
 (declaim (ftype (function (string &key (:package (or null package symbol string)))
                           (values (or null string) (or null integer) t t &optional))
@@ -666,21 +683,18 @@ downstream therefore failed for every file that does exist."
            (find-by-name (and pkg (find-symbol "FIND-DEFINITION-SOURCES-BY-NAME" pkg)))
            (find (and pkg (find-symbol "FIND-DEFINITION-SOURCE" pkg)))
            (path-fn (and pkg (find-symbol "DEFINITION-SOURCE-PATHNAME" pkg)))
-           (kinds '(:function :generic-function :method :macro
-                    :class :condition :structure :type
-                    :variable :constant :method-combination :package))
            (source
             (or ;; Prefer definitions with a known source file.
                 ;; Implicitly-created GFs have NIL pathname; :method
                 ;; entries carry the actual defmethod file location.
-                (loop for kind in kinds
+                (loop for kind in *named-definition-kinds*
                       for src = (and find-by-name
                                      (first (ignore-errors
                                              (funcall find-by-name sym kind))))
                       when (and src path-fn (funcall path-fn src))
                         return src)
                 ;; Fallback: accept any source even without pathname
-                (loop for kind in kinds
+                (loop for kind in *named-definition-kinds*
                       for src = (and find-by-name
                                      (first (ignore-errors
                                              (funcall find-by-name sym kind))))
@@ -1075,6 +1089,46 @@ files (MERGE-REFERENCES' second value), as a list, or NIL when there are none."
                                      :test #'equal :from-end t)
                   (rest gone) (rest gone) (rest gone)))))
 
+(defun %loaded-definition-locations (symbol)
+  "Return (absolute-path . position) pairs for loaded definitions using SYMBOL.
+A stale location keeps its path but has no reliable position."
+  (let ((find-by-name (%sb-introspect-symbol "FIND-DEFINITION-SOURCES-BY-NAME")))
+    (when find-by-name
+      (flet ((sources (name kinds)
+               (loop for kind in kinds
+                     append (ignore-errors (funcall find-by-name name kind)))))
+        (with-definition-source-cache
+          (loop for source in (append
+                               (sources symbol
+                                        (append (remove :package *named-definition-kinds*)
+                                                '(:compiler-macro :symbol-macro :setf-expander
+                                                  :declaration :alien-type)))
+                               (sources (list 'setf symbol)
+                                        '(:function :generic-function :method :compiler-macro)))
+                for location =
+                  (multiple-value-bind (path display line stale position)
+                      (%definition-source-location source)
+                    (declare (ignore display line))
+                    (when path (cons path (unless stale position))))
+                when location collect location))))))
+
+(defun %definer-reference-filter (symbol)
+  "Return a predicate that checks whether a scan form is outside SYMBOL's definitions.
+Look up those definitions on the first candidate. A definition in the same
+file needs a reliable source position to distinguish it from the form."
+  (let ((locations :unknown))
+    (lambda (form)
+      (when (eq locations :unknown)
+        (setf locations (%loaded-definition-locations symbol)))
+      (let ((path (gethash "abs_path" form))
+            (start (gethash "start_offset" form))
+            (end (gethash "end_offset" form)))
+        (and path locations
+             (loop for (definition-path . position) in locations
+                   always (or (not (equal path definition-path))
+                              (and position start end
+                                   (or (< position start) (>= position end))))))))))
+
 (defun code-find-references-report (symbol-name &key package (project-only t) (limit 50)
                                                    scan)
   "Return the code-find-references payload for SYMBOL-NAME, without content text.
@@ -1110,7 +1164,9 @@ CL-MCP/SRC/CODE-REFS-CORE:BUILD-REFERENCES-REPORT."
                                             (list :scan-status (%scan-status entry scan))))
                                   (%collect-xref-entries symbol :project-only project-only))))
             (multiple-value-bind (forms unresolved)
-                (resolve-scan-forms scan-forms symbol :macro-p (equal kind "macro"))
+                (resolve-scan-forms scan-forms symbol
+                                    :macro-p (equal kind "macro")
+                                    :definer-reference-p (%definer-reference-filter symbol))
               (multiple-value-bind (refs gone) (merge-references entries forms)
                 (apply #'build-references-report
                        :status :found

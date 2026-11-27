@@ -85,6 +85,12 @@ both a set and a reference for it.  The other arguments are ordinary code.")
 when it is not a bare name or a (SETF name) list -- is (NAME . OPTIONS) and
 must still be skipped as a whole, rather than walked as ordinary code.")
 
+(defparameter *standard-definer-names*
+  '("DEFCONSTANT" "DEFPARAMETER" "DEFSETF" "DEFTYPE" "DEFVAR"
+    "DEFINE-DECLARATION" "DEFINE-METHOD-COMBINATION" "DEFINE-MODIFY-MACRO"
+    "DEFINE-SETF-EXPANDER" "DEFINE-SYMBOL-MACRO")
+  "Common Lisp definers handled by the generic DEF... branch whose name is a definition.")
+
 (defun target-name-from-designator (designator)
   "Return the symbol name DESIGNATOR spells, as the reader would read it.
 Signals ARG-VALIDATION-ERROR for text that is not a symbol name or is a
@@ -189,12 +195,11 @@ function argument of FUNCALL, APPLY or MULTIPLE-VALUE-CALL (see
 are \"bind\"; SETF and SETQ places, and the bare-symbol place of INCF, DECF, POP,
 PUSH and PUSHNEW (see *PLACE-MODIFYING-OPERATORS*), are \"set\"; a DEFMETHOD's name is
 \"method\"; and anything inside a backquote template, outside its unquotes, is
-\"template\".  The name position of a DEF... form is the definition itself and
-is skipped only when it looks like a name -- a bare symbol, a (SETF sym) list,
-or (for DEFSTRUCT) a (name . options) list; anything else in that position is
-walked as ordinary code, so a user macro merely named DEF... (or a CASE clause
-whose key happens to be a DEF...-prefixed symbol) does not lose real call
-sites.  DEFPACKAGE forms, keywords and #:symbols are excluded outright.  Below
+\"template\".  A bare name in a custom top-level DEF... form is a
+\"definer-name\" candidate: the worker keeps it only when the target is defined
+elsewhere.  Known definition names and (SETF sym) lists are skipped, as is a
+DEFSTRUCT's (name . options) list.  Other arguments are walked as ordinary
+code.  DEFPACKAGE forms, keywords and #:symbols are excluded outright.  Below
 a FLET, LABELS or MACROLET that binds the name every site carries that operator
 in :SHADOWED-BY, however far down it is.  A #+feature/#-feature reader
 conditional around any of the above is transparent: it is unwrapped (see
@@ -396,17 +401,20 @@ a site's position, token or structure."
                       (emit super "reference" nil shadowed-by)))
                   (walk-args (cddr args)))
                  ((%definer-name-p name)
-                  ;; Argument 0 is normally the name being defined, but only
-                  ;; skip it when it looks like one: some DEF...-prefixed
-                  ;; heads are not definers at all (a CASE clause whose key
-                  ;; reads as DEFAULT, a function like DEFAULT-VALUE or
-                  ;; DEFLATE), and their first argument is ordinary code.
+                  ;; An extension's first argument may define a name, refer to
+                  ;; one already defined, or be an ordinary Lisp expression.
+                  ;; Leave apparent names for the worker to check, and walk
+                  ;; other shapes as code.
                   (emit-head "call")
                   (cond
                     ((null args) nil)
                     ((member name *definers-with-name-and-options* :test #'string=)
                      (walk-args (rest args)))
                     ((%definer-name-position-p (first args))
+                     (when (and (eq node (%unwrap top))
+                                (not (member name *standard-definer-names* :test #'string=))
+                                (not (assoc name *test-frameworks* :test #'string=)))
+                       (emit (first args) "definer-name" nil shadowed-by))
                      (walk-args (rest args)))
                     (t
                      (walk-args args))))
@@ -462,7 +470,8 @@ lists one JSON-ready hash-table per top-level form holding a site, with path,
 abs_path, index, start_line, end_line, form_type, form_name, test_name,
 test_framework, in_package, context and sites.  INDEX counts the file's
 top-level expressions from 0, the number SBCL's DEFINITION-SOURCE-FORM-PATH
-starts with.  Each site has line, column, kind, token, context and
+starts with.  START_OFFSET and END_OFFSET bound the form in TEXT's character
+positions, with END_OFFSET exclusive.  Each site has line, column, kind, token, context and
 shadowed_by.  Collection stops after MAX-SITES sites.  Signals the parser's
 error when TEXT does not parse.
 
@@ -513,6 +522,8 @@ later forms were not scanned"
                                      "index" index
                                      "start_line" (cst-node-start-line node)
                                      "end_line" (cst-node-end-line node)
+                                     "start_offset" (cst-node-start node)
+                                     "end_offset" (cst-node-end node)
                                      "form_type" form-type
                                      "form_name" form-name
                                      "test_name" test-name

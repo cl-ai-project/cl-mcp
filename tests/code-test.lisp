@@ -691,6 +691,49 @@ fixture directory."
             (ok (find "target-is-called-from-a-test" (gethash "tests" report)
                       :key (lambda (test) (gethash "name" test)) :test #'equal)))))))
 
+(deftest code-find-references-distinguishes-definers-from-definitions
+  (let* ((*project-root*
+           (asdf:system-relative-pathname :cl-mcp "tests/fixtures/code-refs-definers/"))
+         (definitions (merge-pathnames "definitions.lisp" *project-root*))
+         (uses (merge-pathnames "uses.lisp" *project-root*))
+         (definitions-package "cl-mcp/tests/fixtures/code-refs-definers/definitions")
+         (same-line-package "cl-mcp/tests/fixtures/code-refs-definers/same-line"))
+    (%load-xref-fixture definitions)
+    (%load-xref-fixture uses)
+    (%load-xref-fixture (merge-pathnames "same-line.lisp" *project-root*))
+    (flet ((report (name &optional (package definitions-package))
+             (let ((designator (format nil "~A::~A" package name)))
+               (code-find-references-report designator :scan (scan-project designator)))))
+      (testing "an attachment in another package is listed alongside the ordinary caller"
+        (let* ((refs (gethash "refs" (report "target")))
+               (attachment (find "define-checked" refs
+                                 :key (lambda (ref) (gethash "form_type" ref))
+                                 :test #'equal)))
+          (ok (equal '("definer-name" "call")
+                     (map 'list (lambda (ref) (gethash "type" ref)) refs)))
+          (ok (and attachment (equal "uses.lisp" (gethash "path" attachment))))
+          (ok (and attachment
+                   (eql (%fixture-line "(define-checked " uses)
+                        (gethash "line" attachment))))
+          (ok (and attachment (equal "source" (gethash "origin" attachment))))
+          (ok (and attachment
+                   (equal '("definer-name")
+                          (map 'list (lambda (site) (gethash "kind" site))
+                               (gethash "call_sites" attachment)))))))
+      (testing "an attachment in the same file is distinct from the definitions of its name"
+        (let ((refs (gethash "refs" (report "macro-target"))))
+          (ok (equal '("define-checked")
+                     (map 'list (lambda (ref) (gethash "form_type" ref)) refs)))))
+      (testing "a definition and an attachment can share a line"
+        (let ((refs (gethash "refs" (report "compact-target" same-line-package))))
+          (ok (equal '("define-checked")
+                     (map 'list (lambda (ref) (gethash "form_type" ref)) refs)))))
+      (testing "a custom variable or structure definition is not a reference"
+        (dolist (name '("*only-variable*" "only-structure"))
+          (let ((result (report name)))
+            (ok (equal "found" (gethash "symbol_status" result)))
+            (ok (zerop (gethash "count" result)))))))))
+
 (deftest code-find-references-places-macro-expansion-calls-in-their-forms
   (if (uiop:os-macosx-p)
       (skip "XREF tests are unstable on macOS")
