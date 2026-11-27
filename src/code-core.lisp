@@ -639,6 +639,11 @@ debug source.  Without either date STALE is false."
                   (definition-source-line source)
                   (and (%source-stale-p pathname recorded) t))))))
 
+(defparameter *named-definition-kinds*
+  '(:function :generic-function :method :macro :class :condition :structure :type
+    :variable :constant :method-combination :package)
+  "SB-INTROSPECT definition kinds searched when locating a symbol's definition.")
+
 (declaim (ftype (function (string &key (:package (or null package symbol string)))
                           (values (or null string) (or null integer) t t &optional))
                 code-find-definition))
@@ -666,21 +671,18 @@ downstream therefore failed for every file that does exist."
            (find-by-name (and pkg (find-symbol "FIND-DEFINITION-SOURCES-BY-NAME" pkg)))
            (find (and pkg (find-symbol "FIND-DEFINITION-SOURCE" pkg)))
            (path-fn (and pkg (find-symbol "DEFINITION-SOURCE-PATHNAME" pkg)))
-           (kinds '(:function :generic-function :method :macro
-                    :class :condition :structure :type
-                    :variable :constant :method-combination :package))
            (source
             (or ;; Prefer definitions with a known source file.
                 ;; Implicitly-created GFs have NIL pathname; :method
                 ;; entries carry the actual defmethod file location.
-                (loop for kind in kinds
+                (loop for kind in *named-definition-kinds*
                       for src = (and find-by-name
                                      (first (ignore-errors
                                              (funcall find-by-name sym kind))))
                       when (and src path-fn (funcall path-fn src))
                         return src)
                 ;; Fallback: accept any source even without pathname
-                (loop for kind in kinds
+                (loop for kind in *named-definition-kinds*
                       for src = (and find-by-name
                                      (first (ignore-errors
                                              (funcall find-by-name sym kind))))
@@ -1075,6 +1077,38 @@ files (MERGE-REFERENCES' second value), as a list, or NIL when there are none."
                                      :test #'equal :from-end t)
                   (rest gone) (rest gone) (rest gone)))))
 
+(defun %loaded-definition-locations (symbol)
+  "Return (absolute-path . line) pairs for the worker's known definitions of SYMBOL.
+A stale location keeps its path but has no reliable line."
+  (let ((find-by-name (%sb-introspect-symbol "FIND-DEFINITION-SOURCES-BY-NAME")))
+    (when find-by-name
+      (with-definition-source-cache
+        (loop for kind in *named-definition-kinds*
+              unless (eq kind :package)
+                append (loop for source in (ignore-errors (funcall find-by-name symbol kind))
+                             for location =
+                               (multiple-value-bind (path display line stale)
+                                   (definition-source-location source)
+                                 (declare (ignore display))
+                                 (when path (cons path (unless stale line))))
+                             when location collect location))))))
+
+(defun %definer-reference-filter (symbol)
+  "Return a predicate to tell whether a scan form is outside SYMBOL's definitions.
+Look up those definitions on the first candidate. If a definition in the same
+file has no reliable line, the form cannot be distinguished from it."
+  (let ((locations :unknown))
+    (lambda (form)
+      (when (eq locations :unknown)
+        (setf locations (%loaded-definition-locations symbol)))
+      (let ((path (gethash "abs_path" form))
+            (start (gethash "start_line" form))
+            (end (gethash "end_line" form)))
+        (and path locations
+             (loop for (definition-path . line) in locations
+                   always (or (not (equal path definition-path))
+                              (and line (not (<= start line end))))))))))
+
 (defun code-find-references-report (symbol-name &key package (project-only t) (limit 50)
                                                    scan)
   "Return the code-find-references payload for SYMBOL-NAME, without content text.
@@ -1110,7 +1144,9 @@ CL-MCP/SRC/CODE-REFS-CORE:BUILD-REFERENCES-REPORT."
                                             (list :scan-status (%scan-status entry scan))))
                                   (%collect-xref-entries symbol :project-only project-only))))
             (multiple-value-bind (forms unresolved)
-                (resolve-scan-forms scan-forms symbol :macro-p (equal kind "macro"))
+                (resolve-scan-forms scan-forms symbol
+                                    :macro-p (equal kind "macro")
+                                    :definer-reference-p (%definer-reference-filter symbol))
               (multiple-value-bind (refs gone) (merge-references entries forms)
                 (apply #'build-references-report
                        :status :found
