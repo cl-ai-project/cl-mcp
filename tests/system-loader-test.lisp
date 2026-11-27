@@ -865,6 +865,35 @@ present and false, not merely missing."
        (ok (search "caught 1 fatal ERROR condition" output))
        (ok (null (search "caught 2 fatal ERROR conditions" output)))))))
 
+(deftest load-system-response-keeps-the-compile-error-after-a-long-form
+  (dolist (long-p '(nil t))
+    (%call-with-warning-system
+     "(defmacro fail-during-expansion (form)
+  (declare (ignore form))
+  (error \"THE-ACTUAL-REASON-IS-HERE\"))"
+     (lambda (system forget)
+       (declare (ignore forget))
+       (let* ((ht (load-system system :force nil))
+              (output (gethash "compiler_output" ht))
+              (text (%response-text system ht)))
+         (ok (equal "error" (gethash "status" ht)))
+         (ok (search "THE-ACTUAL-REASON-IS-HERE" output))
+         (ok (search "THE-ACTUAL-REASON-IS-HERE" text))
+         (if long-p
+             (progn
+               (ok (> (length output) 2048))
+               (ok (search "then.lisp" text))
+               (ok (search (format nil "[~D characters omitted from the middle]"
+                                   (- (length output) 2048))
+                           text)))
+             (progn
+               (ok (<= (length output) 2048))
+               (ok (search (format nil "Compiler output:~%~A~%~%Hint:"
+                                   (string-right-trim '(#\Newline) output))
+                           text))))))
+     :then (format nil "(fail-during-expansion (~A))"
+                   (if long-p (make-string 2400 :initial-element #\X) "short")))))
+
 (deftest an-own-compilation-unit-reports-before-it-returns-inside-an-outer-one
   ;; Inside a unit someone else opened, the end-of-unit report -- here an
   ;; undefined variable -- would wait for that unit to end, past the caller's
