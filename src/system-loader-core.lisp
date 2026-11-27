@@ -359,9 +359,11 @@ registering it."
                         (when asd-src
                           (ignore-errors
                            (asdf:load-asd asd-src)))))
+                    ;; ASDF rebuilds missing project outputs. A forced load
+                    ;; would also recompile warm .qlot components.
                     (%call-with-suppressed-output
                      (lambda ()
-                       (asdf:load-system system-name :force clear-fasls))
+                       (asdf:load-system system-name))
                      :on-unwind (lambda (stderr records)
                                   (setf unwound-stderr stderr
                                         unwound-records records))

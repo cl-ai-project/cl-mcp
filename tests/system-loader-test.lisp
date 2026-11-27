@@ -1620,7 +1620,7 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
      ("bootstrap.lisp" . "(eval-when (:compile-toplevel) (warn \"bootstrap compile warning\"))")
      ("shared.lisp" . "(eval-when (:compile-toplevel) (warn \"shared source compile warning\"))"))
    (lambda (path)
-     (let* ((root (funcall path "./"))
+     (let* ((root (truename (funcall path "./")))
             (asdf:*central-registry* (cons root asdf:*central-registry*))
             (asdf/output-translations:*output-translations*
               (list (cons (list (uiop:wilden root) t) (asdf:ensure-output-translations)))))
@@ -1641,6 +1641,78 @@ one: COMPILE-FAILED when the error was the compiler's verdict on a file."
 
 (deftest load-system-clear-fasls-preserves-warm-dependency
   (%check-preserved-warm-dependency ".qlot/"))
+
+(deftest load-system-preserves-a-primary-systems-qlot-output
+  (flet ((check (clear-fasls)
+           (%call-with-probe-files
+            '(("qlot-family.asd" .
+               "(defsystem \"qlot-family\" :pathname \"src/\" :components ((:file \"app\")))
+                (defsystem \"qlot-family/vendor\" :pathname \".qlot/vendor/\"
+                  :components ((:file \"dep\")))
+                (defsystem \"qlot-family/cli\" :pathname \"cli/\"
+                  :depends-on (\"qlot-family\" \"qlot-family/vendor\") :components ((:file \"cli\")))")
+              ("src/app.lisp" . "(in-package :cl-user)")
+              (".qlot/vendor/dep.lisp" . "(in-package :cl-user)")
+              ("cli/cli.lisp" . "(in-package :cl-user)"))
+            (lambda (path)
+              (let* ((root (truename (funcall path "./")))
+                     (asdf:*central-registry* (cons root asdf:*central-registry*))
+                     (asdf/output-translations:*output-translations*
+                       (list (cons (list (uiop:wilden root) t) (asdf:ensure-output-translations))))
+                     (dep-source (funcall path ".qlot/vendor/dep.lisp"))
+                     (dep-fasl (compile-file-pathname dep-source)))
+                (unwind-protect
+                     (let* ((epoch (encode-universal-time 0 0 0 1 1 1970 0))
+                            (older (- (get-universal-time) epoch 60)))
+                       (dolist (file '("src/app.lisp" "cli/cli.lisp"))
+                         (uiop:symbol-call :sb-posix :utimes (namestring (funcall path file))
+                                           older older))
+                       (asdf:load-system "qlot-family/cli")
+                       (let* ((stamp (file-write-date dep-fasl))
+                              (unix (- stamp epoch)))
+                         (uiop:symbol-call :sb-posix :utimes (namestring dep-source) unix unix)
+                         (let ((result (load-system "qlot-family/cli" :force (not clear-fasls)
+                                                                      :clear-fasls clear-fasls
+                                                                      :timeout-seconds nil)))
+                           (ok (equal "loaded" (gethash "status" result))
+                               (gethash "message" result))
+                           (if clear-fasls
+                               (ok (eql 2 (gethash "fasls_deleted" result)))
+                               (ok (null (gethash "same_second_fasls_deleted" result))))
+                           (ok (and (probe-file dep-fasl)
+                                    (eql stamp (file-write-date dep-fasl)))))))
+                  (mapc #'asdf:clear-system
+                        '("qlot-family/cli" "qlot-family/vendor" "qlot-family"))))))))
+    (testing "clear_fasls applies the directory rule to all members of the ASDF primary"
+      (check t))
+    (testing "same-second cleanup also preserves the shared output"
+      (check nil))))
+
+(deftest load-system-clear-fasls-reuses-a-warm-qlot-component
+  (%call-with-probe-files
+   '(("qlot-component.asd" .
+      "(defsystem \"qlot-component\" :components ((:file \"app\") (:file \".qlot/vendor/dep\")))")
+     ("app.lisp" . "(in-package :cl-user)")
+     (".qlot/vendor/dep.lisp" .
+      "(eval-when (:compile-toplevel)
+         (when (probe-file (merge-pathnames \"warmed.marker\" *compile-file-truename*))
+           (warn \"compiled a warm qlot component\")))"))
+   (lambda (path)
+     (let* ((root (truename (funcall path "./")))
+            (asdf:*central-registry* (cons root asdf:*central-registry*))
+            (asdf/output-translations:*output-translations*
+              (list (cons (list (uiop:wilden root) t) (asdf:ensure-output-translations)))))
+       (unwind-protect
+            (progn
+              (asdf:load-system "qlot-component")
+              (with-open-file (marker (funcall path ".qlot/vendor/warmed.marker") :direction :output)
+                (write-line "warmed" marker))
+              (let ((result (load-system "qlot-component" :force nil :clear-fasls t
+                                                          :timeout-seconds nil)))
+                (ok (equal "loaded" (gethash "status" result)) (gethash "message" result))
+                (ok (eql 1 (gethash "fasls_deleted" result)))
+                (ok (probe-file (compile-file-pathname (funcall path "app.lisp"))))))
+         (asdf:clear-system "qlot-component"))))))
 
 (deftest load-system-clear-fasls-preserves-tracked-vendor
   (%check-preserved-warm-dependency "vendor/warm-dep/"))

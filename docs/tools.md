@@ -1888,10 +1888,11 @@ old worker compiled with definitions it held only in its image (#317).
 
 Libraries outside the root and vendored sources in a `.qlot/` directory below
 it use ASDF's configured output translations. A fresh worker can reuse the
-FASLs a qlot shell build compiled for those dependencies. `clear_fasls` uses
-the same `.qlot/` directory rule when selecting outputs to delete. Other
-library directories enclosed by the root, for example with `$HOME` as the
-root, can still be compiled into each worker's cache.
+FASLs a qlot shell build compiled for those dependencies. Both `clear_fasls`
+and the same-second reload check preserve `.qlot/` dependency outputs for
+the project being loaded. Other library directories enclosed by the root,
+for example with `$HOME` as the root, can still be compiled into each worker's
+cache.
 
 A worker holds a lock on its cache for as long as it runs. The next worker to
 start after it has ended removes the cache. The inline server
