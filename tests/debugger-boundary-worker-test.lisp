@@ -167,6 +167,28 @@
         (invoke-debugger (make-condition 'worker-invoked-condition)))"
      "WORKER-INVOKED-CONDITION")))
 
+(deftest pooled-repl-eval-structured-diagnostics-ignore-display-limit
+  (with-boundary-worker (worker "repl-eval-diagnostic-limits")
+    (dolist (example '(("1" "CL-MCP-NO-SUCH-DIAGNOSTIC-PACKAGE"
+                        "CL-MCP-NO-SUCH-DIAGNOSTIC-PACKAGE" "P")
+                       (")" "CL-USER" "unmatched close parenthesis" "R")
+                       ("(error \"runtime control\")" "CL-USER" "runtime control" "r")))
+      (destructuring-bind (code package diagnostic prefix) example
+        (let* ((baseline (%worker-eval code :options (list "package" package
+                                                           "max_output_length" 500)))
+               (message (gethash "message" (gethash "error_context" baseline))))
+          (ok (and (stringp message) (search diagnostic message)))
+          (ok (%context-type baseline))
+          (dolist (limit '(0 1))
+            (let ((result (%worker-eval code :options (list "package" package
+                                                          "max_output_length" limit))))
+              (ok (equal message (gethash "message" (gethash "error_context" result))))
+              (ok (equal (%context-type baseline) (%context-type result)))
+              (ok (equal (concatenate 'string
+                                      (if (zerop limit) "" prefix)
+                                      "...(truncated)")
+                         (%worker-text result))))))))))
+
 (deftest pooled-debugger-escape-keeps-captured-output
   (with-boundary-worker (worker "debugger-boundary-output")
     (%worker-eval "(defparameter *boundary-state* 73)
