@@ -402,6 +402,24 @@ in the cleanup form regardless of success or failure."
               "params" (make-ht "name" name "arguments" arguments)))
     state)))
 
+(deftest pooled-repl-eval-accepts-json-integer-valued-print-length
+  (if (not (spawn-available-p))
+      (skip "SBCL launcher unavailable")
+      (let ((*use-worker-pool* t)
+            (*current-session-id* "repl-integer-argument-test"))
+        (with-pool ()
+          (let* ((reply (parse
+                         (process-json-line
+                          "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",
+                            \"params\":{\"name\":\"repl-eval\",\"arguments\":{
+                            \"code\":\"(list 1 2 3)\",\"print_length\":1.0,
+                            \"include_result_preview\":false}}}")))
+                 (result (gethash "result" reply)))
+            (ok (and result
+                     (uiop:string-prefix-p "(1 ...)"
+                                           (gethash "text" (aref (gethash "content" result) 0)))))
+            (ok (and result (not (nth-value 1 (gethash "result_preview" result))))))))))
+
 (deftest agent-ids-isolate-workers-within-and-across-mcp-sessions
   (if (not (spawn-available-p))
       (skip "SBCL launcher unavailable")

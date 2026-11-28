@@ -415,29 +415,47 @@ those as its printed text instead (#417)."
 Its message is text made while the failure was still in progress, so the
 condition holds nothing yason was writing to."))
 
-(defun decode-json-text (text &key preserve-json-types)
+(defun decode-json-text (text &key preserve-json-types key-sources)
   "Decode one JSON value from TEXT using decimal numbers, string keys and vectors.
-PRESERVE-JSON-TYPES keeps booleans and null distinct for replies relayed to a client."
+PRESERVE-JSON-TYPES keeps booleans and null distinct for replies relayed to a client.
+With KEY-SOURCES from the client nesting check, also return TEXT paired with a
+table mapping each decoded object key to the start of its value in TEXT."
   (with-standard-io-syntax
     (let ((*read-eval* nil)
           ;; Older Yason uses the caller's float format. Newer releases bind their own.
           (*read-default-float-format* 'single-float)
           (yason:*parse-object-as-alist* nil)
           (yason:true 'yason:true)
-          (yason:false 'yason:false))
+          (yason:false 'yason:false)
+          (value-positions (when key-sources (make-hash-table :test #'eq)))
+          (keys-by-container (when key-sources (make-hash-table :test #'equal))))
       (declare (special yason:true yason:false)
                (ignorable yason:true yason:false))
       (with-input-from-string (stream text)
-        (prog1 (yason:parse stream
-                            :object-key-fn #'identity
-                            :object-as :hash-table
-                            :json-arrays-as-vectors t
-                            :json-booleans-as-symbols preserve-json-types
-                            :json-nulls-as-keyword preserve-json-types)
-          (loop for char = (read-char stream nil)
-                while char
-                unless (find char '(#\Space #\Tab #\Newline #\Return))
-                  do (error "Unexpected text after the JSON value")))))))
+        (flet ((track-key (key)
+                 (let ((source (gethash (file-position stream) key-sources)))
+                   (if source
+                       (let* ((index (cons (car source) key))
+                              ;; Older Yason keeps the last value of duplicate keys. Its
+                              ;; hash table may keep the first key object, so share that key.
+                              (stored-key (or (gethash index keys-by-container)
+                                              (setf (gethash index keys-by-container) key))))
+                         (setf (gethash stored-key value-positions) (cdr source))
+                         stored-key)
+                       key))))
+          (let ((value (yason:parse stream
+                                    :object-key-fn (if key-sources #'track-key #'identity)
+                                    :object-as :hash-table
+                                    :json-arrays-as-vectors t
+                                    :json-booleans-as-symbols preserve-json-types
+                                    :json-nulls-as-keyword preserve-json-types)))
+            (loop for char = (read-char stream nil)
+                  while char
+                  unless (find char '(#\Space #\Tab #\Newline #\Return))
+                    do (error "Unexpected text after the JSON value"))
+            (if key-sources
+                (values value (cons text value-positions))
+                value)))))))
 
 (defparameter *wire-encoder-bindings*
   ;; Older Yason uses fixed encoders. Resolve the defaults by name only where

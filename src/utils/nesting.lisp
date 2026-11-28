@@ -27,27 +27,46 @@ staying far below the depth that exhausts a thread's control stack.")
 source may need before the reader is let at it.  Eclector uses about 1KB of control stack per level, so a 2MB thread stack
 runs out between 1,700 and 2,000 levels; hand-written code stays far below 500.")
 
-(defun json-too-deep-p (text &optional (limit +max-json-nesting+))
-  "Return T when TEXT, JSON text, opens more than LIMIT arrays and objects
-inside one another.  Brackets inside string literals do not count; the text
-need not be valid JSON."
+(defun json-too-deep-p (text &optional (limit +max-json-nesting+) key-sources)
+  "Return T when TEXT opens more than LIMIT JSON containers inside one another.
+Brackets inside strings do not count. TEXT need not be valid JSON.
+When KEY-SOURCES is a hash table, map the end of each object key string to
+the opening bracket of its container and the start of its value. The key end
+is the position immediately after the closing quote."
   (declare (type string text) (type fixnum limit))
   (let ((depth 0)
+        (containers nil)
         (in-string nil)
         (escaped nil))
     (declare (type fixnum depth))
     (loop for c across text
+          for index from 0
           do (cond
                (in-string
                 (cond (escaped (setf escaped nil))
                       ((char= c #\\) (setf escaped t))
-                      ((char= c #\") (setf in-string nil))))
+                      ((char= c #\")
+                       (setf in-string nil)
+                       (when (and key-sources containers)
+                         (let ((colon (position-if-not
+                                       (lambda (char) (find char '(#\Space #\Tab #\Newline #\Return)))
+                                       text :start (1+ index))))
+                           (when (and colon (char= (char text colon) #\:))
+                             (setf (gethash (1+ index) key-sources)
+                                   (cons (first containers)
+                                         (position-if-not
+                                          (lambda (char)
+                                            (find char '(#\Space #\Tab #\Newline #\Return)))
+                                          text :start (1+ colon))))))))))
                ((char= c #\") (setf in-string t))
                ((or (char= c #\[) (char= c #\{))
                 (when (> (incf depth) limit)
-                  (return-from json-too-deep-p t)))
+                  (return-from json-too-deep-p t))
+                (when key-sources (push index containers)))
                ((or (char= c #\]) (char= c #\}))
-                (when (plusp depth) (decf depth)))))
+                (when (plusp depth)
+                  (decf depth)
+                  (when key-sources (pop containers))))))
     nil))
 
 (defun lisp-too-deep-p (text &optional (limit +max-lisp-nesting+))
