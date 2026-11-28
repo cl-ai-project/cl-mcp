@@ -220,7 +220,7 @@ into the worker image. Add your own defuns/defclasses below.")
 (defparameter *main-test-template-rove*
   ";;;; tests/main-test.lisp
 
-(defpackage #:{{name}}/tests/main-test
+(uiop:define-package #:{{name}}/tests/main-test
   (:use #:cl #:rove))
 
 (in-package #:{{name}}/tests/main-test)
@@ -232,12 +232,14 @@ into the worker image. Add your own defuns/defclasses below.")
   "Template for the generated project's tests/main-test.lisp under Rove.
 Exists so `run-tests` has at least one green assertion out of the box;
 holds no reference to any symbol the main package does not define, so
-deleting this file or replacing the test is free of cascading errors.")
+deleting this file or replacing the test is free of cascading errors.
+Both test templates use UIOP:DEFINE-PACKAGE to remove the old framework
+from a loaded test package's :USE list before adding the new framework.")
 
 (defparameter *main-test-template-fiveam*
   ";;;; tests/main-test.lisp
 
-(defpackage #:{{name}}/tests/main-test
+(uiop:define-package #:{{name}}/tests/main-test
   (:use #:cl #:fiveam))
 
 (in-package #:{{name}}/tests/main-test)
