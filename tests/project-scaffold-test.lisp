@@ -1094,8 +1094,10 @@ path, and signals rather than silently doing nothing when the call is absent."
                              :name name :destination "scaffolds"
                              :framework framework :overwrite overwrite))
                           (check-smoke (framework)
+                            ;; A tool request runs outside the umbrella TEST-OP's ASDF session.
                             (let ((report (build-run-tests-response
-                                           (cl-mcp/src/test-runner:run-tests system))))
+                                           (let ((asdf/session:*asdf-session* nil))
+                                             (cl-mcp/src/test-runner:run-tests system)))))
                               (ok (equal "pass" (gethash "verdict" report))
                                   (gethash "text" (elt (gethash "content" report) 0)))
                               (ok (equal framework (gethash "framework" report)))
