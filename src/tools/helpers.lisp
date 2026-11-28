@@ -5,8 +5,10 @@
 
 (defpackage #:cl-mcp/src/tools/helpers
   (:use #:cl)
+  (:import-from #:cl-ppcre #:create-scanner #:scan-to-strings)
   (:import-from #:cl-mcp/src/utils/hash
                 #:make-string-hash-table)
+  (:import-from #:cl-mcp/src/utils/sanitize #:json-number-p)
   (:import-from #:yason
                 #:false)
   ;; Every tool response passes through this module, parent and worker alike,
@@ -27,7 +29,8 @@
            #:extract-arg
            #:extract-array-arg
            #:extract-boolean-arg
-           #:*wire-tool-arguments*))
+           #:*wire-tool-arguments*
+           #:*wire-scalar-source*))
 
 (in-package #:cl-mcp/src/tools/helpers)
 
@@ -113,16 +116,61 @@ which is what most callers have, still catch it."))
   (:documentation "Signaled when tool argument validation fails.
 Use VALIDATION-MESSAGE to get the user-facing error message."))
 
-(defun %check-type-match (value type arg-name &optional item-number type-error-hint)
-  "Check whether VALUE matches TYPE, including TYPE-ERROR-HINT in a failure message."
+(defvar *wire-tool-arguments* nil
+  "The argument object of the current tool call when decoded from wire JSON.")
+
+(defvar *wire-scalar-source* nil
+  "Request text paired with the value positions of its decoded object keys.")
+
+(defun %wire-argument-source (args name)
+  "Return the request text and source position for the value of NAME in ARGS."
+  (when *wire-scalar-source*
+    (destructuring-bind (text . value-positions) *wire-scalar-source*
+      (loop for key being the hash-keys of args
+            when (equal key name)
+              return (values text (gethash key value-positions))))))
+
+(defparameter *json-decimal-pattern*
+  (create-scanner "\\A(-?)(0|[1-9][0-9]*)(?:\\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?\\z")
+  "The JSON number grammar, with groups for the sign, digits, fraction and exponent.")
+
+(defun %json-decimal-integer (text start value)
+  "Return the exact integer of the JSON number at START, or NIL for a fraction."
+  (unless (json-number-p value)
+    (return-from %json-decimal-integer nil))
+  (multiple-value-bind (rounded remainder) (truncate value)
+    (unless (zerop remainder)
+      (return-from %json-decimal-integer nil))
+    (let ((end (position-if-not (lambda (char) (find char ".0123456789+-Ee"))
+                                text :start start)))
+      (multiple-value-bind (matched parts)
+          (scan-to-strings *json-decimal-pattern* text :start start :end end)
+        (when matched
+          (destructuring-bind (sign whole fraction exponent) (coerce parts 'list)
+            (let* ((digits (concatenate 'string whole fraction))
+                   (last-nonzero (position-if (lambda (digit) (char/= digit #\0))
+                                              digits :from-end t)))
+              (unless last-nonzero
+                (return-from %json-decimal-integer 0))
+              (let* ((scale (- (if exponent (parse-integer exponent) 0) (length fraction)))
+                     (cut (+ (length digits) (min 0 scale))))
+                ;; Negative scale must discard only zeros. Positive scale cannot
+                ;; exceed the bit length of a finite nonzero decoded number.
+                (when (and (< last-nonzero cut) (<= scale (integer-length rounded)))
+                  (let ((number (* (parse-integer digits :end cut)
+                                   (expt 10 (max 0 scale)))))
+                    (if (string= sign "-") (- number) number)))))))))))
+
+(defun %check-type-match (value type arg-name &optional item-number type-error-hint wire-literal)
+  "Check VALUE against TYPE. WIRE-LITERAL names a JSON false or null decoded as NIL."
   (when type
     (let ((valid (ecase type
                    (:any t)
                    (:string (stringp value))
                    (:integer (integerp value))
                    (:number (numberp value))
-                   (:boolean (member value '(t nil)))
-                   (:array (or (listp value)
+                   (:boolean (and (not (eq wire-literal :null)) (member value '(t nil))))
+                   (:array (or (and (not wire-literal) (listp value))
                                (and (vectorp value) (not (stringp value)))))
                    (:object (hash-table-p value)))))
       (unless valid
@@ -140,91 +188,56 @@ Use VALIDATION-MESSAGE to get the user-facing error message."))
                                 type-error-hint))))))
 
 (declaim (ftype (function ((or hash-table null) string
-                           &key (:type (or keyword null)) (:required boolean)
+                           &key (:type (or keyword null)) (:required boolean) (:nullable boolean)
                                 (:type-error-hint (or null string)))
                           t)
                 extract-arg))
-(defun extract-arg (args name &key type required type-error-hint)
-  "Extract argument NAME from ARGS hash-table with optional validation.
-
-Arguments:
-  ARGS     - Hash-table of tool arguments (may be NIL)
-  NAME     - String key to extract
-  TYPE     - Expected type (:string :integer :number :boolean :array :object)
-             If NIL, no type checking is performed.
-  REQUIRED - If T, signal error when argument is missing
-   TYPE-ERROR-HINT - Optional extra text for a type mismatch
-
-Returns the argument value, or NIL if optional and not provided.
-Signals ARG-VALIDATION-ERROR on validation failure.
-
-Example:
-  (extract-arg args \"path\" :type :string :required t)
-  (extract-arg args \"limit\" :type :integer)"
+(defun extract-arg (args name &key type required nullable type-error-hint)
+  "Extract NAME from the tool argument hash table ARGS and validate its TYPE.
+TYPE is :STRING, :INTEGER, :NUMBER, :BOOLEAN, :ARRAY, :OBJECT, :ANY or NIL.
+REQUIRED rejects omission. NULLABLE permits JSON null for the declared TYPE.
+An omitted optional argument or a permitted null returns NIL. Lisp callers
+may also use NIL for an optional argument. TYPE-ERROR-HINT augments a type error."
   (multiple-value-bind (value supplied-p) (and args (gethash name args))
-    (cond
-      ;; Required but missing
-      ((and required (null value) (not (and (eq type :any) supplied-p)))
-       (error 'arg-validation-error
-              :arg-name name
-              :message (format nil "~A is required" name)))
-      ;; Present - check type
-      (value
-       (%check-type-match value type name nil type-error-hint)
-       value)
-      ;; Optional and missing
-      (t nil))))
-
-(defvar *wire-tool-arguments* nil
-  "The argument object of the current tool call when decoded from wire JSON.")
-
-(defun extract-array-arg (args name item-type &key required)
-  "Extract the array argument NAME from ARGS and validate its items against ITEM-TYPE.
-REQUIRED has the same meaning as in EXTRACT-ARG. Return the array unchanged."
-  ;; Yason reads false and null as NIL, but reads [] as an empty vector.
-  ;; Only a decoded argument object can use presence to distinguish them from
-  ;; an omitted argument or a Lisp caller's empty list.
-  (when (and args (eq args *wire-tool-arguments*))
-    (multiple-value-bind (value supplied-p) (gethash name args)
-      (when (and supplied-p (null value))
+    (let ((wire-value-p (and supplied-p (eq args *wire-tool-arguments*))))
+      (when (and required
+                 (not (or value (and supplied-p (or wire-value-p nullable (eq type :any))))))
         (error 'arg-validation-error :arg-name name
-               :message (format nil "~A must be an array" name)))))
-  (let ((items (extract-arg args name :type :array :required required))
+               :message (format nil "~A is required" name)))
+      (when (or value wire-value-p)
+        (multiple-value-bind (text start)
+            (when (and wire-value-p (or (null value) (and (eq type :integer) (floatp value))))
+              (%wire-argument-source args name))
+          (let ((wire-literal (when (and wire-value-p (null value))
+                                (if (and start (char= (char text start) #\n)) :null :false))))
+            (when (and start (eq type :integer) (floatp value))
+              (let ((integer (%json-decimal-integer text start value)))
+                (when integer
+                  ;; Some handlers forward the decoded argument table to the worker.
+                  (setf value integer
+                        (gethash name args) integer))))
+            (unless (and nullable (eq wire-literal :null))
+              (%check-type-match value type name nil type-error-hint wire-literal))
+            value))))))
+
+(defun extract-array-arg (args name item-type &key required nullable)
+  "Extract the array argument NAME from ARGS and validate its items against ITEM-TYPE.
+REQUIRED and NULLABLE have the same meaning as in EXTRACT-ARG.
+Return the array unchanged."
+  (let ((items (extract-arg args name :type :array :required required :nullable nullable))
         (item-number 0))
     (map nil (lambda (item)
                (%check-type-match item item-type name (incf item-number)))
          items)
     items))
 
-(declaim (ftype (function ((or hash-table null) string &key (:default boolean)) boolean) extract-boolean-arg))
-(defun extract-boolean-arg (args name &key (default nil))
-  "Extract boolean argument NAME from ARGS with proper nil/false handling.
-
-The challenge with boolean args is distinguishing between:
-  - Not provided (should use DEFAULT)
-  - Explicitly set to false/nil (should use NIL)
-  - Explicitly set to true (should use T)
-
-Arguments:
-  ARGS    - Hash-table of tool arguments (may be NIL)
-  NAME    - String key to extract
-  DEFAULT - Value to use when argument is not provided (default: NIL)
-
-Returns the boolean value.
-Signals ARG-VALIDATION-ERROR if provided but not a boolean.
-
-Example:
-  (extract-boolean-arg args \"recursive\" :default t)
-  (extract-boolean-arg args \"dry_run\")"
-  (multiple-value-bind (value presentp)
-      (and args (gethash name args))
-    (cond
-      ;; Not provided - use default
-      ((not presentp) default)
-      ;; Provided - validate it's boolean
-      (t
-       (unless (member value '(t nil))
-         (error 'arg-validation-error
-                :arg-name name
-                :message (format nil "~A must be boolean" name)))
-       value))))
+(declaim (ftype (function ((or hash-table null) string
+                           &key (:default boolean) (:nullable boolean))
+                          boolean)
+                extract-boolean-arg))
+(defun extract-boolean-arg (args name &key (default nil) nullable)
+  "Extract the Boolean argument NAME from ARGS.
+Use DEFAULT when omitted, and return NIL for false or a permitted null."
+  (if (and args (nth-value 1 (gethash name args)))
+      (extract-arg args name :type :boolean :nullable nullable)
+      default))

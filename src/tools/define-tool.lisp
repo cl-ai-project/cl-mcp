@@ -52,13 +52,14 @@
            :item-type :string
            :description nil))
     (list
-     (destructuring-bind (name &key json-name type required default enum description
+     (destructuring-bind (name &key json-name type required nullable default enum description
                                     item-type type-error-hint)
          spec
        (list :name name
              :json-name (or json-name (%symbol-to-json-name name))
              :type (or type :string)
              :required required
+             :nullable nullable
              :default default
              :enum enum
              :item-type (or item-type :string)
@@ -82,27 +83,32 @@
         (json-name (getf parsed-spec :json-name))
         (type (getf parsed-spec :type))
         (required (getf parsed-spec :required))
+        (nullable (getf parsed-spec :nullable))
         (default (getf parsed-spec :default))
         (item-type (getf parsed-spec :item-type))
         (hint (getf parsed-spec :type-error-hint)))
     (case type
       (:boolean
-       `(,name (extract-boolean-arg ,args-var ,json-name :default ,default)))
+       `(,name (extract-boolean-arg ,args-var ,json-name
+                                    :default ,default :nullable ,nullable)))
       (:array
-       `(,name (extract-array-arg ,args-var ,json-name ,item-type :required ,required)))
+       `(,name (extract-array-arg ,args-var ,json-name ,item-type
+                                  :required ,required :nullable ,nullable)))
       (otherwise
        `(,name (extract-arg ,args-var ,json-name :type ,type :required ,required
-                            ,@(when hint (list :type-error-hint hint))))))))
+                            :nullable ,nullable ,@(when hint (list :type-error-hint hint))))))))
 
 (defun %generate-schema-property (parsed-spec)
   "Generate the schema setter for an argument. :ANY accepts every JSON type."
   (let* ((type (getf parsed-spec :type))
          (json-type (%type-to-json-type type))
+         (nullable (getf parsed-spec :nullable))
          (item-type (%type-to-json-type (getf parsed-spec :item-type)))
          (enum (getf parsed-spec :enum))
          (description (getf parsed-spec :description)))
     `(setf (gethash ,(getf parsed-spec :json-name) properties)
-           (make-ht ,@(when json-type (list "type" json-type))
+           (make-ht ,@(when json-type
+                        (list "type" (if nullable `(vector ,json-type "null") json-type)))
                     ,@(when (eq type :array)
                         `("items" (make-ht ,@(when item-type (list "type" item-type)))))
                     ,@(when enum `("enum" (vector ,@enum)))
@@ -125,12 +131,13 @@ DESCRIPTION is the tool description string, or a form evaluated when listing too
 
 ARGS is a list of argument specifications. Each spec can be:
   - A symbol: creates an optional string argument
-  - A list: (name &key json-name type required default enum item-type description
+  - A list: (name &key json-name type required nullable default enum item-type description
                        type-error-hint)
     - name: Symbol used in BODY
     - json-name: JSON key (default: snake_case of name)
     - type: :string :integer :number :boolean :array :object :any
     - required: T if required
+    - nullable: T to accept JSON null in addition to the declared type
     - default: Default value (for :boolean only)
     - enum: List of allowed string values (e.g., '(\"a\" \"b\" \"c\"))
     - item-type: for an :array, the JSON type of its items (default :string)

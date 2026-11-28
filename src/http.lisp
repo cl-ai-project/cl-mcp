@@ -17,7 +17,7 @@
   (:import-from #:hunchentoot)
   (:import-from #:cl-mcp/src/utils/sanitize #:decode-json-text #:encode-json-line)
   (:import-from #:cl-mcp/src/utils/random #:generate-random-hex-string)
-  (:import-from #:cl-mcp/src/utils/nesting #:json-too-deep-p)
+  (:import-from #:cl-mcp/src/utils/nesting #:json-too-deep-p #:+max-json-nesting+)
   (:export
    #:*http-server*
    #:*http-server-port*
@@ -291,15 +291,18 @@ Sessions with active in-flight requests are skipped even when expired."
        (equal (gethash "method" body) "initialize")))
 
 (defun parse-json-body ()
-  "Parse the request body as JSON."
-  (let ((body (hunchentoot:raw-post-data :force-text t)))
+  "Parse the request body and return its JSON value, success flag and scalar source."
+  (let ((body (hunchentoot:raw-post-data :force-text t))
+        (key-sources (make-hash-table)))
     ;; Counted before parsing: an exhausted stack is not always catchable.
-    (when (and body (json-too-deep-p body))
+    (when (and body (json-too-deep-p body +max-json-nesting+ key-sources))
       (log-event :warn "http.parse-error" "error" "nested too deeply")
       (return-from parse-json-body nil))
     (when (and body (plusp (length body)))
       (handler-case
-          (values (decode-json-text body) t)
+          (multiple-value-bind (value scalar-source)
+              (decode-json-text body :key-sources key-sources)
+            (values value t scalar-source))
         (error (e)
           (log-event :warn "http.parse-error" "error" (princ-to-string e))
           nil)
@@ -373,7 +376,7 @@ Encoded by ENCODE-JSON-LINE, as every line sent is."
                 (search "*/*" accept))
       (return-from handle-mcp-post
         (json-response (%http-error-json -32600 "Invalid Accept header") :status 406))))
-  (multiple-value-bind (body parsed-p) (parse-json-body)
+  (multiple-value-bind (body parsed-p scalar-source) (parse-json-body)
     (unless parsed-p
       (return-from handle-mcp-post
         (json-response (%http-error-json -32700 "Parse error") :status 400)))
@@ -382,7 +385,8 @@ Encoded by ENCODE-JSON-LINE, as every line sent is."
         (%call-with-http-session
          (lambda (session)
            (let ((response (process-json-message body (http-session-state session)
-                                                  :wire-input-p t)))
+                                                  :wire-input-p t
+                                                  :wire-scalar-source scalar-source)))
              (cond
                ((initialize-request-p body)
                 (json-response (or response (%http-error-json -32600 "Initialize requires an id"))

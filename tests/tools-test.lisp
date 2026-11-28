@@ -1593,9 +1593,104 @@
     (let* ((reply (parse (%pjl "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",
                                \"params\":{\"name\":\"clgrep-search\",\"arguments\":{
                                \"pattern\":\"DEFUN MAKE-HT\",\"path\":\"src/tools/helpers.lisp\",
-                               \"case_insensitive\":false,\"limit\":null}}}")))
+                               \"case_insensitive\":false}}}")))
            (result (gethash "result" reply)))
       (ok (and result (eql 0 (gethash "count" result)))))))
+
+(deftest tools-call-uses-json-integer-semantics-for-file-offsets
+  (with-test-project-root
+    (flet ((read-at (&optional offset)
+             (parse (%pjl
+                     (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",~
+                                  \"params\":{\"name\":\"fs-read-file\",\"arguments\":{~
+                                  \"path\":\"README.md\",\"limit\":8~
+                                  ~@[,\"offset\":~A~]}}}"
+                             offset)))))
+      (dolist (literal '("1" "1.0" "1e0" "10e-1"))
+        (testing (format nil "integer-valued offset ~A" literal)
+          (let ((result (gethash "result" (read-at literal))))
+            (ok (and result (eql 1 (gethash "offset" result))))
+            (ok (and result (equal (format nil " cl-mcp~%") (gethash "text" result))))
+            (ok (and result (eql 9 (gethash "next_offset" result)))))))
+      (testing "omission reads from the start"
+        (let ((result (gethash "result" (read-at))))
+          (ok (and result (equal "# cl-mcp" (gethash "text" result))))
+          (ok (and result (eql 8 (gethash "next_offset" result))))))
+      (dolist (literal '("1.5" "1.0000000000000001" "false" "null"))
+        (testing (format nil "invalid integer offset ~A" literal)
+          (let* ((reply (read-at literal))
+                 (error (gethash "error" reply)))
+            (ok (and error (eql -32602 (gethash "code" error))))
+            (ok (equal "offset must be an integer" (%tool-call-message reply)))))))))
+
+(deftest tools-call-scopes-scalar-validation-to-the-argument-object
+  (with-test-project-root
+    (let ((state (cl-mcp/src/protocol:make-state))
+          (batch "[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",
+                     \"params\":{\"name\":\"fs-read-file\",\"arguments\":{
+                     \"path\":\"README.md\",\"offse\\u0074\" : 1.0,\"extra\":{\"offset\":1.5}}}},
+                    {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",
+                     \"params\":{\"name\":\"fs-read-file\",\"arguments\":{
+                     \"path\":\"README.md\",\"offset\":1.0000000000000001,
+                     \"extra\":[{\"offset\":1.0}]}}}]"))
+      (setf (cl-mcp/src/state:protocol-version state) "2025-03-26")
+      (let* ((reply (parse (%pjl batch state) :json-arrays-as-vectors t))
+             (result (gethash "result" (aref reply 0)))
+             (error (gethash "error" (aref reply 1))))
+        (ok (and result (eql 1 (gethash "offset" result))))
+        (ok (and error (eql -32602 (gethash "code" error))))))))
+
+(deftest tools-call-follows-the-decoder-for-duplicate-scalar-keys
+  (with-test-project-root
+    (dolist (offsets '(("1.5" "1.0") ("1.0" "1.5")))
+      (destructuring-bind (first last) offsets
+        (let* ((args (format nil "{\"path\":\"README.md\",\"offset\":~A,\"offse\\u0074\":~A}"
+                             first last))
+               (line (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",~
+                                  \"params\":{\"name\":\"fs-read-file\",\"arguments\":~A}}"
+                             args))
+               (reply (parse (%pjl line)))
+               (result (gethash "result" reply))
+               (error (gethash "error" reply)))
+          ;; Older Yason uses the last value for duplicate keys. Newer Yason rejects them.
+          (cond
+            ((not (ignore-errors (parse args :object-as :hash-table)))
+             (ok (and error (eql -32700 (gethash "code" error)))))
+            ((equal last "1.0") (ok (and result (eql 1 (gethash "offset" result)))))
+            (t (ok (and error (eql -32602 (gethash "code" error)))))))))))
+
+(deftest tools-call-validates-repl-scalar-types
+  (flet ((call (argument)
+           (parse (%pjl
+                   (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",~
+                                \"params\":{\"name\":\"repl-eval\",\"arguments\":{~
+                                \"code\":\"17\",~A}}}"
+                           argument)))))
+    (testing "false is not a package designator"
+      (let* ((reply (call "\"package\":false"))
+             (error (gethash "error" reply)))
+        (ok (and error (eql -32602 (gethash "code" error))))
+        (ok (equal "package must be a string" (%tool-call-message reply)))))
+    (testing "false is a valid Boolean"
+      (ok (equal "17" (%tool-call-message (call "\"include_result_preview\":false")))))
+    (testing "null is not a Boolean"
+      (let* ((reply (call "\"include_result_preview\":null"))
+             (error (gethash "error" reply)))
+        (ok (and error (eql -32602 (gethash "code" error))))
+        (ok (equal "include_result_preview must be boolean" (%tool-call-message reply)))))))
+
+(deftest repl-eval-keeps-documented-nullable-arguments
+  (let* ((tool (%find-tool-descriptor (nth-value 2 (%tools-list)) "repl-eval"))
+         (properties (gethash "properties" (gethash "inputSchema" tool))))
+    (dolist (field '(("print_level" "integer") ("print_length" "integer")
+                     ("safe_read" "boolean")))
+      (destructuring-bind (name type) field
+        (ok (equalp (vector type "null") (gethash "type" (gethash name properties)))))))
+  (let ((reply (parse (%pjl "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",
+                             \"params\":{\"name\":\"repl-eval\",\"arguments\":{
+                             \"code\":\"17\",\"print_level\":null,\"print_length\":null,
+                             \"safe_read\":null}}}"))))
+    (ok (equal "17" (%tool-call-message reply)))))
 
 (deftest tools-list-includes-tool-descriptors
   (testing "tools/list exposes descriptors for critical tools"

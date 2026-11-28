@@ -16,6 +16,7 @@
                 #:normalize-tool-group
                 #:tool-group-enabled-p
                 #:*enabled-tool-groups*)
+  (:import-from #:cl-mcp/src/protocol #:process-json-line)
   (:import-from #:cl-mcp/src/state
                 #:make-state))
 
@@ -60,6 +61,25 @@
   (result id
           (make-ht "content" (text-content "ok")
                    "tags" tags)))
+
+(define-tool "test-nullable"
+  :description "Accept a required value with no type restriction."
+  :args ((value :type :any :required t))
+  :body
+  (result id (make-ht "value" value)))
+
+(deftest define-tool-unconstrained-argument-accepts-wire-null
+  (flet ((call (arguments)
+           (yason:parse
+            (process-json-line
+             (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",~
+                          \"params\":{\"name\":\"test-nullable\",\"arguments\":~A}}"
+                     arguments))
+            :json-nulls-as-keyword t)))
+    (let ((result (gethash "result" (call "{\"value\":null}"))))
+      (ok (and result (eq :null (gethash "value" result)))))
+    (let ((error (gethash "error" (call "{}"))))
+      (ok (and error (eql -32602 (gethash "code" error)))))))
 
 ;;; Tests
 

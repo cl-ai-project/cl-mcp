@@ -22,6 +22,7 @@
                 #:disabled-tool-group)
   (:import-from #:cl-mcp/src/tools/helpers
                 #:*wire-tool-arguments*
+                #:*wire-scalar-source*
                 #:make-ht
                 #:result
                 #:rpc-error)
@@ -415,7 +416,7 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
       ((string= method "ping") (result id (make-ht)))
       (t (rpc-error id -32601 (format nil "Method ~A not found" method))))))
 
-(defun %dispatch-message (message state in-batch-p wire-input-p)
+(defun %dispatch-message (message state in-batch-p wire-input-p wire-scalar-source)
   "Return the reply object for one message, or NIL for a one-way message."
   (unless (hash-table-p message)
     (return-from %dispatch-message (rpc-error nil -32600 "Invalid Request")))
@@ -455,7 +456,8 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
           (t
            (let ((*wire-tool-arguments*
                    (when (and wire-input-p (equal method "tools/call") (hash-table-p params))
-                     (gethash "arguments" params))))
+                     (gethash "arguments" params)))
+                 (*wire-scalar-source* wire-scalar-source))
              (prog1 (handle-request state id method (unless (eq params :absent) params))
                (log-event :debug "rpc.result" "id" id "method" method)))))
       (error (e)
@@ -471,16 +473,17 @@ MCP_ENABLE_TOOL_GROUPS=~A in the server's environment, or by passing ~
                                   "error" "storage exhausted"))
         (when valid-id (rpc-error id -32603 "Internal error: the server ran out of stack or heap"))))))
 
-(defun process-json-message (message state &key wire-input-p)
+(defun process-json-message (message state &key wire-input-p wire-scalar-source)
   "Dispatch a parsed MCP message and return its encoded reply, or NIL.
 For a single message the second value is its reply object, if any.
-Set WIRE-INPUT-P for JSON decoded from a transport so a supplied null or false
-array argument can be distinguished from an omitted argument."
+Set WIRE-INPUT-P for JSON decoded from a transport, and pass the source
+positions from DECODE-JSON-TEXT as WIRE-SCALAR-SOURCE for scalar validation."
   (if (and (vectorp message) (not (stringp message)) (plusp (length message))
            (equal (protocol-version state) "2025-03-26"))
       ;; Encode each reply independently, preserving its ID even on the encoder's retry path.
       (let ((replies (loop for item across message
-                           for reply = (%dispatch-message item state t wire-input-p)
+                           for reply = (%dispatch-message item state t wire-input-p
+                                                          wire-scalar-source)
                            when reply collect (%encode-json reply))))
         (when replies
           (with-output-to-string (stream)
@@ -490,36 +493,37 @@ array argument can be distinguished from an omitted argument."
               (write-char #\, stream)
               (write-string reply stream))
             (write-char #\] stream))))
-      (let ((reply (%dispatch-message message state nil wire-input-p)))
+      (let ((reply (%dispatch-message message state nil wire-input-p wire-scalar-source)))
         (when reply (values (%encode-json reply) reply)))))
 
 (defun process-json-line (line &optional (state (make-state)))
   "Process one JSON-RPC line and return a JSON line to send, or NIL for notifications."
-  (let ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return) line)))
+  (let ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return) line))
+        (key-sources (make-hash-table)))
     (when (string= trimmed "")
       (log-event :debug "rpc.skip-empty")
       (return-from process-json-line nil))
     ;; Counted before parsing: an exhausted stack is not always catchable.
-    (when (json-too-deep-p trimmed)
+    (when (json-too-deep-p trimmed +max-json-nesting+ key-sources)
       (ignore-errors (log-event :warn "rpc.parse-error" "error" "nested too deeply"))
       (return-from process-json-line
         (%encode-json (rpc-error nil -32700 (format nil "Parse error: nested deeper than ~D levels"
                                                     +max-json-nesting+)))))
-    (let ((msg (handler-case
-                   (decode-json-text trimmed)
-                 (error (e)
-                   (ignore-errors
-                     (log-event :warn "rpc.parse-error"
-                                "line" trimmed
-                                "error" (princ-to-string e)))
-                   (return-from process-json-line
-                     (%encode-json (rpc-error nil -32700 "Parse error"))))
-                 ;; Not an ERROR: without this, a line nested past the
-                 ;; parser's stack would stop the connection's thread.
-                 (storage-condition ()
-                   (ignore-errors
-                     (log-event :warn "rpc.parse-error" "error" "nested too deeply"))
-                   (return-from process-json-line
-                     (%encode-json
-                      (rpc-error nil -32700 "Parse error: nested too deeply")))))))
-      (process-json-message msg state :wire-input-p t))))
+    (multiple-value-bind (message scalar-source)
+        (handler-case
+            (decode-json-text trimmed :key-sources key-sources)
+          (error (e)
+            (ignore-errors
+              (log-event :warn "rpc.parse-error"
+                         "line" trimmed
+                         "error" (princ-to-string e)))
+            (return-from process-json-line
+              (%encode-json (rpc-error nil -32700 "Parse error"))))
+          ;; Not an ERROR: without this, a line nested past the
+          ;; parser's stack would stop the connection's thread.
+          (storage-condition ()
+            (ignore-errors (log-event :warn "rpc.parse-error" "error" "nested too deeply"))
+            (return-from process-json-line
+              (%encode-json
+               (rpc-error nil -32700 "Parse error: nested too deeply")))))
+      (process-json-message message state :wire-input-p t :wire-scalar-source scalar-source))))
