@@ -1717,6 +1717,8 @@ Input:
 - `framework` (string, optional): Force a specific framework (`"rove"`, `"fiveam"`, `"prove"`, `"asdf"`, or `"auto"` for auto-detect). Auto-detection reads the test system's own `:depends-on`: a framework the system declares directly wins, then one reached transitively, and only for a system ASDF has not registered does it fall back to guessing from the loaded packages. Detection never loads anything.
 - `test` (string, optional): Run only a specific test by fully qualified name (e.g., `"my-package::my-test-name"`)
 - `tests` (array of strings, optional): Run only the listed fully qualified tests
+  For Rove, selections are resolved against the requested ASDF system and its dependencies.
+  An out-of-system test makes the selection `unresolved` before any selected test runs.
 - `timeout_seconds` (number, default `300`): give up on the run after this long. The result is
   then `framework: "timeout"` with `failed: 1` and a `TIMEOUT` entry in `failed_tests`; when the
   run's thread could not be stopped, its reason says to get a fresh worker with

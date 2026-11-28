@@ -1019,6 +1019,47 @@ suites, and the directory."
               (ignore-errors (delete-package package))))))
       (ignore-errors (uiop:delete-directory-tree dir :validate t)))))
 
+(deftest run-tests-scopes-rove-selections-to-the-requested-system
+  (%call-with-sibling-rove-fixture
+   (lambda (dir shared)
+     (declare (ignore shared))
+     (%write-fixture-file dir "clmcp-sib-other.asd"
+                          "(asdf:defsystem \"clmcp-sib-other\" :depends-on (\"rove\")
+  :components ((:file \"other\")))
+")
+     (%write-fixture-file dir "tests/a.lisp"
+                          "(defpackage #:clmcp-sib/tests/a (:use #:cl #:rove))
+(in-package #:clmcp-sib/tests/a)
+(defvar *runs* 0)
+(deftest kept (incf *runs*) (ok t))
+")
+     (let ((system "clmcp-sib")
+           (own-test "clmcp-sib/tests/a::kept")
+           (foreign-test "clmcp-sib-other::its-own"))
+       (flet ((check-unresolved (result)
+                (ok (equal "unresolved" (gethash "framework" result)))
+                (ok (zerop (gethash "passed" result)))
+                (let ((detail (aref (gethash "failed_tests" result) 0)))
+                  (ok (search system (gethash "description" detail) :test #'char-equal))
+                  (ok (search foreign-test (gethash "reason" detail) :test #'char-equal)))))
+         (check-unresolved (run-tests system :test foreign-test))
+         (ok (= 1 (gethash "passed" (run-tests "clmcp-sib-other" :test foreign-test))))
+         (let ((result (run-tests system :test foreign-test)))
+           (ok (equal "unresolved" (gethash "framework" result))
+               "a warm worker must reject a test from a different system")
+           (when (equal "unresolved" (gethash "framework" result))
+             (check-unresolved result)))
+         (let ((result (run-tests system :tests (vector own-test foreign-test))))
+           (ok (equal "unresolved" (gethash "framework" result))
+               "a mixed selection must be resolved before any test runs")
+           (when (equal "unresolved" (gethash "framework" result))
+             (check-unresolved result)))
+         (ok (zerop (symbol-value (find-symbol "*RUNS*" "CLMCP-SIB/TESTS/A")))
+             "the in-system test did not run as part of a rejected selection")
+         (let ((result (run-tests system :test own-test)))
+           (ok (= 1 (gethash "passed" result)))
+           (ok (zerop (gethash "failed" result)))))))))
+
 (deftest aggregate-rove-run-includes-subsystem-time-and-output
   (%call-with-sibling-rove-fixture
    (lambda (dir shared)
