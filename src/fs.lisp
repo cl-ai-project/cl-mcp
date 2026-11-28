@@ -175,6 +175,13 @@ Signals an error when PATH is outside the allow-list."
 (sb-alien:define-alien-routine ("fdopendir" %directory-stream-from-fd) (* t)
   (descriptor sb-alien:int))
 
+(defconstant +directory-search-open-mode+
+  #+linux #x200000 ; O_PATH
+  #+darwin #x40000000 ; O_EXEC with O_DIRECTORY gives O_SEARCH.
+  #+freebsd #x40000 ; O_SEARCH
+  #-(or linux darwin freebsd) sb-posix:o-rdonly
+  "Open an ancestor for path lookup without requiring permission to list it.")
+
 (defun fs-project-directory-names (native-path)
   "List raw names in a physical directory under the project root, including dotfiles.
 Open each component relative to the preceding directory descriptor without
@@ -183,7 +190,9 @@ following links. Signal FILE-ERROR if the physical path cannot be opened."
   (let* ((path (ensure-directory-pathname (uiop:parse-native-namestring native-path)))
          (root (ensure-directory-pathname (truename *project-root*)))
          (components (pathname-directory path))
-         (flags (logior sb-posix:o-rdonly sb-posix:o-directory sb-posix:o-nofollow))
+         (flags (logior sb-posix:o-directory sb-posix:o-nofollow))
+         (search-flags (logior flags +directory-search-open-mode+))
+         (read-flags (logior flags sb-posix:o-rdonly))
          (descriptor nil)
          (directory nil))
     (unless (and (eq (first components) :absolute)
@@ -199,16 +208,18 @@ following links. Signal FILE-ERROR if the physical path cannot be opened."
     (sb-sys:without-interrupts
       (unwind-protect
            (progn
-             (setf descriptor (sb-posix:open "/" flags))
+             (setf descriptor
+                   (sb-posix:open "/" (if (rest components) search-flags read-flags)))
              (sb-posix:fcntl descriptor sb-posix:f-setfd 1) ; FD_CLOEXEC
-             (dolist (component (rest components))
-               (let ((next (%open-directory-at descriptor component flags)))
-                 (when (minusp next)
-                   (error 'file-error :pathname path))
-                 (let ((previous descriptor))
-                   (setf descriptor next)
-                   (sb-posix:close previous))
-                 (sb-posix:fcntl descriptor sb-posix:f-setfd 1)))
+             (loop for (component . remaining) on (rest components)
+                   for next = (%open-directory-at descriptor component
+                                                  (if remaining search-flags read-flags))
+                   do (when (minusp next)
+                        (error 'file-error :pathname path))
+                      (let ((previous descriptor))
+                        (setf descriptor next)
+                        (sb-posix:close previous))
+                      (sb-posix:fcntl descriptor sb-posix:f-setfd 1))
              (let ((stream (%directory-stream-from-fd descriptor)))
                (when (sb-alien:null-alien stream)
                  (error 'file-error :pathname path))

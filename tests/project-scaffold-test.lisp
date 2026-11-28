@@ -827,6 +827,25 @@ exists to prove such a payload cannot execute."
               (progn (fs-project-directory-names (uiop:native-namestring through-link)) nil)
             (file-error () t))))))
 
+(deftest scaffold-directory-listing-allows-a-search-only-ancestor
+  (with-temp-project-root (root)
+    (if (zerop (sb-posix:geteuid))
+        (skip "root can list directories without read permission")
+        (let* ((ancestor (merge-pathnames "search-only/" root))
+               (child (merge-pathnames "child/" ancestor))
+               (native-ancestor (uiop:native-namestring ancestor)))
+          (ensure-directories-exist child)
+          (with-open-file (out (merge-pathnames ".note" child)
+                               :direction :output :if-does-not-exist :create)
+            (write-string "A local test file" out))
+          (let ((physical-child (uiop:native-namestring (truename child))))
+            (unwind-protect
+                 (progn
+                   (sb-posix:chmod native-ancestor #o100)
+                   (ok (member ".note" (ignore-errors (fs-project-directory-names physical-child))
+                               :test #'string=)))
+              (sb-posix:chmod native-ancestor #o700)))))))
+
 (deftest scaffold-overwrite-eligibility-rejects-hard-linked-files
   (with-temp-project-root (root)
     (cl-mcp/src/project-scaffold:write-scaffold
