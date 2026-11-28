@@ -1060,6 +1060,37 @@ suites, and the directory."
            (ok (= 1 (gethash "passed" result)))
            (ok (zerop (gethash "failed" result)))))))))
 
+(deftest run-tests-proves-the-source-of-selected-rove-tests
+  (%call-with-sibling-rove-fixture
+   (lambda (dir shared)
+     (declare (ignore shared))
+     (%write-fixture-file dir "tests/a.lisp"
+                          "(defpackage #:clmcp-sib/tests/a (:use #:cl #:rove))
+(in-package #:clmcp-sib/tests/a)
+(defun register-kept () (deftest kept (ok t)))
+(register-kept)
+(deftest doomed (ok t))
+")
+     (let ((asdf/session:*asdf-session* nil))
+       ;; Match the compilation source override used by repl-eval.
+       (with-compilation-unit (:override t :source-namestring "repl-eval")
+         (asdf:load-system "clmcp-sib-other"))
+       ;; A dependency's package may contain a test registered interactively
+       ;; with no source in that dependency. The package is not proof of origin.
+       (let ((name (find-symbol "DOOMED" "CLMCP-SIB/TESTS/A")))
+         (uiop:symbol-call :rove/core/suite/package :set-test name
+                           (compile nil '(lambda () nil))))
+       (let* ((result (run-tests "clmcp-sib-other" :test "clmcp-sib/tests/a::doomed"))
+              (framework (gethash "framework" result)))
+         (ok (equal "unresolved" framework))
+         (when (equal "unresolved" framework)
+           (let ((failure (aref (gethash "failed_tests" result) 0)))
+             (ok (search "source" (gethash "reason" failure) :test #'char-equal)))))
+       ;; A test defined inside a function still has a compiled source file.
+       (let ((result (run-tests "clmcp-sib-other" :test "clmcp-sib/tests/a::kept")))
+         (ok (= 1 (gethash "passed" result)))
+         (ok (zerop (gethash "failed" result))))))))
+
 (deftest aggregate-rove-run-includes-subsystem-time-and-output
   (%call-with-sibling-rove-fixture
    (lambda (dir shared)

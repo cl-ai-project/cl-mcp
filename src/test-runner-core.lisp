@@ -860,21 +860,31 @@ When SINGLE-TEST-P is true, stats contain test results directly (no suite wrappe
                                        (push assertion results)))))))
     (nreverse results)))
 
+(defun %registered-rove-tests ()
+  "Index Rove's current test symbols by their function, or return NIL while Rove is loading."
+  (let* ((package (find-package :rove/core/suite/package))
+         (all-suites (%internal-function (find-package :rove) "ALL-SUITES"))
+         (suite-tests (%internal-function package "SUITE-TESTS"))
+         (get-test (%internal-function package "GET-TEST")))
+    (when (and all-suites suite-tests get-test)
+      (let ((registered (make-hash-table :test 'eq)))
+        (dolist (suite (funcall all-suites))
+          ;; GET-TEST's symbol property can outlive removal from the suite.
+          (dolist (name (funcall suite-tests suite))
+            (let ((test (funcall get-test name)))
+              (when test (setf (gethash name registered) test)))))
+        registered))))
+
 (defun %registered-test-names (framework)
   "Index the test names FRAMEWORK can run, including FiveAM suite names."
-  (let ((registered (make-hash-table :test 'eq)))
-    (ecase framework
-      (:rove
-       ;; GET-TEST reads a symbol property that can outlive a test removed
-       ;; from its suite on reload. Only current suite entries are selectable.
-       (dolist (suite (uiop:symbol-call :rove :all-suites))
-         (dolist (name (uiop:symbol-call :rove/core/suite/package :suite-tests suite))
-           (setf (gethash name registered) t))))
-      (:fiveam
+  (ecase framework
+    (:rove (or (%registered-rove-tests) (make-hash-table :test 'eq)))
+    (:fiveam
+     (let ((registered (make-hash-table :test 'eq)))
        (dolist (name (uiop:symbol-call :fiveam :test-names))
          (when (and (symbolp name) (uiop:symbol-call :fiveam :get-test name))
-           (setf (gethash name registered) t)))))
-    registered))
+           (setf (gethash name registered) t)))
+       registered))))
 
 (defun %resolve-registered-test (name package framework registered)
   "Find NAME accessible in PACKAGE and registered with FRAMEWORK, without interning."
@@ -1919,6 +1929,31 @@ the cache's prefix taken off, as RESOLVE-FILE takes off ASDF:*USER-CACHE*'s."
     (error (condition)
       (log-event :warn "test.runner.rove-rekey-failed"
                  "error" (princ-to-string condition)))))
+
+(defvar *rove-test-source-files* (make-hash-table :test 'eq :weakness :key :synchronized t)
+  "Source files of the test functions registered while loading ASDF components.
+Each entry pairs the test's function with its source so a registration made
+after the load cannot borrow the old function's origin.")
+
+(defmethod asdf:perform :around ((operation asdf:load-op) (component asdf:cl-source-file))
+  ;; REPL compilation deliberately records "repl-eval" as the source name.
+  ;; Record the component that actually registered a test while ASDF loads it.
+  (let ((before (ignore-errors (%registered-rove-tests))))
+    (multiple-value-prog1 (call-next-method)
+      (when before
+        (handler-case
+            (let ((after (%registered-rove-tests))
+                  (source (namestring (asdf:component-pathname component))))
+              (when after
+                (maphash (lambda (name test)
+                           (unless (or (eq test (gethash name before))
+                                       ;; Keep the origin recorded by a nested load.
+                                       (eq test (car (gethash name *rove-test-source-files*))))
+                             (setf (gethash name *rove-test-source-files*) (cons test source))))
+                         after)))
+          (error (condition)
+            (log-event :warn "test.runner.rove-source-recording-failed"
+                       "error" (princ-to-string condition))))))))
 
 (defun run-rove-tests (system-name)
   "Run tests using Rove and return structured results.
@@ -3035,24 +3070,17 @@ ways a FiveAM run and the system's test-op silently part (%FIVEAM-REACHABILITY).
   "Resolve a Rove selection within SYSTEM-NAME and its ASDF dependencies."
   (let* ((names (%selected-test-symbols test tests :rove))
          (systems (cons system-name (%transitive-dependency-names system-name :max-systems nil)))
-         (files (%reloaded-files systems))
-         (packages nil)
-         (packages-scanned-p nil))
+         (files (%reloaded-files systems)))
     (dolist (name names names)
-      (let ((file (%function-file (uiop:symbol-call :rove/core/suite/package :get-test name))))
-        (unless (if (and file (not (string= file "repl-eval")))
-                    (member file files :test #'equal)
-                    ;; A test compiled interactively may only be known by its package.
-                    (progn
-                      (unless packages-scanned-p
-                        (setf packages (%packages-defined-by files)
-                              packages-scanned-p t))
-                      (member (symbol-package name) packages)))
+      (let* ((test (uiop:symbol-call :rove/core/suite/package :get-test name))
+             (origin (gethash name *rove-test-source-files*))
+             (file (if (eq test (car origin)) (cdr origin) (%function-file test))))
+        (unless (member file files :test #'equal)
           (error 'test-resolution-error
                  :system-name system-name
-                 :detail (format nil "Test ~A is outside ASDF system ~A."
+                 :detail (format nil "Test ~A has no source in ASDF system ~A."
                                  (%qualified-test-name name) system-name)
-                 :hint "Select a test from the requested system or change the system argument."))))))
+                 :hint "Select a test defined by the requested system or its dependencies."))))))
 
 (defun run-tests (system-name &key framework test tests)
   "Run tests for SYSTEM-NAME using the specified or auto-detected FRAMEWORK.
