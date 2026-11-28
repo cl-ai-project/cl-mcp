@@ -5,7 +5,10 @@
   (:import-from #:cl-mcp/src/project-scaffold-core
                 #:escape-lisp-string
                 #:*scaffold-marker-file*)
-  (:import-from #:cl-mcp/src/project-scaffold)
+  (:import-from #:cl-mcp/src/project-scaffold
+                #:%scaffold-owned-p)
+  (:import-from #:cl-mcp/src/project-scaffold-ownership
+                #:*scaffold-signing-key*)
   (:import-from #:cl-mcp/src/project-root)
   (:import-from #:cl-mcp/src/test-runner
                 #:detect-test-framework))
@@ -713,23 +716,95 @@ exists to prove such a payload cannot execute."
           (ok (member "marked.asd" (getf form :files) :test #'string=))
           (ok (member "src/main.lisp" (getf form :files) :test #'string=)))))))
 
+(deftest scaffold-overwrite-eligibility-requires-an-unchanged-tree
+  (with-temp-project-root (root)
+    (cl-mcp/src/project-scaffold:write-scaffold
+     :name "preserve-edits" :destination "scaffolds")
+    (let* ((target (uiop:merge-pathnames* "scaffolds/preserve-edits/" root))
+           (readme (merge-pathnames "README.md" target)))
+      (testing "the untouched scaffold is eligible for replacement"
+        (ok (%scaffold-owned-p target)))
+      (testing "editing a generated file makes the scaffold ineligible"
+        (with-open-file (out readme :direction :output :if-exists :append)
+          (write-line "User notes" out))
+        (ok (null (%scaffold-owned-p target)))))))
+
+(deftest scaffold-tool-preserves-user-files-on-overwrite-refusal
+  (with-temp-project-root (root)
+    (let* ((handler (cl-mcp/src/tools/registry:get-tool-handler "project-scaffold"))
+           (args (alexandria:alist-hash-table '(("name" . "saved-work")) :test 'equal))
+           (target (merge-pathnames "scaffolds/saved-work/" root))
+           (readme (merge-pathnames "README.md" target))
+           (notes (merge-pathnames ".notes.txt" target))
+           (empty (merge-pathnames "empty/" target)))
+      (ok (gethash "created" (gethash "result" (funcall handler nil 1 args))))
+      (let ((edited (make-string (length (alexandria:read-file-into-string readme))
+                                 :initial-element #\x)))
+        (with-open-file (out readme :direction :output :if-exists :supersede)
+          (write-string edited out))
+        (with-open-file (out notes :direction :output :if-does-not-exist :create)
+          (write-string "User notes" out))
+        (ensure-directories-exist empty)
+        (setf (gethash "overwrite" args) t)
+        (let* ((response (funcall handler nil 2 args))
+               (result (gethash "result" response))
+               (diagnostic (gethash "error" result)))
+          (testing "the tool reports a refusal and identifies the changed entries"
+            (ok (= 2 (gethash "id" response)))
+            (ok (hash-table-p result))
+            (ok (nth-value 1 (gethash "created" result)))
+            (ok (null (gethash "created" result)))
+            (ok (and (stringp diagnostic) (search "README.md" diagnostic)))
+            (ok (and (stringp diagnostic) (search ".notes.txt" diagnostic)))
+            (ok (and (stringp diagnostic) (search "empty" diagnostic))))
+          (testing "the edited bytes and the added entries survive"
+            (ok (equal edited (alexandria:read-file-into-string readme)))
+            (ok (equal "User notes" (alexandria:read-file-into-string notes)))
+            (ok (uiop:directory-exists-p empty))))))))
+
+(deftest scaffold-overwrite-eligibility-is-bound-to-the-original-location
+  (with-temp-project-root (root)
+    (cl-mcp/src/project-scaffold:write-scaffold
+     :name "original" :destination "scaffolds")
+    (let ((original (merge-pathnames "scaffolds/original/" root))
+          (moved (merge-pathnames "scaffolds/moved/" root)))
+      (rename-file original moved)
+      (ok (null (%scaffold-owned-p moved)))
+      (rename-file moved original)
+      (ok (%scaffold-owned-p original)))))
+
+(deftest scaffold-overwrite-eligibility-requires-the-server-key
+  (with-temp-project-root (root)
+    (cl-mcp/src/project-scaffold:write-scaffold
+     :name "earlier-process" :destination "scaffolds")
+    (let ((target (merge-pathnames "scaffolds/earlier-process/" root))
+          (*scaffold-signing-key* nil))
+      (ok (null (%scaffold-owned-p target)))
+      (ok (probe-file (merge-pathnames "README.md" target))))))
+
+(deftest scaffold-overwrite-eligibility-requires-a-regular-file
+  (with-temp-project-root (root)
+    (cl-mcp/src/project-scaffold:write-scaffold
+     :name "with-link" :destination "scaffolds")
+    (let* ((target (merge-pathnames "scaffolds/with-link/" root))
+           (readme (merge-pathnames "README.md" target))
+           (same-bytes (merge-pathnames "readme-copy.md" root)))
+      (rename-file readme same-bytes)
+      (sb-posix:symlink (uiop:native-namestring same-bytes) (uiop:native-namestring readme))
+      (ok (null (%scaffold-owned-p target)))
+      (ok (probe-file same-bytes)))))
+
 (deftest write-scaffold-overwrite-replaces-own-scaffold
   (with-temp-project-root (root)
     (cl-mcp/src/project-scaffold:write-scaffold
      :name "over-me" :description "first" :author "a" :license "MIT"
      :destination "scaffolds")
     (let ((target (uiop:merge-pathnames* "scaffolds/over-me/" root)))
-      ;; A stale file proves the old tree really went away rather than
-      ;; being merged into.
-      (with-open-file (s (uiop:merge-pathnames* "stale.txt" target)
-                         :direction :output :if-exists :supersede)
-        (write-string "stale" s))
-      (testing "overwriting a cl-mcp-generated scaffold succeeds"
+      (testing "overwriting an unchanged cl-mcp-generated scaffold succeeds"
         (ok (cl-mcp/src/project-scaffold:write-scaffold
              :name "over-me" :description "second" :author "a" :license "MIT"
              :destination "scaffolds" :overwrite t)))
-      (testing "the tree was replaced, not merged"
-        (ok (null (probe-file (uiop:merge-pathnames* "stale.txt" target))))
+      (testing "the replacement contains the requested description"
         (ok (search "second"
                     (alexandria:read-file-into-string
                      (uiop:merge-pathnames* "over-me.asd" target)))))
