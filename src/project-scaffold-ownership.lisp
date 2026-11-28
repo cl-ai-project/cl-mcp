@@ -6,7 +6,8 @@
   (:import-from #:cl-mcp/src/fs
                 #:*fs-read-max-bytes*
                 #:fs-read-file
-                #:fs-read-source-octets)
+                #:fs-read-source-octets
+                #:fs-project-directory-names)
   (:import-from #:cl-mcp/src/project-scaffold-core
                 #:*scaffold-marker-file*
                 #:scaffold-marker-content)
@@ -97,19 +98,6 @@
                   (let ((*read-eval* nil))
                     (read-from-string manifest)))))))))))
 
-(defun %directory-names (native)
-  "List the raw entry names of NATIVE, including hidden files and links."
-  (let ((directory (sb-posix:opendir native)))
-    (unwind-protect
-         (loop with names = nil
-               for entry = (sb-posix:readdir directory)
-               until (sb-alien:null-alien entry)
-               do (let ((name (sb-posix:dirent-name entry)))
-                    (unless (member name '("." "..") :test #'string=)
-                      (push name names)))
-               finally (return names))
-      (sb-posix:closedir directory))))
-
 (defun %expected-entries (manifest)
   "Index the generated files, their containing directories, and the receipt."
   (let ((pending (make-hash-table :test #'equal)))
@@ -125,10 +113,10 @@
 (defun %changed-entries (directory manifest)
   "List missing, added, or changed entries. Visit only expected real directories."
   (let ((pending (%expected-entries manifest))
-        (root (native-path-namestring directory))
+        (root (native-path-namestring (truename directory)))
         (changed nil))
     (labels ((walk (prefix)
-               (dolist (name (%directory-names (concatenate 'string root prefix)))
+               (dolist (name (fs-project-directory-names (concatenate 'string root prefix)))
                  (let* ((relative (concatenate 'string prefix name))
                         (expected (gethash relative pending))
                         (native (concatenate 'string root relative)))

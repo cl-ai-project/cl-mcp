@@ -11,7 +11,8 @@
   (:import-from #:cl-mcp/src/project-scaffold-ownership
                 #:*scaffold-signing-key*)
   (:import-from #:cl-mcp/src/fs
-                #:*fs-read-max-bytes*)
+                #:*fs-read-max-bytes*
+                #:fs-project-directory-names)
   (:import-from #:cl-mcp/src/project-root)
   (:import-from #:cl-mcp/src/test-runner
                 #:detect-test-framework))
@@ -808,6 +809,23 @@ exists to prove such a payload cannot execute."
       (sb-posix:symlink (uiop:native-namestring same-bytes) (uiop:native-namestring readme))
       (ok (null (%scaffold-owned-p target)))
       (ok (probe-file same-bytes)))))
+
+(deftest scaffold-directory-listing-refuses-a-linked-component
+  (with-temp-project-root (root)
+    (let* ((real (merge-pathnames "real/" root))
+           (child (merge-pathnames "child/" real))
+           (through-link (merge-pathnames "alias/child/" (truename root)))
+           (note (merge-pathnames ".note" child)))
+      (ensure-directories-exist child)
+      (with-open-file (out note :direction :output :if-does-not-exist :create)
+        (write-string "A local test file" out))
+      (sb-posix:symlink (uiop:native-namestring real)
+                        (uiop:native-namestring (merge-pathnames "alias" root)))
+      (ok (member ".note" (fs-project-directory-names (uiop:native-namestring (truename child)))
+                  :test #'string=))
+      (ok (handler-case
+              (progn (fs-project-directory-names (uiop:native-namestring through-link)) nil)
+            (file-error () t))))))
 
 (deftest scaffold-overwrite-eligibility-rejects-hard-linked-files
   (with-temp-project-root (root)
