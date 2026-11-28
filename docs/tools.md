@@ -1966,8 +1966,9 @@ Output fields (on success):
 - `files` (array of strings): relative file paths written, in manifest order
 - `framework` (string): the resolved test framework, `"rove"` or `"fiveam"`
 - `next_steps` (array of strings): human-readable REPL commands to register the system with ASDF, load it, run its tests, and edit it via `lisp-edit-form`
-- `warning` (string, optional): the path to an old scaffold preserved after
-  replacement. Review and move the backup before loading because ASDF may pick up its `.asd`.
+- `warning` (string, optional): the path to the previous scaffold after an overwrite.
+  Its system definition is normally saved with an `.asd.backup` suffix.
+  If the original `.asd` remains, move the backup before loading the new system.
 - `content`: `Scaffolded NAME at PATH (N files, FRAMEWORK tests)`, the absolute path, and the
   steps
 
@@ -1982,7 +1983,7 @@ Output on failure (an ordinary result, not `isError`):
 
 Behavior:
 - Runs inline in the parent process alongside other `fs-*` tools.
-- Stages the new tree in a private `.tmp-project-scaffold-<uuid>/` directory
+- Stages the new tree in a private `.cl-mcp-scaffold-<uuid>/` directory
   next to the destination, then renames it into place.
 - `framework` drives the generated `.asd` `:depends-on` entry, its `test-op`
   hook and `tests/main-test.lisp`. A FiveAM project gets a root suite named
@@ -1995,7 +1996,9 @@ Behavior:
 - With `overwrite: true`, the server checks the signature and verifies that
   every entry matches its manifest. Added, edited, missing, or linked entries
   cause a refusal that preserves the original directory. The server verifies the
-  tree again after renaming it aside and before removing the backup.
+  old tree again after moving it aside and before publishing the replacement.
+  A successful overwrite keeps the old tree as a backup, including any writes
+  that finish through files opened before the replacement.
 - The signing key lives in the server process. Legacy markers, moved scaffolds,
   and scaffolds from an earlier server process are preserved. Use a new name
   or move the existing scaffold before generating at that location again.

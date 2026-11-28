@@ -27,7 +27,6 @@
   (:import-from #:cl-mcp/src/project-scaffold-ownership
                 #:scaffold-entry-kind
                 #:signed-scaffold-marker
-                #:discard-scaffold-backup
                 #:scaffold-replacement-problem)
   (:import-from #:cl-mcp/src/fs
                 #:fs-write-file)
@@ -111,7 +110,7 @@ INVALID-ARGUMENT-ERROR."
   (let ((parent (uiop:pathname-parent-directory-pathname target)))
     (ensure-directories-exist parent)
     (loop for relative = (uiop:ensure-directory-pathname
-                          (format nil ".tmp-project-scaffold-~A" (%uuid-suffix)))
+                          (format nil ".cl-mcp-scaffold-~A" (%uuid-suffix)))
           for scratch = (merge-pathnames relative parent)
           do (%assert-within-project-root scratch)
              (handler-case
@@ -150,12 +149,21 @@ INVALID-ARGUMENT-ERROR."
                            (native-path-namestring backup)))))
 
 (defun %delete-scaffold-tree (scratch)
-  "Remove SCRATCH, which this call created exclusively for its transaction."
+  "Remove the staged generation within this call's private transaction directory."
   (%assert-within-project-root scratch)
   (uiop:delete-directory-tree
    scratch :validate (lambda (path)
                        (and (equal path scratch)
                             (eq :directory (scaffold-entry-kind path))))))
+
+(defun %abort-scaffold-generation (scratch temp backup target)
+  "Restore any staged original and clean up only the new generation on failure."
+  ;; A rename can have taken effect even if the caller was interrupted before
+  ;; it returned. Check for the old tree on disk before cleaning up.
+  (when (scaffold-entry-kind backup)
+    (%restore-scaffold-backup backup target))
+  (ignore-errors (%delete-scaffold-tree temp))
+  (ignore-errors (sb-posix:rmdir (native-path-namestring scratch))))
 
 (defun %prompt-destination (target-dir)
   "Return the destination relative to the physical root, including its uncreated suffix."
@@ -172,13 +180,23 @@ INVALID-ARGUMENT-ERROR."
                               (asdf:system-relative-pathname :cl-mcp path)
                               :external-format :utf-8))))
 
+(defun %archive-backup-asd (backup name)
+  "Keep the old system definition under a name ASDF will not discover."
+  (let ((source (merge-pathnames (concatenate 'string name ".asd") backup))
+        (archive (merge-pathnames (concatenate 'string name ".asd.backup") backup)))
+    (when (and (eq :file (scaffold-entry-kind source))
+               (null (scaffold-entry-kind archive)))
+      (sb-posix:rename (native-path-namestring source) (native-path-namestring archive))
+      t)))
+
 (defun write-scaffold (&key name description author license destination overwrite framework)
   "Generate a scaffold and return its target path, generated files, and framework.
 OVERWRITE replaces only a directory whose ownership and unchanged contents
 this server can verify. The old tree is renamed aside and verified again
 before the new one is published. On failure, restore the original directory.
-If the new tree was published but the backup could not be safely removed,
-return its pathname under :LEFTOVER-BACKUP for the caller to report."
+A successful replacement keeps the old tree under :LEFTOVER-BACKUP so
+writes through open files still have a destination. :ARCHIVED-BACKUP-ASD
+reports whether its system definition was moved out of ASDF discovery."
   (ensure-project-root)
   (validate-project-name name)
   (validate-destination destination)
@@ -207,7 +225,6 @@ return its pathname under :LEFTOVER-BACKUP for the caller to report."
                (scratch (%make-scaffold-scratch target))
                (temp (merge-pathnames "new/" scratch))
                (backup (merge-pathnames "old/" scratch))
-               (moved-aside nil)
                (committed nil))
           (unwind-protect
                (let ((location (%physical-scaffold-location target)))
@@ -215,7 +232,6 @@ return its pathname under :LEFTOVER-BACKUP for the caller to report."
                  (%assert-within-project-root target)
                  (when exists
                    (rename-file target backup)
-                   (setf moved-aside t)
                    (%require-scaffold-ownership backup target location))
                  (when (scaffold-entry-kind target)
                    (error 'invalid-argument-error
@@ -223,21 +239,19 @@ return its pathname under :LEFTOVER-BACKUP for the caller to report."
                           :reason "the destination appeared during generation"))
                  (rename-file temp target)
                  (setf committed t)
-                 (let ((keep-backup (and moved-aside
-                                         (not (ignore-errors
-                                                (discard-scaffold-backup backup location))))))
-                   (unless keep-backup
+                 (let ((archived-asd (when exists
+                                       (ignore-errors (%archive-backup-asd backup name)))))
+                   (unless exists
                      (ignore-errors (sb-posix:rmdir (native-path-namestring scratch))))
                    (list :target-dir target
                          :relative-path (native-path-namestring
                                          (uiop:enough-pathname target *project-root*))
                          :files (mapcar #'car plan)
                          :framework framework
-                         :leftover-backup (and keep-backup backup))))
+                         :leftover-backup (and exists backup)
+                         :archived-backup-asd archived-asd)))
             (unless committed
-              (when moved-aside
-                (%restore-scaffold-backup backup target))
-              (ignore-errors (%delete-scaffold-tree scratch)))))))))
+              (%abort-scaffold-generation scratch temp backup target))))))))
 
 (define-tool "project-scaffold"
   :description
@@ -259,6 +273,7 @@ ownership manifest from this server process. Its generated files must match
 the manifest and the directory must contain no extra entries. If verification
 fails, the existing files are kept. Use a new name for an older or changed
 scaffold. A refusal is an ordinary result with created=false and an error message.
+A successful overwrite reports where the previous scaffold was saved.
 
 The generated .asd is NOT loaded or registered with ASDF: this tool runs in
 the cl-mcp parent process, so loading generated code here would escape the
@@ -343,10 +358,11 @@ generated project without further configuration.")
         (let* ((warning
                 (when leftover
                   (format nil
-                          "The previous scaffold was preserved at ~A. ~
-                           Review and move it before loading because ASDF ~
-                           may resolve ~A to the backup."
-                          (native-path-namestring leftover) name)))
+                          "The previous scaffold is preserved at ~A. ~A"
+                          (native-path-namestring leftover)
+                          (if (getf result-plist :archived-backup-asd)
+                              "Its system definition has an .asd.backup suffix."
+                              "Move the backup before loading so ASDF finds the new system."))))
                (ht (make-ht
                     "created" t
                     "path" relative

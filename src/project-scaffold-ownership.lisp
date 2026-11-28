@@ -10,7 +10,6 @@
                 #:native-path-namestring)
   (:export #:scaffold-entry-kind
            #:signed-scaffold-marker
-           #:discard-scaffold-backup
            #:scaffold-replacement-problem))
 
 (in-package #:cl-mcp/src/project-scaffold-ownership)
@@ -23,13 +22,14 @@
 (defparameter *signature-prefix* ";;;; cl-mcp scaffold HMAC-SHA256 ")
 
 (defun scaffold-entry-kind (path)
-  "Return :DIRECTORY, :FILE, :OTHER or NIL for PATH without following its last entry."
+  "Classify PATH without following its last entry.
+:FILE means a regular file with one link. :OTHER covers links and special files."
   (let ((native (if (pathnamep path) (native-path-namestring path) path)))
     (handler-case
         (let* ((stat (sb-posix:lstat (string-right-trim "/" native)))
                (type (logand (sb-posix:stat-mode stat) sb-posix:s-ifmt)))
           (cond ((= type sb-posix:s-ifdir) :directory)
-                ((= type sb-posix:s-ifreg) :file)
+                ((and (= type sb-posix:s-ifreg) (= 1 (sb-posix:stat-nlink stat))) :file)
                 (t :other)))
       (sb-posix:syscall-error (condition)
         (unless (= (sb-posix:syscall-errno condition) sb-posix:enoent)
@@ -160,27 +160,3 @@ LOCATION is its original physical namestring when DIRECTORY has been moved aside
           "the existing target is not a real directory")
     ((or file-error stream-error sb-posix:syscall-error) ()
       "the existing scaffold could not be inspected safely")))
-
-(defun discard-scaffold-backup (directory location)
-  "Remove verified generated entries from DIRECTORY. Return true once it is gone.
-Remove directories only when empty, so a new entry that appears during
-cleanup is kept and the caller can report the backup."
-  (let ((manifest (%verified-manifest directory location)))
-    (when (and manifest (null (%changed-entries directory manifest)))
-      (let ((root (native-path-namestring directory))
-            (folders nil))
-        (maphash
-         (lambda (relative expected)
-           (let ((native (concatenate 'string root relative)))
-             (cond ((eq expected :directory) (push native folders))
-                   ((listp expected)
-                    (unless (and (eq :file (scaffold-entry-kind native))
-                                 (equal expected (%file-evidence native (first expected))))
-                      (return-from discard-scaffold-backup nil))
-                    (sb-posix:unlink native)))))
-         (%expected-entries manifest))
-        (dolist (folder (sort folders #'> :key #'length))
-          (sb-posix:rmdir folder))
-        (sb-posix:unlink (concatenate 'string root *scaffold-marker-file*))
-        (sb-posix:rmdir root)
-        t))))

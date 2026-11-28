@@ -6,7 +6,8 @@
                 #:escape-lisp-string
                 #:*scaffold-marker-file*)
   (:import-from #:cl-mcp/src/project-scaffold
-                #:%scaffold-owned-p)
+                #:%scaffold-owned-p
+                #:%abort-scaffold-generation)
   (:import-from #:cl-mcp/src/project-scaffold-ownership
                 #:*scaffold-signing-key*)
   (:import-from #:cl-mcp/src/project-root)
@@ -794,31 +795,74 @@ exists to prove such a payload cannot execute."
       (ok (null (%scaffold-owned-p target)))
       (ok (probe-file same-bytes)))))
 
+(deftest scaffold-overwrite-eligibility-rejects-hard-linked-files
+  (with-temp-project-root (root)
+    (cl-mcp/src/project-scaffold:write-scaffold
+     :name "with-hard-link" :destination "scaffolds")
+    (let* ((target (merge-pathnames "scaffolds/with-hard-link/" root))
+           (readme (merge-pathnames "README.md" target))
+           (same-bytes (merge-pathnames "readme-copy.md" root)))
+      (rename-file readme same-bytes)
+      (sb-posix:link (uiop:native-namestring same-bytes) (uiop:native-namestring readme))
+      (ok (null (%scaffold-owned-p target)))
+      (ok (probe-file same-bytes)))))
+
+(deftest scaffold-abort-restores-the-backup-found-on-disk
+  (with-temp-project-root (root)
+    (cl-mcp/src/project-scaffold:write-scaffold
+     :name "interrupted" :destination "scaffolds")
+    (let* ((target (merge-pathnames "scaffolds/interrupted/" root))
+           (notes (merge-pathnames "notes.txt" target))
+           (scratch (merge-pathnames "scaffolds/staging/" root))
+           (temp (merge-pathnames "new/" scratch))
+           (backup (merge-pathnames "old/" scratch)))
+      (with-open-file (out notes :direction :output :if-does-not-exist :create)
+        (write-string "Preserve these notes" out))
+      (ensure-directories-exist temp)
+      (rename-file target backup)
+      (%abort-scaffold-generation scratch temp backup target)
+      (ok (equal "Preserve these notes" (alexandria:read-file-into-string notes)))
+      (ok (null (uiop:directory-exists-p scratch))))))
+
+(deftest scaffold-replacement-preserves-an-open-save
+  (with-temp-project-root (root)
+    (cl-mcp/src/project-scaffold:write-scaffold
+     :name "open-save" :destination "scaffolds")
+    (let ((readme (merge-pathnames "scaffolds/open-save/README.md" root))
+          (backup nil))
+      (with-open-file (out readme :direction :output :if-exists :append)
+        (let ((replacement
+                (cl-mcp/src/project-scaffold:write-scaffold
+                 :name "open-save" :destination "scaffolds" :overwrite t)))
+          (setf backup (getf replacement :leftover-backup)))
+        (write-line "A save completed after replacement" out))
+      (ok (and backup
+               (search "A save completed after replacement"
+                       (alexandria:read-file-into-string
+                        (merge-pathnames "README.md" backup)))))
+      (ok (null (search "A save completed after replacement"
+                        (alexandria:read-file-into-string readme)))))))
+
 (deftest write-scaffold-overwrite-replaces-own-scaffold
   (with-temp-project-root (root)
     (cl-mcp/src/project-scaffold:write-scaffold
      :name "over-me" :description "first" :author "a" :license "MIT"
      :destination "scaffolds")
-    (let ((target (uiop:merge-pathnames* "scaffolds/over-me/" root)))
-      (testing "overwriting an unchanged cl-mcp-generated scaffold succeeds"
-        (ok (cl-mcp/src/project-scaffold:write-scaffold
-             :name "over-me" :description "second" :author "a" :license "MIT"
-             :destination "scaffolds" :overwrite t)))
+    (let* ((target (merge-pathnames "scaffolds/over-me/" root))
+           (new-asd (merge-pathnames "over-me.asd" target))
+           (replacement (cl-mcp/src/project-scaffold:write-scaffold
+                         :name "over-me" :description "second" :author "a" :license "MIT"
+                         :destination "scaffolds" :overwrite t))
+           (backup (getf replacement :leftover-backup)))
       (testing "the replacement contains the requested description"
-        (ok (search "second"
-                    (alexandria:read-file-into-string
-                     (uiop:merge-pathnames* "over-me.asd" target)))))
-      (testing "no scratch directories are left behind"
-        (ok (null (remove-if-not
-                   (lambda (p)
-                     (let ((last-seg (car (last (pathname-directory p)))))
-                       (and (stringp last-seg)
-                            (or (uiop:string-prefix-p ".tmp-project-scaffold-"
-                                                      last-seg)
-                                (uiop:string-prefix-p ".bak-project-scaffold-"
-                                                      last-seg)))))
-                   (uiop:subdirectories
-                    (uiop:merge-pathnames* "scaffolds/" root)))))))))
+        (ok (search "second" (alexandria:read-file-into-string new-asd))))
+      (testing "the previous definition is kept without adding an ASDF discovery candidate"
+        (ok (getf replacement :archived-backup-asd))
+        (ok (and backup
+                 (search "first" (alexandria:read-file-into-string
+                                  (merge-pathnames "over-me.asd.backup" backup)))))
+        (ok (equal (truename new-asd)
+                   (cl-mcp/src/utils/paths:discover-asd-in-project "over-me")))))))
 
 (deftest write-scaffold-overwrite-refuses-foreign-directory
   (with-temp-project-root (root)
