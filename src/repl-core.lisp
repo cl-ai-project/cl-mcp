@@ -130,7 +130,8 @@ a caller than knowing only that something was lost."
   (let ((pkg (etypecase package
                (package package)
                (symbol (find-package package))
-               (string (find-package (string-upcase package))))))
+               (string (or (find-package package)
+                            (find-package (string-upcase package)))))))
     (unless pkg
       (error '%package-not-found-error :package package))
     pkg))
