@@ -160,10 +160,11 @@ INVALID-ARGUMENT-ERROR."
   "Restore any staged original and clean up only the new generation on failure."
   ;; A rename can have taken effect even if the caller was interrupted before
   ;; it returned. Check for the old tree on disk before cleaning up.
-  (when (scaffold-entry-kind backup)
-    (%restore-scaffold-backup backup target))
-  (ignore-errors (%delete-scaffold-tree temp))
-  (ignore-errors (sb-posix:rmdir (native-path-namestring scratch))))
+  (unwind-protect
+       (when (scaffold-entry-kind backup)
+         (%restore-scaffold-backup backup target))
+    (ignore-errors (%delete-scaffold-tree temp))
+    (ignore-errors (sb-posix:rmdir (native-path-namestring scratch)))))
 
 (defun %prompt-destination (target-dir)
   "Return the destination relative to the physical root, including its uncreated suffix."

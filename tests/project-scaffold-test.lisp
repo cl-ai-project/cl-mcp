@@ -824,6 +824,22 @@ exists to prove such a payload cannot execute."
       (ok (equal "Preserve these notes" (alexandria:read-file-into-string notes)))
       (ok (null (uiop:directory-exists-p scratch))))))
 
+(deftest scaffold-abort-cleans-staging-even-when-the-target-is-occupied
+  (with-temp-project-root (root)
+    (let* ((target (merge-pathnames "scaffolds/occupied/" root))
+           (scratch (merge-pathnames "scaffolds/staging/" root))
+           (temp (merge-pathnames "new/" scratch))
+           (backup (merge-pathnames "old/" scratch))
+           (notes (merge-pathnames "notes.txt" backup)))
+      (mapc #'ensure-directories-exist (list target temp backup))
+      (with-open-file (out notes :direction :output :if-does-not-exist :create)
+        (write-string "Preserved original" out))
+      (ok (handler-case (progn (%abort-scaffold-generation scratch temp backup target) nil)
+            (cl-mcp/src/project-scaffold-core:invalid-argument-error () t)))
+      (ok (null (uiop:directory-exists-p temp)))
+      (ok (equal "Preserved original" (alexandria:read-file-into-string notes)))
+      (ok (uiop:directory-exists-p target)))))
+
 (deftest scaffold-replacement-preserves-an-open-save
   (with-temp-project-root (root)
     (cl-mcp/src/project-scaffold:write-scaffold
