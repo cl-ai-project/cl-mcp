@@ -3,6 +3,9 @@
 (defpackage #:cl-mcp/src/project-scaffold-ownership
   (:use #:cl)
   (:import-from #:ironclad)
+  (:import-from #:cl-mcp/src/fs
+                #:fs-read-file
+                #:fs-read-source-octets)
   (:import-from #:cl-mcp/src/project-scaffold-core
                 #:*scaffold-marker-file*
                 #:scaffold-marker-content)
@@ -37,12 +40,14 @@
 
 (defun %file-evidence (native &optional expected-size)
   "Return the byte count and SHA-256 of a generated file. Skip hashing other sizes."
-  (with-open-file (input (uiop:parse-native-namestring native)
-                        :element-type '(unsigned-byte 8))
-    (let ((size (file-length input)))
-      (when (or (null expected-size) (= size expected-size))
-        (list size (ironclad:byte-array-to-hex-string
-                    (ironclad:digest-stream :sha256 input)))))))
+  (when (or (null expected-size)
+            (= expected-size (sb-posix:stat-size (sb-posix:lstat native))))
+    ;; Use the file tools' read policy while retaining exact bytes for the digest.
+    (let ((bytes (fs-read-source-octets (uiop:parse-native-namestring native))))
+      (when (or (null expected-size) (= (length bytes) expected-size))
+        (list (length bytes)
+              (ironclad:byte-array-to-hex-string
+               (ironclad:digest-sequence :sha256 bytes)))))))
 
 (defun %signature (directory location manifest)
   "Authenticate MANIFEST for DIRECTORY and its original physical LOCATION."
@@ -72,23 +77,21 @@
   "Read the manifest at DIRECTORY only after authenticating its text for LOCATION."
   (let ((marker (merge-pathnames *scaffold-marker-file* directory)))
     (when (and *scaffold-signing-key* (eq :file (scaffold-entry-kind marker)))
-      (with-open-file (input marker :external-format :utf-8)
-        (let* ((buffer (make-string (1+ +marker-limit+)))
-               (end (read-sequence buffer input))
-               (newline (position #\Newline buffer :end end)))
-          (when (and (< end (length buffer))
-                     (eql newline (+ 64 (length *signature-prefix*)))
-                     (uiop:string-prefix-p *signature-prefix* buffer))
-            (let ((signature (ignore-errors
-                               (ironclad:hex-string-to-byte-array
-                                (subseq buffer (length *signature-prefix*) newline))))
-                  (manifest (subseq buffer (1+ newline) end)))
-              (when (and signature
-                         (ironclad:constant-time-equal
-                          signature (%signature directory location manifest)))
-                (with-standard-io-syntax
-                  (let ((*read-eval* nil))
-                    (read-from-string manifest)))))))))))
+      (let* ((text (fs-read-file marker :limit (1+ +marker-limit+)))
+             (newline (position #\Newline text)))
+        (when (and (<= (length text) +marker-limit+)
+                   (eql newline (+ 64 (length *signature-prefix*)))
+                   (uiop:string-prefix-p *signature-prefix* text))
+          (let ((signature (ignore-errors
+                             (ironclad:hex-string-to-byte-array
+                              (subseq text (length *signature-prefix*) newline))))
+                (manifest (subseq text (1+ newline))))
+            (when (and signature
+                       (ironclad:constant-time-equal
+                        signature (%signature directory location manifest)))
+              (with-standard-io-syntax
+                (let ((*read-eval* nil))
+                  (read-from-string manifest))))))))))
 
 (defun %directory-names (native)
   "List the raw entry names of NATIVE, including hidden files and links."
@@ -158,5 +161,5 @@ LOCATION is its original physical namestring when DIRECTORY has been moved aside
                             changed)))
                 "this server cannot verify ownership. Use a new scaffold name."))
           "the existing target is not a real directory")
-    ((or file-error stream-error sb-posix:syscall-error) ()
+    ((or file-error stream-error simple-error sb-posix:syscall-error) ()
       "the existing scaffold could not be inspected safely")))

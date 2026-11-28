@@ -862,20 +862,20 @@ exists to prove such a payload cannot execute."
 (deftest write-scaffold-overwrite-replaces-own-scaffold
   (with-temp-project-root (root)
     (cl-mcp/src/project-scaffold:write-scaffold
-     :name "over-me" :description "first" :author "a" :license "MIT"
+     :name "over-me" :description "初版" :author "a" :license "MIT"
      :destination "scaffolds")
     (let* ((target (merge-pathnames "scaffolds/over-me/" root))
            (new-asd (merge-pathnames "over-me.asd" target))
            (replacement (cl-mcp/src/project-scaffold:write-scaffold
-                         :name "over-me" :description "second" :author "a" :license "MIT"
+                         :name "over-me" :description "改訂版" :author "a" :license "MIT"
                          :destination "scaffolds" :overwrite t))
            (backup (getf replacement :leftover-backup)))
       (testing "the replacement contains the requested description"
-        (ok (search "second" (alexandria:read-file-into-string new-asd))))
+        (ok (search "改訂版" (alexandria:read-file-into-string new-asd))))
       (testing "the previous definition is kept without adding an ASDF discovery candidate"
         (ok (getf replacement :archived-backup-asd))
         (ok (and backup
-                 (search "first" (alexandria:read-file-into-string
+                 (search "初版" (alexandria:read-file-into-string
                                   (merge-pathnames "over-me.asd.backup" backup)))))
         (ok (equal (truename new-asd)
                    (cl-mcp/src/utils/paths:discover-asd-in-project "over-me")))))))
