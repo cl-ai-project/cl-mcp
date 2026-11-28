@@ -10,6 +10,8 @@
                 #:%abort-scaffold-generation)
   (:import-from #:cl-mcp/src/project-scaffold-ownership
                 #:*scaffold-signing-key*)
+  (:import-from #:cl-mcp/src/fs
+                #:*fs-read-max-bytes*)
   (:import-from #:cl-mcp/src/project-root)
   (:import-from #:cl-mcp/src/test-runner
                 #:detect-test-framework))
@@ -782,6 +784,18 @@ exists to prove such a payload cannot execute."
           (*scaffold-signing-key* nil))
       (ok (null (%scaffold-owned-p target)))
       (ok (probe-file (merge-pathnames "README.md" target))))))
+
+(deftest scaffold-overwrite-eligibility-observes-the-file-read-cap
+  (with-temp-project-root (root)
+    (cl-mcp/src/project-scaffold:write-scaffold
+     :name "capped-read" :destination "scaffolds")
+    (let ((target (merge-pathnames "scaffolds/capped-read/" root)))
+      (testing "a receipt that fits in the cap can be verified"
+        (let ((*fs-read-max-bytes* 4096))
+          (ok (%scaffold-owned-p target))))
+      (testing "a partial receipt is refused"
+        (let ((*fs-read-max-bytes* 128))
+          (ok (null (%scaffold-owned-p target))))))))
 
 (deftest scaffold-overwrite-eligibility-requires-a-regular-file
   (with-temp-project-root (root)

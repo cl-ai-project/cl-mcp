@@ -4,6 +4,7 @@
   (:use #:cl)
   (:import-from #:ironclad)
   (:import-from #:cl-mcp/src/fs
+                #:*fs-read-max-bytes*
                 #:fs-read-file
                 #:fs-read-source-octets)
   (:import-from #:cl-mcp/src/project-scaffold-core
@@ -77,21 +78,24 @@
   "Read the manifest at DIRECTORY only after authenticating its text for LOCATION."
   (let ((marker (merge-pathnames *scaffold-marker-file* directory)))
     (when (and *scaffold-signing-key* (eq :file (scaffold-entry-kind marker)))
-      (let* ((text (fs-read-file marker :limit (1+ +marker-limit+)))
-             (newline (position #\Newline text)))
-        (when (and (<= (length text) +marker-limit+)
-                   (eql newline (+ 64 (length *signature-prefix*)))
-                   (uiop:string-prefix-p *signature-prefix* text))
-          (let ((signature (ignore-errors
-                             (ironclad:hex-string-to-byte-array
-                              (subseq text (length *signature-prefix*) newline))))
-                (manifest (subseq text (1+ newline))))
-            (when (and signature
-                       (ironclad:constant-time-equal
-                        signature (%signature directory location manifest)))
-              (with-standard-io-syntax
-                (let ((*read-eval* nil))
-                  (read-from-string manifest))))))))))
+      (multiple-value-bind (text truncated size remaining)
+          (fs-read-file marker :limit (min (1+ +marker-limit+) *fs-read-max-bytes*))
+        (declare (ignore truncated size))
+        (let ((newline (position #\Newline text)))
+          (when (and (not remaining)
+                     (<= (length text) +marker-limit+)
+                     (eql newline (+ 64 (length *signature-prefix*)))
+                     (uiop:string-prefix-p *signature-prefix* text))
+            (let ((signature (ignore-errors
+                               (ironclad:hex-string-to-byte-array
+                                (subseq text (length *signature-prefix*) newline))))
+                  (manifest (subseq text (1+ newline))))
+              (when (and signature
+                         (ironclad:constant-time-equal
+                          signature (%signature directory location manifest)))
+                (with-standard-io-syntax
+                  (let ((*read-eval* nil))
+                    (read-from-string manifest)))))))))))
 
 (defun %directory-names (native)
   "List the raw entry names of NATIVE, including hidden files and links."
