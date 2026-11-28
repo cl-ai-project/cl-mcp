@@ -15,7 +15,9 @@
                 #:fs-project-directory-names)
   (:import-from #:cl-mcp/src/project-root)
   (:import-from #:cl-mcp/src/test-runner
-                #:detect-test-framework))
+                #:detect-test-framework)
+  (:import-from #:cl-mcp/src/tools/response-builders
+                #:build-run-tests-response))
 
 (in-package #:cl-mcp/tests/project-scaffold-test)
 
@@ -1075,6 +1077,50 @@ path, and signals rather than silently doing nothing when the call is absent."
           (ignore-errors (asdf:clear-system "fiveam-e2e-demo/tests/main-test"))
           (ignore-errors (asdf:clear-system "fiveam-e2e-demo/tests"))
           (ignore-errors (asdf:clear-system "fiveam-e2e-demo")))))))
+
+(deftest scaffold-e2e-switches-framework-on-warm-worker
+  (when-fiveam-available
+    (dolist (frameworks '(("rove" "fiveam") ("fiveam" "rove")))
+      (destructuring-bind (from to) frameworks
+        (testing (format nil "~A to ~A in the same Lisp image" from to)
+          (with-temp-project-root (root)
+            (let* ((name (format nil "scaffold-switch-~A-~D" from (random #xFFFFFFFF)))
+                   (system (format nil "~A/tests" name))
+                   (test-path (merge-pathnames
+                               (format nil "scaffolds/~A/tests/main-test.lisp" name) root)))
+              (unwind-protect
+                   (flet ((scaffold (framework &key overwrite)
+                            (cl-mcp/src/project-scaffold:write-scaffold
+                             :name name :destination "scaffolds"
+                             :framework framework :overwrite overwrite))
+                          (check-smoke (framework)
+                            (let ((report (build-run-tests-response
+                                           (cl-mcp/src/test-runner:run-tests system))))
+                              (ok (equal "pass" (gethash "verdict" report))
+                                  (gethash "text" (elt (gethash "content" report) 0)))
+                              (ok (equal framework (gethash "framework" report)))
+                              (ok (= 1 (gethash "passed" report))))))
+                     (scaffold from)
+                     (check-smoke from)
+                     (let* ((original (alexandria:read-file-into-string test-path))
+                            (replacement (scaffold to :overwrite t))
+                            (backup (getf replacement :leftover-backup)))
+                       (ok (and backup
+                                (string= original
+                                         (alexandria:read-file-into-string
+                                          (merge-pathnames "tests/main-test.lisp" backup))))
+                           "the original test source is preserved in the backup")
+                       (check-smoke to))
+                     (break-the-generated-smoke-test root name)
+                     (let ((edited (alexandria:read-file-into-string test-path)))
+                       (ok (signals (scaffold from :overwrite t)
+                                    'cl-mcp/src/project-scaffold-core:invalid-argument-error))
+                       (ok (string= edited (alexandria:read-file-into-string test-path))
+                           "a rejected overwrite preserves the edited file")))
+                (let ((suite (find-symbol (string-upcase name) :keyword)))
+                  (when suite (forget-fiveam-toplevel-suite suite)))
+                (dolist (suffix '("/tests/main-test" "/tests" "/src/main" ""))
+                  (asdf:clear-system (concatenate 'string name suffix)))))))))))
 
 (deftest scaffold-rove-test-op-signals-when-the-suite-fails
   ;; The runner's return value is the only evidence ASDF gets that a suite
