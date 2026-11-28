@@ -203,6 +203,42 @@ project root for integration tool calls.")
         (ok (stringp text))
         (ok (search "..." text))))))
 
+(deftest repl-eval-prefers-exact-package-names
+  (flet ((evaluate-in-package (name)
+           (let ((request (format nil
+                                  (concatenate 'string
+                                               "{\"jsonrpc\":\"2.0\",\"id\":141,"
+                                               "\"method\":\"tools/call\",\"params\":"
+                                               "{\"name\":\"repl-eval\",\"arguments\":"
+                                               "{\"code\":\"(package-name *package*)\","
+                                               "\"package\":~S}}}")
+                                  name)))
+             (gethash "result" (parse (%pjl request)))))
+         (result-text (result)
+           (gethash "text" (aref (gethash "content" result) 0))))
+    (let ((mixed-name "Cl-Mcp-Repl-Package-Test")
+          (mixed-case nil)
+          (uppercase nil))
+      (unwind-protect
+           (progn
+             (setf mixed-case (make-package mixed-name :use '("COMMON-LISP")))
+             (testing "a mixed-case package is selected by its exact name"
+               (ok (equal "\"Cl-Mcp-Repl-Package-Test\""
+                          (result-text (evaluate-in-package mixed-name)))))
+             (setf uppercase (make-package (string-upcase mixed-name) :use '("COMMON-LISP")))
+             (testing "an exact match wins when an uppercase package also exists"
+               (ok (equal "\"Cl-Mcp-Repl-Package-Test\""
+                          (result-text (evaluate-in-package mixed-name))))))
+        (when uppercase (delete-package uppercase))
+        (when mixed-case (delete-package mixed-case))))
+    (testing "a lowercase spelling falls back to the uppercase package"
+      (ok (equal "\"COMMON-LISP-USER\"" (result-text (evaluate-in-package "cl-user")))))
+    (testing "an unknown package still produces a package error"
+      (let ((context (gethash "error_context"
+                              (evaluate-in-package "CL-MCP-NO-SUCH-REPL-PACKAGE"))))
+        (ok (and (hash-table-p context)
+                 (search "CL-MCP-NO-SUCH-REPL-PACKAGE" (gethash "message" context))))))))
+
 (deftest fs-read-disallowed-path
   (testing "fs-read-file rejects paths outside allow-list"
     (let ((req (concatenate

@@ -233,6 +233,20 @@
       (ok (not (gethash "isError" result)))
       (%assert-survival worker pid))))
 
+(deftest pooled-repl-eval-prefers-exact-package-names
+  (with-boundary-worker (worker "repl-eval-package-case")
+    (%assert-success
+     "(make-package \"Cl-Mcp-Repl-Worker-Test\" :use '(\"COMMON-LISP\")) :ready"
+     ":ready")
+    (let ((options '("package" "Cl-Mcp-Repl-Worker-Test")))
+      (ok (equal "\"Cl-Mcp-Repl-Worker-Test\""
+                 (%worker-text (%worker-eval "(package-name *package*)" :options options))))
+      (%assert-success
+       "(make-package \"CL-MCP-REPL-WORKER-TEST\" :use '(\"COMMON-LISP\")) :ready"
+       ":ready")
+      (ok (equal "\"Cl-Mcp-Repl-Worker-Test\""
+                 (%worker-text (%worker-eval "(package-name *package*)" :options options)))))))
+
 (deftest pooled-worker-preserves-user-diagnostics
   (with-boundary-worker (worker "debugger-boundary-diagnostics")
     (%worker-eval
