@@ -20,8 +20,14 @@
                 #:validate-framework
                 #:plan-scaffold
                 #:invalid-argument-error
-                #:*scaffold-marker-file*
-                #:scaffold-marker-content)
+                #:*scaffold-marker-file*)
+  (:import-from #:bordeaux-threads
+                #:make-lock
+                #:with-lock-held)
+  (:import-from #:cl-mcp/src/project-scaffold-ownership
+                #:scaffold-entry-kind
+                #:signed-scaffold-marker
+                #:scaffold-replacement-problem)
   (:import-from #:cl-mcp/src/fs
                 #:fs-write-file)
   (:import-from #:cl-mcp/src/project-root
@@ -39,38 +45,15 @@
   "Return a short pseudo-random suffix for scratch directory naming."
   (format nil "~8,'0X" (random #xFFFFFFFF)))
 
-(defun %absolute-scaffold-paths (root destination name)
-  "Return (values TARGET-DIR TEMP-DIR BACKUP-DIR) as absolute directory pathnames.
-All three paths are inside ROOT. TEMP-DIR holds the freshly generated
-files before they are moved into place; BACKUP-DIR receives the previous
-TARGET-DIR contents during an overwrite so the replacement is a pair of
-renames rather than a recursive delete. Both share one random suffix so
-that leftovers from a crashed run are traceable to the same call, and so
-that concurrent calls never collide."
-  (let* ((suffix (%uuid-suffix))
-         ;; PARSE-UNIX-NAMESTRING on the two caller-supplied strings:
-         ;; ENSURE-DIRECTORY-PATHNAME reads them with the CL pathname reader,
-         ;; so a destination such as "demo[old]" became a wild pathname rather
-         ;; than a directory of that name.
-         (dest-dir (uiop:ensure-directory-pathname
-                    (merge-pathnames
-                     (uiop:parse-unix-namestring destination :ensure-directory t)
-                     root)))
-         (target-dir (uiop:ensure-directory-pathname
-                      (merge-pathnames
-                       (uiop:parse-unix-namestring name :ensure-directory t)
-                       dest-dir)))
-         (temp-dir (uiop:ensure-directory-pathname
-                    (merge-pathnames
-                     (uiop:ensure-directory-pathname
-                      (format nil ".tmp-project-scaffold-~A" suffix))
-                     dest-dir)))
-         (backup-dir (uiop:ensure-directory-pathname
-                      (merge-pathnames
-                       (uiop:ensure-directory-pathname
-                        (format nil ".bak-project-scaffold-~A" suffix))
-                       dest-dir))))
-    (values target-dir temp-dir backup-dir)))
+(defvar *scaffold-lock* (make-lock "project-scaffold")
+  "Serialize scaffold generation and replacement in the server.")
+
+(defun %absolute-scaffold-target (root destination name)
+  "Resolve the requested scaffold path under ROOT using native path components."
+  ;; The CL pathname reader interprets a name such as demo[old] as a wildcard.
+  (merge-pathnames
+   (uiop:parse-unix-namestring name :ensure-directory t)
+   (merge-pathnames (uiop:parse-unix-namestring destination :ensure-directory t) root)))
 
 (defun %resolve-deepest-existing (pathname)
   "Return the deepest existing ancestor of PATHNAME as a truename and as originally spelled.
@@ -107,88 +90,81 @@ INVALID-ARGUMENT-ERROR."
              :value (native-path-namestring pathname)
              :reason "resolves outside project root"))))
 
-(defun %write-files-to-temp (temp-dir name plan)
-  "Write the ownership marker and all PLAN entries into TEMP-DIR.
-TEMP-DIR must already be inside *PROJECT-ROOT*; the caller is
-responsible for that containment check. Using FS-WRITE-FILE keeps the
-file-write path inside the same sandbox wrapper as the other MCP file
-tools, so scaffold writes go through ENSURE-WRITE-PATH validation and
-atomic write-to-temp-then-rename for each file. The marker is written
-first so that a temp directory abandoned by a mid-way failure is still
-recognizable as cl-mcp-owned and therefore still deletable by
-%DELETE-SCAFFOLD-TREE. Caller cleans up TEMP-DIR if any intermediate
-write fails."
+(defun %write-files-to-temp (temp-dir location name plan)
+  "Write the planned files and their ownership receipt into TEMP-DIR."
   (ensure-directories-exist temp-dir)
-  ;; Native: this prefix is concatenated into fs-write-file's path argument,
-  ;; and fs-write-file resolves that natively. ENOUGH-NAMESTRING escapes [ and
-  ;; ] for the pathname reader, so under a bracketed project root every file
-  ;; would be written to a directory whose name carries a literal backslash.
-  (let ((temp-relative (native-path-namestring
-                        (uiop:enough-pathname temp-dir *project-root*))))
-    (fs-write-file (concatenate 'string temp-relative *scaffold-marker-file*)
-                   (scaffold-marker-content name (mapcar #'car plan)))
+  ;; FS-WRITE-FILE expects native paths, including under bracketed project roots.
+  (let ((relative (native-path-namestring (uiop:enough-pathname temp-dir *project-root*))))
     (dolist (entry plan)
-      (let ((rel (car entry))
-            (content (cdr entry)))
-        (fs-write-file (concatenate 'string temp-relative rel) content)))))
+      (fs-write-file (concatenate 'string relative (car entry)) (cdr entry)))
+    (fs-write-file (concatenate 'string relative *scaffold-marker-file*)
+                   (signed-scaffold-marker temp-dir location name (mapcar #'car plan)))))
 
-(defun %scaffold-owned-p (directory)
-  "Return T when DIRECTORY carries the cl-mcp scaffold ownership marker.
-Only directories this tool generated hold the marker, so it is what
-separates a replaceable scaffold from an arbitrary directory that merely
-happens to sit at the requested path."
-  (and (uiop:directory-exists-p directory)
-       (probe-file (merge-pathnames *scaffold-marker-file* directory))
-       t))
+(defun %scaffold-owned-p (directory &optional location)
+  "Return whether DIRECTORY can be replaced, and the reason for any refusal."
+  (let ((problem (scaffold-replacement-problem directory location)))
+    (values (null problem) problem)))
 
-(defparameter *scaffold-scratch-prefixes*
-  '(".tmp-project-scaffold-" ".bak-project-scaffold-")
-  "Directory-name prefixes reserved for this tool's own scratch directories.
-Every such directory is created by %ABSOLUTE-SCAFFOLD-PATHS with a fresh
-random suffix, so a caller can never steer the tool at a pre-existing one.
-They count as deletable even without the ownership marker, which is what
-lets a run that died before the marker was written still clean up.")
+(defun %make-scaffold-scratch (target)
+  "Allocate a private, empty transaction directory beside TARGET."
+  (let ((parent (uiop:pathname-parent-directory-pathname target)))
+    (ensure-directories-exist parent)
+    (loop for relative = (uiop:ensure-directory-pathname
+                          (format nil ".cl-mcp-scaffold-~A" (%uuid-suffix)))
+          for scratch = (merge-pathnames relative parent)
+          do (%assert-within-project-root scratch)
+             (handler-case
+                 (progn (sb-posix:mkdir (native-path-namestring scratch) #o700)
+                        (return scratch))
+               (sb-posix:syscall-error (condition)
+                 (unless (= (sb-posix:syscall-errno condition) sb-posix:eexist)
+                   (error condition)))))))
 
-(defun %scaffold-scratch-dir-p (directory)
-  "Return T when DIRECTORY's last segment uses a reserved scratch prefix.
-See *SCAFFOLD-SCRATCH-PREFIXES* for why these are safe to delete."
-  (let ((last-segment (car (last (pathname-directory
-                                  (uiop:ensure-directory-pathname directory))))))
-    (and (stringp last-segment)
-         (some (lambda (prefix) (uiop:string-prefix-p prefix last-segment))
-               *scaffold-scratch-prefixes*)
-         t)))
+(defun %physical-scaffold-location (target)
+  "Return the native identity of TARGET beneath its resolved parent."
+  (let ((leaf (car (last (pathname-directory target))))
+        (parent (truename (uiop:pathname-parent-directory-pathname target))))
+    (native-path-namestring
+     (merge-pathnames (uiop:parse-unix-namestring leaf :ensure-directory t) parent))))
 
-(defun %delete-scaffold-tree (directory)
-  "Recursively delete DIRECTORY, but only if this tool owns it.
-UIOP's :VALIDATE T is a validator that always answers yes, which turns
-DELETE-DIRECTORY-TREE into an unguarded rm -rf. This passes a real
-predicate instead: the directory must truename inside *PROJECT-ROOT*,
-must not be *PROJECT-ROOT* itself, and must either carry the ownership
-marker or be one of this tool's reserved scratch directories. Signals
-INVALID-ARGUMENT-ERROR rather than deleting when any of those fail."
-  (let ((resolved-root
-         (or (ignore-errors
-              (uiop/pathname:ensure-directory-pathname
-               (truename *project-root*)))
-             *project-root*)))
-    (flet ((safe-to-delete-p (dir)
-             (let ((resolved (ignore-errors
-                              (uiop/pathname:ensure-directory-pathname
-                               (truename dir)))))
-               (and resolved
-                    (path-inside-p resolved resolved-root)
-                    (not (equal resolved resolved-root))
-                    (or (%scaffold-owned-p resolved)
-                        (%scaffold-scratch-dir-p resolved))
-                    t))))
-      (unless (safe-to-delete-p directory)
-        (error 'invalid-argument-error
-               :field "overwrite"
-               :value (native-path-namestring directory)
-               :reason (format nil "refusing to delete ~A: not a cl-mcp-generated scaffold"
-                               (native-path-namestring directory))))
-      (uiop:delete-directory-tree directory :validate #'safe-to-delete-p))))
+(defun %require-scaffold-ownership (directory target &optional location)
+  "Refuse replacement of TARGET if DIRECTORY cannot be verified."
+  (multiple-value-bind (owned problem) (%scaffold-owned-p directory location)
+    (unless owned
+      (error 'invalid-argument-error
+             :field "overwrite" :value (native-path-namestring target)
+             :reason (format nil "cannot overwrite ~A because ~A"
+                             (native-path-namestring target) problem)))))
+
+(defun %restore-scaffold-backup (backup target)
+  "Restore BACKUP after a rejected transaction, or report where it was preserved."
+  (unless (ignore-errors
+            (unless (scaffold-entry-kind target)
+              (%assert-within-project-root target)
+              (rename-file backup target)
+              t))
+    (error 'invalid-argument-error
+           :field "overwrite" :value (native-path-namestring target)
+           :reason (format nil "the original files are preserved at ~A"
+                           (native-path-namestring backup)))))
+
+(defun %delete-scaffold-tree (scratch)
+  "Remove the staged generation within this call's private transaction directory."
+  (%assert-within-project-root scratch)
+  (uiop:delete-directory-tree
+   scratch :validate (lambda (path)
+                       (and (equal path scratch)
+                            (eq :directory (scaffold-entry-kind path))))))
+
+(defun %abort-scaffold-generation (scratch temp backup target)
+  "Restore any staged original and clean up only the new generation on failure."
+  ;; A rename can have taken effect even if the caller was interrupted before
+  ;; it returned. Check for the old tree on disk before cleaning up.
+  (unwind-protect
+       (when (scaffold-entry-kind backup)
+         (%restore-scaffold-backup backup target))
+    (ignore-errors (%delete-scaffold-tree temp))
+    (ignore-errors (sb-posix:rmdir (native-path-namestring scratch)))))
 
 (defun %prompt-destination (target-dir)
   "Return the destination relative to the physical root, including its uncreated suffix."
@@ -205,103 +181,78 @@ INVALID-ARGUMENT-ERROR rather than deleting when any of those fail."
                               (asdf:system-relative-pathname :cl-mcp path)
                               :external-format :utf-8))))
 
-(defun write-scaffold (&key name description author license destination overwrite
-                            framework)
-  "Generate the scaffold project atomically. Returns a plist with:
-  :target-dir (absolute pathname)
-  :relative-path (namestring relative to *project-root*)
-  :files (list of relative path strings, in manifest order)
-  :framework (keyword) -- the test framework the project was generated
-    for, resolved from the FRAMEWORK designator
-  :leftover-backup (pathname, or NIL) -- set when the replaced tree could
-    not be removed after the commit.  The caller must surface it: the
-    leftover carries the same .asd, and ASDF's tree scan reaches
-    dot-directories, so FIND-SYSTEM can resolve the system to the stale
-    copy.  The generation itself succeeded, so this is a warning rather
-    than an error.
+(defun %archive-backup-asd (backup name)
+  "Keep the old system definition under a name ASDF will not discover."
+  (let ((source (merge-pathnames (concatenate 'string name ".asd") backup))
+        (archive (merge-pathnames (concatenate 'string name ".asd.backup") backup)))
+    (when (and (eq :file (scaffold-entry-kind source))
+               (null (scaffold-entry-kind archive)))
+      (sb-posix:rename (native-path-namestring source) (native-path-namestring archive))
+      t)))
 
-OVERWRITE only ever replaces a directory this tool generated, proven by
-the ownership marker; anything else is refused so that a name colliding
-with a real source directory cannot delete it. The replacement itself is
-done by renaming the old tree aside and only deleting the backup once the
-new tree is in place, so an interrupted overwrite is recoverable.
-
-On any failure, signals INVALID-ARGUMENT-ERROR or propagates the
-underlying error after cleaning up the temp directory."
+(defun write-scaffold (&key name description author license destination overwrite framework)
+  "Generate a scaffold and return its target path, generated files, and framework.
+OVERWRITE replaces only a directory whose ownership and unchanged contents
+this server can verify. The old tree is renamed aside and verified again
+before the new one is published. On failure, restore the original directory.
+A successful replacement keeps the old tree under :LEFTOVER-BACKUP so
+writes through open files still have a destination. :ARCHIVED-BACKUP-ASD
+reports whether its system definition was moved out of ASDF discovery."
   (ensure-project-root)
   (validate-project-name name)
   (validate-destination destination)
   (validate-text-field "description" (or description ""))
   (validate-text-field "author" (or author ""))
   (validate-text-field "license" (or license ""))
-  ;; Normalizes as well as validates: everything downstream -- the template
-  ;; selection and the tool's response field -- wants the resolved keyword
-  ;; rather than the designator the caller passed.
   (setf framework (validate-framework framework))
-  (multiple-value-bind (target-dir temp-dir backup-dir)
-      (%absolute-scaffold-paths *project-root* destination name)
-    (%assert-within-project-root target-dir)
-    (%assert-within-project-root temp-dir)
-    (%assert-within-project-root backup-dir)
-    (let ((target-exists (and (uiop:directory-exists-p target-dir) t)))
-      (when (and target-exists (not overwrite))
-        (error 'invalid-argument-error
-               :field "name" :value name
-               :reason (format nil "target directory already exists: ~A"
-                               (native-path-namestring target-dir))))
-      (when (and target-exists (not (%scaffold-owned-p target-dir)))
-        (error 'invalid-argument-error
-               :field "overwrite" :value name
-               :reason (format nil "refusing to overwrite ~A: not a cl-mcp-generated ~
-                                    scaffold; delete it manually"
-                               (native-path-namestring target-dir))))
-      (let ((plan (plan-scaffold :name name
-                                 :description (or description "")
-                                 :author (or author "")
-                                 :license (or license "")
-                                 :destination (%prompt-destination target-dir)
-                                 :framework framework
-                                 :bundled-prompts (%missing-prompt-files *project-root*)))
-            (moved-aside nil)
-            (committed nil)
-            (leftover-backup nil))
-        (unwind-protect
-             (progn
-               (%write-files-to-temp temp-dir name plan)
-               ;; Move the existing target aside AFTER temp is ready, preserving
-               ;; atomicity: if %write-files-to-temp fails, the original
-               ;; scaffold survives untouched.
-               (when target-exists
-                 (rename-file target-dir backup-dir)
-                 (setf moved-aside t))
-               (rename-file temp-dir target-dir)
-               (setf committed t)
-               ;; The scaffold is already in place, so a failure to remove the
-               ;; backup must not turn a successful generation into a reported
-               ;; error -- the unwind cleanup below cannot undo the commit
-               ;; either.  But the leftover is NOT inert: it is a complete
-               ;; copy carrying the same .asd, and ASDF's tree scan walks
-               ;; dot-directories, so FIND-SYSTEM can resolve the system to the
-               ;; stale copy instead of the new one.  Report it rather than
-               ;; returning a bare success the caller cannot act on.
-               (when moved-aside
-                 (unless (ignore-errors (%delete-scaffold-tree backup-dir) t)
-                   (setf leftover-backup backup-dir)))
-               (list :target-dir target-dir
-                     ;; Native: reported as the tool's "path" and quoted in
-                     ;; next_steps, both of which a caller feeds back.
-                     :relative-path (native-path-namestring
-                                     (uiop:enough-pathname target-dir *project-root*))
-                     :files (mapcar #'car plan)
-                     :framework framework
-                     :leftover-backup leftover-backup))
-          (unless committed
-            (when (uiop:directory-exists-p temp-dir)
-              (ignore-errors (%delete-scaffold-tree temp-dir)))
-            ;; Put the original tree back if it was renamed aside but the
-            ;; commit never happened.
-            (when (and moved-aside (not (uiop:directory-exists-p target-dir)))
-              (ignore-errors (rename-file backup-dir target-dir)))))))))
+  (with-lock-held (*scaffold-lock*)
+    (let ((target (%absolute-scaffold-target *project-root* destination name)))
+      (%assert-within-project-root target)
+      (let ((exists (scaffold-entry-kind target)))
+        (when exists
+          (unless overwrite
+            (error 'invalid-argument-error
+                   :field "name" :value name
+                   :reason (format nil "target directory already exists at ~A"
+                                   (native-path-namestring target))))
+          (%require-scaffold-ownership target target))
+        (let* ((plan (plan-scaffold :name name
+                                    :description (or description "")
+                                    :author (or author "")
+                                    :license (or license "")
+                                    :destination (%prompt-destination target)
+                                    :framework framework
+                                    :bundled-prompts (%missing-prompt-files *project-root*)))
+               (scratch (%make-scaffold-scratch target))
+               (temp (merge-pathnames "new/" scratch))
+               (backup (merge-pathnames "old/" scratch))
+               (committed nil))
+          (unwind-protect
+               (let ((location (%physical-scaffold-location target)))
+                 (%write-files-to-temp temp location name plan)
+                 (%assert-within-project-root target)
+                 (when exists
+                   (rename-file target backup)
+                   (%require-scaffold-ownership backup target location))
+                 (when (scaffold-entry-kind target)
+                   (error 'invalid-argument-error
+                          :field "name" :value name
+                          :reason "the destination appeared during generation"))
+                 (rename-file temp target)
+                 (setf committed t)
+                 (let ((archived-asd (when exists
+                                       (ignore-errors (%archive-backup-asd backup name)))))
+                   (unless exists
+                     (ignore-errors (sb-posix:rmdir (native-path-namestring scratch))))
+                   (list :target-dir target
+                         :relative-path (native-path-namestring
+                                         (uiop:enough-pathname target *project-root*))
+                         :files (mapcar #'car plan)
+                         :framework framework
+                         :leftover-backup (and exists backup)
+                         :archived-backup-asd archived-asd)))
+            (unless committed
+              (%abort-scaffold-generation scratch temp backup target))))))))
 
 (define-tool "project-scaffold"
   :description
@@ -318,13 +269,12 @@ On success, returns the list of created files, the resolved framework, and
 a 'next_steps' array with concrete REPL commands the agent can invoke to
 register the project with ASDF and run its tests.
 
-Fails if the target directory already exists, unless 'overwrite' is true AND
-that directory was itself generated by this tool (it carries a
-.cl-mcp-scaffold marker file). A directory cl-mcp did not generate is never
-deleted, so pointing this tool at an existing source directory is refused
-rather than destructive; choose a unique 'name' per generation. A refused or
-invalid request is an ordinary result with created=false and an error message,
-not an isError result.
+An existing target is replaceable only with 'overwrite' and a signed
+ownership manifest from this server process. Its generated files must match
+the manifest and the directory must contain no extra entries. If verification
+fails, the existing files are kept. Use a new name for an older or changed
+scaffold. A refusal is an ordinary result with created=false and an error message.
+A successful overwrite reports where the previous scaffold was saved.
 
 The generated .asd is NOT loaded or registered with ASDF: this tool runs in
 the cl-mcp parent process, so loading generated code here would escape the
@@ -354,9 +304,8 @@ no leading /, no .. segment. Default: scaffolds.")
 tests/main-test.lisp template, so run-tests picks the framework up from the
 generated project without further configuration.")
    (overwrite :type :boolean :description
-              "When true, replace an existing directory instead of failing -- but only
-if cl-mcp itself generated that directory (it must contain a .cl-mcp-scaffold marker
-file). Any other existing directory is refused, never deleted."))
+              "Replace an unchanged scaffold that this server process generated. Its signed
+.cl-mcp-scaffold manifest and every directory entry must be verified."))
   :body
   (handler-case
       (let* ((result-plist
@@ -410,12 +359,11 @@ file). Any other existing directory is refused, never deleted."))
         (let* ((warning
                 (when leftover
                   (format nil
-                          "The replaced scaffold could not be removed and ~
-                           remains at ~A.  It carries the same .asd, and ~
-                           ASDF's tree scan reaches it, so FIND-SYSTEM may ~
-                           resolve ~A to that stale copy -- delete it before ~
-                           loading."
-                          (native-path-namestring leftover) name)))
+                          "The previous scaffold is preserved at ~A. ~A"
+                          (native-path-namestring leftover)
+                          (if (getf result-plist :archived-backup-asd)
+                              "Its system definition has an .asd.backup suffix."
+                              "Move the backup before loading so ASDF finds the new system."))))
                (ht (make-ht
                     "created" t
                     "path" relative

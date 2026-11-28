@@ -47,7 +47,7 @@ For every tool's input/output schema, see [docs/tools.md](docs/tools.md).
 ## Requirements
 - SBCL 2.x (developed with SBCL 2.5.x)
 - Quicklisp (optional; pure ASDF also works)
-- Dependencies (via ASDF/Quicklisp): runtime — `alexandria`, `cl-ppcre`, `yason`, `usocket`, `bordeaux-threads`, `eclector`, `hunchentoot`, `named-readtables`; tests — `rove`; optional — `fiveam` (for running FiveAM suites), `clhs` (loaded on-demand by `clhs-lookup` tool), `swank` (only for `MCP_WORKER_SWANK`), `cl-spec` (only for the `cl-spec` tool group).
+- Dependencies (via ASDF/Quicklisp): runtime — `alexandria`, `cl-ppcre`, `yason`, `usocket`, `bordeaux-threads`, `eclector`, `hunchentoot`, `named-readtables`, `ironclad`; tests — `rove`; optional — `fiveam` (for running FiveAM suites), `clhs` (loaded on-demand by `clhs-lookup` tool), `swank` (only for `MCP_WORKER_SWANK`), `cl-spec` (only for the `cl-spec` tool group).
 
 ## Quick Start
 

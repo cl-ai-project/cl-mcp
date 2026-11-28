@@ -58,6 +58,7 @@
            #:fs-window-start
            #:fs-write-file
            #:fs-list-directory
+           #:fs-project-directory-names
            #:fs-get-project-info
            #:fs-set-project-root))
 
@@ -167,6 +168,73 @@ Signals an error when PATH is outside the allow-list."
     (unless pn
       (error "Read not permitted for path ~A" path))
     pn))
+
+(sb-alien:define-alien-routine ("openat" %open-directory-at) sb-alien:int
+  (parent sb-alien:int) (name sb-alien:c-string) (flags sb-alien:int))
+
+(sb-alien:define-alien-routine ("fdopendir" %directory-stream-from-fd) (* t)
+  (descriptor sb-alien:int))
+
+(defconstant +directory-search-open-mode+
+  #+(and linux sparc) #x1000000 ; O_PATH on Linux/SPARC.
+  #+(and linux (not sparc)) #x200000 ; O_PATH in the generic Linux ABI.
+  #+darwin #x40000000 ; O_EXEC with O_DIRECTORY gives O_SEARCH.
+  #+freebsd #x40000 ; O_SEARCH
+  #-(or linux darwin freebsd) sb-posix:o-rdonly
+  "Open an ancestor for path lookup without requiring permission to list it.")
+
+(defun fs-project-directory-names (native-path)
+  "List raw names in a physical directory under the project root, including dotfiles.
+Open each component relative to the preceding directory descriptor without
+following links. Signal FILE-ERROR if the physical path cannot be opened."
+  (ensure-project-root)
+  (let* ((path (ensure-directory-pathname (uiop:parse-native-namestring native-path)))
+         (root (ensure-directory-pathname (truename *project-root*)))
+         (components (pathname-directory path))
+         (flags (logior sb-posix:o-directory sb-posix:o-nofollow))
+         (search-flags (logior flags +directory-search-open-mode+))
+         (read-flags (logior flags sb-posix:o-rdonly))
+         (descriptor nil)
+         (directory nil))
+    (unless (and (eq (first components) :absolute)
+                 (subpathp path root)
+                 (every (lambda (part)
+                          (and (stringp part)
+                               (not (member part '("." "..") :test #'string=))
+                               (not (position (code-char 0) part))
+                               (not (position #\/ part))))
+                        (rest components)))
+      (error 'file-error :pathname path))
+    ;; Keep ownership of each descriptor through the switch to a DIR stream.
+    (sb-sys:without-interrupts
+      (unwind-protect
+           (progn
+             (setf descriptor
+                   (sb-posix:open "/" (if (rest components) search-flags read-flags)))
+             (sb-posix:fcntl descriptor sb-posix:f-setfd 1) ; FD_CLOEXEC
+             (loop for (component . remaining) on (rest components)
+                   for next = (%open-directory-at descriptor component
+                                                  (if remaining search-flags read-flags))
+                   do (when (minusp next)
+                        (error 'file-error :pathname path))
+                      (let ((previous descriptor))
+                        (setf descriptor next)
+                        (sb-posix:close previous))
+                      (sb-posix:fcntl descriptor sb-posix:f-setfd 1))
+             (let ((stream (%directory-stream-from-fd descriptor)))
+               (when (sb-alien:null-alien stream)
+                 (error 'file-error :pathname path))
+               (setf directory stream descriptor nil))
+             (sb-sys:with-local-interrupts
+               (loop with names = nil
+                     for entry = (sb-posix:readdir directory)
+                     until (sb-alien:null-alien entry)
+                     do (let ((name (sb-posix:dirent-name entry)))
+                          (unless (member name '("." "..") :test #'string=)
+                            (push name names)))
+                     finally (return names))))
+        (cond (directory (sb-posix:closedir directory))
+              (descriptor (sb-posix:close descriptor)))))))
 
 (defun fs-read-file (path &key offset limit)
   "Read text file PATH with optional OFFSET and LIMIT.
