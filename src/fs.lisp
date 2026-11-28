@@ -176,7 +176,8 @@ Signals an error when PATH is outside the allow-list."
   (descriptor sb-alien:int))
 
 (defconstant +directory-search-open-mode+
-  #+linux #x200000 ; O_PATH
+  #+(and linux sparc) #x1000000 ; O_PATH on Linux/SPARC.
+  #+(and linux (not sparc)) #x200000 ; O_PATH in the generic Linux ABI.
   #+darwin #x40000000 ; O_EXEC with O_DIRECTORY gives O_SEARCH.
   #+freebsd #x40000 ; O_SEARCH
   #-(or linux darwin freebsd) sb-posix:o-rdonly
