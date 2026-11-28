@@ -310,7 +310,7 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                      (%captured-output stdout)
                                      (%captured-output stderr)
                                      (list :condition-type (princ-to-string (type-of e))
-                                           :message msg
+                                           :message (%sanitize-control-chars raw-msg)
                                            :restarts nil
                                            :frames nil))))))
                      (reader-error
@@ -322,7 +322,7 @@ ERROR-CONTEXT is a plist with structured error info when an error occurs, NIL ot
                                      (%captured-output stdout)
                                      (%captured-output stderr)
                                      (list :condition-type (princ-to-string (type-of e))
-                                           :message msg
+                                           :message (%sanitize-control-chars raw-msg)
                                            :restarts nil
                                            :frames nil))))))
                      (error (lambda (e)

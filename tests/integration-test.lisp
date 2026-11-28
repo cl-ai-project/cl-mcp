@@ -103,6 +103,38 @@ project root for integration tool calls.")
       (ok (stringp text4))
       (ok (search "3.3.0" text4)))))
 
+(deftest repl-eval-structured-diagnostics-ignore-display-limit
+  (flet ((evaluate (code package limit)
+           (let ((request (format nil
+                                  (concatenate 'string
+                                               "{\"jsonrpc\":\"2.0\",\"id\":105,"
+                                               "\"method\":\"tools/call\",\"params\":"
+                                               "{\"name\":\"repl-eval\",\"arguments\":"
+                                               "{\"code\":~S,\"package\":~S,"
+                                               "\"max_output_length\":~D}}}")
+                                  code package limit)))
+             (gethash "result" (parse (%pjl request))))))
+    (dolist (example '(("1" "CL-MCP-NO-SUCH-DIAGNOSTIC-PACKAGE"
+                        "CL-MCP-NO-SUCH-DIAGNOSTIC-PACKAGE" "P")
+                       (")" "CL-USER" "unmatched close parenthesis" "R")
+                       ("(error \"runtime control\")" "CL-USER" "runtime control" "r")))
+      (destructuring-bind (code package diagnostic prefix) example
+        (let* ((baseline (gethash "error_context" (evaluate code package 500)))
+               (message (gethash "message" baseline))
+               (condition-type (gethash "condition_type" baseline)))
+          (ok (and (stringp message) (search diagnostic message)))
+          (ok (and (stringp condition-type) (plusp (length condition-type))))
+          (dolist (limit '(0 1))
+            (let* ((result (evaluate code package limit))
+                   (context (gethash "error_context" result))
+                   (text (gethash "text" (aref (gethash "content" result) 0))))
+              (ok (equal message (gethash "message" context)))
+              (ok (equal condition-type (gethash "condition_type" context)))
+              (ok (equal (concatenate 'string
+                                      (if (zerop limit) "" prefix)
+                                      "...(truncated)")
+                         text)))))))))
+
 (deftest fs-write-then-readback
   (testing "write file then read it back via tools/call"
     (let* ((path "tests/tmp/integration-write.txt")
